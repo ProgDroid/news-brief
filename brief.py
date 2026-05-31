@@ -337,17 +337,9 @@ def process_telegram_commands():
                 telegram_send(f"No open paper position for <b>{tkr}</b>.")
             else:
                 day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-                closed_n = 0
-                for p in matches:
-                    price = fetch_stooq_price(p["stooq_symbol"])
-                    if price is None:
-                        continue
-                    ret = _signal_return(p["direction"], p["entry_price"], price)
-                    p["last_mark"] = {"date": day, "price": price, "return": ret}
-                    p["status"] = "closed"
-                    p["close_reason"] = "manual"
-                    p["closed_date"] = day
-                    closed_n += 1
+                closed_n = sum(
+                    _close_position_at_market(p, day, "manual") for p in matches
+                )
                 if closed_n:
                     save_paper_book(book)
                     telegram_send(
@@ -364,16 +356,18 @@ def process_telegram_commands():
     STATE_FILE.write_text(json.dumps(state))
 
 
-def run_dig(query: str) -> str:
+def run_dig(query: str, since: str | None = None) -> str:
     """
     Deep-dive on a specific topic. Synchronous Messages API call (not batch)
     with web search, so the reader gets a fast, detailed answer in-chat.
     Pulls the most RECENT podcast commentary on the topic for current framing.
+    When `since` (YYYY-MM-DD) is given, the podcast search is date-bounded to it.
     """
-    chroma_excerpts = query_chroma_latest(query, n_results=4)
+    chroma_excerpts = query_chroma_latest(query, n_results=4, after_date=since)
     chroma_block = (
         "\n\n".join(e[:600] for e in chroma_excerpts) or "(no recent podcast context)"
     )
+    since_note = f" Focus on developments since {since}." if since else ""
 
     payload = {
         "model": MODEL,
@@ -394,7 +388,7 @@ def run_dig(query: str) -> str:
                 "content": (
                     f"Question: {query}\n\n"
                     f"Most recent podcast analyst commentary on this topic:\n{chroma_block}\n\n"
-                    f"Search the web for the latest specifics and answer in depth."
+                    f"Search the web for the latest specifics and answer in depth.{since_note}"
                 ),
             }
         ],
@@ -772,6 +766,24 @@ def _signal_return(direction: str, entry: float, price: float) -> float:
     return sign * (price / entry - 1.0)
 
 
+def _close_position_at_market(p: dict, day: str, reason: str) -> bool:
+    """Close one open position at the current Stooq mark, stamping realized_return.
+
+    Shared by the weekly horizon close, the /close command, and reversal closes.
+    Returns False (leaving the position open) when Stooq can't price it.
+    """
+    price = fetch_stooq_price(p["stooq_symbol"])
+    if price is None:
+        return False
+    ret = _signal_return(p["direction"], p["entry_price"], price)
+    p["last_mark"] = {"date": day, "price": price, "return": ret}
+    p["realized_return"] = ret
+    p["status"] = "closed"
+    p["close_reason"] = reason
+    p["closed_date"] = day
+    return True
+
+
 def mode_paper():
     """Open paper positions from today's signals. Pure simulation — no money, no orders.
 
@@ -811,6 +823,30 @@ def mode_paper():
     opened = 0
     for s in actionable:
         ticker, direction = s["ticker"], s["direction"]
+        opposite = "bearish" if direction == "bullish" else "bullish"
+
+        # Reversal: a fresh opposite-direction call closes the standing position first.
+        if (ticker, opposite) in open_keys:
+            for p in book["positions"]:
+                if (
+                    p["status"] == "open"
+                    and p["ticker"] == ticker
+                    and p["direction"] == opposite
+                    and _close_position_at_market(p, today, "reversal")
+                ):
+                    log.info(f"Paper reversal: closed {ticker} {opposite}")
+            open_keys = {
+                (q["ticker"], q["direction"])
+                for q in book["positions"]
+                if q["status"] == "open"
+            }
+            if (ticker, opposite) in open_keys:
+                # Reversal close couldn't be priced — don't open the opposite yet.
+                log.warning(
+                    f"Paper skip: unpriced reversal for {ticker}; not opening {direction}"
+                )
+                continue
+
         if (ticker, direction) in open_keys:
             continue  # dedup: a position for this call is already open
         symbol = resolve_stooq_symbol(ticker, cache, overrides)
@@ -839,6 +875,7 @@ def mode_paper():
                 "closed_date": None,
                 "checkpoints": {},
                 "last_mark": None,
+                "realized_return": None,
             }
         )
         open_keys.add((ticker, direction))
@@ -879,21 +916,20 @@ def mark_to_market(book: dict, today_str: str) -> dict:
             p["status"] = "closed"
             p["close_reason"] = "horizon"
             p["closed_date"] = today_str
+            p["realized_return"] = p["checkpoints"][PAPER_CLOSE_HORIZON]["return"]
     return book
 
 
 def paper_scorecard(book: dict) -> str:
     """Build a Telegram-HTML paper scorecard: hit-rate and mean returns (percentages only)."""
     positions = book.get("positions", [])
-    closed = [
-        p
-        for p in positions
-        if p["status"] == "closed" and "4w" in p.get("checkpoints", {})
-    ]
+    closed = [p for p in positions if p["status"] == "closed"]
     open_ = [p for p in positions if p["status"] == "open"]
 
     def _hit_rate(ps):
-        rets = [p["checkpoints"]["4w"]["return"] for p in ps]
+        rets = [
+            p["realized_return"] for p in ps if p.get("realized_return") is not None
+        ]
         if not rets:
             return None
         hits = sum(1 for r in rets if r > 0)
@@ -903,7 +939,7 @@ def paper_scorecard(book: dict) -> str:
     overall = _hit_rate(closed)
     if overall:
         rate, n = overall
-        lines.append(f"• Realized hit-rate (4w): {rate:.0f}% of {n}")
+        lines.append(f"• Realized hit-rate (at close): {rate:.0f}% of {n}")
         for conf in ("high", "medium"):
             sub = _hit_rate([p for p in closed if p.get("confidence") == conf])
             if sub:
@@ -923,9 +959,10 @@ def paper_scorecard(book: dict) -> str:
     if recent:
         lines.append("Recently closed:")
         for p in recent:
-            r = p["checkpoints"]["4w"]["return"]
+            r = p.get("realized_return")
+            rstr = f"{100 * r:+.1f}%" if r is not None else "n/a"
             lines.append(
-                f"  • {p['ticker']} {p['direction']}: {100 * r:+.1f}% ({p['close_reason']})"
+                f"  • {p['ticker']} {p['direction']}: {rstr} ({p['close_reason']})"
             )
     return "\n".join(lines)
 

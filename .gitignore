@@ -4,3 +4,7 @@ logs/
 __pycache__/
 *.pyc
 .DS_Store
+
+# Tooling caches
+.serena/
+.ruff_cache/
