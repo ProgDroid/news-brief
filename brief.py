@@ -1,0 +1,976 @@
+#!/usr/bin/env python3
+"""
+newsbrief - Daily geopolitical/macro briefing via Claude Batch API
+
+Modes:
+  submit   — fetch feeds, query Chroma, submit batch job (~8pm UTC)
+  collect  — poll for results and deliver via Telegram (~6am UTC)
+  weekly   — generate weekly summary from last 7 briefs (run Sunday ~9pm UTC)
+  commands — process pending Telegram commands without submitting
+  run      — submit + collect synchronously (for testing)
+
+Crontab:
+  0 20 * * *   docker compose run --rm newsbrief python brief.py submit
+  0  6 * * *   docker compose run --rm newsbrief python brief.py collect
+  0 21 * * 0   docker compose run --rm newsbrief python brief.py weekly
+  */30 * * * * docker compose run --rm newsbrief python brief.py commands
+"""
+
+import os
+import re
+import json
+import time
+import logging
+import requests
+import feedparser
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("/app/logs/newsbrief.log"),
+    ],
+)
+log = logging.getLogger(__name__)
+
+# ── Config ────────────────────────────────────────────────────────────────────
+ANTHROPIC_API_KEY  = os.environ["ANTHROPIC_API_KEY"]
+TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+TELEGRAM_CHAT_ID   = os.environ["TELEGRAM_CHAT_ID"]
+
+# Chroma MCP HTTP endpoint
+# NOTE: This endpoint is called via HTTP POST with JSON-RPC 2.0 format.
+# If you are running the MCP server locally or via a different transport,
+# update CHROMA_MCP_URL in your .env accordingly.
+CHROMA_MCP_URL = os.environ.get(
+    "CHROMA_MCP_URL",
+    "https://progdroid--podcast-mcp-server-mcp-server.modal.run/mcp"
+)
+
+ANTHROPIC_HEADERS = {
+    "x-api-key": ANTHROPIC_API_KEY,
+    "anthropic-version": "2023-06-01",
+    "content-type": "application/json",
+}
+
+MODEL      = "claude-sonnet-4-6"
+MAX_TOKENS = 4096
+
+STATE_FILE    = Path("/app/logs/batch_state.json")
+FEEDBACK_FILE = Path("/app/logs/feedback.json")
+BRIEFS_DIR    = Path("/app/logs/briefs")
+WEEKLY_DIR    = Path("/app/logs/weekly")
+
+# ── Trading212 portfolio ──────────────────────────────────────────────────────
+# Read-only API key. Base URL: live for real account, demo for practice.
+T212_API_KEY  = os.environ.get("T212_API_KEY", "")
+T212_BASE_URL = os.environ.get("T212_BASE_URL", "https://live.trading212.com")
+
+THESIS_FILE = Path("/app/logs/theses.json")
+
+# ── Feed sources ──────────────────────────────────────────────────────────────
+RSS_FEEDS = [
+    {"name": "Reuters Markets",                "url": "https://feeds.reuters.com/reuters/businessNews",            "category": "macro"},
+    {"name": "Reuters World",                  "url": "https://feeds.reuters.com/Reuters/worldNews",              "category": "geo"},
+    {"name": "Sinica Podcast",                 "url": "https://sinica.substack.com/feed",                         "category": "china"},
+    {"name": "Un-Diplomatic",                  "url": "https://undiplomaticnewsletter.substack.com/feed",         "category": "geo"},
+    {"name": "Observing Japan",                "url": "https://observingjapan.substack.com/feed",                 "category": "japan"},
+    {"name": "Pinecone Weekly Brief",          "url": "https://pineconebriefs.substack.com/feed",                 "category": "geo"},
+    {"name": "Intersubjectively Transmissible","url": "https://intersubjectivelytransmissible.substack.com/feed", "category": "macro"},
+    {"name": "Marko Papic (@geo_papic)",       "url": "https://rsshub.app/twitter/user/geo_papic",                "category": "geo"},
+    {"name": "Jacob Shapiro (@jacobshap)",     "url": "https://rsshub.app/twitter/user/jacobshap",               "category": "geo"},
+]
+
+WEB_SOURCES = [
+    {
+        "name":     "BCA Research — Iran Conflict Daily Dashboard",
+        "url":      "https://www.bcaresearch.com/collection/bcas-iran-conflict-daily-dashboard",
+        "category": "iran",
+    },
+]
+
+# Each topic drives both a web search query and a Chroma query
+TOPICS = [
+    {"label": "ukraine", "search": "Ukraine war latest news",       "chroma": "Ukraine war Russia ceasefire frontline", "recency": True},
+    {"label": "iran",    "search": "US Iran negotiations Hormuz",   "chroma": "Iran Hormuz oil shipping blockade",      "recency": True},
+    {"label": "korea",   "search": "North Korea South Korea news",  "chroma": "Korea peninsula Kim Jong Un South Korea","recency": False},
+    {"label": "japan",   "search": "Japan geopolitics economy BOJ", "chroma": "Japan yen BOJ monetary policy",          "recency": False},
+    {"label": "china",   "search": "China Taiwan economy trade",    "chroma": "China Taiwan trade economy Xi Jinping",  "recency": False},
+]
+
+
+# ── Feedback / memory ─────────────────────────────────────────────────────────
+def load_feedback() -> dict:
+    if FEEDBACK_FILE.exists():
+        return json.loads(FEEDBACK_FILE.read_text())
+    return {"focus": [], "mute": [], "notes": []}
+
+
+def save_feedback(fb: dict):
+    FEEDBACK_FILE.write_text(json.dumps(fb, indent=2))
+
+
+def feedback_summary(fb: dict) -> str:
+    lines = []
+    if fb.get("focus"):
+        lines.append("Focus: " + ", ".join(fb["focus"]))
+    if fb.get("mute"):
+        lines.append("Muted: " + ", ".join(fb["mute"]))
+    if fb.get("notes"):
+        lines.append("Notes:\n" + "\n".join(f"  • {n}" for n in fb["notes"]))
+    return "\n".join(lines) if lines else "No active overrides."
+
+
+# ── Telegram ──────────────────────────────────────────────────────────────────
+HELP_TEXT = """<b>newsbrief commands</b>
+
+/focus [topic or phrase]
+  Emphasise something in upcoming briefs.
+  e.g. <code>/focus ceasefire talks Ukraine</code>
+
+/mute [topic]
+  Reduce a quiet section to one line.
+  e.g. <code>/mute korea</code>
+
+/note [free text]
+  Inject a one-off instruction into the next brief.
+  e.g. <code>/note watch JPY moves above 155</code>
+
+/reset — clear all overrides
+/status — show current overrides
+/help — this message
+"""
+
+TELEGRAM_MAX_LEN = 4000
+ALLOWED_TAGS = {"b", "i", "u", "s", "code", "pre", "a"}
+
+
+def telegram_send(text: str) -> bool:
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+        "disable_notification": True,
+    }
+    try:
+        resp = requests.post(url, json=payload, timeout=15)
+        if not resp.ok:
+            log.error(f"Telegram {resp.status_code}: {resp.text}")
+            return False
+        return True
+    except Exception as e:
+        log.error(f"Telegram failed: {e}")
+        return False
+
+
+def telegram_get_updates(offset: int = 0) -> list:
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+    try:
+        resp = requests.get(url, params={"offset": offset, "timeout": 5}, timeout=10)
+        return resp.json().get("result", []) if resp.ok else []
+    except Exception:
+        return []
+
+
+def process_telegram_commands():
+    """Poll for bot messages and apply feedback commands."""
+    state  = load_state() or {}
+    offset = state.get("tg_offset", 0)
+    updates = telegram_get_updates(offset)
+    if not updates:
+        return
+
+    fb = load_feedback()
+    new_offset = offset
+
+    for update in updates:
+        new_offset = update["update_id"] + 1
+        msg     = update.get("message", {})
+        text    = msg.get("text", "").strip()
+        chat_id = str(msg.get("chat", {}).get("id", ""))
+
+        if chat_id != str(TELEGRAM_CHAT_ID):
+            continue
+
+        if text.startswith("/focus "):
+            item = text[7:].strip()
+            if item and item not in fb["focus"]:
+                fb["focus"].append(item)
+            telegram_send(f"✅ Focus added: <b>{item}</b>\n\n{feedback_summary(fb)}")
+
+        elif text.startswith("/mute "):
+            item = text[6:].strip().lower()
+            if item and item not in fb["mute"]:
+                fb["mute"].append(item)
+            telegram_send(f"🔇 Muted: <b>{item}</b>\n\n{feedback_summary(fb)}")
+
+        elif text.startswith("/note "):
+            note = text[6:].strip()
+            if note:
+                fb["notes"].append(note)
+            telegram_send(f"📝 Note added: <i>{note}</i>\n\n{feedback_summary(fb)}")
+
+        elif text == "/reset":
+            fb = {"focus": [], "mute": [], "notes": []}
+            telegram_send("🔄 All overrides cleared.")
+
+        elif text == "/status":
+            telegram_send(f"<b>Current overrides</b>\n\n{feedback_summary(fb)}")
+
+        elif text in ("/help", "/start"):
+            telegram_send(HELP_TEXT)
+
+        elif text.startswith("/thesis "):
+            # /thesis SHEL = long oil supply tightness
+            # /thesis cluster:energy = long structural oil demand
+            body = text[8:].strip()
+            if "=" in body:
+                key, val = body.split("=", 1)
+                theses = load_theses()
+                theses[key.strip()] = val.strip()
+                save_theses(theses)
+                telegram_send(f"📌 Thesis set: <b>{key.strip()}</b> — {val.strip()}")
+            else:
+                telegram_send("Format: <code>/thesis TICKER = your thesis</code>")
+
+        elif text.startswith("/dig "):
+            query = text[5:].strip()
+            telegram_send(f"🔎 Digging into: <i>{query}</i>…")
+            answer = run_dig(query)
+            for chunk in split_html_message(sanitise_html(answer)):
+                telegram_send(chunk)
+                time.sleep(0.4)
+
+        else:
+            telegram_send("Unknown command — send /help for options.")
+
+    save_feedback(fb)
+    state["tg_offset"] = new_offset
+    STATE_FILE.write_text(json.dumps(state))
+
+def run_dig(query: str) -> str:
+    """
+    Deep-dive on a specific topic. Synchronous Messages API call (not batch)
+    with web search, so the reader gets a fast, detailed answer in-chat.
+    Pulls the most RECENT podcast commentary on the topic for current framing.
+    """
+    chroma_excerpts = query_chroma_latest(query, n_results=4)
+    chroma_block = "\n\n".join(e[:600] for e in chroma_excerpts) or "(no recent podcast context)"
+
+    payload = {
+        "model": MODEL,
+        "max_tokens": 2048,
+        "system": (
+            "You are a geopolitical/macro analyst answering a focused follow-up "
+            "question for an informed investor. Be specific and detailed — this is a "
+            "drill-down, so depth is wanted, unlike the daily brief. Prioritise Reuters. "
+            "The podcast context provided is the most recent commentary available; weigh "
+            "it by its date and note if a view may be stale. "
+            "Output Telegram HTML only: <b>, <i>, <code>, <a href>. Bullets with •. "
+            "No markdown, no # headers, no code fences. Under 500 words."
+        ),
+        "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+        "messages": [{
+            "role": "user",
+            "content": (
+                f"Question: {query}\n\n"
+                f"Most recent podcast analyst commentary on this topic:\n{chroma_block}\n\n"
+                f"Search the web for the latest specifics and answer in depth."
+            ),
+        }],
+    }
+    try:
+        resp = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers=ANTHROPIC_HEADERS,
+            json=payload,
+            timeout=120,
+        )
+        resp.raise_for_status()
+        blocks = resp.json().get("content", [])
+        return "\n".join(b["text"] for b in blocks if b.get("type") == "text") \
+               or "No answer returned."
+    except Exception as e:
+        log.error(f"Dig failed: {e}")
+        return f"⚠️ Dig failed: {e}"
+
+# ── Feed fetching ─────────────────────────────────────────────────────────────
+def fetch_rss(feed: dict, max_items: int = 5) -> str:
+    try:
+        parsed = feedparser.parse(feed["url"])
+        if not parsed.entries:
+            log.warning(f"No entries: {feed['name']}")
+            return ""
+        lines = [f"\n### {feed['name']} ({feed['category'].upper()})"]
+        for entry in parsed.entries[:max_items]:
+            title   = entry.get("title", "").strip()
+            summary = re.sub(r"<[^>]+>", "",
+                             entry.get("summary", entry.get("description", "")).strip())[:400]
+            pub     = entry.get("published", "")
+            lines.append(f"- {title} ({pub})\n  {summary}")
+        return "\n".join(lines)
+    except Exception as e:
+        log.warning(f"RSS failed {feed['name']}: {e}")
+        return ""
+
+
+def fetch_web_source(source: dict) -> str:
+    try:
+        resp = requests.get(source["url"], timeout=15,
+                            headers={"User-Agent": "Mozilla/5.0 (compatible; newsbrief/1.0)"})
+        resp.raise_for_status()
+        meta = (
+            re.search(r'<meta[^>]+name=["\']description["\'][^>]+content=["\'](.*?)["\']',
+                      resp.text, re.I)
+            or re.search(r'<meta[^>]+content=["\'](.*?)["\'][^>]+name=["\']description["\']',
+                         resp.text, re.I)
+        )
+        content = meta.group(1).strip() if meta else resp.text[:800]
+        return f"\n### {source['name']} ({source['category'].upper()})\n{content}"
+    except Exception as e:
+        log.warning(f"Web fetch failed {source['name']}: {e}")
+        return ""
+
+
+# ── Chroma DB ─────────────────────────────────────────────────────────────────
+def query_chroma(query: str, n_results: int = 2) -> list[str]:
+    """
+    Query the podcast Chroma MCP server via HTTP.
+    The server speaks JSON-RPC 2.0 over HTTP POST.
+    Returns a list of plain-text excerpt strings.
+    """
+    payload = {
+        "jsonrpc": "2.0",
+        "id":      1,
+        "method":  "tools/call",
+        "params":  {
+            "name":      "search_podcasts",
+            "arguments": {"query": query, "n_results": n_results},
+        },
+    }
+    try:
+        resp = requests.post(
+            CHROMA_MCP_URL,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=20,
+        )
+        resp.raise_for_status()
+        content = resp.json().get("result", {}).get("content", [])
+        return [b["text"] for b in content if b.get("type") == "text"]
+    except Exception as e:
+        log.warning(f"Chroma failed '{query}': {e}")
+        return []
+
+def query_chroma_latest(topic: str, n_results: int = 4) -> list[str]:
+    """
+    Query the podcast Chroma MCP server for the MOST RECENT commentary on a topic,
+    using the server's `latest_on_topic` tool. Returns text excerpts, newest first.
+    Use this where recency matters more than pure semantic relevance — e.g. /dig,
+    and the fast-moving topics in the daily brief.
+    """
+    payload = {
+        "jsonrpc": "2.0",
+        "id":      1,
+        "method":  "tools/call",
+        "params":  {
+            "name":      "latest_on_topic",
+            "arguments": {"topic": topic, "n_results": n_results},
+        },
+    }
+    try:
+        resp = requests.post(
+            CHROMA_MCP_URL,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=20,
+        )
+        resp.raise_for_status()
+        content = resp.json().get("result", {}).get("content", [])
+        return [b["text"] for b in content if b.get("type") == "text"]
+    except Exception as e:
+        log.warning(f"Chroma latest failed '{topic}': {e}")
+        return []
+
+
+def build_chroma_context(fb: dict) -> str:
+    """Query Chroma for each non-muted topic and format as analyst context.
+    Volatile topics (recency=True) use latest_on_topic; others use semantic search."""
+    muted   = {m.lower() for m in fb.get("mute", [])}
+    focused = {f.lower() for f in fb.get("focus", [])}
+    sections = []
+
+    for topic in TOPICS:
+        label = topic["label"]
+        if label in muted:
+            continue
+        n = 3 if any(label in f for f in focused) else 2
+        if topic.get("recency"):
+            excerpts = query_chroma_latest(topic["chroma"], n_results=n)
+        else:
+            excerpts = query_chroma(topic["chroma"], n_results=n)
+        if not excerpts:
+            continue
+        lines = [f"\n#### Podcast context — {label.upper()}"]
+        for excerpt in excerpts:
+            lines.append(excerpt[:500])
+        sections.append("\n".join(lines))
+
+    return "\n".join(sections) if sections else "(no podcast context retrieved)"
+
+# ── Trading212 portfolio ──────────────────────────────────────────────────────
+
+def load_theses() -> dict:
+    """Manual thesis annotations, keyed by ticker or free-text cluster name."""
+    if THESIS_FILE.exists():
+        return json.loads(THESIS_FILE.read_text())
+    return {}
+
+
+def save_theses(theses: dict):
+    THESIS_FILE.write_text(json.dumps(theses, indent=2))
+
+
+def fetch_portfolio_weights() -> str:
+    """
+    Fetch open positions from Trading212, compute percentage weights locally,
+    and return a privacy-safe summary. Absolute monetary values NEVER leave
+    this function — only tickers and normalised percentages are returned.
+    """
+    if not T212_API_KEY:
+        return ""
+
+    try:
+        resp = requests.get(
+            f"{T212_BASE_URL}/api/v0/equity/positions",
+            headers={"Authorization": T212_API_KEY},
+            timeout=20,
+        )
+        resp.raise_for_status()
+        positions = resp.json()
+    except Exception as e:
+        log.warning(f"Trading212 fetch failed: {e}")
+        return ""
+
+    if not positions:
+        return ""
+
+    # Compute total portfolio value locally (this number is discarded after)
+    enriched = []
+    total_value = 0.0
+    for p in positions:
+        wi = p.get("walletImpact") or {}
+        value = wi.get("currentValue")
+        if value is None:
+            # Fall back to currentPrice * quantity if walletImpact missing
+            value = (p.get("currentPrice") or 0) * (p.get("quantity") or 0)
+        ticker = (p.get("instrument") or {}).get("ticker", "UNKNOWN")
+        name   = (p.get("instrument") or {}).get("name", "")
+        pl     = wi.get("unrealizedProfitLoss")
+        enriched.append({"ticker": ticker, "name": name, "value": value, "pl": pl})
+        total_value += value
+
+    if total_value <= 0:
+        return ""
+
+    # Sort by weight descending, compute percentages
+    enriched.sort(key=lambda x: x["value"], reverse=True)
+    theses = load_theses()
+
+    lines = []
+    for e in enriched:
+        weight = 100.0 * e["value"] / total_value
+        if weight < 0.5:  # skip dust positions
+            continue
+        # P/L direction only — not the amount
+        pl_dir = ""
+        if e["pl"] is not None:
+            pl_dir = " ▲" if e["pl"] > 0 else (" ▼" if e["pl"] < 0 else "")
+        thesis = theses.get(e["ticker"], "")
+        thesis_str = f" — {thesis}" if thesis else ""
+        lines.append(f"- {e['ticker']} ({e['name']}): {weight:.1f}%{pl_dir}{thesis_str}")
+
+    # Append any cluster-level theses (not tied to a single ticker)
+    cluster_theses = {k: v for k, v in theses.items() if k.startswith("cluster:")}
+    cluster_lines = [f"- {k.replace('cluster:', '')}: {v}" for k, v in cluster_theses.items()]
+
+    out = "Current portfolio weights (percentages only — amounts withheld):\n" + "\n".join(lines)
+    if cluster_lines:
+        out += "\n\nThesis clusters:\n" + "\n".join(cluster_lines)
+    return out
+
+# ── Brief archive helpers ─────────────────────────────────────────────────────
+def load_yesterday_brief() -> str:
+    path = BRIEFS_DIR / f"brief-{(datetime.now(timezone.utc) - timedelta(days=1)).strftime('%Y-%m-%d')}.md"
+    return path.read_text() if path.exists() else ""
+
+
+def load_last_weekly_summary() -> str:
+    """Load the most recent weekly summary if one exists."""
+    WEEKLY_DIR.mkdir(exist_ok=True)
+    summaries = sorted(WEEKLY_DIR.glob("week-*.md"), reverse=True)
+    if summaries:
+        return summaries[0].read_text()
+    return ""
+
+
+def load_last_n_briefs(n: int = 7) -> list[tuple[str, str]]:
+    """Return up to n most recent daily briefs as (date_str, content) tuples."""
+    BRIEFS_DIR.mkdir(exist_ok=True)
+    files = sorted(BRIEFS_DIR.glob("brief-*.md"), reverse=True)[:n]
+    result = []
+    for f in reversed(files):  # chronological order
+        date = f.stem.replace("brief-", "")
+        result.append((date, f.read_text()))
+    return result
+
+
+# ── Prompts ───────────────────────────────────────────────────────────────────
+SYSTEM_PROMPT = """You are a senior geopolitical and macroeconomic analyst producing a concise daily briefing for an investor.
+
+The reader:
+- Is Portuguese, based in the UK
+- Has financial exposure to multiple countries and regions
+- Tracks geopolitics as a leading indicator for markets, not as an end in itself
+- Is familiar with constraint-based analysis (Papic/BCA style)
+- Does not need hedging language or excessive caveats — be direct
+- Prefers Reuters as a primary news source
+
+Your job is to synthesise the provided source material into a structured morning brief.
+Use the web search tool to fill gaps on the listed search topics — prioritise Reuters results.
+Do not pad or repeat. If nothing significant happened on a topic, say so in one line."""
+
+
+def build_daily_prompt(feed_content: str, web_content: str, chroma_context: str,
+                       yesterday_brief: str, weekly_summary: str, fb: dict,
+                       portfolio: str) -> str:
+    today       = datetime.now(timezone.utc).strftime("%A, %d %B %Y")
+    search_list = "\n".join(f"- {t['search']}" for t in TOPICS)
+
+    fb_lines = []
+    if fb.get("focus"):
+        fb_lines.append("FOCUS — go deeper on these: " + "; ".join(fb["focus"]))
+    if fb.get("mute"):
+        fb_lines.append("MUTED — one-liner only, skip if nothing new: " + "; ".join(fb["mute"]))
+    if fb.get("notes"):
+        fb_lines.append("READER NOTES:\n" + "\n".join(f"  • {n}" for n in fb["notes"]))
+    feedback_block = ("\n## READER OVERRIDES\n" + "\n".join(fb_lines)) if fb_lines else ""
+
+    yesterday_block = ""
+    if yesterday_brief:
+        yesterday_block = f"""
+## YESTERDAY'S BRIEF
+For any section where the situation is materially unchanged from yesterday, replace the paragraph with a single sentence: "No significant change — [one-line summary]." Only write a full paragraph when something new or materially different has occurred.
+
+{yesterday_brief[:2000]}
+"""
+
+    weekly_block = ""
+    if weekly_summary:
+        weekly_block = f"""
+## WEEKLY CONTEXT (for trend awareness)
+Use this to identify multi-day patterns, unresolved watch list items, and slow-moving trends. Do not repeat it — use it as background framing only.
+
+{weekly_summary[:1000]}
+"""
+
+    return f"""Today is {today} (UTC). Produce the morning brief.
+{feedback_block}
+
+## RSS / WEB SOURCE MATERIAL
+{feed_content}
+{web_content}
+
+## PODCAST ANALYST CONTEXT
+Relevant excerpts from an indexed archive of geopolitical/macro podcast episodes.
+Use for analytical framing where appropriate. Cite the show name if drawing on a specific insight.
+{chroma_context}
+
+## WEB SEARCH TOPICS
+Search for current developments on each before writing. Prioritise Reuters.
+{search_list}
+{yesterday_block}{weekly_block}
+portfolio_block = ""
+    if portfolio:
+        portfolio_block = f"""
+## READER PORTFOLIO (privacy-safe — weights only, no amounts)
+{portfolio}
+
+When scoring news against these positions, flag only confirming or contradicting
+evidence. Do NOT give buy/sell advice or price targets. Surface what is worth the
+reader's attention; the reader decides what to do with it.
+"""
+---
+
+## OUTPUT FORMAT
+
+Telegram HTML only. Allowed tags: <b>, <i>, <code>, <a href="...">
+Use <b> for section headings. Bullets with •. No markdown. No # headers. No asterisks.
+Output only the HTML — no preamble, no sign-off, no code fences.
+
+<b>🌍 TOP STORIES</b>
+- [3–5 bullets, only genuinely significant developments]
+
+<b>🇺🇦 UKRAINE</b>
+[paragraph, or: No significant change — one sentence]
+
+<b>🇮🇷 US–IRAN / STRAIT OF HORMUZ</b>
+[paragraph, or one-liner. Include BCA dashboard context if available.]
+
+<b>🇰🇷🇰🇵 KOREA</b>
+[paragraph, or: No significant change — one sentence]
+
+<b>🇯🇵 JAPAN</b>
+[paragraph, or: No significant change — one sentence]
+
+<b>🇨🇳 CHINA</b>
+[paragraph, or: No significant change — one sentence]
+
+<b>📊 MACRO SIGNAL</b>
+[paragraph if material; omit entirely if nothing significant]
+
+<b>📌 POSITION SIGNALS</b>
+- [news that confirms or challenges a held position or thesis — name the ticker/thesis and the signal direction. Omit the section entirely if nothing in today's news is materially relevant to the portfolio.]
+
+<b>👁 WATCH LIST</b>
+- [2–4 things to monitor in next 24–72h that could move markets]
+
+Keep the entire brief under 600 words."""
+
+
+WEEKLY_SYSTEM_PROMPT = """You are a senior geopolitical and macroeconomic analyst.
+Your job is to produce a compact weekly synthesis from a set of daily briefs.
+Be direct. Focus on patterns, trends, and unresolved situations — not a summary of each day."""
+
+
+def build_weekly_prompt(briefs: list[tuple[str, str]]) -> str:
+    brief_text = ""
+    for date, content in briefs:
+        brief_text += f"\n\n--- {date} ---\n{content[:1500]}"
+
+    return f"""Below are the daily briefs from the past week. Produce a weekly synthesis.
+
+{brief_text}
+
+---
+
+## OUTPUT FORMAT
+
+Telegram HTML only. Allowed tags: <b>, <i>, <code>
+Use <b> for section headings. Bullets with •. No markdown. No # headers.
+Output only the HTML — no preamble, no sign-off, no code fences.
+
+<b>📅 WEEK IN REVIEW</b>
+2–3 sentences: the single most important geopolitical or macro development this week and why it matters.
+
+<b>🔁 PERSISTENT SITUATIONS</b>
+- [situations that have been present all week without resolution — note duration]
+- [up to 4 bullets]
+
+<b>📈 TRENDS TO WATCH</b>
+- [patterns that emerged or intensified across multiple days this week]
+- [up to 3 bullets]
+
+<b>✅ RESOLVED / FADED</b>
+- [things that were on the watch list earlier in the week but have since quieted — or note "none"]
+
+Keep the entire summary under 400 words. This summary will be used as background context in next week's daily briefs."""
+
+
+# ── Batch API ─────────────────────────────────────────────────────────────────
+def submit_batch(system: str, prompt_user: str, custom_id: str) -> str:
+    payload = {
+        "requests": [{
+            "custom_id": custom_id,
+            "params": {
+                "model":      MODEL,
+                "max_tokens": MAX_TOKENS,
+                "system":     system,
+                "tools":      [{"type": "web_search_20250305", "name": "web_search"}],
+                "messages":   [{"role": "user", "content": prompt_user}],
+            },
+        }]
+    }
+    resp = requests.post(
+        "https://api.anthropic.com/v1/messages/batches",
+        headers=ANTHROPIC_HEADERS,
+        json=payload,
+        timeout=30,
+    )
+    resp.raise_for_status()
+    batch_id = resp.json()["id"]
+    log.info(f"Batch submitted: {batch_id}")
+    return batch_id
+
+
+def submit_batch_no_search(system: str, prompt_user: str, custom_id: str) -> str:
+    """Submit a batch job without web search — used for the weekly summary."""
+    payload = {
+        "requests": [{
+            "custom_id": custom_id,
+            "params": {
+                "model":      MODEL,
+                "max_tokens": MAX_TOKENS,
+                "system":     system,
+                "messages":   [{"role": "user", "content": prompt_user}],
+            },
+        }]
+    }
+    resp = requests.post(
+        "https://api.anthropic.com/v1/messages/batches",
+        headers=ANTHROPIC_HEADERS,
+        json=payload,
+        timeout=30,
+    )
+    resp.raise_for_status()
+    batch_id = resp.json()["id"]
+    log.info(f"Weekly batch submitted: {batch_id}")
+    return batch_id
+
+
+def poll_batch(batch_id: str, max_wait_secs: int = 43200) -> str | None:
+    url      = f"https://api.anthropic.com/v1/messages/batches/{batch_id}"
+    deadline = time.time() + max_wait_secs
+    sleep    = 60
+
+    while time.time() < deadline:
+        resp   = requests.get(url, headers=ANTHROPIC_HEADERS, timeout=15)
+        resp.raise_for_status()
+        data   = resp.json()
+        status = data.get("processing_status")
+        log.info(f"Batch {batch_id}: {status}")
+
+        if status == "ended":
+            results_url = (
+                data.get("results_url")
+                or f"https://api.anthropic.com/v1/messages/batches/{batch_id}/results"
+            )
+            return fetch_batch_results(results_url)
+
+        time.sleep(min(sleep, 300))
+        sleep = int(sleep * 1.5)
+
+    log.error(f"Batch {batch_id} timed out")
+    return None
+
+
+def fetch_batch_results(results_url: str) -> str | None:
+    resp = requests.get(results_url, headers=ANTHROPIC_HEADERS, timeout=30, stream=True)
+    resp.raise_for_status()
+    for line in resp.iter_lines():
+        if not line:
+            continue
+        try:
+            result = json.loads(line)
+            if result.get("result", {}).get("type") == "succeeded":
+                blocks = result["result"]["message"]["content"]
+                return "\n".join(b["text"] for b in blocks if b.get("type") == "text")
+        except json.JSONDecodeError:
+            continue
+    log.error("No succeeded result in batch output")
+    return None
+
+
+# ── State ─────────────────────────────────────────────────────────────────────
+def load_state() -> dict | None:
+    return json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else None
+
+
+def save_state(updates: dict):
+    state = load_state() or {}
+    state.update(updates)
+    STATE_FILE.write_text(json.dumps(state))
+
+
+def clear_batch_state():
+    state = load_state() or {}
+    for key in ("batch_id", "submitted_at", "date", "weekly_batch_id"):
+        state.pop(key, None)
+    STATE_FILE.write_text(json.dumps(state))
+
+
+# ── Delivery ──────────────────────────────────────────────────────────────────
+def sanitise_html(text: str) -> str:
+    text = re.sub(r"```[a-z]*\n?", "", text)
+    text = re.sub(
+        r"</?(?!(?:" + "|".join(ALLOWED_TAGS) + r")(?:\s[^>]*)?>)[a-zA-Z][^>]*>",
+        "", text,
+    )
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def split_html_message(text: str, max_len: int = TELEGRAM_MAX_LEN) -> list[str]:
+    if len(text) <= max_len:
+        return [text]
+    chunks, current = [], ""
+    for part in re.split(r"(\n\n)", text):
+        if len(current) + len(part) > max_len:
+            if current.strip():
+                chunks.append(current.strip())
+            current = part
+        else:
+            current += part
+    if current.strip():
+        chunks.append(current.strip())
+    return chunks
+
+
+def deliver(text: str, header: str, archive_path: Path):
+    """Sanitise, split, send via Telegram, and archive to disk."""
+    clean  = sanitise_html(text)
+    chunks = split_html_message(f"{header}\n\n{clean}")
+
+    ok = True
+    for i, chunk in enumerate(chunks):
+        if not telegram_send(chunk):
+            log.error(f"Failed chunk {i+1}/{len(chunks)}")
+            ok = False
+        elif len(chunks) > 1:
+            time.sleep(0.5)
+
+    log.info(f"Delivered ({len(chunks)} msg(s))" if ok else "Delivery had failures")
+
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    plain = re.sub(r"<[^>]+>", "", text)
+    archive_path.write_text(plain + "\n")
+    log.info(f"Saved: {archive_path}")
+
+
+# ── Modes ─────────────────────────────────────────────────────────────────────
+def mode_submit():
+    log.info("=== SUBMIT ===")
+    process_telegram_commands()
+
+    state = load_state() or {}
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if state.get("date") == today and state.get("batch_id"):
+        log.info(f"Already submitted today ({state['batch_id']}), skipping")
+        return
+
+    feed_content = "\n".join(c for f in RSS_FEEDS if (c := fetch_rss(f))) or "(no RSS content)"
+    web_content  = "\n".join(c for s in WEB_SOURCES if (c := fetch_web_source(s))) or "(no web content)"
+
+    fb              = load_feedback()
+    chroma_context  = build_chroma_context(fb)
+    yesterday_brief = load_yesterday_brief()
+    weekly_summary  = load_last_weekly_summary()
+
+    log.info(
+        f"Chroma: {len(chroma_context)} chars | "
+        f"Yesterday: {'yes' if yesterday_brief else 'no'} | "
+        f"Weekly: {'yes' if weekly_summary else 'no'}"
+    )
+
+    portfolio = fetch_portfolio_weights()
+    log.info(f"Portfolio: {'fetched' if portfolio else 'none'}")
+
+    prompt = build_daily_prompt(feed_content, web_content, chroma_context,
+                                yesterday_brief, weekly_summary, fb, portfolio)
+    batch_id = submit_batch(SYSTEM_PROMPT, prompt,
+                            custom_id=f"newsbrief-{today}")
+    save_state({"batch_id": batch_id, "submitted_at": datetime.now(timezone.utc).isoformat(), "date": today})
+
+
+def mode_collect():
+    log.info("=== COLLECT ===")
+    state    = load_state() or {}
+    batch_id = state.get("batch_id")
+    if not batch_id:
+        log.error("No pending batch — run submit first")
+        return
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    brief = poll_batch(batch_id)
+    if brief:
+        deliver(
+            brief,
+            header=f"🌐 <b>Morning Brief — {datetime.now(timezone.utc).strftime('%d %b %Y')}</b>",
+            archive_path=BRIEFS_DIR / f"brief-{today}.md",
+        )
+        clear_batch_state()
+    else:
+        log.error("Could not retrieve brief — will retry next collect run")
+
+
+def mode_weekly():
+    """
+    Generate a weekly summary from the last 7 daily briefs.
+    Submit as a batch job (no web search needed — all content is local).
+    Poll synchronously since this runs on a Sunday evening cron and
+    we want the result available for Monday's brief.
+    Run: 0 21 * * 0  (Sunday 9pm UTC)
+    """
+    log.info("=== WEEKLY ===")
+    briefs = load_last_n_briefs(7)
+    if not briefs:
+        log.warning("No daily briefs found — skipping weekly summary")
+        return
+
+    log.info(f"Generating weekly summary from {len(briefs)} briefs: "
+             f"{briefs[0][0]} → {briefs[-1][0]}")
+
+    prompt   = build_weekly_prompt(briefs)
+    batch_id = submit_batch_no_search(WEEKLY_SYSTEM_PROMPT, prompt,
+                                      custom_id=f"weekly-{datetime.now(timezone.utc).strftime('%Y-W%W')}")
+
+    # Poll synchronously — weekly job runs at 9pm, result needed by next morning
+    summary = poll_batch(batch_id, max_wait_secs=7200)
+    if summary:
+        week_label = datetime.now(timezone.utc).strftime("%Y-W%W")
+        deliver(
+            summary,
+            header=f"📅 <b>Weekly Summary — W{datetime.now(timezone.utc).strftime('%W, %Y')}</b>",
+            archive_path=WEEKLY_DIR / f"week-{week_label}.md",
+        )
+        log.info(f"Weekly summary saved: week-{week_label}.md")
+    else:
+        log.error("Weekly batch failed or timed out")
+
+
+def mode_run():
+    """Synchronous submit + collect for testing."""
+    log.info("=== RUN (sync) ===")
+    mode_submit()
+    state    = load_state() or {}
+    batch_id = state.get("batch_id")
+    if batch_id:
+        brief = poll_batch(batch_id, max_wait_secs=3600)
+        if brief:
+            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            deliver(
+                brief,
+                header=f"🌐 <b>Morning Brief — {datetime.now(timezone.utc).strftime('%d %b %Y')}</b>",
+                archive_path=BRIEFS_DIR / f"brief-{today}.md",
+            )
+            clear_batch_state()
+
+
+def mode_commands():
+    """Process Telegram commands without submitting anything."""
+    log.info("=== COMMANDS ===")
+    process_telegram_commands()
+
+
+# ── Entry ─────────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    import sys
+    mode = sys.argv[1] if len(sys.argv) > 1 else "run"
+    dispatch = {
+        "submit":   mode_submit,
+        "collect":  mode_collect,
+        "weekly":   mode_weekly,
+        "run":      mode_run,
+        "commands": mode_commands,
+    }
+    fn = dispatch.get(mode)
+    if fn:
+        fn()
+    else:
+        print("Usage: brief.py [submit|collect|weekly|run|commands]")
+        sys.exit(1)
