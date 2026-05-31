@@ -69,8 +69,17 @@ WEEKLY_DIR = Path("/app/logs/weekly")
 
 # ── Trading212 portfolio ──────────────────────────────────────────────────────
 # Read-only API key. Base URL: live for real account, demo for practice.
-T212_API_KEY = os.environ.get("T212_API_KEY", "")
-T212_BASE_URL = os.environ.get("T212_BASE_URL", "https://live.trading212.com")
+# .strip() guards against a trailing newline/whitespace leaking in from .env or a
+# Docker secret — T212 rejects a malformed Authorization value with 401.
+T212_API_KEY = os.environ.get("T212_API_KEY", "").strip()
+T212_BASE_URL = os.environ.get("T212_BASE_URL", "https://live.trading212.com").strip()
+
+# Self-hosted Nitter (Twitter/X mirror) reachable on the container's Docker network.
+# Default targets a service named `nitter` on Nitter's default internal port 8080;
+# override NITTER_BASE_URL if your instance listens on a different host/port.
+NITTER_BASE_URL = (
+    os.environ.get("NITTER_BASE_URL", "http://nitter:8080").strip().rstrip("/")
+)
 
 THESIS_FILE = Path("/app/logs/theses.json")
 
@@ -88,12 +97,17 @@ PAPER_CLOSE_HORIZON = "4w"  # close the position once this checkpoint is recorde
 RSS_FEEDS = [
     {
         "name": "Reuters Markets",
-        "url": "https://feeds.reuters.com/reuters/businessNews",
+        # Reuters discontinued public RSS (June 2020); proxy via Google News.
+        # `site:` is stable (unlike allinurl:); `when:2d` is a freshness guardrail
+        # so a quiet section never feeds the LLM stale headlines as news. Only the
+        # 5 newest items are used (fetch_rss max_items), so the window isn't a
+        # volume control — markets still returns 100 items inside 2d.
+        "url": "https://news.google.com/rss/search?q=when:2d+site%3Areuters.com%2Fmarkets&hl=en-US&gl=US&ceid=US%3Aen",
         "category": "macro",
     },
     {
         "name": "Reuters World",
-        "url": "https://feeds.reuters.com/Reuters/worldNews",
+        "url": "https://news.google.com/rss/search?q=when:2d+site%3Areuters.com%2Fworld&hl=en-US&gl=US&ceid=US%3Aen",
         "category": "geo",
     },
     {
@@ -103,7 +117,7 @@ RSS_FEEDS = [
     },
     {
         "name": "Un-Diplomatic",
-        "url": "https://undiplomaticnewsletter.substack.com/feed",
+        "url": "https://www.un-diplomatic.com/feed",
         "category": "geo",
     },
     {
@@ -113,22 +127,24 @@ RSS_FEEDS = [
     },
     {
         "name": "Pinecone Weekly Brief",
-        "url": "https://pineconebriefs.substack.com/feed",
+        "url": "https://pineconemacroresearch.substack.com/feed",
         "category": "geo",
     },
     {
         "name": "Intersubjectively Transmissible",
-        "url": "https://intersubjectivelytransmissible.substack.com/feed",
+        "url": "https://jashap.substack.com/feed",
         "category": "macro",
     },
     {
         "name": "Marko Papic (@geo_papic)",
-        "url": "https://rsshub.app/twitter/user/geo_papic",
+        # X killed unauthenticated scraping and rsshub.app's public route is dead;
+        # served via the self-hosted Nitter on the container's Docker network.
+        "url": f"{NITTER_BASE_URL}/geo_papic/rss",
         "category": "geo",
     },
     {
         "name": "Jacob Shapiro (@jacobshap)",
-        "url": "https://rsshub.app/twitter/user/jacobshap",
+        "url": f"{NITTER_BASE_URL}/jacobshap/rss",
         "category": "geo",
     },
 ]
@@ -419,7 +435,13 @@ def fetch_rss(feed: dict, max_items: int = 5) -> str:
     try:
         parsed = feedparser.parse(feed["url"])
         if not parsed.entries:
-            log.warning(f"No entries: {feed['name']}")
+            # feedparser never raises on HTTP errors — it returns empty .entries
+            # and stashes the real cause in .status / .bozo_exception. Surface it
+            # so a dead feed (404/000) is distinguishable from a genuinely empty one.
+            status = getattr(parsed, "status", None)
+            bozo_exc = getattr(parsed, "bozo_exception", None)
+            detail = f"HTTP {status}" if status else (str(bozo_exc) or "unknown")
+            log.warning(f"No entries: {feed['name']} ({detail})")
             return ""
         lines = [f"\n### {feed['name']} ({feed['category'].upper()})"]
         for entry in parsed.entries[:max_items]:
@@ -465,7 +487,9 @@ def fetch_web_source(source: dict) -> str:
 def query_chroma(query: str, n_results: int = 2) -> list[str]:
     """
     Query the podcast Chroma MCP server via HTTP.
-    The server speaks JSON-RPC 2.0 over HTTP POST.
+    The server speaks JSON-RPC 2.0 over MCP's Streamable HTTP transport, which
+    requires the client to advertise it accepts both application/json and
+    text/event-stream; omitting that Accept header yields 406 Not Acceptable.
     Returns a list of plain-text excerpt strings.
     """
     payload = {
@@ -481,8 +505,12 @@ def query_chroma(query: str, n_results: int = 2) -> list[str]:
         resp = requests.post(
             CHROMA_MCP_URL,
             json=payload,
-            headers={"Content-Type": "application/json"},
-            timeout=20,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+            },
+            # Modal serverless cold-starts can exceed 20s on the first call of a run.
+            timeout=60,
         )
         resp.raise_for_status()
         content = resp.json().get("result", {}).get("content", [])
@@ -514,8 +542,12 @@ def query_chroma_latest(
         resp = requests.post(
             CHROMA_MCP_URL,
             json=payload,
-            headers={"Content-Type": "application/json"},
-            timeout=20,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+            },
+            # Modal serverless cold-starts can exceed 20s on the first call of a run.
+            timeout=60,
         )
         resp.raise_for_status()
         content = resp.json().get("result", {}).get("content", [])

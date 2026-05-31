@@ -6,7 +6,7 @@
 #
 # Values are interpolated from your stack environment / a .env beside this file:
 #   ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID   (required)
-#   T212_API_KEY, T212_BASE_URL, CHROMA_MCP_URL               (optional)
+#   T212_API_KEY, T212_BASE_URL, CHROMA_MCP_URL, NITTER_BASE_URL  (optional)
 #   PUID / PGID    — host uid:gid that OWNS the logs volume (runs the container non-root)
 #   APPDATA_DIR    — host path for persistent state + archives
 #
@@ -27,12 +27,16 @@ x-newsbrief: &newsbrief
     - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
     - T212_API_KEY=${T212_API_KEY:-}
     - T212_BASE_URL=${T212_BASE_URL:-https://live.trading212.com}
+    # Self-hosted Nitter on the shared network (Twitter/X feeds). Defaults to the
+    # service named `nitter` on Nitter's internal port 8080; override if it differs.
+    - NITTER_BASE_URL=${NITTER_BASE_URL:-http://nitter:8080}
     # - CHROMA_MCP_URL=${CHROMA_MCP_URL}   # optional: override the default podcast MCP endpoint
   volumes:
     - "${APPDATA_DIR:-./appdata}/news-brief:/app/logs"
   restart: "no"
-  # To reach a self-hosted RSSHub/Nitter on an internal Docker network, attach it here
-  # (and declare it under the top-level `networks:` block below):
+  # The Twitter/X feeds resolve `nitter` over Docker DNS, so this stack must share a
+  # network with your Nitter container. Attach it here (and declare the external
+  # network under the top-level `networks:` block below):
   # networks: [ default, nitter_network ]
 
 services:
