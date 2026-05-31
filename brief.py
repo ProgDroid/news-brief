@@ -74,6 +74,12 @@ THESIS_FILE = Path("/app/logs/theses.json")
 SIGNALS_DIR = Path("/app/logs/signals")
 
 PAPER_DIR = Path("/app/logs/paper")
+PAPER_BOOK_FILE = PAPER_DIR / "paper-book.json"
+TICKER_MAP_FILE = PAPER_DIR / "ticker_map.json"
+INSTRUMENTS_CACHE_FILE = PAPER_DIR / "instruments-cache.json"
+
+PAPER_HORIZONS = {"1w": 7, "2w": 14, "4w": 28}  # days from entry_date
+PAPER_CLOSE_HORIZON = "4w"  # close the position once this checkpoint is recorded
 
 # ── Feed sources ──────────────────────────────────────────────────────────────
 RSS_FEEDS = [
@@ -204,6 +210,10 @@ HELP_TEXT = """<b>newsbrief commands</b>
   Inject a one-off instruction into the next brief.
   e.g. <code>/note watch JPY moves above 155</code>
 
+/close [TICKER]
+  Close an open paper position early at the current mark.
+  e.g. <code>/close AAPL_US_EQ</code>
+
 /reset — clear all overrides
 /status — show current overrides
 /help — this message
@@ -314,6 +324,37 @@ def process_telegram_commands():
             for chunk in split_html_message(sanitise_html(answer)):
                 telegram_send(chunk)
                 time.sleep(0.4)
+
+        elif text.startswith("/close "):
+            tkr = text[7:].strip()
+            book = load_paper_book()
+            matches = [
+                p
+                for p in book["positions"]
+                if p["status"] == "open" and p["ticker"] == tkr
+            ]
+            if not matches:
+                telegram_send(f"No open paper position for <b>{tkr}</b>.")
+            else:
+                day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                closed_n = 0
+                for p in matches:
+                    price = fetch_stooq_price(p["stooq_symbol"])
+                    if price is None:
+                        continue
+                    ret = _signal_return(p["direction"], p["entry_price"], price)
+                    p["last_mark"] = {"date": day, "price": price, "return": ret}
+                    p["status"] = "closed"
+                    p["close_reason"] = "manual"
+                    p["closed_date"] = day
+                    closed_n += 1
+                if closed_n:
+                    save_paper_book(book)
+                    telegram_send(
+                        f"✅ Closed {closed_n} paper position(s) for <b>{tkr}</b> (manual)."
+                    )
+                else:
+                    telegram_send(f"⚠️ Couldn't price {tkr} — left open.")
 
         else:
             telegram_send("Unknown command — send /help for options.")
@@ -603,23 +644,141 @@ def fetch_portfolio_weights() -> str:
     return out
 
 
-def get_price(ticker: str) -> float | None:
-    """Fetch current price for a ticker from the live positions feed is not possible
-    for unheld tickers, so use Trading212's instrument price via a lightweight quote.
-    For paper trading we approximate using the brief's signal; here we fetch from
-    the Trading212 API if the instrument is held, else return None and skip.
-    A fuller version would hit a quote endpoint."""
-    # Placeholder: paper tracker records the signal and resolves price at review time
-    # via web/market data. Kept deliberately simple — see note below.
-    return None
+# ── Paper trading ──────────────────────────────────────────────────────────────
+
+# Map a T212 instrument currency (and ISIN country for EUR) to a Stooq market suffix.
+_STOOQ_SUFFIX = {"USD": "us", "GBP": "uk", "GBX": "uk"}
+_STOOQ_EUR_BY_ISIN = {"DE": "de", "FR": "fr"}
+
+
+def fetch_stooq_price(stooq_symbol: str) -> float | None:
+    """Fetch the latest close price for a Stooq symbol (e.g. 'aapl.us').
+
+    Returns None on network error or Stooq's 'N/D' not-found sentinel — callers MUST treat
+    None as 'could not price' and skip, never substitute a guessed value.
+    """
+    url = f"https://stooq.com/q/l/?s={stooq_symbol}&f=sd2t2ohlcv&h&e=csv"
+    try:
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
+    except Exception as e:
+        log.warning(f"Stooq fetch failed for {stooq_symbol}: {e}")
+        return None
+    lines = resp.text.strip().splitlines()
+    if len(lines) < 2:
+        return None
+    cols = lines[1].split(",")  # Symbol,Date,Time,Open,High,Low,Close,Volume
+    if len(cols) < 7 or cols[6] in ("N/D", ""):
+        log.warning(f"Stooq returned no price for {stooq_symbol}")
+        return None
+    try:
+        return float(cols[6])
+    except ValueError:
+        return None
+
+
+def load_ticker_overrides() -> dict:
+    """Manual T212-ticker -> Stooq-symbol overrides for instruments that don't map automatically."""
+    if TICKER_MAP_FILE.exists():
+        return json.loads(TICKER_MAP_FILE.read_text())
+    return {}
+
+
+def load_instruments_cache() -> dict:
+    if INSTRUMENTS_CACHE_FILE.exists():
+        return json.loads(INSTRUMENTS_CACHE_FILE.read_text())
+    return {}
+
+
+def refresh_instruments_cache(max_age_days: int = 14, force: bool = False) -> dict:
+    """Refresh the T212 instrument metadata cache (ticker -> isin/currencyCode) if stale.
+
+    One rate-limited call (1 req / 50s) returns the full catalogue. Returns the cache dict;
+    returns the existing/empty cache unchanged when T212_API_KEY is unset or the call fails.
+    """
+    cache = load_instruments_cache()
+    if not force and cache.get("fetched_at"):
+        try:
+            age = datetime.now(timezone.utc) - datetime.fromisoformat(
+                cache["fetched_at"]
+            )
+            if age < timedelta(days=max_age_days):
+                return cache
+        except ValueError:
+            pass
+    if not T212_API_KEY:
+        return cache
+    try:
+        resp = requests.get(
+            f"{T212_BASE_URL}/api/v0/equity/metadata/instruments",
+            headers={"Authorization": T212_API_KEY},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        instruments = {
+            i["ticker"]: {
+                "isin": i.get("isin", ""),
+                "currencyCode": i.get("currencyCode", ""),
+            }
+            for i in resp.json()
+            if i.get("ticker")
+        }
+    except Exception as e:
+        log.warning(f"Instrument cache refresh failed: {e}")
+        return cache
+    cache = {
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "instruments": instruments,
+    }
+    PAPER_DIR.mkdir(parents=True, exist_ok=True)
+    INSTRUMENTS_CACHE_FILE.write_text(json.dumps(cache))
+    log.info(f"Instrument cache refreshed: {len(instruments)} instruments")
+    return cache
+
+
+def resolve_stooq_symbol(ticker: str, cache: dict, overrides: dict) -> str | None:
+    """Map a T212 ticker (e.g. 'AAPL_US_EQ') to a Stooq symbol (e.g. 'aapl.us').
+
+    Override file wins; otherwise derive base.suffix from the cached instrument currency
+    (and ISIN country for EUR). Returns None when no suffix can be determined.
+    """
+    if ticker in overrides:
+        return overrides[ticker]
+    base = ticker.split("_")[0].lower()
+    meta = cache.get("instruments", {}).get(ticker, {})
+    ccy = (meta.get("currencyCode") or "").upper()
+    suffix = _STOOQ_SUFFIX.get(ccy)
+    if suffix is None and ccy == "EUR":
+        suffix = _STOOQ_EUR_BY_ISIN.get((meta.get("isin") or "")[:2].upper())
+    if suffix is None:
+        return None
+    return f"{base}.{suffix}"
+
+
+def load_paper_book() -> dict:
+    if PAPER_BOOK_FILE.exists():
+        return json.loads(PAPER_BOOK_FILE.read_text())
+    return {"positions": []}
+
+
+def save_paper_book(book: dict):
+    PAPER_DIR.mkdir(parents=True, exist_ok=True)
+    PAPER_BOOK_FILE.write_text(json.dumps(book, indent=2))
+
+
+def _signal_return(direction: str, entry: float, price: float) -> float:
+    """Directional return ratio: +1 for bullish, -1 for bearish, FX/unit-neutral."""
+    sign = 1.0 if direction == "bullish" else -1.0
+    return sign * (price / entry - 1.0)
 
 
 def mode_paper():
-    """
-    Open paper positions from today's signals. Pure simulation — no money, no orders.
-    Each signal with confidence medium/high and a non-neutral direction opens a
-    notional unit-sized paper position, recorded with the date and entry context.
-    Review/mark-to-market happens in the weekly job.
+    """Open paper positions from today's signals. Pure simulation — no money, no orders.
+
+    Each medium/high-confidence directional signal with a resolvable ticker opens one notional
+    paper position (deduped per ticker+direction). Prices come from Stooq; unmappable tickers,
+    Stooq 'N/D', and macro/null-ticker signals are skipped and logged. Marking-to-market and
+    closing happen in the weekly job.
     """
     log.info("=== PAPER ===")
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -634,28 +793,141 @@ def mode_paper():
         for s in signals
         if s.get("direction") in ("bullish", "bearish")
         and s.get("confidence") in ("medium", "high")
+        and s.get("ticker")
     ]
-
     if not actionable:
         log.info("No actionable signals today")
         return
 
-    PAPER_DIR.mkdir(parents=True, exist_ok=True)
-    book_path = PAPER_DIR / "paper-book.jsonl"
-    with book_path.open("a") as f:
-        for s in actionable:
-            entry = {
+    book = load_paper_book()
+    open_keys = {
+        (p["ticker"], p["direction"])
+        for p in book["positions"]
+        if p["status"] == "open"
+    }
+    cache = refresh_instruments_cache()
+    overrides = load_ticker_overrides()
+
+    opened = 0
+    for s in actionable:
+        ticker, direction = s["ticker"], s["direction"]
+        if (ticker, direction) in open_keys:
+            continue  # dedup: a position for this call is already open
+        symbol = resolve_stooq_symbol(ticker, cache, overrides)
+        if not symbol:
+            log.warning(f"Paper skip: no Stooq symbol for {ticker}")
+            continue
+        price = fetch_stooq_price(symbol)
+        if price is None:
+            log.warning(f"Paper skip: no price for {ticker} ({symbol})")
+            continue
+        book["positions"].append(
+            {
+                "id": f"{today}:{ticker}:{direction}",
                 "opened": today,
-                "ticker": s.get("ticker"),
-                "topic": s.get("topic"),
-                "direction": s.get("direction"),
+                "ticker": ticker,
+                "stooq_symbol": symbol,
+                "direction": direction,
                 "confidence": s.get("confidence"),
+                "topic": s.get("topic"),
                 "thesis_ref": s.get("thesis_ref"),
                 "rationale": s.get("rationale"),
+                "entry_price": price,
+                "entry_date": today,
                 "status": "open",
+                "close_reason": None,
+                "closed_date": None,
+                "checkpoints": {},
+                "last_mark": None,
             }
-            f.write(json.dumps(entry) + "\n")
-    log.info(f"Opened {len(actionable)} paper positions")
+        )
+        open_keys.add((ticker, direction))
+        opened += 1
+
+    save_paper_book(book)
+    log.info(f"Opened {opened} paper position(s)")
+
+
+def mark_to_market(book: dict, today_str: str) -> dict:
+    """Mark every open position to market, record crossed horizon checkpoints, close at 4w.
+
+    Mutates and returns the book. A position whose Stooq price can't be fetched is left open
+    and retried next run. All crossed-but-unrecorded checkpoints are recorded in one pass
+    (covers a missed weekly run); closing happens once the 4w checkpoint is recorded.
+    """
+    today = datetime.strptime(today_str, "%Y-%m-%d").date()
+    for p in book["positions"]:
+        if p["status"] != "open":
+            continue
+        price = fetch_stooq_price(p["stooq_symbol"])
+        if price is None:
+            log.warning(
+                f"MtM kept open (no price): {p['ticker']} ({p['stooq_symbol']})"
+            )
+            continue
+        ret = _signal_return(p["direction"], p["entry_price"], price)
+        p["last_mark"] = {"date": today_str, "price": price, "return": ret}
+        days_open = (today - datetime.strptime(p["entry_date"], "%Y-%m-%d").date()).days
+        for label, threshold in PAPER_HORIZONS.items():
+            if label not in p["checkpoints"] and days_open >= threshold:
+                p["checkpoints"][label] = {
+                    "date": today_str,
+                    "price": price,
+                    "return": ret,
+                }
+        if PAPER_CLOSE_HORIZON in p["checkpoints"]:
+            p["status"] = "closed"
+            p["close_reason"] = "horizon"
+            p["closed_date"] = today_str
+    return book
+
+
+def paper_scorecard(book: dict) -> str:
+    """Build a Telegram-HTML paper scorecard: hit-rate and mean returns (percentages only)."""
+    positions = book.get("positions", [])
+    closed = [
+        p
+        for p in positions
+        if p["status"] == "closed" and "4w" in p.get("checkpoints", {})
+    ]
+    open_ = [p for p in positions if p["status"] == "open"]
+
+    def _hit_rate(ps):
+        rets = [p["checkpoints"]["4w"]["return"] for p in ps]
+        if not rets:
+            return None
+        hits = sum(1 for r in rets if r > 0)
+        return 100.0 * hits / len(rets), len(rets)
+
+    lines = ["<b>🧪 PAPER SIGNALS SCORECARD</b>"]
+    overall = _hit_rate(closed)
+    if overall:
+        rate, n = overall
+        lines.append(f"• Realized hit-rate (4w): {rate:.0f}% of {n}")
+        for conf in ("high", "medium"):
+            sub = _hit_rate([p for p in closed if p.get("confidence") == conf])
+            if sub:
+                lines.append(f"  – {conf}: {sub[0]:.0f}% of {sub[1]}")
+    for label in PAPER_HORIZONS:
+        rets = [
+            p["checkpoints"][label]["return"]
+            for p in positions
+            if label in p.get("checkpoints", {})
+        ]
+        if rets:
+            lines.append(
+                f"• Mean {label} return: {100.0 * sum(rets) / len(rets):+.1f}% (n={len(rets)})"
+            )
+    lines.append(f"• Open: {len(open_)} | Closed: {len(closed)}")
+    recent = sorted(closed, key=lambda p: p.get("closed_date") or "", reverse=True)[:5]
+    if recent:
+        lines.append("Recently closed:")
+        for p in recent:
+            r = p["checkpoints"]["4w"]["return"]
+            lines.append(
+                f"  • {p['ticker']} {p['direction']}: {100 * r:+.1f}% ({p['close_reason']})"
+            )
+    return "\n".join(lines)
 
 
 # ── Brief archive helpers ─────────────────────────────────────────────────────
@@ -1230,6 +1502,7 @@ def mode_collect():
             archive_path=BRIEFS_DIR / f"brief-{today}.md",
         )
         save_signals(signals, today, status=status, dropped=dropped)
+        mode_paper()
         clear_batch_state()
     else:
         log.error("Could not retrieve brief — will retry next collect run")
@@ -1274,6 +1547,15 @@ def mode_weekly():
     else:
         log.error("Weekly batch failed or timed out")
 
+    # Mark the paper book to market regardless of the weekly-summary outcome
+    refresh_instruments_cache(force=True)
+    book = mark_to_market(
+        load_paper_book(), datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    )
+    save_paper_book(book)
+    telegram_send(paper_scorecard(book))
+    log.info("Paper book marked to market")
+
 
 def mode_run():
     """Synchronous submit + collect for testing."""
@@ -1295,6 +1577,7 @@ def mode_run():
                 archive_path=BRIEFS_DIR / f"brief-{today}.md",
             )
             save_signals(signals, today, status=status, dropped=dropped)
+            mode_paper()
             clear_batch_state()
 
 
@@ -1315,6 +1598,7 @@ if __name__ == "__main__":
         "weekly": mode_weekly,
         "run": mode_run,
         "commands": mode_commands,
+        "paper": mode_paper,
     }
     fn = dispatch.get(mode)
     if fn:
