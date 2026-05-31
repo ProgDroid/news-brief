@@ -151,21 +151,28 @@ cp .env.example .env
 ```bash
 docker build -t newsbrief .
 # Synchronous end-to-end test (submit + poll + deliver), ~30s–2min:
-docker run --rm --env-file .env -v "$PWD/logs:/app/logs" newsbrief python brief.py run
+docker run --rm --env-file .env -v "$PWD/logs:/app/logs" newsbrief run
 ```
 
 ### 5. Schedule
 
-The published image (see below) is invoked per-mode from the host crontab. Example:
+Use the committed [`docker-compose.yml`](docker-compose.yml). The image's entrypoint is
+`python brief.py`, so each mode is just a service whose `command:` is the mode — and all shared
+config lives once in the `&newsbrief` YAML anchor, so changing the image/user/volume/env is a
+single edit that every mode inherits. The container runs **non-root** via `user: "${PUID}:${PGID}"`
+(those must own `${APPDATA_DIR}/news-brief`).
+
+Trigger the modes from your container scheduler or host cron:
 
 ```cron
-0 20 * * *   docker run --rm --env-file /path/to/.env -v /path/to/logs:/app/logs ghcr.io/progdroid/news-brief python brief.py submit
-0  6 * * *   docker run --rm --env-file /path/to/.env -v /path/to/logs:/app/logs ghcr.io/progdroid/news-brief python brief.py collect
-0 21 * * 0   docker run --rm --env-file /path/to/.env -v /path/to/logs:/app/logs ghcr.io/progdroid/news-brief python brief.py weekly
-*/30 * * * * docker run --rm --env-file /path/to/.env -v /path/to/logs:/app/logs ghcr.io/progdroid/news-brief python brief.py commands
+0 20 * * *   docker compose run --rm newsbrief-submit
+0  6 * * *   docker compose run --rm newsbrief-collect
+0 21 * * 0   docker compose run --rm newsbrief-weekly
+*/30 * * * * docker compose run --rm newsbrief-commands
 ```
 
-The `/app/logs` volume holds all state and archives, so it must persist across runs.
+Adding a mode is one new two-line service in the compose file. The `/app/logs` volume holds all
+state and archives, so it must persist across runs.
 
 ---
 
@@ -173,8 +180,9 @@ The `/app/logs` volume holds all state and archives, so it must persist across r
 
 `.github/workflows/docker-publish.yml` builds and pushes the image to
 `ghcr.io/<owner>/news-brief` on every push to `main` that touches `brief.py`, `Dockerfile`, or
-`requirements.txt` (and on manual `workflow_dispatch`). Pull the published image on your server
-rather than building there.
+`requirements.txt` (and on manual `workflow_dispatch`). The committed `docker-compose.yml` pulls
+that published image, so deploying a change is `git push` → CI rebuilds → `docker compose pull`,
+with no edits to the compose file.
 
 ---
 
@@ -184,6 +192,7 @@ rather than building there.
 news-brief/
 ├── brief.py                 # The entire application
 ├── Dockerfile
+├── docker-compose.yml       # One anchor + per-mode services (non-root, ghcr image)
 ├── requirements.txt         # feedparser, requests (the only dependencies)
 ├── .env.example
 ├── docs/superpowers/        # Design specs + implementation plans

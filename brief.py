@@ -4,16 +4,19 @@ newsbrief - Daily geopolitical/macro briefing via Claude Batch API
 
 Modes:
   submit   — fetch feeds, query Chroma, submit batch job (~8pm UTC)
-  collect  — poll for results and deliver via Telegram (~6am UTC)
-  weekly   — generate weekly summary from last 7 briefs (run Sunday ~9pm UTC)
+  collect  — poll for results, deliver via Telegram, save signals, open paper positions (~6am UTC)
+  weekly   — weekly summary from last 7 briefs + mark the paper book to market (Sunday ~9pm UTC)
   commands — process pending Telegram commands without submitting
   run      — submit + collect synchronously (for testing)
+  paper    — open paper positions from today's signals (also run inside collect)
 
-Crontab:
-  0 20 * * *   docker compose run --rm newsbrief python brief.py submit
-  0  6 * * *   docker compose run --rm newsbrief python brief.py collect
-  0 21 * * 0   docker compose run --rm newsbrief python brief.py weekly
-  */30 * * * * docker compose run --rm newsbrief python brief.py commands
+The image entrypoint is `python brief.py`, so the MODE is the command argument. The
+committed docker-compose.yml defines one service per mode from a single shared anchor;
+schedule them with your container scheduler or host cron:
+  0 20 * * *   docker compose run --rm newsbrief-submit
+  0  6 * * *   docker compose run --rm newsbrief-collect
+  0 21 * * 0   docker compose run --rm newsbrief-weekly
+  */30 * * * * docker compose run --rm newsbrief-commands
 """
 
 import os

@@ -1,0 +1,58 @@
+# newsbrief — one image, one config source.
+#
+# The image's ENTRYPOINT is `python brief.py`, so each service differs ONLY by the
+# mode in `command:`. All shared configuration lives once in the &newsbrief anchor —
+# change the image tag, user, volume, or env in ONE place and every mode inherits it.
+#
+# Values are interpolated from your stack environment / a .env beside this file:
+#   ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID   (required)
+#   T212_API_KEY, T212_BASE_URL, CHROMA_MCP_URL               (optional)
+#   PUID / PGID    — host uid:gid that OWNS the logs volume (runs the container non-root)
+#   APPDATA_DIR    — host path for persistent state + archives
+#
+# Schedule the modes with your container scheduler or host cron, e.g.:
+#   0 20 * * *   docker compose run --rm newsbrief-submit
+#   0  6 * * *   docker compose run --rm newsbrief-collect
+#   0 21 * * 0   docker compose run --rm newsbrief-weekly
+#   */30 * * * * docker compose run --rm newsbrief-commands
+
+x-newsbrief: &newsbrief
+  image: ghcr.io/progdroid/news-brief:latest
+  # Real non-root: the process runs as this uid:gid, which must own ${APPDATA_DIR}/news-brief.
+  # (PUID/PGID as plain env vars do nothing on this image — `user:` is the lever that works.)
+  user: "${PUID:-1000}:${PGID:-1000}"
+  environment:
+    - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+    - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+    - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+    - T212_API_KEY=${T212_API_KEY:-}
+    - T212_BASE_URL=${T212_BASE_URL:-https://live.trading212.com}
+    # - CHROMA_MCP_URL=${CHROMA_MCP_URL}   # optional: override the default podcast MCP endpoint
+  volumes:
+    - "${APPDATA_DIR:-./appdata}/news-brief:/app/logs"
+  restart: "no"
+  # To reach a self-hosted RSSHub/Nitter on an internal Docker network, attach it here
+  # (and declare it under the top-level `networks:` block below):
+  # networks: [ default, nitter_network ]
+
+services:
+  newsbrief-submit:
+    <<: *newsbrief
+    command: [submit]
+
+  newsbrief-collect:
+    <<: *newsbrief
+    command: [collect]
+
+  newsbrief-weekly:
+    <<: *newsbrief
+    command: [weekly]
+
+  newsbrief-commands:
+    <<: *newsbrief
+    command: [commands]
+
+# Uncomment to attach to a network shared with your self-hosted RSSHub/Nitter stack:
+# networks:
+#   nitter_network:
+#     external: true
