@@ -696,6 +696,11 @@ def fetch_portfolio_weights() -> str:
 _STOOQ_SUFFIX = {"USD": "us", "GBP": "uk", "GBX": "uk"}
 _STOOQ_EUR_BY_ISIN = {"DE": "de", "FR": "fr"}
 
+# When a plain signal symbol matches several T212 listings (same base, different
+# exchanges), prefer the US listing — signals carry US-style symbols (SHEL, EQNR,
+# TSM) — then UK, then EUR markets. Lower rank wins.
+_COUNTRY_PREFERENCE = {"US": 0, "GB": 1, "UK": 1, "DE": 2, "FR": 3}
+
 
 def fetch_stooq_price(stooq_symbol: str) -> float | None:
     """Fetch the latest close price for a Stooq symbol (e.g. 'aapl.us').
@@ -785,16 +790,49 @@ def refresh_instruments_cache(max_age_days: int = 14, force: bool = False) -> di
     return cache
 
 
-def resolve_stooq_symbol(ticker: str, cache: dict, overrides: dict) -> str | None:
-    """Map a T212 ticker (e.g. 'AAPL_US_EQ') to a Stooq symbol (e.g. 'aapl.us').
+def _match_instrument_by_base(symbol: str, instruments: dict) -> dict | None:
+    """Find the cached T212 instrument whose base symbol matches `symbol`.
 
-    Override file wins; otherwise derive base.suffix from the cached instrument currency
-    (and ISIN country for EUR). Returns None when no suffix can be determined.
+    Signals carry plain exchange symbols ('SHEL'), while T212 tickers are
+    '<SYMBOL>_<COUNTRY>_EQ' (US) or '<SYMBOLl>_EQ' (LSE). The base is the part
+    before the first '_'. When several listings share a base, prefer the US one
+    (signals use US-style symbols). Returns the metadata dict or None.
+    """
+    want = symbol.split("_")[0].upper()
+    candidates = []
+    for tkr, meta in instruments.items():
+        parts = tkr.split("_")
+        if parts[0].upper() != want:
+            continue
+        country = parts[1].upper() if len(parts) > 2 else ""
+        candidates.append((_COUNTRY_PREFERENCE.get(country, 9), tkr, meta))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda c: (c[0], c[1]))
+    return candidates[0][2]
+
+
+def resolve_stooq_symbol(ticker: str, cache: dict, overrides: dict) -> str | None:
+    """Map a signal ticker to a Stooq symbol (e.g. 'aapl.us').
+
+    Resolution order:
+      1. Manual override file (authoritative).
+      2. Exact T212 ticker match in the instrument cache (e.g. 'AAPL_US_EQ').
+      3. Base-symbol match: signals usually carry the plain exchange symbol
+         ('SHEL', 'BP'), so match it against each instrument's base (the segment
+         before the first '_'), preferring the US listing on ambiguity.
+    The suffix is derived from the matched instrument's real currency (and ISIN
+    country for EUR). Returns None when nothing resolves — callers skip and log.
     """
     if ticker in overrides:
         return overrides[ticker]
+    instruments = cache.get("instruments", {})
+    meta = instruments.get(ticker)
+    if meta is None:
+        meta = _match_instrument_by_base(ticker, instruments)
+    if not meta:
+        return None
     base = ticker.split("_")[0].lower()
-    meta = cache.get("instruments", {}).get(ticker, {})
     ccy = (meta.get("currencyCode") or "").upper()
     suffix = _STOOQ_SUFFIX.get(ccy)
     if suffix is None and ccy == "EUR":
@@ -1176,7 +1214,7 @@ After the WATCH LIST and a blank line, output the delimiter token below on its o
 Then output a JSON array (and nothing else after it) capturing any position-relevant signals. Empty array if none. Schema:
 [
   {{
-    "ticker": "SHEL_US_EQ or the relevant instrument, or null if macro-level",
+    "ticker": "the primary listing symbol, e.g. SHEL or BP; null only for macro-level signals with no single tradable instrument",
     "topic": "short topic label, e.g. hormuz-disruption",
     "direction": "bullish | bearish | neutral",
     "thesis_ref": "the held thesis this bears on, or null",
