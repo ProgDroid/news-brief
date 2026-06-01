@@ -741,12 +741,17 @@ def refresh_instruments_cache(max_age_days: int = 14, force: bool = False) -> di
                 return cache
         except ValueError:
             pass
-    if not T212_API_KEY:
+    if not T212_API_KEY and not T212_API_KEY_ID:
         return cache
+
+    auth_header = "Basic " + base64.b64encode(b"T212_API_KEY:T212_API_SECRET").decode(
+        "utf-8"
+    )
+
     try:
         resp = requests.get(
             f"{T212_BASE_URL}/api/v0/equity/metadata/instruments",
-            headers={"Authorization": T212_API_KEY},
+            headers={"Authorization": auth_header},
             timeout=30,
         )
         resp.raise_for_status()
