@@ -61,7 +61,7 @@ ANTHROPIC_HEADERS = {
 }
 
 MODEL = "claude-sonnet-4-6"
-MAX_TOKENS = 4096
+MAX_TOKENS = 16384  # whole-turn budget; web-search loop + brief + signals JSON
 
 STATE_FILE = Path("/app/logs/batch_state.json")
 FEEDBACK_FILE = Path("/app/logs/feedback.json")
@@ -1517,14 +1517,17 @@ def poll_batch(batch_id: str, max_wait_secs: int = 43200) -> str | None:
 
 
 def _dump_raw_batch_result(result: dict, joined_text: str) -> None:
-    """Persist the full batch result so signal-parse failures can be diagnosed.
+    """Log a batch-result summary, and dump the full payload only on anomalies.
 
-    The brief/signals files only retain post-parse output, so when parsing fails
-    (notably parse_error) there is no record of what the model actually returned.
-    This logs the message's stop_reason and content-block makeup, then writes the
-    entire result object — every block, stop_reason and usage — alongside the
-    flattened text the parser sees. Diagnostics must never break the run, so all
-    failures here are swallowed.
+    The brief/signals files only retain post-parse output, so when the model's
+    response is off (notably a max_tokens truncation that surfaces downstream as
+    a signals parse_error) there is no record of what it actually returned. On
+    every run this logs a one-line summary (stop_reason, content-block makeup,
+    text length and tail). Only when the result looks anomalous — the model did
+    not finish cleanly (stop_reason != "end_turn", e.g. "max_tokens") or emitted
+    no text — does it also write the entire result object and the flattened text
+    to /app/logs/debug, so the daily cron does not accumulate dumps on healthy
+    days. Diagnostics must never break the run, so all failures here are swallowed.
     """
     try:
         message = result.get("result", {}).get("message", {})
@@ -1533,13 +1536,16 @@ def _dump_raw_batch_result(result: dict, joined_text: str) -> None:
         for b in blocks:
             t = b.get("type", "?")
             block_types[t] = block_types.get(t, 0) + 1
+        stop_reason = message.get("stop_reason")
         log.warning(
             "Batch result: stop_reason=%s blocks=%s text_len=%d tail=%r",
-            message.get("stop_reason"),
+            stop_reason,
             block_types,
             len(joined_text),
             joined_text[-400:],
         )
+        if stop_reason == "end_turn" and joined_text.strip():
+            return  # healthy run — summary line is enough, skip the file dump
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         dump_dir = Path("/app/logs/debug")
         dump_dir.mkdir(parents=True, exist_ok=True)
@@ -1547,7 +1553,10 @@ def _dump_raw_batch_result(result: dict, joined_text: str) -> None:
             json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8"
         )
         (dump_dir / f"batch-text-{ts}.txt").write_text(joined_text, encoding="utf-8")
-        log.warning(f"Raw batch result dumped to {dump_dir}/batch-raw-{ts}.json")
+        log.warning(
+            f"Anomalous batch (stop_reason={stop_reason}) dumped to "
+            f"{dump_dir}/batch-raw-{ts}.json"
+        )
     except Exception as exc:  # never let diagnostics break the run
         log.warning(f"Failed to dump raw batch result: {exc}")
 
