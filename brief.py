@@ -696,6 +696,12 @@ def fetch_portfolio_weights() -> str:
 _STOOQ_SUFFIX = {"USD": "us", "GBP": "uk", "GBX": "uk"}
 _STOOQ_EUR_BY_ISIN = {"DE": "de", "FR": "fr"}
 
+# T212's two-part non-US tickers append a lowercase exchange-marker letter to the
+# symbol (Rolls-Royce on the LSE is 'RRl_EQ', the iShares Banks ETF on Xetra is
+# 'EXV1d_EQ'). Stooq wants the bare symbol ('rr.uk', 'exv1.de'), so the marker is
+# stripped for the resolved market. Keyed by Stooq suffix; add markets as observed.
+_STOOQ_MARKET_MARKER = {"uk": "l", "de": "d"}
+
 # When a plain signal symbol matches several T212 listings (same base, different
 # exchanges), prefer the US listing — signals carry US-style symbols (SHEL, EQNR,
 # TSM) — then UK, then EUR markets. Lower rank wins.
@@ -832,13 +838,20 @@ def resolve_stooq_symbol(ticker: str, cache: dict, overrides: dict) -> str | Non
         meta = _match_instrument_by_base(ticker, instruments)
     if not meta:
         return None
-    base = ticker.split("_")[0].lower()
+    parts = ticker.split("_")
+    base = parts[0].lower()
     ccy = (meta.get("currencyCode") or "").upper()
     suffix = _STOOQ_SUFFIX.get(ccy)
     if suffix is None and ccy == "EUR":
         suffix = _STOOQ_EUR_BY_ISIN.get((meta.get("isin") or "")[:2].upper())
     if suffix is None:
         return None
+    # Only the two-part LSE/Xetra form ('RRl_EQ', 'EXV1d_EQ') carries the trailing
+    # market-marker letter; the three-part US/country form ('AAPL_US_EQ') is clean,
+    # and a plain signal symbol ('SHEL') has no underscore — neither is stripped.
+    marker = _STOOQ_MARKET_MARKER.get(suffix)
+    if len(parts) == 2 and marker and base.endswith(marker):
+        base = base[:-1]
     return f"{base}.{suffix}"
 
 
