@@ -607,8 +607,10 @@ def fetch_portfolio_weights() -> str:
     """
     if not T212_API_KEY and not T212_API_KEY_ID:
         return ""
-    
-    auth_header = "Basic " + base64.b64encode(b"T212_API_KEY:T212_API_SECRET")
+
+    auth_header = "Basic " + base64.b64encode(b"T212_API_KEY:T212_API_SECRET").decode(
+        "utf-8"
+    )
 
     try:
         resp = requests.get(
@@ -1155,8 +1157,9 @@ Output only the HTML — no preamble, no sign-off, no code fences.
 <b>👁 WATCH LIST</b>
 - [2–4 things to monitor in next 24–72h that could move markets]
 
----SIGNALS---
-After the brief, output a JSON array (and nothing else after it) capturing any position-relevant signals. Empty array if none. Schema:
+After the WATCH LIST and a blank line, output the delimiter token below on its own line, exactly as written — it is a literal parsing marker, NOT a section divider, so reproduce it verbatim and do not shorten, restyle, or drop it:
+@@@SIGNALS@@@
+Then output a JSON array (and nothing else after it) capturing any position-relevant signals. Empty array if none. Schema:
 [
   {{
     "ticker": "SHEL_US_EQ or the relevant instrument, or null if macro-level",
@@ -1211,29 +1214,68 @@ Output only the HTML — no preamble, no sign-off, no code fences.
 Keep the entire summary under 400 words. This summary will be used as background context in next week's daily briefs."""
 
 
+# Delimiters the model may emit before the signals JSON, primary first. The
+# model is asked for @@@SIGNALS@@@; ---SIGNALS--- is kept for older archived runs.
+_SIGNAL_MARKERS = ("@@@SIGNALS@@@", "---SIGNALS---")
+
+
+def _find_trailing_json_array(text: str) -> tuple[int, list] | None:
+    """Locate the last top-level JSON array in `text`.
+
+    The signals block is always the final element of the model's output, so we
+    anchor on the last ']' and try candidate '[' positions (leftmost first) until
+    a substring parses as a list. Brackets in prose (e.g. citation markers) fail
+    to parse and are skipped. Returns (start_index, parsed_list) or None.
+    """
+    end = text.rfind("]")
+    if end == -1:
+        return None
+    start = text.find("[")
+    while start != -1 and start <= end:
+        try:
+            value = json.loads(text[start : end + 1])
+        except json.JSONDecodeError:
+            start = text.find("[", start + 1)
+            continue
+        if isinstance(value, list):
+            return start, value
+        start = text.find("[", start + 1)
+    return None
+
+
 def split_brief_and_signals(raw: str) -> tuple[str, list, str]:
-    """Separate the prose brief from the trailing ---SIGNALS--- JSON block.
+    """Separate the prose brief from the trailing signals JSON block.
+
+    The model is asked to emit a literal @@@SIGNALS@@@ delimiter before the JSON,
+    but it sometimes restyles or drops it (notably collapsing it to a bare '---',
+    or omitting it entirely). To stay robust we try, in order:
+      1. a known delimiter (@@@SIGNALS@@@, or the legacy ---SIGNALS---),
+      2. the trailing top-level JSON array on its own — recovering from a mangled
+         or missing delimiter.
 
     Returns (prose, raw_signals, status) where status is one of:
-      "ok"          — marker present and a JSON array parsed (the array may be empty)
-      "parse_error" — marker present but no parseable JSON array followed it
-      "no_marker"   — the ---SIGNALS--- marker was absent entirely (model format failure)
+      "ok"          — a JSON array was recovered (the array may be empty)
+      "parse_error" — a known delimiter was present but no parseable array followed
+      "no_marker"   — no delimiter and no trailing JSON array (model format failure)
     """
-    marker = "---SIGNALS---"
-    if marker not in raw:
+    for marker in _SIGNAL_MARKERS:
+        if marker in raw:
+            prose, _, signal_part = raw.partition(marker)
+            found = _find_trailing_json_array(signal_part)
+            if found is None:
+                log.warning("Signals marker present but no parseable JSON array")
+                return prose.strip(), [], "parse_error"
+            return prose.strip(), found[1], "ok"
+
+    # No known delimiter — the model dropped or mangled it (e.g. a bare '---').
+    # Recover the trailing JSON array directly so signals aren't lost.
+    found = _find_trailing_json_array(raw)
+    if found is None:
         return raw.strip(), [], "no_marker"
-    prose, _, signal_part = raw.partition(marker)
-    # Find the JSON array in the signal part
-    match = re.search(r"\[.*\]", signal_part, re.DOTALL)
-    if not match:
-        return prose.strip(), [], "parse_error"
-    try:
-        signals = json.loads(match.group(0))
-    except json.JSONDecodeError:
-        log.warning("Could not parse signals JSON; delivering brief without signals")
-        return prose.strip(), [], "parse_error"
-    if not isinstance(signals, list):
-        return prose.strip(), [], "parse_error"
+    log.warning("Signals delimiter missing/mangled; recovered array by fallback")
+    start, signals = found
+    # Drop a bare '---' divider the model emitted in place of the delimiter.
+    prose = re.sub(r"-{3,}\s*$", "", raw[:start].rstrip())
     return prose.strip(), signals, "ok"
 
 
