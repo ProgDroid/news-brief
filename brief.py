@@ -1516,6 +1516,42 @@ def poll_batch(batch_id: str, max_wait_secs: int = 43200) -> str | None:
     return None
 
 
+def _dump_raw_batch_result(result: dict, joined_text: str) -> None:
+    """Persist the full batch result so signal-parse failures can be diagnosed.
+
+    The brief/signals files only retain post-parse output, so when parsing fails
+    (notably parse_error) there is no record of what the model actually returned.
+    This logs the message's stop_reason and content-block makeup, then writes the
+    entire result object — every block, stop_reason and usage — alongside the
+    flattened text the parser sees. Diagnostics must never break the run, so all
+    failures here are swallowed.
+    """
+    try:
+        message = result.get("result", {}).get("message", {})
+        blocks = message.get("content", [])
+        block_types: dict[str, int] = {}
+        for b in blocks:
+            t = b.get("type", "?")
+            block_types[t] = block_types.get(t, 0) + 1
+        log.warning(
+            "Batch result: stop_reason=%s blocks=%s text_len=%d tail=%r",
+            message.get("stop_reason"),
+            block_types,
+            len(joined_text),
+            joined_text[-400:],
+        )
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        dump_dir = Path("/app/logs/debug")
+        dump_dir.mkdir(parents=True, exist_ok=True)
+        (dump_dir / f"batch-raw-{ts}.json").write_text(
+            json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        (dump_dir / f"batch-text-{ts}.txt").write_text(joined_text, encoding="utf-8")
+        log.warning(f"Raw batch result dumped to {dump_dir}/batch-raw-{ts}.json")
+    except Exception as exc:  # never let diagnostics break the run
+        log.warning(f"Failed to dump raw batch result: {exc}")
+
+
 def fetch_batch_results(results_url: str) -> str | None:
     resp = requests.get(results_url, headers=ANTHROPIC_HEADERS, timeout=30, stream=True)
     resp.raise_for_status()
@@ -1526,7 +1562,9 @@ def fetch_batch_results(results_url: str) -> str | None:
             result = json.loads(line)
             if result.get("result", {}).get("type") == "succeeded":
                 blocks = result["result"]["message"]["content"]
-                return "\n".join(b["text"] for b in blocks if b.get("type") == "text")
+                text = "\n".join(b["text"] for b in blocks if b.get("type") == "text")
+                _dump_raw_batch_result(result, text)
+                return text
         except json.JSONDecodeError:
             continue
     log.error("No succeeded result in batch output")
