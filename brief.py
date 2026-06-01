@@ -76,6 +76,19 @@ T212_API_KEY_ID = os.environ.get("T212_API_KEY_ID", "").strip()
 T212_API_KEY = os.environ.get("T212_API_KEY", "").strip()
 T212_BASE_URL = os.environ.get("T212_BASE_URL", "https://live.trading212.com").strip()
 
+
+def t212_auth_header() -> str:
+    """Build the T212 HTTP Basic Authorization value from the configured credentials.
+
+    base64.b64encode never inserts line breaks (unlike GNU `base64` without -w0, or
+    the legacy base64.encodebytes), so the encoded value is always header-safe.
+    """
+    token = base64.b64encode(
+        f"{T212_API_KEY_ID}:{T212_API_KEY}".encode("utf-8")
+    ).decode("utf-8")
+    return f"Basic {token}"
+
+
 # Self-hosted Nitter (Twitter/X mirror) reachable on the container's Docker network.
 # Default targets a service named `nitter` on Nitter's default internal port 8080;
 # override NITTER_BASE_URL if your instance listens on a different host/port.
@@ -608,9 +621,7 @@ def fetch_portfolio_weights() -> str:
     if not T212_API_KEY and not T212_API_KEY_ID:
         return ""
 
-    auth_header = "Basic " + base64.b64encode(b"T212_API_KEY:T212_API_SECRET").decode(
-        "utf-8"
-    )
+    auth_header = t212_auth_header()
 
     try:
         resp = requests.get(
@@ -744,9 +755,7 @@ def refresh_instruments_cache(max_age_days: int = 14, force: bool = False) -> di
     if not T212_API_KEY and not T212_API_KEY_ID:
         return cache
 
-    auth_header = "Basic " + base64.b64encode(b"T212_API_KEY:T212_API_SECRET").decode(
-        "utf-8"
-    )
+    auth_header = t212_auth_header()
 
     try:
         resp = requests.get(
