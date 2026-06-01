@@ -25,6 +25,7 @@ x-newsbrief: &newsbrief
     - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
     - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
     - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+    - T212_API_KEY_ID=${T212_API_KEY_ID:-}
     - T212_API_KEY=${T212_API_KEY:-}
     - T212_BASE_URL=${T212_BASE_URL:-https://live.trading212.com}
     # Self-hosted Nitter on the shared network (Twitter/X feeds). Defaults to the

@@ -19,6 +19,7 @@ schedule them with your container scheduler or host cron:
   */30 * * * * docker compose run --rm newsbrief-commands
 """
 
+import base64
 import os
 import re
 import json
@@ -71,6 +72,7 @@ WEEKLY_DIR = Path("/app/logs/weekly")
 # Read-only API key. Base URL: live for real account, demo for practice.
 # .strip() guards against a trailing newline/whitespace leaking in from .env or a
 # Docker secret — T212 rejects a malformed Authorization value with 401.
+T212_API_KEY_ID = os.environ.get("T212_API_KEY_ID", "").strip()
 T212_API_KEY = os.environ.get("T212_API_KEY", "").strip()
 T212_BASE_URL = os.environ.get("T212_BASE_URL", "https://live.trading212.com").strip()
 
@@ -603,13 +605,15 @@ def fetch_portfolio_weights() -> str:
     and return a privacy-safe summary. Absolute monetary values NEVER leave
     this function — only tickers and normalised percentages are returned.
     """
-    if not T212_API_KEY:
+    if not T212_API_KEY and not T212_API_KEY_ID:
         return ""
+    
+    auth_header = "Basic " + base64.b64encode(b"T212_API_KEY:T212_API_SECRET")
 
     try:
         resp = requests.get(
             f"{T212_BASE_URL}/api/v0/equity/positions",
-            headers={"Authorization": T212_API_KEY},
+            headers={"Authorization": auth_header},
             timeout=20,
         )
         resp.raise_for_status()

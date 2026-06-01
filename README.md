@@ -107,7 +107,7 @@ If you see `Paper skip: no Stooq symbol …` in the logs for a ticker you care a
 
 ## Trading212 & the privacy boundary
 
-Setting `T212_API_KEY` (a **read-only** key) enables two things: portfolio-weighted news scoring
+Setting `T212_API_KEY_ID` and `T212_API_KEY` (a **read-only** key) enables two things: portfolio-weighted news scoring
 in the brief, and automatic symbol mapping for the paper tracker.
 
 `fetch_portfolio_weights()` computes your total portfolio value **locally and discards it**. Only
