@@ -1,0 +1,18 @@
+# Weekly dependency bumps for pinned Python deps, the GitHub Actions SHAs,
+# and the Docker base image. Solo repo: PRs land straight on main after CI.
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"

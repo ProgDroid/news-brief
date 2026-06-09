@@ -20,6 +20,7 @@ schedule them with your container scheduler or host cron:
 """
 
 import base64
+import html
 import os
 import re
 import json
@@ -30,21 +31,37 @@ import feedparser
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
+# ── Config ────────────────────────────────────────────────────────────────────
+# Required at runtime — validated in __main__ before dispatch. Read with .get()
+# so the module stays importable (for tests, tooling) without a full environment.
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+
+REQUIRED_ENV = ("ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")
+
+# Root for all persistent state, archives and the log file. /app/logs is the
+# container volume mount; override NEWSBRIEF_DATA_DIR for local runs and tests.
+DATA_DIR = Path(os.environ.get("NEWSBRIEF_DATA_DIR", "/app/logs"))
+
+
 # ── Logging ───────────────────────────────────────────────────────────────────
+def _log_handlers() -> list[logging.Handler]:
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        handlers.append(logging.FileHandler(DATA_DIR / "newsbrief.log"))
+    except OSError:
+        pass  # data dir unavailable (local run, tests): console logging still works
+    return handlers
+
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("/app/logs/newsbrief.log"),
-    ],
+    handlers=_log_handlers(),
 )
 log = logging.getLogger(__name__)
-
-# ── Config ────────────────────────────────────────────────────────────────────
-ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
-TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
 # Chroma MCP HTTP endpoint
 # NOTE: This endpoint is called via HTTP POST with JSON-RPC 2.0 format.
@@ -63,10 +80,10 @@ ANTHROPIC_HEADERS = {
 MODEL = "claude-sonnet-4-6"
 MAX_TOKENS = 16384  # whole-turn budget; web-search loop + brief + signals JSON
 
-STATE_FILE = Path("/app/logs/batch_state.json")
-FEEDBACK_FILE = Path("/app/logs/feedback.json")
-BRIEFS_DIR = Path("/app/logs/briefs")
-WEEKLY_DIR = Path("/app/logs/weekly")
+STATE_FILE = DATA_DIR / "batch_state.json"
+FEEDBACK_FILE = DATA_DIR / "feedback.json"
+BRIEFS_DIR = DATA_DIR / "briefs"
+WEEKLY_DIR = DATA_DIR / "weekly"
 
 # ── Trading212 portfolio ──────────────────────────────────────────────────────
 # Read-only API key. Base URL: live for real account, demo for practice.
@@ -96,11 +113,11 @@ NITTER_BASE_URL = (
     os.environ.get("NITTER_BASE_URL", "http://nitter:8080").strip().rstrip("/")
 )
 
-THESIS_FILE = Path("/app/logs/theses.json")
+THESIS_FILE = DATA_DIR / "theses.json"
 
-SIGNALS_DIR = Path("/app/logs/signals")
+SIGNALS_DIR = DATA_DIR / "signals"
 
-PAPER_DIR = Path("/app/logs/paper")
+PAPER_DIR = DATA_DIR / "paper"
 PAPER_BOOK_FILE = PAPER_DIR / "paper-book.json"
 TICKER_MAP_FILE = PAPER_DIR / "ticker_map.json"
 INSTRUMENTS_CACHE_FILE = PAPER_DIR / "instruments-cache.json"
@@ -207,25 +224,61 @@ TOPICS = [
 ]
 
 
+# ── JSON persistence ──────────────────────────────────────────────────────────
+def _write_json_atomic(path: Path, data, indent: int | None = 2) -> None:
+    """Write JSON via temp file + os.replace so a crash mid-write can never
+    leave a truncated file behind (os.replace is atomic on POSIX and NTFS)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(
+        json.dumps(data, indent=indent, ensure_ascii=False), encoding="utf-8"
+    )
+    os.replace(tmp, path)
+
+
+def _load_json_or(path: Path, default):
+    """Load JSON, quarantining a corrupt/unreadable file instead of crashing.
+
+    One bad write (crash mid-write, full disk) must not wedge every mode at
+    startup — losing one file of state beats a pipeline that can't start. The
+    corrupt file is renamed aside (*.corrupt-<ts>) for post-mortem, not deleted.
+    """
+    if not path.exists():
+        return default
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        quarantine = path.with_name(f"{path.name}.corrupt-{stamp}")
+        try:
+            os.replace(path, quarantine)
+            log.error(f"Corrupt JSON {path.name} quarantined as {quarantine.name}: {e}")
+        except OSError as qe:
+            log.error(f"Corrupt JSON {path.name} (quarantine failed: {qe}): {e}")
+        return default
+
+
 # ── Feedback / memory ─────────────────────────────────────────────────────────
 def load_feedback() -> dict:
-    if FEEDBACK_FILE.exists():
-        return json.loads(FEEDBACK_FILE.read_text())
-    return {"focus": [], "mute": [], "notes": []}
+    return _load_json_or(FEEDBACK_FILE, {"focus": [], "mute": [], "notes": []})
 
 
 def save_feedback(fb: dict):
-    FEEDBACK_FILE.write_text(json.dumps(fb, indent=2))
+    _write_json_atomic(FEEDBACK_FILE, fb)
 
 
 def feedback_summary(fb: dict) -> str:
+    """Summary for Telegram echoes — html.escape()d because it is always
+    embedded in parse_mode=HTML messages and contains stored user text."""
     lines = []
     if fb.get("focus"):
-        lines.append("Focus: " + ", ".join(fb["focus"]))
+        lines.append("Focus: " + ", ".join(html.escape(f) for f in fb["focus"]))
     if fb.get("mute"):
-        lines.append("Muted: " + ", ".join(fb["mute"]))
+        lines.append("Muted: " + ", ".join(html.escape(m) for m in fb["mute"]))
     if fb.get("notes"):
-        lines.append("Notes:\n" + "\n".join(f"  • {n}" for n in fb["notes"]))
+        lines.append(
+            "Notes:\n" + "\n".join(f"  • {html.escape(n)}" for n in fb["notes"])
+        )
     return "\n".join(lines) if lines else "No active overrides."
 
 
@@ -257,6 +310,17 @@ TELEGRAM_MAX_LEN = 4000
 ALLOWED_TAGS = {"b", "i", "u", "s", "code", "pre", "a"}
 
 
+def _redact(text: str) -> str:
+    """Strip the bot token from text destined for logs or alerts.
+
+    requests exceptions embed the full request URL — which for the Telegram API
+    contains the bot token — so raw exception text must never be logged as-is.
+    """
+    return (
+        text.replace(TELEGRAM_BOT_TOKEN, "***TOKEN***") if TELEGRAM_BOT_TOKEN else text
+    )
+
+
 def telegram_send(text: str) -> bool:
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
@@ -273,8 +337,28 @@ def telegram_send(text: str) -> bool:
             return False
         return True
     except Exception as e:
-        log.error(f"Telegram failed: {e}")
+        log.error(f"Telegram failed: {_redact(str(e))}")
         return False
+
+
+def telegram_alert(text: str) -> None:
+    """Send an operational failure alert to the reader.
+
+    Failures used to be log-file-only, so the system could announce success but
+    never its own breakage — "no brief arrived" was the only symptom. This is
+    deliberately plain text (no parse_mode): arbitrary exception text containing
+    '<' or '&' must never be able to 400 the message that reports failures.
+    """
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": f"🚨 newsbrief: {_redact(text)[:3500]}",
+        "disable_web_page_preview": True,
+    }
+    try:
+        requests.post(url, json=payload, timeout=15)
+    except Exception as e:
+        log.error(f"Alert send failed: {_redact(str(e))}")
 
 
 def telegram_get_updates(offset: int = 0) -> list:
@@ -282,12 +366,19 @@ def telegram_get_updates(offset: int = 0) -> list:
     try:
         resp = requests.get(url, params={"offset": offset, "timeout": 5}, timeout=10)
         return resp.json().get("result", []) if resp.ok else []
-    except Exception:
+    except Exception as e:
+        log.warning(f"getUpdates failed: {_redact(str(e))}")
         return []
 
 
 def process_telegram_commands():
-    """Poll for bot messages and apply feedback commands."""
+    """Poll for bot messages and apply feedback commands.
+
+    Each update is handled in isolation and the offset always advances past it,
+    so one malformed message (a "poison message") can fail without jamming the
+    queue: before this, an exception mid-loop meant the offset was never saved
+    and the same update crashed every subsequent run forever.
+    """
     state = load_state() or {}
     offset = state.get("tg_offset", 0)
     updates = telegram_get_updates(offset)
@@ -298,96 +389,117 @@ def process_telegram_commands():
     new_offset = offset
 
     for update in updates:
-        new_offset = update["update_id"] + 1
-        msg = update.get("message", {})
-        text = msg.get("text", "").strip()
-        chat_id = str(msg.get("chat", {}).get("id", ""))
-
-        if chat_id != str(TELEGRAM_CHAT_ID):
-            continue
-
-        if text.startswith("/focus "):
-            item = text[7:].strip()
-            if item and item not in fb["focus"]:
-                fb["focus"].append(item)
-            telegram_send(f"✅ Focus added: <b>{item}</b>\n\n{feedback_summary(fb)}")
-
-        elif text.startswith("/mute "):
-            item = text[6:].strip().lower()
-            if item and item not in fb["mute"]:
-                fb["mute"].append(item)
-            telegram_send(f"🔇 Muted: <b>{item}</b>\n\n{feedback_summary(fb)}")
-
-        elif text.startswith("/note "):
-            note = text[6:].strip()
-            if note:
-                fb["notes"].append(note)
-            telegram_send(f"📝 Note added: <i>{note}</i>\n\n{feedback_summary(fb)}")
-
-        elif text == "/reset":
-            fb = {"focus": [], "mute": [], "notes": []}
-            telegram_send("🔄 All overrides cleared.")
-
-        elif text == "/status":
-            telegram_send(f"<b>Current overrides</b>\n\n{feedback_summary(fb)}")
-
-        elif text in ("/help", "/start"):
-            telegram_send(HELP_TEXT)
-
-        elif text.startswith("/thesis "):
-            # /thesis SHEL = long oil supply tightness
-            # /thesis cluster:energy = long structural oil demand
-            body = text[8:].strip()
-            if "=" in body:
-                key, val = body.split("=", 1)
-                theses = load_theses()
-                theses[key.strip()] = val.strip()
-                save_theses(theses)
-                telegram_send(f"📌 Thesis set: <b>{key.strip()}</b> — {val.strip()}")
-            else:
-                telegram_send("Format: <code>/thesis TICKER = your thesis</code>")
-
-        elif text.startswith("/dig "):
-            query = text[5:].strip()
-            since = None
-            m = re.match(r"since:(\d{4}-\d{2}-\d{2})\s+(.*)", query)
-            if m:
-                since, query = m.group(1), m.group(2)
-            telegram_send(f"🔎 Digging into: <i>{query}</i>…")
-            answer = run_dig(query, since=since)
-            for chunk in split_html_message(sanitise_html(answer)):
-                telegram_send(chunk)
-                time.sleep(0.4)
-
-        elif text.startswith("/close "):
-            tkr = text[7:].strip()
-            book = load_paper_book()
-            matches = [
-                p
-                for p in book["positions"]
-                if p["status"] == "open" and p["ticker"] == tkr
-            ]
-            if not matches:
-                telegram_send(f"No open paper position for <b>{tkr}</b>.")
-            else:
-                day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-                closed_n = sum(
-                    _close_position_at_market(p, day, "manual") for p in matches
-                )
-                if closed_n:
-                    save_paper_book(book)
-                    telegram_send(
-                        f"✅ Closed {closed_n} paper position(s) for <b>{tkr}</b> (manual)."
-                    )
-                else:
-                    telegram_send(f"⚠️ Couldn't price {tkr} — left open.")
-
-        else:
-            telegram_send("Unknown command — send /help for options.")
+        new_offset = update.get("update_id", new_offset) + 1
+        try:
+            fb = _handle_telegram_update(update, fb)
+        except Exception as e:
+            log.exception(f"Command failed (update {update.get('update_id')}): {e}")
+            telegram_send("⚠️ Command failed — check logs.")
 
     save_feedback(fb)
-    state["tg_offset"] = new_offset
-    STATE_FILE.write_text(json.dumps(state))
+    # Persist ONLY the offset via read-merge-write. A concurrent submit may have
+    # saved a batch_id while this loop ran (a /dig can take minutes), and writing
+    # back the whole stale snapshot loaded above would erase it — losing the
+    # day's brief.
+    save_state({"tg_offset": new_offset})
+
+
+def _handle_telegram_update(update: dict, fb: dict) -> dict:
+    """Apply one Telegram update to the feedback dict; returns the (possibly
+    replaced) feedback dict. User-provided text is html.escape()d before being
+    echoed back — Telegram 400s the whole message on malformed HTML, so a note
+    like 'watch JPY <155' would otherwise silently kill the confirmation."""
+    msg = update.get("message", {})
+    text = msg.get("text", "").strip()
+    chat_id = str(msg.get("chat", {}).get("id", ""))
+
+    if chat_id != str(TELEGRAM_CHAT_ID):
+        return fb
+
+    if text.startswith("/focus "):
+        item = text[7:].strip()
+        if item and item not in fb["focus"]:
+            fb["focus"].append(item)
+        telegram_send(
+            f"✅ Focus added: <b>{html.escape(item)}</b>\n\n{feedback_summary(fb)}"
+        )
+
+    elif text.startswith("/mute "):
+        item = text[6:].strip().lower()
+        if item and item not in fb["mute"]:
+            fb["mute"].append(item)
+        telegram_send(f"🔇 Muted: <b>{html.escape(item)}</b>\n\n{feedback_summary(fb)}")
+
+    elif text.startswith("/note "):
+        note = text[6:].strip()
+        if note:
+            fb["notes"].append(note)
+        telegram_send(
+            f"📝 Note added: <i>{html.escape(note)}</i>\n\n{feedback_summary(fb)}"
+        )
+
+    elif text == "/reset":
+        fb = {"focus": [], "mute": [], "notes": []}
+        telegram_send("🔄 All overrides cleared.")
+
+    elif text == "/status":
+        telegram_send(f"<b>Current overrides</b>\n\n{feedback_summary(fb)}")
+
+    elif text in ("/help", "/start"):
+        telegram_send(HELP_TEXT)
+
+    elif text.startswith("/thesis "):
+        # /thesis SHEL = long oil supply tightness
+        # /thesis cluster:energy = long structural oil demand
+        body = text[8:].strip()
+        if "=" in body:
+            key, val = body.split("=", 1)
+            theses = load_theses()
+            theses[key.strip()] = val.strip()
+            save_theses(theses)
+            telegram_send(
+                f"📌 Thesis set: <b>{html.escape(key.strip())}</b> — "
+                f"{html.escape(val.strip())}"
+            )
+        else:
+            telegram_send("Format: <code>/thesis TICKER = your thesis</code>")
+
+    elif text.startswith("/dig "):
+        query = text[5:].strip()
+        since = None
+        m = re.match(r"since:(\d{4}-\d{2}-\d{2})\s+(.*)", query)
+        if m:
+            since, query = m.group(1), m.group(2)
+        telegram_send(f"🔎 Digging into: <i>{html.escape(query)}</i>…")
+        answer = run_dig(query, since=since)
+        for chunk in split_html_message(sanitise_html(answer)):
+            telegram_send(chunk)
+            time.sleep(0.4)
+
+    elif text.startswith("/close "):
+        tkr = text[7:].strip()
+        book = load_paper_book()
+        matches = [
+            p for p in book["positions"] if p["status"] == "open" and p["ticker"] == tkr
+        ]
+        if not matches:
+            telegram_send(f"No open paper position for <b>{html.escape(tkr)}</b>.")
+        else:
+            day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            closed_n = sum(_close_position_at_market(p, day, "manual") for p in matches)
+            if closed_n:
+                save_paper_book(book)
+                telegram_send(
+                    f"✅ Closed {closed_n} paper position(s) for "
+                    f"<b>{html.escape(tkr)}</b> (manual)."
+                )
+            else:
+                telegram_send(f"⚠️ Couldn't price {html.escape(tkr)} — left open.")
+
+    else:
+        telegram_send("Unknown command — send /help for options.")
+
+    return fb
 
 
 def run_dig(query: str, since: str | None = None) -> str:
@@ -448,15 +560,20 @@ def run_dig(query: str, since: str | None = None) -> str:
 # ── Feed fetching ─────────────────────────────────────────────────────────────
 def fetch_rss(feed: dict, max_items: int = 5) -> str:
     try:
-        parsed = feedparser.parse(feed["url"])
+        # Fetch with requests rather than letting feedparser fetch: feedparser
+        # uses no socket timeout, so one hung feed (a wedged Nitter, not a dead
+        # one) would block the whole submit run indefinitely. This also gives
+        # real HTTP status handling instead of spelunking bozo_exception.
+        resp = requests.get(
+            feed["url"],
+            timeout=20,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; newsbrief/1.0)"},
+        )
+        resp.raise_for_status()
+        parsed = feedparser.parse(resp.content)
         if not parsed.entries:
-            # feedparser never raises on HTTP errors — it returns empty .entries
-            # and stashes the real cause in .status / .bozo_exception. Surface it
-            # so a dead feed (404/000) is distinguishable from a genuinely empty one.
-            status = getattr(parsed, "status", None)
             bozo_exc = getattr(parsed, "bozo_exception", None)
-            detail = f"HTTP {status}" if status else (str(bozo_exc) or "unknown")
-            log.warning(f"No entries: {feed['name']} ({detail})")
+            log.warning(f"No entries: {feed['name']} ({bozo_exc or 'empty feed'})")
             return ""
         lines = [f"\n### {feed['name']} ({feed['category'].upper()})"]
         for entry in parsed.entries[:max_items]:
@@ -603,13 +720,11 @@ def build_chroma_context(fb: dict) -> str:
 
 def load_theses() -> dict:
     """Manual thesis annotations, keyed by ticker or free-text cluster name."""
-    if THESIS_FILE.exists():
-        return json.loads(THESIS_FILE.read_text())
-    return {}
+    return _load_json_or(THESIS_FILE, {})
 
 
 def save_theses(theses: dict):
-    THESIS_FILE.write_text(json.dumps(theses, indent=2))
+    _write_json_atomic(THESIS_FILE, theses)
 
 
 def fetch_portfolio_weights() -> str:
@@ -729,22 +844,24 @@ def fetch_stooq_price(stooq_symbol: str) -> float | None:
         log.warning(f"Stooq returned no price for {stooq_symbol}")
         return None
     try:
-        return float(cols[6])
+        price = float(cols[6])
     except ValueError:
         return None
+    if price <= 0:
+        # Stooq emits 0 for some halted/delisted lines; a 0 entry_price would
+        # later divide-by-zero in _signal_return and kill the weekly MtM run.
+        log.warning(f"Stooq returned non-positive price for {stooq_symbol}: {price}")
+        return None
+    return price
 
 
 def load_ticker_overrides() -> dict:
     """Manual T212-ticker -> Stooq-symbol overrides for instruments that don't map automatically."""
-    if TICKER_MAP_FILE.exists():
-        return json.loads(TICKER_MAP_FILE.read_text())
-    return {}
+    return _load_json_or(TICKER_MAP_FILE, {})
 
 
 def load_instruments_cache() -> dict:
-    if INSTRUMENTS_CACHE_FILE.exists():
-        return json.loads(INSTRUMENTS_CACHE_FILE.read_text())
-    return {}
+    return _load_json_or(INSTRUMENTS_CACHE_FILE, {})
 
 
 def refresh_instruments_cache(max_age_days: int = 14, force: bool = False) -> dict:
@@ -790,8 +907,8 @@ def refresh_instruments_cache(max_age_days: int = 14, force: bool = False) -> di
         "fetched_at": datetime.now(timezone.utc).isoformat(),
         "instruments": instruments,
     }
-    PAPER_DIR.mkdir(parents=True, exist_ok=True)
-    INSTRUMENTS_CACHE_FILE.write_text(json.dumps(cache))
+    # indent=None: the full T212 catalogue is ~10k instruments; keep it compact.
+    _write_json_atomic(INSTRUMENTS_CACHE_FILE, cache, indent=None)
     log.info(f"Instrument cache refreshed: {len(instruments)} instruments")
     return cache
 
@@ -856,14 +973,11 @@ def resolve_stooq_symbol(ticker: str, cache: dict, overrides: dict) -> str | Non
 
 
 def load_paper_book() -> dict:
-    if PAPER_BOOK_FILE.exists():
-        return json.loads(PAPER_BOOK_FILE.read_text())
-    return {"positions": []}
+    return _load_json_or(PAPER_BOOK_FILE, {"positions": []})
 
 
 def save_paper_book(book: dict):
-    PAPER_DIR.mkdir(parents=True, exist_ok=True)
-    PAPER_BOOK_FILE.write_text(json.dumps(book, indent=2))
+    _write_json_atomic(PAPER_BOOK_FILE, book)
 
 
 def _signal_return(direction: str, entry: float, price: float) -> float:
@@ -1432,9 +1546,7 @@ def save_signals(signals: list, date_str: str, status: str = "ok", dropped: int 
         "dropped": dropped,
         "signals": signals,
     }
-    (SIGNALS_DIR / f"signals-{date_str}.json").write_text(
-        json.dumps(snapshot, indent=2)
-    )
+    _write_json_atomic(SIGNALS_DIR / f"signals-{date_str}.json", snapshot)
 
     # Rolling log for the feedback review (only meaningful entries)
     if signals:
@@ -1560,7 +1672,7 @@ def _dump_raw_batch_result(result: dict, joined_text: str) -> None:
         if stop_reason == "end_turn" and joined_text.strip():
             return  # healthy run — summary line is enough, skip the file dump
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        dump_dir = Path("/app/logs/debug")
+        dump_dir = DATA_DIR / "debug"
         dump_dir.mkdir(parents=True, exist_ok=True)
         (dump_dir / f"batch-raw-{ts}.json").write_text(
             json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8"
@@ -1595,20 +1707,20 @@ def fetch_batch_results(results_url: str) -> str | None:
 
 # ── State ─────────────────────────────────────────────────────────────────────
 def load_state() -> dict | None:
-    return json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else None
+    return _load_json_or(STATE_FILE, None)
 
 
 def save_state(updates: dict):
     state = load_state() or {}
     state.update(updates)
-    STATE_FILE.write_text(json.dumps(state))
+    _write_json_atomic(STATE_FILE, state, indent=None)
 
 
 def clear_batch_state():
     state = load_state() or {}
     for key in ("batch_id", "submitted_at", "date", "weekly_batch_id"):
         state.pop(key, None)
-    STATE_FILE.write_text(json.dumps(state))
+    _write_json_atomic(STATE_FILE, state, indent=None)
 
 
 # ── Delivery ──────────────────────────────────────────────────────────────────
@@ -1627,6 +1739,15 @@ def split_html_message(text: str, max_len: int = TELEGRAM_MAX_LEN) -> list[str]:
         return [text]
     chunks, current = [], ""
     for part in re.split(r"(\n\n)", text):
+        # A single paragraph longer than a whole message can't be placed by the
+        # paragraph-boundary logic — hard-slice it, else the oversized chunk
+        # would exceed Telegram's limit and the API would reject the message.
+        while len(part) > max_len:
+            if current.strip():
+                chunks.append(current.strip())
+                current = ""
+            chunks.append(part[:max_len].strip())
+            part = part[max_len:]
         if len(current) + len(part) > max_len:
             if current.strip():
                 chunks.append(current.strip())
@@ -1651,7 +1772,13 @@ def deliver(text: str, header: str, archive_path: Path):
         elif len(chunks) > 1:
             time.sleep(0.5)
 
-    log.info(f"Delivered ({len(chunks)} msg(s))" if ok else "Delivery had failures")
+    if ok:
+        log.info(f"Delivered ({len(chunks)} msg(s))")
+    else:
+        log.error("Delivery had failures")
+        telegram_alert(
+            f"delivery had failed chunks for {archive_path.name} — content archived, check logs"
+        )
 
     archive_path.parent.mkdir(parents=True, exist_ok=True)
     plain = re.sub(r"<[^>]+>", "", text)
@@ -1717,6 +1844,7 @@ def mode_collect():
     batch_id = state.get("batch_id")
     if not batch_id:
         log.error("No pending batch — run submit first")
+        telegram_alert("collect found no pending batch — did last night's submit run?")
         return
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -1736,6 +1864,9 @@ def mode_collect():
         clear_batch_state()
     else:
         log.error("Could not retrieve brief — will retry next collect run")
+        telegram_alert(
+            f"collect could not retrieve the brief (batch {batch_id}) — will retry next run"
+        )
 
 
 def mode_weekly():
@@ -1776,6 +1907,7 @@ def mode_weekly():
         log.info(f"Weekly summary saved: week-{week_label}.md")
     else:
         log.error("Weekly batch failed or timed out")
+        telegram_alert("weekly summary batch failed or timed out")
 
     # Mark the paper book to market regardless of the weekly-summary outcome
     refresh_instruments_cache(force=True)
@@ -1821,6 +1953,11 @@ def mode_commands():
 if __name__ == "__main__":
     import sys
 
+    missing = [k for k in REQUIRED_ENV if not os.environ.get(k)]
+    if missing:
+        print(f"Missing required environment variables: {', '.join(missing)}")
+        sys.exit(1)
+
     mode = sys.argv[1] if len(sys.argv) > 1 else "run"
     dispatch = {
         "submit": mode_submit,
@@ -1832,7 +1969,14 @@ if __name__ == "__main__":
     }
     fn = dispatch.get(mode)
     if fn:
-        fn()
+        try:
+            fn()
+        except Exception as e:
+            # Last-resort alert: without this, an uncaught crash is visible only
+            # in the log file and the reader just silently gets no brief.
+            log.exception(f"Mode '{mode}' crashed")
+            telegram_alert(f"{mode} crashed: {type(e).__name__}: {e}")
+            sys.exit(1)
     else:
         print("Usage: brief.py [submit|collect|weekly|run|commands]")
         sys.exit(1)
