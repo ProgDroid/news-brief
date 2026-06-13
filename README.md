@@ -213,11 +213,12 @@ news-brief/
 │   ├── signals-YYYY-MM-DD.json
 │   └── signals-log.jsonl
 └── paper/
-    ├── book.json              # Open + closed paper positions (equity + crypto)
+    ├── book.json              # Open + closed paper positions (equity + crypto + prediction)
     ├── paper-book.json        # Legacy equity-only book, kept as backup after one-time migration
     ├── ticker_map.json        # Manual T212→Stooq symbol overrides (equity)
     ├── crypto_ticker_map.json # Manual crypto-ticker→Kraken-pair overrides
-    └── instruments-cache.json
+    ├── instruments-cache.json
+    └── polygram_token.json    # PolyGram JWT (prediction markets), refreshed on 401
 ```
 
 Every brief is archived to disk regardless of delivery success, so a Telegram hiccup never loses one.
