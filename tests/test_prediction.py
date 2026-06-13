@@ -416,3 +416,40 @@ def test_prediction_mtm_kept_open_when_unfetchable(monkeypatch):
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     out = trading.mark_to_market({"positions": [p]}, today)["positions"][0]
     assert out["status"] == "open"  # no price -> retried next run
+
+
+# ── mode_collect failure isolation ────────────────────────────────────────────
+def test_collect_trading_failure_does_not_duplicate_brief(monkeypatch):
+    import brief
+
+    calls = {"deliver": 0, "cleared": 0}
+    monkeypatch.setattr(brief, "load_state", lambda: {"batch_id": "b1"})
+    monkeypatch.setattr(brief, "poll_batch", lambda bid: "RAW")
+    monkeypatch.setattr(
+        brief, "split_brief_and_signals", lambda raw: ("BRIEF", [], "ok")
+    )
+    monkeypatch.setattr(brief, "normalize_signals", lambda raw: ([], []))
+    monkeypatch.setattr(
+        brief,
+        "deliver",
+        lambda *a, **k: calls.__setitem__("deliver", calls["deliver"] + 1),
+    )
+    monkeypatch.setattr(brief, "save_signals", lambda *a, **k: None)
+    monkeypatch.setattr(
+        brief,
+        "clear_batch_state",
+        lambda: calls.__setitem__("cleared", calls["cleared"] + 1),
+    )
+    monkeypatch.setattr(brief, "telegram_alert", lambda *a, **k: None)
+
+    def _boom():
+        raise RuntimeError("PolyGram down")
+
+    monkeypatch.setattr(brief, "mode_paper", _boom)
+
+    brief.mode_collect()  # must NOT raise
+
+    assert calls["deliver"] == 1  # brief delivered exactly once
+    assert (
+        calls["cleared"] == 1
+    )  # batch cleared despite the trading failure -> no re-collect

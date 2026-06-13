@@ -1324,8 +1324,14 @@ def mode_collect():
             archive_path=BRIEFS_DIR / f"brief-{today}.md",
         )
         save_signals(signals, today, status=status, dropped=dropped)
-        mode_paper()
         clear_batch_state()
+        # Trading stage runs AFTER clear_batch_state and is isolated: a matcher /
+        # PolyGram / Claude failure must never re-collect and duplicate the brief.
+        try:
+            mode_paper()
+        except Exception as e:
+            log.error(f"Trading stage failed (brief already delivered): {e}")
+            telegram_alert(f"trading stage failed after brief: {e}")
     else:
         log.error("Could not retrieve brief — will retry next collect run")
         telegram_alert(
