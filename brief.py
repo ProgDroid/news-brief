@@ -677,11 +677,11 @@ from trading import (
     load_paper_book,
     save_paper_book,
     _close_position_at_market,
+    refresh_instruments_cache,
     mode_paper,
     mark_to_market,
     paper_scorecard,
 )
-
 
 
 # ── Brief archive helpers ─────────────────────────────────────────────────────
