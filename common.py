@@ -4,7 +4,6 @@ Telegram + HTML, Anthropic headers, and T212 auth. No domain logic; imported
 by both brief.py and trading.py (one-way dependency, no cycles)."""
 
 import base64
-import html  # noqa: F401 — re-exported for callers that used to import via brief
 import os
 import re
 import json
