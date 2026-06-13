@@ -100,12 +100,50 @@ def fetch_stooq_price(stooq_symbol: str) -> float | None:
     return price
 
 
+def fetch_kraken_price(pair: str) -> float | None:
+    """Fetch the last-trade price for a Kraken pair (e.g. 'XBTUSD') via the public API.
+
+    Returns None on network error, a non-empty Kraken error array, an empty/garbled
+    result, or a non-positive price — callers MUST treat None as 'could not price' and
+    skip, never substitute a guessed value (mirrors fetch_stooq_price).
+    """
+    url = f"https://api.kraken.com/0/public/Ticker?pair={pair}"
+    try:
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        log.warning(f"Kraken fetch failed for {pair}: {e}")
+        return None
+    if data.get("error"):
+        log.warning(f"Kraken error for {pair}: {data['error']}")
+        return None
+    result = data.get("result") or {}
+    if not result:
+        log.warning(f"Kraken returned no result for {pair}")
+        return None
+    # Kraken keys the result by its canonical pair name (e.g. XXBTZUSD), not the
+    # queried alias — take the single entry rather than indexing by `pair`.
+    entry = next(iter(result.values()))
+    try:
+        price = float(entry["c"][0])
+    except (KeyError, IndexError, TypeError, ValueError):
+        log.warning(f"Kraken price unparseable for {pair}")
+        return None
+    if price <= 0:
+        log.warning(f"Kraken returned non-positive price for {pair}: {price}")
+        return None
+    return price
+
+
 def fetch_price(asset_class: str, instrument: str) -> float | None:
     """Mark one instrument to market via the pricer for its asset class.
 
-    Equity → Stooq. (The crypto → Kraken branch is added with the Kraken
-    pricer.) Returns None on any pricing failure — callers skip, never guess.
+    Equity → Stooq, crypto → Kraken. Returns None on any pricing failure —
+    callers skip, never guess.
     """
+    if asset_class == "crypto":
+        return fetch_kraken_price(instrument)
     return fetch_stooq_price(instrument)
 
 
