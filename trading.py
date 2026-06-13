@@ -20,8 +20,8 @@ from common import (
     t212_auth_header,
     MODEL,  # noqa: F401 — re-exported for later prediction-seam tasks
     ANTHROPIC_HEADERS,  # noqa: F401 — re-exported for later prediction-seam tasks
-    POLYGRAM_EMAIL,  # noqa: F401 — re-exported for later prediction-seam tasks
-    POLYGRAM_PASSWORD,  # noqa: F401 — re-exported for later prediction-seam tasks
+    POLYGRAM_EMAIL,
+    POLYGRAM_PASSWORD,
 )
 
 PAPER_DIR = DATA_DIR / "paper"
@@ -33,7 +33,7 @@ INSTRUMENTS_CACHE_FILE = PAPER_DIR / "instruments-cache.json"
 CRYPTO_TICKER_MAP_FILE = PAPER_DIR / "crypto_ticker_map.json"
 
 # Asset-class → informational venue tag stamped on opened positions.
-_VENUE_BY_ASSET = {"equity": "t212", "crypto": "kraken"}
+_VENUE_BY_ASSET = {"equity": "t212", "crypto": "kraken", "prediction": "polygram"}
 
 # Crypto majors → Kraken base asset (encodes Kraken's BTC→XBT, DOGE→XDG quirks).
 # Signals carry plain symbols (BTC, ETH); the realistic tradable universe is small
@@ -55,6 +55,13 @@ _KRAKEN_BASE = {
 
 PAPER_HORIZONS = {"1w": 7, "2w": 14, "4w": 28}  # days from entry_date
 PAPER_CLOSE_HORIZON = "4w"  # close the position once this checkpoint is recorded
+
+# ── PolyGram (prediction markets) ─────────────────────────────────────────────
+POLYGRAM_BASE = "https://polygram.ink/api"
+POLYGRAM_TOKEN_FILE = PAPER_DIR / "polygram_token.json"
+PG_CANDIDATE_CAP = 25  # max candidate markets fed to the matcher (prompt-size bound)
+PG_SIMILARITY_FLOOR = 0.60  # open only matches at/above this matcher similarity
+PG_MAX_HOLD_DAYS = 182  # ~26w backstop close for never-resolving resolution markets
 
 # Map a T212 instrument currency (and ISIN country for EUR) to a Stooq market suffix.
 _STOOQ_SUFFIX = {"USD": "us", "GBP": "uk", "GBX": "uk"}
@@ -138,6 +145,103 @@ def fetch_kraken_price(pair: str) -> float | None:
         log.warning(f"Kraken returned non-positive price for {pair}: {price}")
         return None
     return price
+
+
+def _parse_pg_market(m: dict) -> dict | None:
+    """Flatten a raw PolyGram market into the fields the seam needs.
+
+    PolyGram mirrors Polymarket: `outcomes`, `outcomePrices`, and `clobTokenIds`
+    are JSON-ENCODED STRINGS of index-aligned arrays (YES=index 0, NO=index 1).
+    Returns None if the required arrays are missing or unparseable — callers skip.
+    """
+    try:
+        prices = [float(x) for x in json.loads(m["outcomePrices"])]
+        token_ids = json.loads(m.get("clobTokenIds") or "[]")
+    except (KeyError, TypeError, ValueError):
+        return None
+    if len(prices) < 2:
+        return None
+    return {
+        "market_id": str(m.get("id", "")),
+        "question": str(m.get("question", "")),
+        "prices": prices,
+        "yes_price": prices[0],
+        "end_date": m.get("endDate"),
+        "closed": bool(m.get("closed")),
+        "uma_status": m.get("umaResolutionStatus"),
+        "token_ids": token_ids,
+    }
+
+
+def polygram_login() -> str | None:
+    """Log in with POLYGRAM_EMAIL/PASSWORD, persist and return the JWT (or None)."""
+    if not (POLYGRAM_EMAIL and POLYGRAM_PASSWORD):
+        return None
+    try:
+        resp = requests.post(
+            f"{POLYGRAM_BASE}/auth/login",
+            json={"email": POLYGRAM_EMAIL, "password": POLYGRAM_PASSWORD},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        token = resp.json().get("token")
+    except Exception as e:
+        log.warning(f"PolyGram login failed: {e}")
+        return None
+    if not token:
+        log.warning("PolyGram login returned no token")
+        return None
+    _write_json_atomic(POLYGRAM_TOKEN_FILE, {"token": token})
+    return token
+
+
+def _polygram_get(path: str, params: dict | None = None):
+    """GET a PolyGram path with the persisted JWT; refresh once on 401.
+
+    Returns parsed JSON or None on any failure (uncredentialed, network error,
+    non-2xx after a refresh attempt) — same None-on-failure posture as the pricers.
+    """
+    if not (POLYGRAM_EMAIL and POLYGRAM_PASSWORD):
+        return None
+    token = (_load_json_or(POLYGRAM_TOKEN_FILE, {}) or {}).get(
+        "token"
+    ) or polygram_login()
+    if not token:
+        return None
+    url = f"{POLYGRAM_BASE}{path}"
+    for attempt in (1, 2):
+        try:
+            resp = requests.get(
+                url,
+                headers={"Authorization": f"Bearer {token}"},
+                params=params,
+                timeout=30,
+            )
+        except Exception as e:
+            log.warning(f"PolyGram GET {path} failed: {e}")
+            return None
+        if resp.status_code == 401 and attempt == 1:
+            token = polygram_login()
+            if not token:
+                return None
+            continue
+        try:
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            log.warning(f"PolyGram GET {path} failed: {e}")
+            return None
+    return None
+
+
+def polygram_search(query: str) -> list | None:
+    """Search PolyGram events/markets by free text. Returns the raw events list or None."""
+    return _polygram_get("/search", params={"q": query})
+
+
+def polygram_market(market_id: str) -> dict | None:
+    """Fetch one market's full detail (mark + settlement status). Returns raw dict or None."""
+    return _polygram_get(f"/markets/{market_id}")
 
 
 def fetch_price(asset_class: str, instrument: str) -> float | None:
