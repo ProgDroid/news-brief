@@ -716,6 +716,7 @@ The reader:
 - Is familiar with constraint-based analysis (Papic/BCA style)
 - Does not need hedging language or excessive caveats — be direct
 - Prefers Reuters as a primary news source
+- Trades equities and major cryptocurrencies (BTC, ETH, and other large-cap coins); surface directional crypto calls the same way as equities when news warrants
 
 Your job is to synthesise the provided source material into a structured morning brief.
 Use the web search tool to fill gaps on the listed search topics — prioritise Reuters results.
@@ -831,7 +832,8 @@ After the WATCH LIST and a blank line, output the delimiter token below on its o
 Then output a JSON array (and nothing else after it) capturing any position-relevant signals. Empty array if none. Schema:
 [
   {{
-    "ticker": "the primary listing symbol, e.g. SHEL or BP; null only for macro-level signals with no single tradable instrument",
+    "ticker": "the primary listing symbol — e.g. SHEL or BP for equities, BTC or ETH for crypto; null only for macro-level signals with no single tradable instrument",
+    "asset_class": "equity | crypto — equity for stocks/ETFs, crypto for major coins; default to equity if unsure",
     "topic": "short topic label, e.g. hormuz-disruption",
     "direction": "bullish | bearish | neutral",
     "thesis_ref": "the held thesis this bears on, or null",
@@ -974,6 +976,7 @@ _CONFIDENCE_MAP = {
     "hi": "high",
 }
 _NULLISH = {"", "null", "none", "n/a", "na"}
+_ASSET_CLASSES = {"equity", "crypto"}
 
 
 def _nullish(value) -> str | None:
@@ -1013,6 +1016,12 @@ def normalize_signals(raw_signals: list) -> tuple[list, int]:
                 "thesis_ref": _nullish(item.get("thesis_ref")),
                 "rationale": str(item.get("rationale", "")).strip(),
                 "provenance": str(item.get("provenance", "")).strip(),
+                "asset_class": (
+                    ac
+                    if (ac := str(item.get("asset_class", "")).strip().lower())
+                    in _ASSET_CLASSES
+                    else "equity"
+                ),
             }
         )
     return clean, dropped

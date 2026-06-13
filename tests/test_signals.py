@@ -116,4 +116,23 @@ def test_normalize_strips_unknown_fields():
         "thesis_ref",
         "rationale",
         "provenance",
+        "asset_class",
     }
+
+
+def test_normalize_defaults_asset_class_to_equity():
+    s = dict(SIGNAL)  # no asset_class key
+    clean, _ = brief.normalize_signals([s])
+    assert clean[0]["asset_class"] == "equity"
+
+
+def test_normalize_keeps_valid_crypto_asset_class():
+    s = dict(SIGNAL, ticker="BTC", asset_class="crypto")
+    clean, _ = brief.normalize_signals([s])
+    assert clean[0]["asset_class"] == "crypto"
+
+
+def test_normalize_unknown_asset_class_falls_back_to_equity():
+    s = dict(SIGNAL, asset_class="forex")
+    clean, _ = brief.normalize_signals([s])
+    assert clean[0]["asset_class"] == "equity"
