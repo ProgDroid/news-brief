@@ -211,3 +211,24 @@ def test_run_matcher_calls_claude_and_parses(monkeypatch):
         }
     ]
     assert "tools" not in captured["payload"]  # no web search
+
+
+# ── price_position prediction dispatch ────────────────────────────────────────
+def test_price_position_prediction_reads_held_side(monkeypatch):
+    monkeypatch.setattr(
+        trading, "polygram_market", lambda mid: _raw_market(yes="0.30", no="0.70")
+    )
+    yes_pos = {"asset_class": "prediction", "instrument": "2410562", "side_index": 0}
+    no_pos = {"asset_class": "prediction", "instrument": "2410562", "side_index": 1}
+    assert trading.price_position(yes_pos) == 0.30
+    assert trading.price_position(no_pos) == 0.70
+
+
+def test_price_position_prediction_none_when_unfetchable(monkeypatch):
+    monkeypatch.setattr(trading, "polygram_market", lambda mid: None)
+    assert (
+        trading.price_position(
+            {"asset_class": "prediction", "instrument": "x", "side_index": 0}
+        )
+        is None
+    )

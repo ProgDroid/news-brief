@@ -386,7 +386,19 @@ def fetch_price(asset_class: str, instrument: str) -> float | None:
 
 
 def price_position(p: dict) -> float | None:
-    """Mark a position to market by dispatching on its asset_class."""
+    """Mark a position to market by dispatching on its asset_class.
+
+    Equity/crypto go through fetch_price (instrument-level). Prediction marks the
+    held side from market detail (outcomePrices[side_index]) — None if unfetchable.
+    """
+    if p.get("asset_class") == "prediction":
+        m = polygram_market(p["instrument"])
+        if m is None:
+            return None
+        parsed = _parse_pg_market(m)
+        if parsed is None:
+            return None
+        return parsed["prices"][p["side_index"]]
     return fetch_price(p.get("asset_class", "equity"), p["instrument"])
 
 
