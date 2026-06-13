@@ -8,3 +8,4 @@ __pycache__/
 # Tooling caches
 .serena/
 .ruff_cache/
+.playwright-mcp/
