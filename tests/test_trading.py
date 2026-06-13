@@ -48,6 +48,11 @@ def test_legacy_book_migrates_in_place(tmp_path, monkeypatch):
     assert book_file.exists()  # migrated copy written
     assert legacy_file.exists()  # original kept as backup
 
+    # Second load reads book.json (already migrated) and leaves it intact.
+    book2 = trading.load_book()
+    assert book2["positions"][0]["instrument"] == "aapl.us"
+    assert "stooq_symbol" not in book2["positions"][0]
+
 
 def test_paper_horizon_config():
     assert set(trading.PAPER_HORIZONS) == {"1w", "2w", "4w"}

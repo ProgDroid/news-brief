@@ -255,10 +255,10 @@ def _signal_return(direction: str, entry: float, price: float) -> float:
 
 
 def _close_position_at_market(p: dict, day: str, reason: str) -> bool:
-    """Close one open position at the current Stooq mark, stamping realized_return.
+    """Close one open position at the current market mark, stamping realized_return.
 
     Shared by the weekly horizon close, the /close command, and reversal closes.
-    Returns False (leaving the position open) when Stooq can't price it.
+    Returns False (leaving the position open) when pricing fails.
     """
     price = price_position(p)
     if price is None:
