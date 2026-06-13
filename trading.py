@@ -18,8 +18,8 @@ from common import (
     T212_API_KEY,
     T212_BASE_URL,
     t212_auth_header,
-    MODEL,  # noqa: F401 — re-exported for later prediction-seam tasks
-    ANTHROPIC_HEADERS,  # noqa: F401 — re-exported for later prediction-seam tasks
+    MODEL,
+    ANTHROPIC_HEADERS,
     POLYGRAM_EMAIL,
     POLYGRAM_PASSWORD,
 )
@@ -242,6 +242,136 @@ def polygram_search(query: str) -> list | None:
 def polygram_market(market_id: str) -> dict | None:
     """Fetch one market's full detail (mark + settlement status). Returns raw dict or None."""
     return _polygram_get(f"/markets/{market_id}")
+
+
+def _gather_pg_candidates(signals: list) -> list:
+    """Search PolyGram for markets related to the day's signals; dedup + cap.
+
+    Searches each distinct signal `topic` and `thesis_ref`, keeps OPEN binary
+    markets, dedups by market_id, and caps the total at PG_CANDIDATE_CAP to bound
+    the matcher prompt. Returns the parsed-candidate dicts (market_id/question/
+    yes_price/end_date) the matcher is shown.
+    """
+    queries = []
+    for s in signals:
+        for q in (s.get("topic"), s.get("thesis_ref")):
+            if q and q not in queries:
+                queries.append(q)
+    seen: dict[str, dict] = {}
+    for q in queries:
+        events = polygram_search(q)
+        for ev in events or []:
+            for m in ev.get("markets", []):
+                parsed = _parse_pg_market(m)
+                if parsed is None or parsed["closed"]:
+                    continue
+                seen.setdefault(
+                    parsed["market_id"],
+                    {
+                        "market_id": parsed["market_id"],
+                        "question": parsed["question"],
+                        "yes_price": parsed["yes_price"],
+                        "end_date": parsed["end_date"],
+                    },
+                )
+                if len(seen) >= PG_CANDIDATE_CAP:
+                    return list(seen.values())
+    return list(seen.values())
+
+
+def _parse_matches(text: str, candidate_ids: set) -> list:
+    """Parse the matcher's JSON-array reply, validating each match.
+
+    Resilient like the signals parser: locate the array within any surrounding
+    prose/fences, json.loads it, and keep only well-formed matches whose
+    market_id is a real candidate. Returns [] on any failure.
+    """
+    try:
+        arr = json.loads(text[text.index("[") : text.rindex("]") + 1])
+    except (ValueError, json.JSONDecodeError):
+        return []
+    out = []
+    for item in arr if isinstance(arr, list) else []:
+        if not isinstance(item, dict):
+            continue
+        mid = str(item.get("market_id", ""))
+        side = str(item.get("side", "")).upper()
+        play = str(item.get("play_type", "")).lower()
+        if (
+            mid not in candidate_ids
+            or side not in ("YES", "NO")
+            or play not in ("resolution", "momentum")
+        ):
+            continue
+        try:
+            sim = float(item.get("similarity"))
+        except (TypeError, ValueError):
+            continue
+        target = item.get("target")
+        try:
+            target = float(target) if target is not None else None
+        except (TypeError, ValueError):
+            target = None
+        out.append(
+            {
+                "market_id": mid,
+                "side": side,
+                "play_type": play,
+                "similarity": sim,
+                "target": target,
+            }
+        )
+    return out
+
+
+def run_prediction_matcher(signals: list, candidates: list) -> list:
+    """One synchronous Claude call mapping signals → prediction-market matches.
+
+    Same Messages-API shape as run_dig but with NO tools/web search. Returns the
+    validated match list (possibly empty); never raises into the cron path.
+    """
+    if not candidates:
+        return []
+    payload = {
+        "model": MODEL,
+        "max_tokens": 2048,
+        "system": (
+            "You map daily investing signals to live prediction markets. Given today's "
+            "signals and candidate markets, return ONLY a JSON array (no prose, no code "
+            'fences). Each element: {"market_id": str, "side": "YES"|"NO", "play_type": '
+            '"resolution"|"momentum", "similarity": number 0..1, "target": number|null}. '
+            "side is the outcome the signal implies. play_type is 'resolution' when the "
+            "signal speaks to the eventual settled outcome, 'momentum' when it is a "
+            "near-term catalyst likely to move the odds regardless of settlement. target "
+            "(momentum only, else null) is an optional held-side price in 0..1 to take "
+            "profit at. similarity is your confidence the signal is genuinely about this "
+            "market. Omit weak matches; return [] if none."
+        ),
+        "messages": [
+            {
+                "role": "user",
+                "content": (
+                    f"Today's signals:\n{json.dumps(signals)}\n\n"
+                    f"Candidate markets:\n{json.dumps(candidates)}\n\n"
+                    "Return the JSON array of matches."
+                ),
+            }
+        ],
+    }
+    try:
+        resp = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers=ANTHROPIC_HEADERS,
+            json=payload,
+            timeout=120,
+        )
+        resp.raise_for_status()
+        blocks = resp.json().get("content", [])
+        text = "\n".join(b["text"] for b in blocks if b.get("type") == "text")
+    except Exception as e:
+        log.warning(f"Prediction matcher call failed: {e}")
+        return []
+    return _parse_matches(text, {c["market_id"] for c in candidates})
 
 
 def fetch_price(asset_class: str, instrument: str) -> float | None:

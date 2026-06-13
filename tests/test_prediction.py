@@ -111,3 +111,103 @@ def test_polygram_get_returns_none_when_uncredentialed(monkeypatch):
     monkeypatch.setattr(trading, "POLYGRAM_EMAIL", None)
     monkeypatch.setattr(trading, "POLYGRAM_PASSWORD", None)
     assert trading._polygram_get("/markets/1") is None
+
+
+# ── _parse_matches ────────────────────────────────────────────────────────────
+def test_parse_matches_validates_and_filters_unknown_ids():
+    text = (
+        "Here are the matches:\n"
+        '[{"market_id": "111", "side": "yes", "play_type": "momentum", "similarity": 0.8, "target": 0.6},'
+        ' {"market_id": "999", "side": "NO", "play_type": "resolution", "similarity": 0.9, "target": null},'
+        ' {"market_id": "111", "side": "BAD", "play_type": "momentum", "similarity": 0.7}]'
+    )
+    out = trading._parse_matches(text, {"111", "999"})
+    # First (side normalised to YES) and second kept; third dropped (bad side).
+    assert len(out) == 2
+    assert out[0] == {
+        "market_id": "111",
+        "side": "YES",
+        "play_type": "momentum",
+        "similarity": 0.8,
+        "target": 0.6,
+    }
+    assert out[1]["market_id"] == "999" and out[1]["target"] is None
+
+
+def test_parse_matches_empty_on_garbage():
+    assert trading._parse_matches("no json here", {"111"}) == []
+    assert trading._parse_matches("", {"111"}) == []
+
+
+def test_parse_matches_drops_id_not_in_candidates():
+    out = trading._parse_matches(
+        '[{"market_id":"42","side":"YES","play_type":"momentum","similarity":0.9}]',
+        {"111"},
+    )
+    assert out == []
+
+
+# ── _gather_pg_candidates (dedup + cap) ───────────────────────────────────────
+def test_gather_candidates_dedups_and_caps(monkeypatch):
+    def fake_search(q):
+        return [
+            {
+                "markets": [
+                    _raw_market(),  # id 2410562, open
+                    {**_raw_market(), "id": "999", "closed": True},  # closed -> dropped
+                ]
+            }
+        ]
+
+    monkeypatch.setattr(trading, "polygram_search", fake_search)
+    cands = trading._gather_pg_candidates(
+        [{"topic": "a"}, {"topic": "b", "thesis_ref": "t"}]
+    )
+    ids = [c["market_id"] for c in cands]
+    assert ids == ["2410562"]  # deduped across topics; closed market excluded
+
+
+# ── run_prediction_matcher ────────────────────────────────────────────────────
+def test_run_matcher_calls_claude_and_parses(monkeypatch):
+    captured = {}
+
+    class _ClaudeResp:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": '[{"market_id":"2410562","side":"YES","play_type":"momentum","similarity":0.75,"target":null}]',
+                    }
+                ]
+            }
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        captured["payload"] = json
+        return _ClaudeResp()
+
+    monkeypatch.setattr(trading.requests, "post", fake_post)
+    cands = [
+        {
+            "market_id": "2410562",
+            "question": "Will X?",
+            "yes_price": 0.3,
+            "end_date": None,
+        }
+    ]
+    out = trading.run_prediction_matcher([{"topic": "x"}], cands)
+    assert out == [
+        {
+            "market_id": "2410562",
+            "side": "YES",
+            "play_type": "momentum",
+            "similarity": 0.75,
+            "target": None,
+        }
+    ]
+    assert "tools" not in captured["payload"]  # no web search
