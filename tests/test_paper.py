@@ -2,7 +2,7 @@
 
 import pytest
 
-import brief
+import trading
 
 
 INSTRUMENTS = {
@@ -18,38 +18,38 @@ CACHE = {"fetched_at": "2026-01-01T00:00:00+00:00", "instruments": INSTRUMENTS}
 
 # ── resolve_stooq_symbol ──────────────────────────────────────────────────────
 def test_override_is_authoritative():
-    assert brief.resolve_stooq_symbol("FOO", CACHE, {"FOO": "foo.us"}) == "foo.us"
+    assert trading.resolve_stooq_symbol("FOO", CACHE, {"FOO": "foo.us"}) == "foo.us"
 
 
 def test_exact_t212_us_ticker():
-    assert brief.resolve_stooq_symbol("AAPL_US_EQ", CACHE, {}) == "aapl.us"
+    assert trading.resolve_stooq_symbol("AAPL_US_EQ", CACHE, {}) == "aapl.us"
 
 
 def test_plain_symbol_base_match_prefers_us_listing():
     # SHEL matches both SHEL_US_EQ (USD) and SHEL_FR_EQ (EUR/FR) — US wins
-    assert brief.resolve_stooq_symbol("SHEL", CACHE, {}) == "shel.us"
+    assert trading.resolve_stooq_symbol("SHEL", CACHE, {}) == "shel.us"
 
 
 def test_lse_two_part_ticker_strips_market_marker():
-    assert brief.resolve_stooq_symbol("RRl_EQ", CACHE, {}) == "rr.uk"
+    assert trading.resolve_stooq_symbol("RRl_EQ", CACHE, {}) == "rr.uk"
 
 
 def test_xetra_eur_resolved_by_isin_country():
-    assert brief.resolve_stooq_symbol("EXV1d_EQ", CACHE, {}) == "exv1.de"
+    assert trading.resolve_stooq_symbol("EXV1d_EQ", CACHE, {}) == "exv1.de"
 
 
 def test_unknown_currency_returns_none():
-    assert brief.resolve_stooq_symbol("XYZ_PL_EQ", CACHE, {}) is None
+    assert trading.resolve_stooq_symbol("XYZ_PL_EQ", CACHE, {}) is None
 
 
 def test_unknown_symbol_returns_none():
-    assert brief.resolve_stooq_symbol("NOPE", CACHE, {}) is None
+    assert trading.resolve_stooq_symbol("NOPE", CACHE, {}) is None
 
 
 # ── _signal_return ────────────────────────────────────────────────────────────
 def test_signal_return_directionality():
-    assert brief._signal_return("bullish", 100.0, 110.0) == pytest.approx(0.10)
-    assert brief._signal_return("bearish", 100.0, 110.0) == pytest.approx(-0.10)
+    assert trading._signal_return("bullish", 100.0, 110.0) == pytest.approx(0.10)
+    assert trading._signal_return("bearish", 100.0, 110.0) == pytest.approx(-0.10)
 
 
 # ── fetch_stooq_price ─────────────────────────────────────────────────────────
@@ -63,7 +63,7 @@ class _FakeResp:
 
 def _patch_stooq(monkeypatch, csv_text):
     monkeypatch.setattr(
-        brief.requests, "get", lambda url, timeout=None: _FakeResp(csv_text)
+        trading.requests, "get", lambda url, timeout=None: _FakeResp(csv_text)
     )
 
 
@@ -73,7 +73,7 @@ def test_stooq_parses_close(monkeypatch):
         "Symbol,Date,Time,Open,High,Low,Close,Volume\n"
         "aapl.us,2026-06-08,22:00:00,1,2,3,123.45,1000",
     )
-    assert brief.fetch_stooq_price("aapl.us") == 123.45
+    assert trading.fetch_stooq_price("aapl.us") == 123.45
 
 
 def test_stooq_nd_sentinel_returns_none(monkeypatch):
@@ -82,7 +82,7 @@ def test_stooq_nd_sentinel_returns_none(monkeypatch):
         "Symbol,Date,Time,Open,High,Low,Close,Volume\n"
         "nope.us,N/D,N/D,N/D,N/D,N/D,N/D,N/D",
     )
-    assert brief.fetch_stooq_price("nope.us") is None
+    assert trading.fetch_stooq_price("nope.us") is None
 
 
 def test_stooq_zero_price_returns_none(monkeypatch):
@@ -92,9 +92,9 @@ def test_stooq_zero_price_returns_none(monkeypatch):
         "Symbol,Date,Time,Open,High,Low,Close,Volume\n"
         "halt.us,2026-06-08,22:00:00,0,0,0,0,0",
     )
-    assert brief.fetch_stooq_price("halt.us") is None
+    assert trading.fetch_stooq_price("halt.us") is None
 
 
 def test_stooq_short_response_returns_none(monkeypatch):
     _patch_stooq(monkeypatch, "Symbol,Date,Time,Open,High,Low,Close,Volume")
-    assert brief.fetch_stooq_price("aapl.us") is None
+    assert trading.fetch_stooq_price("aapl.us") is None

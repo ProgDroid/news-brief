@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY common.py brief.py .
+COPY common.py trading.py brief.py .
 
 # Logs and brief archive persist via volume mount. Run as a real non-root user
 # so a bare `docker run` is unprivileged too — docker-compose's `user:` still
