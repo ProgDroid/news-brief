@@ -138,6 +138,7 @@ def test_offset_saved_without_clobbering_other_state(monkeypatch, tmp_path):
 
 # ── t212 auth ─────────────────────────────────────────────────────────────────
 def test_t212_auth_header_is_basic_base64(monkeypatch):
-    monkeypatch.setattr(brief, "T212_API_KEY_ID", "kid")
-    monkeypatch.setattr(brief, "T212_API_KEY", "secret")
+    import common
+    monkeypatch.setattr(common, "T212_API_KEY_ID", "kid")
+    monkeypatch.setattr(common, "T212_API_KEY", "secret")
     assert brief.t212_auth_header() == "Basic a2lkOnNlY3JldA=="
