@@ -213,8 +213,10 @@ news-brief/
 │   ├── signals-YYYY-MM-DD.json
 │   └── signals-log.jsonl
 └── paper/
-    ├── paper-book.json       # Open + closed paper positions
-    ├── ticker_map.json       # Manual T212→Stooq symbol overrides
+    ├── book.json              # Open + closed paper positions (equity + crypto)
+    ├── paper-book.json        # Legacy equity-only book, kept as backup after one-time migration
+    ├── ticker_map.json        # Manual T212→Stooq symbol overrides (equity)
+    ├── crypto_ticker_map.json # Manual crypto-ticker→Kraken-pair overrides
     └── instruments-cache.json
 ```
 
