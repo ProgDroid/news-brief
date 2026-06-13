@@ -1,6 +1,9 @@
 """Prediction seam: PolyGram read client + Claude matcher + prediction lifecycle."""
 
 import json
+from datetime import datetime, timedelta, timezone
+
+import pytest
 
 import trading
 
@@ -321,3 +324,95 @@ def test_mode_paper_skips_prediction_when_uncredentialed(tmp_path, monkeypatch):
     )
     trading.mode_paper()  # must not raise, must not call the matcher
     assert trading.load_book() == {"positions": []}
+
+
+# ── prediction MtM close triggers ─────────────────────────────────────────────
+def _pred_position(play_type, side_index=0, entry=0.30, target=None, entry_days_ago=0):
+    entry_date = (datetime.now(timezone.utc) - timedelta(days=entry_days_ago)).strftime(
+        "%Y-%m-%d"
+    )
+    return {
+        "asset_class": "prediction",
+        "ticker": "2410562",
+        "instrument": "2410562",
+        "play_type": play_type,
+        "outcome": "Yes" if side_index == 0 else "No",
+        "side_index": side_index,
+        "target": target,
+        "direction": "bullish",
+        "entry_price": entry,
+        "entry_date": entry_date,
+        "status": "open",
+        "close_reason": None,
+        "closed_date": None,
+        "checkpoints": {},
+        "last_mark": None,
+        "realized_return": None,
+    }
+
+
+def _mtm(monkeypatch, position, raw_market):
+    monkeypatch.setattr(trading, "polygram_market", lambda mid: raw_market)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return trading.mark_to_market({"positions": [position]}, today)["positions"][0]
+
+
+def test_momentum_closes_on_target_cross(monkeypatch):
+    p = _pred_position("momentum", entry=0.30, target=0.60, entry_days_ago=3)
+    out = _mtm(
+        monkeypatch, p, _raw_market(yes="0.65", no="0.35")
+    )  # YES now 0.65 >= 0.60
+    assert out["status"] == "closed"
+    assert out["close_reason"] == "target"
+    assert out["realized_return"] == pytest.approx(0.65 / 0.30 - 1.0)
+
+
+def test_momentum_force_closes_at_4w(monkeypatch):
+    p = _pred_position(
+        "momentum", entry=0.30, target=0.99, entry_days_ago=30
+    )  # target not hit
+    out = _mtm(monkeypatch, p, _raw_market(yes="0.40", no="0.60"))
+    assert out["status"] == "closed"
+    assert out["close_reason"] == "horizon"
+    assert "4w" in out["checkpoints"]
+
+
+def test_momentum_stays_open_before_horizon(monkeypatch):
+    p = _pred_position("momentum", entry=0.30, target=0.99, entry_days_ago=10)
+    out = _mtm(monkeypatch, p, _raw_market(yes="0.40", no="0.60"))
+    assert out["status"] == "open"
+
+
+def test_resolution_closes_on_settlement(monkeypatch):
+    p = _pred_position("resolution", side_index=0, entry=0.30, entry_days_ago=40)
+    out = _mtm(
+        monkeypatch, p, _raw_market(yes="1", no="0", closed=True, uma="resolved")
+    )
+    assert out["status"] == "closed"
+    assert out["close_reason"] == "settlement"
+    assert out["realized_return"] == pytest.approx(1.0 / 0.30 - 1.0)
+
+
+def test_resolution_ignores_4w_horizon(monkeypatch):
+    # 40 days open, NOT resolved -> resolution must stay open past 4w (unlike equity).
+    p = _pred_position("resolution", entry=0.30, entry_days_ago=40)
+    out = _mtm(monkeypatch, p, _raw_market(yes="0.50", no="0.50", closed=False))
+    assert out["status"] == "open"
+    assert "4w" in out["checkpoints"]  # checkpoint still recorded
+
+
+def test_resolution_max_hold_backstop(monkeypatch):
+    p = _pred_position(
+        "resolution", entry=0.30, entry_days_ago=trading.PG_MAX_HOLD_DAYS + 1
+    )
+    out = _mtm(monkeypatch, p, _raw_market(yes="0.50", no="0.50", closed=False))
+    assert out["status"] == "closed"
+    assert out["close_reason"] == "max_hold"
+
+
+def test_prediction_mtm_kept_open_when_unfetchable(monkeypatch):
+    p = _pred_position("momentum", entry_days_ago=40)
+    monkeypatch.setattr(trading, "polygram_market", lambda mid: None)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    out = trading.mark_to_market({"positions": [p]}, today)["positions"][0]
+    assert out["status"] == "open"  # no price -> retried next run

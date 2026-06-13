@@ -789,16 +789,28 @@ def mode_paper():
     log.info(f"Opened {opened} paper position(s)")
 
 
-def mark_to_market(book: dict, today_str: str) -> dict:
-    """Mark every open position to market, record crossed horizon checkpoints, close at 4w.
+def _record_checkpoints(
+    p: dict, today_str: str, price: float, ret: float, days_open: int
+):
+    """Record any crossed-but-unrecorded horizon checkpoints (idempotent, one pass)."""
+    for label, threshold in PAPER_HORIZONS.items():
+        if label not in p["checkpoints"] and days_open >= threshold:
+            p["checkpoints"][label] = {"date": today_str, "price": price, "return": ret}
 
-    Mutates and returns the book. A position whose Stooq price can't be fetched is left open
-    and retried next run. All crossed-but-unrecorded checkpoints are recorded in one pass
-    (covers a missed weekly run); closing happens once the 4w checkpoint is recorded.
+
+def mark_to_market(book: dict, today_str: str) -> dict:
+    """Mark every open position to market, record crossed horizon checkpoints, close on trigger.
+
+    Mutates and returns the book. Equity/crypto: record 1w/2w/4w checkpoints, close at 4w.
+    Prediction: dispatched to _mtm_prediction (held-side mark + play_type close trigger).
+    A position whose price can't be fetched is left open and retried next run.
     """
     today = datetime.strptime(today_str, "%Y-%m-%d").date()
     for p in book["positions"]:
         if p["status"] != "open":
+            continue
+        if p.get("asset_class") == "prediction":
+            _mtm_prediction(p, today, today_str)
             continue
         price = price_position(p)
         if price is None:
@@ -807,19 +819,56 @@ def mark_to_market(book: dict, today_str: str) -> dict:
         ret = _signal_return(p["direction"], p["entry_price"], price)
         p["last_mark"] = {"date": today_str, "price": price, "return": ret}
         days_open = (today - datetime.strptime(p["entry_date"], "%Y-%m-%d").date()).days
-        for label, threshold in PAPER_HORIZONS.items():
-            if label not in p["checkpoints"] and days_open >= threshold:
-                p["checkpoints"][label] = {
-                    "date": today_str,
-                    "price": price,
-                    "return": ret,
-                }
+        _record_checkpoints(p, today_str, price, ret, days_open)
         if PAPER_CLOSE_HORIZON in p["checkpoints"]:
             p["status"] = "closed"
             p["close_reason"] = "horizon"
             p["closed_date"] = today_str
             p["realized_return"] = p["checkpoints"][PAPER_CLOSE_HORIZON]["return"]
     return book
+
+
+def _settle_prediction(p: dict, day: str, price: float, ret: float, reason: str):
+    """Close a prediction position at the given mark with the given reason."""
+    p["status"] = "closed"
+    p["close_reason"] = reason
+    p["closed_date"] = day
+    p["realized_return"] = ret
+
+
+def _mtm_prediction(p: dict, today, today_str: str):
+    """Mark + (maybe) close one open prediction position from a single market-detail fetch.
+
+    Held-side mark = outcomePrices[side_index]; return is long-sense (you hold the token).
+    Close trigger forks by play_type:
+      momentum  → close at target-cross (held price >= target) else 4w horizon backstop.
+      resolution→ hold to settlement (closed & uma 'resolved'); PG_MAX_HOLD_DAYS backstop.
+    Left open (retried next run) if the market can't be fetched/parsed.
+    """
+    m = polygram_market(p["instrument"])
+    parsed = _parse_pg_market(m) if m is not None else None
+    if parsed is None:
+        log.warning(f"MtM kept open (no price): prediction {p['instrument']}")
+        return
+    price = parsed["prices"][p["side_index"]]
+    ret = _signal_return(
+        "bullish", p["entry_price"], price
+    )  # always long the held side
+    p["last_mark"] = {"date": today_str, "price": price, "return": ret}
+    days_open = (today - datetime.strptime(p["entry_date"], "%Y-%m-%d").date()).days
+    _record_checkpoints(p, today_str, price, ret, days_open)
+
+    if p["play_type"] == "resolution":
+        if parsed["closed"] and parsed["uma_status"] == "resolved":
+            _settle_prediction(p, today_str, price, ret, "settlement")
+        elif days_open >= PG_MAX_HOLD_DAYS:
+            _settle_prediction(p, today_str, price, ret, "max_hold")
+    else:  # momentum
+        target = p.get("target")
+        if target is not None and price >= target:
+            _settle_prediction(p, today_str, price, ret, "target")
+        elif PAPER_CLOSE_HORIZON in p["checkpoints"]:
+            _settle_prediction(p, today_str, price, ret, "horizon")
 
 
 def paper_scorecard(book: dict) -> str:
