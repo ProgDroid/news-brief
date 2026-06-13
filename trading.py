@@ -18,6 +18,10 @@ from common import (
     T212_API_KEY,
     T212_BASE_URL,
     t212_auth_header,
+    MODEL,  # noqa: F401 — re-exported for later prediction-seam tasks
+    ANTHROPIC_HEADERS,  # noqa: F401 — re-exported for later prediction-seam tasks
+    POLYGRAM_EMAIL,  # noqa: F401 — re-exported for later prediction-seam tasks
+    POLYGRAM_PASSWORD,  # noqa: F401 — re-exported for later prediction-seam tasks
 )
 
 PAPER_DIR = DATA_DIR / "paper"

@@ -65,6 +65,12 @@ T212_API_KEY = os.environ.get("T212_API_KEY", "").strip()
 T212_BASE_URL = os.environ.get("T212_BASE_URL", "https://live.trading212.com").strip()
 
 
+# PolyGram (prediction markets) credentials — optional, like T212. Login is
+# JWT-based; registration is manual/one-time and never in the cron path.
+POLYGRAM_EMAIL = os.environ.get("POLYGRAM_EMAIL")
+POLYGRAM_PASSWORD = os.environ.get("POLYGRAM_PASSWORD")
+
+
 def t212_auth_header() -> str:
     """Build the T212 HTTP Basic Authorization value from the configured credentials.
 

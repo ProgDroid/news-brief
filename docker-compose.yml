@@ -28,6 +28,8 @@ x-newsbrief: &newsbrief
     - T212_API_KEY_ID=${T212_API_KEY_ID:-}
     - T212_API_KEY=${T212_API_KEY:-}
     - T212_BASE_URL=${T212_BASE_URL:-https://live.trading212.com}
+    - POLYGRAM_EMAIL=${POLYGRAM_EMAIL:-}
+    - POLYGRAM_PASSWORD=${POLYGRAM_PASSWORD:-}
     # Self-hosted Nitter on the shared network (Twitter/X feeds). Defaults to the
     # service named `nitter` on Nitter's internal port 8080; override if it differs.
     - NITTER_BASE_URL=${NITTER_BASE_URL:-http://nitter:8080}
