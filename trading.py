@@ -31,6 +31,24 @@ CRYPTO_TICKER_MAP_FILE = PAPER_DIR / "crypto_ticker_map.json"
 # Asset-class → informational venue tag stamped on opened positions.
 _VENUE_BY_ASSET = {"equity": "t212", "crypto": "kraken"}
 
+# Crypto majors → Kraken base asset (encodes Kraken's BTC→XBT, DOGE→XDG quirks).
+# Signals carry plain symbols (BTC, ETH); the realistic tradable universe is small
+# and stable, so a static map + an optional crypto_ticker_map.json override beats a
+# catalogue fetch. Unlisted/exotic coins resolve to None (skipped + logged).
+_KRAKEN_QUOTE = "USD"
+_KRAKEN_BASE = {
+    "BTC": "XBT",
+    "ETH": "ETH",
+    "SOL": "SOL",
+    "XRP": "XRP",
+    "ADA": "ADA",
+    "DOT": "DOT",
+    "LINK": "LINK",
+    "LTC": "LTC",
+    "DOGE": "XDG",
+    "AVAX": "AVAX",
+}
+
 PAPER_HORIZONS = {"1w": 7, "2w": 14, "4w": 28}  # days from entry_date
 PAPER_CLOSE_HORIZON = "4w"  # close the position once this checkpoint is recorded
 
@@ -211,6 +229,26 @@ def resolve_stooq_symbol(ticker: str, cache: dict, overrides: dict) -> str | Non
     if len(parts) == 2 and marker and base.endswith(marker):
         base = base[:-1]
     return f"{base}.{suffix}"
+
+
+def load_crypto_ticker_overrides() -> dict:
+    """Manual signal-ticker -> Kraken-pair overrides (mirrors load_ticker_overrides)."""
+    return _load_json_or(CRYPTO_TICKER_MAP_FILE, {})
+
+
+def resolve_kraken_pair(ticker: str, overrides: dict) -> str | None:
+    """Map a signal crypto ticker (BTC, ETH, ...) to a Kraken USD pair (e.g. 'XBTUSD').
+
+    Override file is authoritative; otherwise the static majors map supplies the base
+    asset and the USD quote is appended. Returns None for unmapped tickers — callers
+    skip and log (same posture as an unresolvable equity).
+    """
+    if ticker in overrides:
+        return overrides[ticker]
+    base = _KRAKEN_BASE.get(ticker.strip().upper())
+    if base is None:
+        return None
+    return f"{base}{_KRAKEN_QUOTE}"
 
 
 def _migrate_position(p: dict) -> dict:
