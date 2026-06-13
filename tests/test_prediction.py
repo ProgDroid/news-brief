@@ -232,3 +232,92 @@ def test_price_position_prediction_none_when_unfetchable(monkeypatch):
         )
         is None
     )
+
+
+# ── mode_paper opens a prediction position ────────────────────────────────────
+def test_mode_paper_opens_prediction_position(tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    signals_dir = tmp_path / "signals"
+    signals_dir.mkdir()
+    monkeypatch.setattr(trading, "SIGNALS_DIR", signals_dir)
+    monkeypatch.setattr(trading, "BOOK_FILE", tmp_path / "book.json")
+    monkeypatch.setattr(trading, "LEGACY_PAPER_BOOK_FILE", tmp_path / "paper-book.json")
+    monkeypatch.setattr(trading, "POLYGRAM_EMAIL", "e@x.com")
+    monkeypatch.setattr(trading, "POLYGRAM_PASSWORD", "pw")
+    # A single NEUTRAL signal (no actionable equity/crypto) still drives the matcher.
+    (signals_dir / f"signals-{today}.json").write_text(
+        '{"signals": [{"ticker": null, "asset_class": "equity", "direction": "neutral", '
+        '"confidence": "low", "topic": "fed-cuts", "thesis_ref": null, '
+        '"rationale": "macro", "provenance": "web_search"}]}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        trading,
+        "_gather_pg_candidates",
+        lambda signals: [
+            {
+                "market_id": "2410562",
+                "question": "Will the Fed cut in June?",
+                "yes_price": 0.3,
+                "end_date": None,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        trading,
+        "run_prediction_matcher",
+        lambda signals, cands: [
+            {
+                "market_id": "2410562",
+                "side": "YES",
+                "play_type": "momentum",
+                "similarity": 0.8,
+                "target": 0.6,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        trading, "polygram_market", lambda mid: _raw_market(yes="0.30", no="0.70")
+    )
+
+    trading.mode_paper()
+
+    book = trading.load_book()
+    assert len(book["positions"]) == 1
+    p = book["positions"][0]
+    assert p["asset_class"] == "prediction"
+    assert p["venue"] == "polygram"
+    assert p["instrument"] == "2410562"
+    assert p["play_type"] == "momentum"
+    assert p["outcome"] == "Yes" and p["side_index"] == 0
+    assert p["target"] == 0.6
+    assert p["direction"] == "bullish"  # always long the held side
+    assert p["entry_price"] == 0.30
+    assert p["status"] == "open"
+
+
+def test_mode_paper_skips_prediction_when_uncredentialed(tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    signals_dir = tmp_path / "signals"
+    signals_dir.mkdir()
+    monkeypatch.setattr(trading, "SIGNALS_DIR", signals_dir)
+    monkeypatch.setattr(trading, "BOOK_FILE", tmp_path / "book.json")
+    monkeypatch.setattr(trading, "LEGACY_PAPER_BOOK_FILE", tmp_path / "paper-book.json")
+    monkeypatch.setattr(trading, "POLYGRAM_EMAIL", None)
+    monkeypatch.setattr(trading, "POLYGRAM_PASSWORD", None)
+
+    def _boom(*a, **k):
+        raise AssertionError("matcher must not run without creds")
+
+    monkeypatch.setattr(trading, "_gather_pg_candidates", _boom)
+    (signals_dir / f"signals-{today}.json").write_text(
+        '{"signals": [{"ticker": null, "direction": "neutral", "confidence": "low", '
+        '"topic": "x", "thesis_ref": null, "rationale": "", "provenance": ""}]}',
+        encoding="utf-8",
+    )
+    trading.mode_paper()  # must not raise, must not call the matcher
+    assert trading.load_book() == {"positions": []}
