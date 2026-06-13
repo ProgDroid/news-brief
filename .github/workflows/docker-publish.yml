@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - 'brief.py'
+      - 'common.py'
+      - 'trading.py'
       - 'tests/**'
       - 'Dockerfile'
       - 'requirements.txt'
@@ -40,8 +42,8 @@ jobs:
 
       - name: Lint
         run: |
-          ruff check brief.py tests
-          ruff format --check brief.py tests
+          ruff check brief.py common.py trading.py tests
+          ruff format --check brief.py common.py trading.py tests
 
       - name: Test
         run: pytest -q

@@ -24,14 +24,12 @@ import os
 import re
 import json
 import time
-import logging
 import requests
 import feedparser
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from common import (
-    ANTHROPIC_API_KEY,
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
     REQUIRED_ENV,
@@ -44,8 +42,6 @@ from common import (
     T212_API_KEY,
     T212_BASE_URL,
     t212_auth_header,
-    TELEGRAM_MAX_LEN,
-    ALLOWED_TAGS,
     _write_json_atomic,
     _load_json_or,
     _redact,
@@ -53,6 +49,15 @@ from common import (
     telegram_alert,
     sanitise_html,
     split_html_message,
+)
+from trading import (
+    load_paper_book,
+    save_paper_book,
+    _close_position_at_market,
+    refresh_instruments_cache,
+    mode_paper,
+    mark_to_market,
+    paper_scorecard,
 )
 
 
@@ -670,18 +675,6 @@ def fetch_portfolio_weights() -> str:
     if cluster_lines:
         out += "\n\nThesis clusters:\n" + "\n".join(cluster_lines)
     return out
-
-
-# ── Paper trading (extracted to trading.py) ───────────────────────────────────
-from trading import (
-    load_paper_book,
-    save_paper_book,
-    _close_position_at_market,
-    refresh_instruments_cache,
-    mode_paper,
-    mark_to_market,
-    paper_scorecard,
-)
 
 
 # ── Brief archive helpers ─────────────────────────────────────────────────────
