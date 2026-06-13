@@ -89,3 +89,37 @@ def test_price_position_dispatches_on_asset_class(monkeypatch):
     monkeypatch.setattr(trading, "fetch_kraken_price", lambda s: 100.0)
     p = {"asset_class": "crypto", "instrument": "XBTUSD"}
     assert trading.price_position(p) == 100.0
+
+
+# ── mode_paper opens a crypto position ────────────────────────────────────────
+def test_mode_paper_opens_crypto_position(tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    signals_dir = tmp_path / "signals"
+    signals_dir.mkdir()
+    monkeypatch.setattr(trading, "SIGNALS_DIR", signals_dir)
+    monkeypatch.setattr(trading, "BOOK_FILE", tmp_path / "book.json")
+    monkeypatch.setattr(trading, "LEGACY_PAPER_BOOK_FILE", tmp_path / "paper-book.json")
+    # No T212 call; crypto resolution doesn't use the equity cache anyway.
+    monkeypatch.setattr(trading, "refresh_instruments_cache", lambda *a, **k: {})
+    monkeypatch.setattr(trading, "fetch_kraken_price", lambda pair: 60000.0)
+
+    (signals_dir / f"signals-{today}.json").write_text(
+        '{"signals": [{"ticker": "BTC", "asset_class": "crypto", '
+        '"direction": "bullish", "confidence": "high", "topic": "btc-etf-flows", '
+        '"thesis_ref": null, "rationale": "Inflows accelerating.", "provenance": "web_search"}]}',
+        encoding="utf-8",
+    )
+
+    trading.mode_paper()
+
+    book = trading.load_book()
+    assert len(book["positions"]) == 1
+    p = book["positions"][0]
+    assert p["asset_class"] == "crypto"
+    assert p["venue"] == "kraken"
+    assert p["execution"] == "paper"
+    assert p["instrument"] == "XBTUSD"
+    assert p["entry_price"] == 60000.0
+    assert p["status"] == "open"

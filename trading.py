@@ -387,6 +387,7 @@ def mode_paper():
     open_keys = _open_keys()
     cache = refresh_instruments_cache()
     overrides = load_ticker_overrides()
+    crypto_overrides = load_crypto_ticker_overrides()
 
     opened = 0
     for s in actionable:
@@ -415,9 +416,10 @@ def mode_paper():
 
         if (ac, ticker, direction) in open_keys:
             continue  # dedup: a position for this call is already open
-        symbol = (
-            resolve_stooq_symbol(ticker, cache, overrides) if ac == "equity" else None
-        )
+        if ac == "crypto":
+            symbol = resolve_kraken_pair(ticker, crypto_overrides)
+        else:
+            symbol = resolve_stooq_symbol(ticker, cache, overrides)
         if not symbol:
             log.warning(f"Paper skip: no instrument for {ticker} ({ac})")
             continue
