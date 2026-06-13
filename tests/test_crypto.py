@@ -22,3 +22,14 @@ def test_crypto_override_is_authoritative():
 
 def test_unknown_coin_returns_none():
     assert trading.resolve_kraken_pair("NOTACOIN", {}) is None
+
+
+def test_doge_maps_to_xdg_usd_pair():
+    # Kraken's second non-obvious base rename (DOGE→XDG), mirrors the XBT quirk.
+    assert trading.resolve_kraken_pair("DOGE", {}) == "XDGUSD"
+
+
+def test_override_beats_known_map_entry():
+    # An override must win even for a coin that IS in the static map (guards
+    # against a future reorder that checks the map before the override).
+    assert trading.resolve_kraken_pair("BTC", {"BTC": "XBTEUR"}) == "XBTEUR"
