@@ -51,8 +51,8 @@ from common import (
     split_html_message,
 )
 from trading import (
-    load_paper_book,
-    save_paper_book,
+    load_book,
+    save_book,
     _close_position_at_market,
     refresh_instruments_cache,
     mode_paper,
@@ -350,7 +350,7 @@ def _handle_telegram_update(update: dict, fb: dict) -> dict:
 
     elif text.startswith("/close "):
         tkr = text[7:].strip()
-        book = load_paper_book()
+        book = load_book()
         matches = [
             p for p in book["positions"] if p["status"] == "open" and p["ticker"] == tkr
         ]
@@ -360,7 +360,7 @@ def _handle_telegram_update(update: dict, fb: dict) -> dict:
             day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             closed_n = sum(_close_position_at_market(p, day, "manual") for p in matches)
             if closed_n:
-                save_paper_book(book)
+                save_book(book)
                 telegram_send(
                     f"✅ Closed {closed_n} paper position(s) for "
                     f"<b>{html.escape(tkr)}</b> (manual)."
@@ -1366,10 +1366,8 @@ def mode_weekly():
 
     # Mark the paper book to market regardless of the weekly-summary outcome
     refresh_instruments_cache(force=True)
-    book = mark_to_market(
-        load_paper_book(), datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    )
-    save_paper_book(book)
+    book = mark_to_market(load_book(), datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+    save_book(book)
     telegram_send(paper_scorecard(book))
     log.info("Paper book marked to market")
 

@@ -21,9 +21,15 @@ from common import (
 )
 
 PAPER_DIR = DATA_DIR / "paper"
-PAPER_BOOK_FILE = PAPER_DIR / "paper-book.json"
+BOOK_FILE = PAPER_DIR / "book.json"
+# Legacy equity-only book; read once and migrated into BOOK_FILE on first load.
+LEGACY_PAPER_BOOK_FILE = PAPER_DIR / "paper-book.json"
 TICKER_MAP_FILE = PAPER_DIR / "ticker_map.json"
 INSTRUMENTS_CACHE_FILE = PAPER_DIR / "instruments-cache.json"
+CRYPTO_TICKER_MAP_FILE = PAPER_DIR / "crypto_ticker_map.json"
+
+# Asset-class → informational venue tag stamped on opened positions.
+_VENUE_BY_ASSET = {"equity": "t212", "crypto": "kraken"}
 
 PAPER_HORIZONS = {"1w": 7, "2w": 14, "4w": 28}  # days from entry_date
 PAPER_CLOSE_HORIZON = "4w"  # close the position once this checkpoint is recorded
@@ -74,6 +80,20 @@ def fetch_stooq_price(stooq_symbol: str) -> float | None:
         log.warning(f"Stooq returned non-positive price for {stooq_symbol}: {price}")
         return None
     return price
+
+
+def fetch_price(asset_class: str, instrument: str) -> float | None:
+    """Mark one instrument to market via the pricer for its asset class.
+
+    Equity → Stooq. (The crypto → Kraken branch is added with the Kraken
+    pricer.) Returns None on any pricing failure — callers skip, never guess.
+    """
+    return fetch_stooq_price(instrument)
+
+
+def price_position(p: dict) -> float | None:
+    """Mark a position to market by dispatching on its asset_class."""
+    return fetch_price(p.get("asset_class", "equity"), p["instrument"])
 
 
 def load_ticker_overrides() -> dict:
@@ -193,12 +213,39 @@ def resolve_stooq_symbol(ticker: str, cache: dict, overrides: dict) -> str | Non
     return f"{base}.{suffix}"
 
 
-def load_paper_book() -> dict:
-    return _load_json_or(PAPER_BOOK_FILE, {"positions": []})
+def _migrate_position(p: dict) -> dict:
+    """Stamp a legacy equity position into the polymorphic shape (idempotent)."""
+    p.setdefault("asset_class", "equity")
+    p.setdefault("venue", "t212")
+    p.setdefault("execution", "paper")
+    p.setdefault("play_type", None)
+    if "instrument" not in p:
+        p["instrument"] = p.pop("stooq_symbol", None)
+    return p
 
 
-def save_paper_book(book: dict):
-    _write_json_atomic(PAPER_BOOK_FILE, book)
+def load_book() -> dict:
+    """Load the unified position book, migrating the legacy equity book once.
+
+    If book.json exists it is authoritative. Otherwise, if the legacy
+    paper-book.json exists, its positions are stamped into the polymorphic
+    shape (asset_class/venue/execution/instrument/play_type) and written to
+    book.json; the legacy file is left in place as a backup. A missing pair
+    yields the empty-book shape.
+    """
+    if BOOK_FILE.exists():
+        return _load_json_or(BOOK_FILE, {"positions": []})
+    legacy = _load_json_or(LEGACY_PAPER_BOOK_FILE, None)
+    if legacy is None:
+        return {"positions": []}
+    legacy["positions"] = [_migrate_position(p) for p in legacy.get("positions", [])]
+    _write_json_atomic(BOOK_FILE, legacy)
+    log.info(f"Migrated {len(legacy['positions'])} position(s) to book.json")
+    return legacy
+
+
+def save_book(book: dict):
+    _write_json_atomic(BOOK_FILE, book)
 
 
 def _signal_return(direction: str, entry: float, price: float) -> float:
@@ -213,7 +260,7 @@ def _close_position_at_market(p: dict, day: str, reason: str) -> bool:
     Shared by the weekly horizon close, the /close command, and reversal closes.
     Returns False (leaving the position open) when Stooq can't price it.
     """
-    price = fetch_stooq_price(p["stooq_symbol"])
+    price = price_position(p)
     if price is None:
         return False
     ret = _signal_return(p["direction"], p["entry_price"], price)
@@ -228,10 +275,10 @@ def _close_position_at_market(p: dict, day: str, reason: str) -> bool:
 def mode_paper():
     """Open paper positions from today's signals. Pure simulation — no money, no orders.
 
-    Each medium/high-confidence directional signal with a resolvable ticker opens one notional
-    paper position (deduped per ticker+direction). Prices come from Stooq; unmappable tickers,
-    Stooq 'N/D', and macro/null-ticker signals are skipped and logged. Marking-to-market and
-    closing happen in the weekly job.
+    Each medium/high-confidence directional signal with a resolvable instrument opens one
+    notional paper position (deduped per asset_class+ticker+direction). Equity prices come
+    from Stooq; unmappable tickers, pricing failures, and macro/null-ticker signals are
+    skipped and logged. Marking-to-market and closing happen in the weekly job.
     """
     log.info("=== PAPER ===")
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -252,58 +299,66 @@ def mode_paper():
         log.info("No actionable signals today")
         return
 
-    book = load_paper_book()
-    open_keys = {
-        (p["ticker"], p["direction"])
-        for p in book["positions"]
-        if p["status"] == "open"
-    }
+    book = load_book()
+
+    def _open_keys() -> set:
+        return {
+            (p.get("asset_class", "equity"), p["ticker"], p["direction"])
+            for p in book["positions"]
+            if p["status"] == "open"
+        }
+
+    open_keys = _open_keys()
     cache = refresh_instruments_cache()
     overrides = load_ticker_overrides()
 
     opened = 0
     for s in actionable:
+        ac = s.get("asset_class", "equity")
         ticker, direction = s["ticker"], s["direction"]
         opposite = "bearish" if direction == "bullish" else "bullish"
 
         # Reversal: a fresh opposite-direction call closes the standing position first.
-        if (ticker, opposite) in open_keys:
+        if (ac, ticker, opposite) in open_keys:
             for p in book["positions"]:
                 if (
                     p["status"] == "open"
+                    and p.get("asset_class", "equity") == ac
                     and p["ticker"] == ticker
                     and p["direction"] == opposite
                     and _close_position_at_market(p, today, "reversal")
                 ):
-                    log.info(f"Paper reversal: closed {ticker} {opposite}")
-            open_keys = {
-                (q["ticker"], q["direction"])
-                for q in book["positions"]
-                if q["status"] == "open"
-            }
-            if (ticker, opposite) in open_keys:
+                    log.info(f"Paper reversal: closed {ac} {ticker} {opposite}")
+            open_keys = _open_keys()
+            if (ac, ticker, opposite) in open_keys:
                 # Reversal close couldn't be priced — don't open the opposite yet.
                 log.warning(
                     f"Paper skip: unpriced reversal for {ticker}; not opening {direction}"
                 )
                 continue
 
-        if (ticker, direction) in open_keys:
+        if (ac, ticker, direction) in open_keys:
             continue  # dedup: a position for this call is already open
-        symbol = resolve_stooq_symbol(ticker, cache, overrides)
+        symbol = (
+            resolve_stooq_symbol(ticker, cache, overrides) if ac == "equity" else None
+        )
         if not symbol:
-            log.warning(f"Paper skip: no Stooq symbol for {ticker}")
+            log.warning(f"Paper skip: no instrument for {ticker} ({ac})")
             continue
-        price = fetch_stooq_price(symbol)
+        price = fetch_price(ac, symbol)
         if price is None:
             log.warning(f"Paper skip: no price for {ticker} ({symbol})")
             continue
         book["positions"].append(
             {
-                "id": f"{today}:{ticker}:{direction}",
+                "id": f"{today}:{ac}:{ticker}:{direction}",
                 "opened": today,
+                "asset_class": ac,
+                "venue": _VENUE_BY_ASSET.get(ac, ""),
+                "execution": "paper",
                 "ticker": ticker,
-                "stooq_symbol": symbol,
+                "instrument": symbol,
+                "play_type": None,
                 "direction": direction,
                 "confidence": s.get("confidence"),
                 "topic": s.get("topic"),
@@ -319,10 +374,10 @@ def mode_paper():
                 "realized_return": None,
             }
         )
-        open_keys.add((ticker, direction))
+        open_keys.add((ac, ticker, direction))
         opened += 1
 
-    save_paper_book(book)
+    save_book(book)
     log.info(f"Opened {opened} paper position(s)")
 
 
@@ -337,11 +392,9 @@ def mark_to_market(book: dict, today_str: str) -> dict:
     for p in book["positions"]:
         if p["status"] != "open":
             continue
-        price = fetch_stooq_price(p["stooq_symbol"])
+        price = price_position(p)
         if price is None:
-            log.warning(
-                f"MtM kept open (no price): {p['ticker']} ({p['stooq_symbol']})"
-            )
+            log.warning(f"MtM kept open (no price): {p['ticker']} ({p['instrument']})")
             continue
         ret = _signal_return(p["direction"], p["entry_price"], price)
         p["last_mark"] = {"date": today_str, "price": price, "return": ret}
