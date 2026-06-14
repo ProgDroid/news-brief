@@ -58,6 +58,9 @@ from trading import (
     mode_paper,
     mark_to_market,
     run_volume_monitor,
+    load_watchlist,
+    save_watchlist,
+    resolve_watch_entry,
 )
 from validation import (
     performance_report,
@@ -233,6 +236,16 @@ HELP_TEXT = """<b>newsbrief commands</b>
   Close an open paper position early at the current mark.
   e.g. <code>/close AAPL_US_EQ</code>
 
+/watch [SYMBOL]
+  Track an instrument for volume alerts (crypto/equity inferred).
+  e.g. <code>/watch BTC</code> · <code>/watch prediction 0xMARKETID</code>
+
+/unwatch [SYMBOL]
+  Stop watching an instrument.
+
+/positions — open positions with live marks
+/performance — performance report + go-live gate
+
 /reset — clear all overrides
 /status — show current overrides
 /help — this message
@@ -373,6 +386,51 @@ def _handle_telegram_update(update: dict, fb: dict) -> dict:
                 )
             else:
                 telegram_send(f"⚠️ Couldn't price {html.escape(tkr)} — left open.")
+
+    elif text.startswith("/watch "):
+        body = text[7:].strip()
+        parts = body.split(maxsplit=1)
+        if parts and parts[0] in ("equity", "crypto", "prediction") and len(parts) == 2:
+            ac, token = parts[0], parts[1].strip()
+        else:
+            ac, token = None, body
+        entry = resolve_watch_entry(token, asset_class=ac)
+        if entry is None:
+            telegram_send(
+                f"⚠️ Couldn't resolve <b>{html.escape(token)}</b>"
+                + (
+                    " (prediction needs an explicit market id: <code>/watch prediction &lt;id&gt;</code>)"
+                    if ac is None
+                    else ""
+                )
+            )
+        else:
+            wl = load_watchlist()
+            dup = any(
+                i["asset_class"] == entry["asset_class"]
+                and i["instrument"] == entry["instrument"]
+                for i in wl["items"]
+            )
+            if not dup:
+                entry["added"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                wl["items"].append(entry)
+                save_watchlist(wl)
+            telegram_send(
+                f"👁️ Watching <b>{html.escape(entry['raw'])}</b> "
+                f"({entry['asset_class']} → <code>{html.escape(entry['instrument'])}</code>)"
+                + ("" if not dup else " — already watched")
+            )
+
+    elif text.startswith("/unwatch "):
+        token = text[9:].strip()
+        wl = load_watchlist()
+        before = len(wl["items"])
+        wl["items"] = [i for i in wl["items"] if i["raw"].lower() != token.lower()]
+        if len(wl["items"]) < before:
+            save_watchlist(wl)
+            telegram_send(f"🚫 Unwatched <b>{html.escape(token)}</b>.")
+        else:
+            telegram_send(f"<b>{html.escape(token)}</b> is not on the watchlist.")
 
     else:
         telegram_send("Unknown command — send /help for options.")
