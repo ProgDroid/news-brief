@@ -22,6 +22,9 @@ from common import (
     ANTHROPIC_HEADERS,
     POLYGRAM_EMAIL,
     POLYGRAM_PASSWORD,
+    HAIRCUT_BPS_EQUITY,  # noqa: F401  consumed by close-time haircut (later task)
+    HAIRCUT_BPS_CRYPTO,  # noqa: F401
+    HAIRCUT_BPS_PREDICTION,  # noqa: F401
 )
 
 PAPER_DIR = DATA_DIR / "paper"
@@ -145,6 +148,73 @@ def fetch_kraken_price(pair: str) -> float | None:
         log.warning(f"Kraken returned non-positive price for {pair}: {price}")
         return None
     return price
+
+
+def fetch_benchmark_level(asset_class: str) -> float | None:
+    """Current benchmark index level for an asset class (best-effort, None on failure).
+
+    Equity → S&P 500 (^spx via Stooq); crypto → BTC/XBT (Kraken); prediction → None
+    (naive coin-flip baseline, handled at close as benchmark_return=0).
+    """
+    if asset_class == "equity":
+        return fetch_stooq_price("^spx")
+    if asset_class == "crypto":
+        pair = resolve_kraken_pair("BTC", load_crypto_ticker_overrides())
+        return fetch_kraken_price(pair) if pair else None
+    return None
+
+
+def _fetch_pg_half_spread(token_id: str) -> float | None:
+    """Best bid/ask half-spread as a fraction of mid, from PolyGram's orderbook.
+
+    Returns None when uncredentialed/unavailable/malformed. Tolerant of both
+    [{"price": "0.4"}] and [["0.4", size]] level shapes.
+    """
+    data = _polygram_get(f"/orderbook/{token_id}")
+    if not isinstance(data, dict):
+        return None
+
+    def _best(levels):
+        if not levels:
+            return None
+        lvl = levels[0]
+        try:
+            raw = lvl["price"] if isinstance(lvl, dict) else lvl[0]
+            return float(raw)
+        except (TypeError, ValueError, KeyError, IndexError):
+            return None
+
+    bid = _best(data.get("bids"))
+    ask = _best(data.get("asks"))
+    if bid is None or ask is None or ask < bid:
+        return None
+    mid = (ask + bid) / 2
+    if mid <= 0:
+        return None
+    return (ask - bid) / 2 / mid
+
+
+def _stamp_open_benchmark(p: dict) -> None:
+    """Stamp benchmark_entry (+ prediction entry_spread) on a freshly opened position.
+
+    Best-effort: any fetch failure leaves the field None and never raises.
+    """
+    ac = p.get("asset_class", "equity")
+    if ac == "prediction":
+        p["benchmark_entry"] = None
+        tok = p.get("token_id")
+        try:
+            p["entry_spread"] = _fetch_pg_half_spread(tok) if tok else None
+        except Exception as e:
+            log.warning(f"PG spread fetch failed for {p.get('ticker')}: {e}")
+            p["entry_spread"] = None
+        return
+    p["entry_spread"] = None
+    try:
+        p["benchmark_entry"] = fetch_benchmark_level(ac)
+    except Exception as e:
+        log.warning(f"Benchmark fetch failed for {p.get('ticker')}: {e}")
+        p["benchmark_entry"] = None
 
 
 def _parse_pg_market(m: dict) -> dict | None:
@@ -665,6 +735,7 @@ def _open_prediction_positions(
                 "realized_return": None,
             }
         )
+        _stamp_open_benchmark(book["positions"][-1])
         open_keys.add(key)
         opened += 1
     return opened
@@ -778,6 +849,7 @@ def mode_paper():
                     "realized_return": None,
                 }
             )
+            _stamp_open_benchmark(book["positions"][-1])
             open_keys.add((ac, ticker, direction))
             opened += 1
     else:
