@@ -25,3 +25,18 @@ def test_sanitise_html_strips_disallowed_tags():
     out = common.sanitise_html("<b>ok</b><script>bad()</script>")
     assert "<b>ok</b>" in out
     assert "script" not in out
+
+
+def test_log_handlers_include_rotating_file_handler():
+    # newsbrief.log must rotate, not grow unbounded for the life of the container.
+    from logging.handlers import RotatingFileHandler
+
+    handlers = common._log_handlers()
+    try:
+        rotating = [h for h in handlers if isinstance(h, RotatingFileHandler)]
+        assert rotating, "expected a RotatingFileHandler for bounded log growth"
+        assert rotating[0].maxBytes > 0
+        assert rotating[0].backupCount > 0
+    finally:
+        for h in handlers:
+            h.close()

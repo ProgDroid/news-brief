@@ -10,6 +10,7 @@ import json
 import time
 import logging
 import requests
+from logging.handlers import RotatingFileHandler
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,7 +34,13 @@ def _log_handlers() -> list[logging.Handler]:
     handlers: list[logging.Handler] = [logging.StreamHandler()]
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        handlers.append(logging.FileHandler(DATA_DIR / "newsbrief.log"))
+        # Rotate so the log can't grow unbounded over the container's lifetime:
+        # 5 MB × 5 backups ≈ 30 MB ceiling.
+        handlers.append(
+            RotatingFileHandler(
+                DATA_DIR / "newsbrief.log", maxBytes=5_000_000, backupCount=5
+            )
+        )
     except OSError:
         pass  # data dir unavailable (local run, tests): console logging still works
     return handlers
