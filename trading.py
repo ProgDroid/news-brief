@@ -165,6 +165,7 @@ def fetch_stooq_volume(stooq_symbol: str) -> float | None:
         return None
     cols = lines[1].split(",")  # Symbol,Date,Time,Open,High,Low,Close,Volume
     if len(cols) < 8 or cols[7] in ("N/D", ""):
+        log.warning(f"Stooq returned no volume for {stooq_symbol}")
         return None
     try:
         vol = float(cols[7])
@@ -185,9 +186,11 @@ def fetch_kraken_volume(pair: str) -> float | None:
         log.warning(f"Kraken volume fetch failed for {pair}: {e}")
         return None
     if data.get("error"):
+        log.warning(f"Kraken error for {pair}: {data['error']}")
         return None
     result = data.get("result") or {}
     if not result:
+        log.warning(f"Kraken returned no result for {pair}")
         return None
     entry = next(iter(result.values()))
     try:
