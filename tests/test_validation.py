@@ -59,3 +59,46 @@ def test_aggregate_excludes_no_net_return():
 
 def test_aggregate_empty_book():
     assert validation.aggregate_performance({"positions": []})["overall"] is None
+
+
+def _many(asset_class, n, net, edge):
+    return [_closed(asset_class, net, edge=edge) for _ in range(n)]
+
+
+def test_gate_not_ready_too_few_trades(monkeypatch, tmp_path):
+    monkeypatch.setattr(validation, "GATE_HISTORY_FILE", tmp_path / "g.json")
+    book = {"positions": _many("equity", 5, 0.10, 0.05)}
+    res = validation.evaluate_gate(book)
+    assert res["equity"]["ready"] is False
+    assert "closed" in res["equity"]["reason"]
+
+
+def test_gate_ready_when_all_criteria_met(monkeypatch, tmp_path):
+    hist = tmp_path / "g.json"
+    monkeypatch.setattr(validation, "GATE_HISTORY_FILE", hist)
+    # seed two positive prior evals for the sustained-window check
+    validation._write_json_atomic(hist, {"equity": [0.03, 0.04]})
+    book = {"positions": _many("equity", 30, 0.10, 0.05)}  # all wins, edge +
+    res = validation.evaluate_gate(book)
+    assert res["equity"]["ready"] is True
+
+
+def test_gate_not_ready_when_not_sustained(monkeypatch, tmp_path):
+    hist = tmp_path / "g.json"
+    monkeypatch.setattr(validation, "GATE_HISTORY_FILE", hist)
+    validation._write_json_atomic(hist, {"equity": [-0.01, 0.04]})  # one negative
+    book = {"positions": _many("equity", 30, 0.10, 0.05)}
+    res = validation.evaluate_gate(book)
+    assert res["equity"]["ready"] is False
+    assert "sustained" in res["equity"]["reason"] or "evals" in res["equity"]["reason"]
+
+
+def test_record_gate_history_appends(monkeypatch, tmp_path):
+    hist = tmp_path / "g.json"
+    monkeypatch.setattr(validation, "GATE_HISTORY_FILE", hist)
+    book = {"positions": _many("crypto", 3, 0.20, 0.10)}
+    validation.record_gate_history(book)
+    data = validation._load_json_or(hist, {})
+    assert len(data["crypto"]) == 1
+    assert abs(data["crypto"][0] - 0.10) < 1e-9
+    assert data["equity"] == [None]  # no equity trades → null entry

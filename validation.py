@@ -9,7 +9,14 @@ gate, the daily prompt-feedback block, and the unified daily trade message.
 
 import statistics
 
-from common import DATA_DIR
+from common import (
+    DATA_DIR,
+    _write_json_atomic,
+    _load_json_or,
+    GATE_MIN_TRADES,
+    GATE_MIN_HIT_RATE,
+    GATE_SUSTAINED_EVALS,
+)
 
 GATE_HISTORY_FILE = DATA_DIR / "paper" / "gate_history.json"
 _DIMENSIONS = ("asset_class", "confidence", "play_type", "thesis_ref")
@@ -49,3 +56,53 @@ def aggregate_performance(book: dict) -> dict:
             groups.setdefault(key, []).append(p)
         dims[dim] = {k: s for k, v in groups.items() if (s := _stats(v))}
     return {"overall": _stats(closed), "dimensions": dims}
+
+
+def record_gate_history(book: dict) -> None:
+    """Append this evaluation's per-asset mean edge to gate_history.json.
+
+    Called once per weekly run BEFORE evaluate_gate, so the sustained-window check
+    includes the current week. A null entry is recorded for asset classes with no
+    scored trades this period.
+    """
+    per_asset = aggregate_performance(book)["dimensions"].get("asset_class", {})
+    history = _load_json_or(GATE_HISTORY_FILE, {}) or {}
+    for ac in _ASSET_CLASSES:
+        s = per_asset.get(ac)
+        history.setdefault(ac, []).append(s["mean_edge"] if s else None)
+    _write_json_atomic(GATE_HISTORY_FILE, history)
+
+
+def evaluate_gate(book: dict) -> dict:
+    """Per-asset-class go-live readiness against the configured criteria.
+
+    Each entry: {"ready": bool, "reason": str}. The gate is informational —
+    nothing in the system auto-enables live trading.
+    """
+    per_asset = aggregate_performance(book)["dimensions"].get("asset_class", {})
+    history = _load_json_or(GATE_HISTORY_FILE, {}) or {}
+    out = {}
+    for ac in _ASSET_CLASSES:
+        s = per_asset.get(ac)
+        if s is None:
+            out[ac] = {"ready": False, "reason": "no closed trades yet"}
+            continue
+        recent = history.get(ac, [])[-GATE_SUSTAINED_EVALS:]
+        sustained = len(recent) >= GATE_SUSTAINED_EVALS and all(
+            e is not None and e > 0 for e in recent
+        )
+        if s["n"] < GATE_MIN_TRADES:
+            reason = f"need {GATE_MIN_TRADES} closed trades, have {s['n']}"
+        elif s["mean_edge"] is None or s["mean_edge"] <= 0:
+            reason = "mean edge over benchmark not positive"
+        elif s["hit_rate"] < GATE_MIN_HIT_RATE * 100:
+            reason = (
+                f"net hit-rate {s['hit_rate']:.0f}% < {GATE_MIN_HIT_RATE * 100:.0f}%"
+            )
+        elif not sustained:
+            reason = f"edge not positive across last {GATE_SUSTAINED_EVALS} evals"
+        else:
+            out[ac] = {"ready": True, "reason": "all criteria met"}
+            continue
+        out[ac] = {"ready": False, "reason": reason}
+    return out
