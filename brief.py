@@ -61,6 +61,7 @@ from trading import (
 from validation import (
     performance_report,
     record_gate_history,
+    performance_prompt_block,
 )
 
 
@@ -734,6 +735,7 @@ def build_daily_prompt(
     weekly_summary: str,
     fb: dict,
     portfolio: str,
+    perf_block: str = "",
 ) -> str:
     today = datetime.now(timezone.utc).strftime("%A, %d %B %Y")
     search_list = "\n".join(f"- {t['search']}" for t in TOPICS)
@@ -796,6 +798,7 @@ Use for analytical framing where appropriate. Cite the show name if drawing on a
 Search for current developments on each before writing. Prioritise Reuters.
 {search_list}
 {yesterday_block}{weekly_block}{portfolio_block}
+{perf_block}
 
 ## OUTPUT FORMAT
 
@@ -1286,6 +1289,7 @@ def mode_submit():
     portfolio = fetch_portfolio_weights()
     log.info(f"Portfolio: {'fetched' if portfolio else 'none'}")
 
+    perf_block = performance_prompt_block(load_book())
     prompt = build_daily_prompt(
         feed_content,
         web_content,
@@ -1294,6 +1298,7 @@ def mode_submit():
         weekly_summary,
         fb,
         portfolio,
+        perf_block,
     )
     batch_id = submit_batch(SYSTEM_PROMPT, prompt, custom_id=f"newsbrief-{today}")
     save_state(

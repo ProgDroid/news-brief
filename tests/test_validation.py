@@ -123,3 +123,20 @@ def test_performance_report_empty_book(monkeypatch, tmp_path):
     monkeypatch.setattr(validation, "GATE_HISTORY_FILE", tmp_path / "g.json")
     out = validation.performance_report({"positions": []})
     assert "No closed" in out or "no closed" in out.lower()
+
+
+def test_prompt_block_requires_min_sample():
+    # 4 trades < n>=5 floor → empty
+    book = {"positions": [_closed("equity", 0.1, confidence="high") for _ in range(4)]}
+    assert validation.performance_prompt_block(book) == ""
+
+
+def test_prompt_block_includes_qualifying_dimension():
+    book = {
+        "positions": [
+            _closed("equity", 0.1, edge=0.03, confidence="high") for _ in range(6)
+        ]
+    }
+    out = validation.performance_prompt_block(book)
+    assert out  # non-empty
+    assert "high" in out or "equity" in out

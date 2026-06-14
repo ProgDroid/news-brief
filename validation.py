@@ -156,3 +156,37 @@ def performance_report(book: dict) -> str:
         mark = "✅ READY" if g["ready"] else "⛔ not ready"
         lines.append(f"  – {ac}: {mark} — {g['reason']}")
     return "\n".join(lines)
+
+
+_PROMPT_MIN_N = 5  # don't feed the model dimensions with tiny, noisy samples
+
+
+def performance_prompt_block(book: dict) -> str:
+    """Compact track-record block for the daily prompt (recalibration, not rules).
+
+    Surfaces realized net hit-rate + edge by asset_class, confidence, and thesis_ref
+    for dimensions with at least _PROMPT_MIN_N closed trades. Returns "" when nothing
+    qualifies (so the caller adds nothing to the prompt).
+    """
+    agg = aggregate_performance(book)
+    rows = []
+    for dim in ("asset_class", "confidence", "thesis_ref"):
+        for key, s in agg["dimensions"].get(dim, {}).items():
+            if s["n"] < _PROMPT_MIN_N:
+                continue
+            edge = (
+                f", edge {100 * s['mean_edge']:+.0f}%"
+                if s["mean_edge"] is not None
+                else ""
+            )
+            rows.append(
+                f"  • {dim}={key}: {s['hit_rate']:.0f}% hit-rate, "
+                f"net {100 * s['mean_net']:+.0f}%{edge} (n={s['n']})"
+            )
+    if not rows:
+        return ""
+    return (
+        "## YOUR TRACK RECORD (paper, net of costs)\n"
+        "Calibrate confidence against your realized performance below. This is "
+        "context for self-correction, not a rule change.\n" + "\n".join(rows)
+    )
