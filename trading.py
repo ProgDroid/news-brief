@@ -185,6 +185,65 @@ def fetch_stooq_volume(stooq_symbol: str) -> float | None:
     return vol if vol >= 0 else None
 
 
+def fetch_daily_move(asset_class: str, instrument: str) -> float | None:
+    """Intraday percent move (open → last) for one instrument, single fetch.
+
+    Equity → Stooq light quote (Open=col3, Close=col6); crypto → Kraken Ticker
+    (o=today's open, c[0]=last). Returns the percent change rounded to 2dp, or
+    None on any failure / non-positive open — callers render '—', never guess.
+    """
+    if asset_class == "crypto":
+        return _kraken_daily_move(instrument)
+    return _stooq_daily_move(instrument)
+
+
+def _stooq_daily_move(stooq_symbol: str) -> float | None:
+    url = f"https://stooq.com/q/l/?s={stooq_symbol}&f=sd2t2ohlcv&h&e=csv"
+    try:
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
+    except Exception as e:
+        log.warning(f"Stooq move fetch failed for {stooq_symbol}: {e}")
+        return None
+    lines = resp.text.strip().splitlines()
+    if len(lines) < 2:
+        return None
+    cols = lines[1].split(",")  # Symbol,Date,Time,Open,High,Low,Close,Volume
+    if len(cols) < 7 or cols[3] in ("N/D", "") or cols[6] in ("N/D", ""):
+        return None
+    try:
+        open_, close = float(cols[3]), float(cols[6])
+    except ValueError:
+        return None
+    if open_ <= 0:
+        return None
+    return round((close - open_) / open_ * 100, 2)
+
+
+def _kraken_daily_move(pair: str) -> float | None:
+    url = f"https://api.kraken.com/0/public/Ticker?pair={pair}"
+    try:
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        log.warning(f"Kraken move fetch failed for {pair}: {e}")
+        return None
+    if data.get("error"):
+        return None
+    result = data.get("result") or {}
+    if not result:
+        return None
+    entry = next(iter(result.values()))
+    try:
+        open_, last = float(entry["o"]), float(entry["c"][0])
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
+    if open_ <= 0:
+        return None
+    return round((last - open_) / open_ * 100, 2)
+
+
 def fetch_kraken_volume(pair: str) -> float | None:
     """Last-24h traded volume for a Kraken pair (Ticker 'v' = [today, last 24h]).
     None on error / garbled result — caller skips (mirrors fetch_kraken_price)."""

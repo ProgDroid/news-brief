@@ -193,3 +193,40 @@ def test_stamp_close_metrics_prediction_momentum_fallback():
     bps = trading.HAIRCUT_BPS_PREDICTION / 10_000
     assert abs(p["haircut"] - 2 * bps) < 1e-9  # entry fallback + exit bps
     assert abs(p["net_return"] - (0.10 - 2 * bps)) < 1e-9
+
+
+def test_stooq_daily_move_open_to_last(monkeypatch):
+    # CSV: Symbol,Date,Time,Open,High,Low,Close,Volume — open 100, close 110 → +10%
+    csv = "Symbol,Date,Time,Open,High,Low,Close,Volume\nAAPL.US,2026-06-13,22:00:00,100,111,99,110,5000"
+
+    class _R:
+        text = csv
+
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr(trading.requests, "get", lambda *a, **k: _R())
+    assert trading.fetch_daily_move("equity", "aapl.us") == 10.0
+
+
+def test_kraken_daily_move(monkeypatch):
+    # open 200, last 190 → -5%
+    data = {"error": [], "result": {"XXBTZUSD": {"o": "200", "c": ["190", "0.1"]}}}
+
+    class _R:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return data
+
+    monkeypatch.setattr(trading.requests, "get", lambda *a, **k: _R())
+    assert trading.fetch_daily_move("crypto", "XBTUSD") == -5.0
+
+
+def test_daily_move_none_on_failure(monkeypatch):
+    def _boom(*a, **k):
+        raise RuntimeError("network")
+
+    monkeypatch.setattr(trading.requests, "get", _boom)
+    assert trading.fetch_daily_move("equity", "aapl.us") is None
