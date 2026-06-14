@@ -172,3 +172,45 @@ def test_fetch_rss_header_includes_kind(monkeypatch):
     out = brief.fetch_rss(feed)
     assert "WIRE" in out
     assert "Test Wire" in out
+
+
+# ── build_daily_prompt ────────────────────────────────────────────────────────
+def _daily_kwargs():
+    return dict(
+        feed_content="(feeds)",
+        web_content="(web)",
+        chroma_context="(chroma)",
+        yesterday_brief="",
+        weekly_summary="",
+        fb={"focus": [], "mute": [], "notes": [], "pin": ["iran", "japan"]},
+        portfolio="",
+    )
+
+
+def test_prompt_includes_pinned_override_line():
+    out = brief.build_daily_prompt(**_daily_kwargs())
+    assert "PINNED" in out
+    assert "iran" in out and "japan" in out
+
+
+def test_prompt_has_fixed_spine_and_dynamic_instruction():
+    out = brief.build_daily_prompt(**_daily_kwargs())
+    assert "TOP STORIES" in out
+    assert "MARKET PULSE" in out
+    assert "WATCH" in out
+    assert "@@@SIGNALS@@@" in out
+    assert "significan" in out.lower()  # dynamic-middle instruction present
+
+
+def test_prompt_renders_market_block_when_supplied():
+    out = brief.build_daily_prompt(
+        market_block="### MARKET PULSE\n- S&P 500: +0.5%", **_daily_kwargs()
+    )
+    assert "S&P 500: +0.5%" in out
+
+
+def test_prompt_defaults_pins_when_key_absent():
+    kw = _daily_kwargs()
+    kw["fb"] = {"focus": [], "mute": [], "notes": []}
+    out = brief.build_daily_prompt(**kw)
+    assert "ukraine" in out  # default pins surfaced

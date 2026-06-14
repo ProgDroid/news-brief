@@ -944,6 +944,7 @@ def build_daily_prompt(
     fb: dict,
     portfolio: str,
     perf_block: str = "",
+    market_block: str = "",
 ) -> str:
     today = datetime.now(timezone.utc).strftime("%A, %d %B %Y")
     search_list = "\n".join(f"- {t['search']}" for t in TOPICS)
@@ -957,6 +958,12 @@ def build_daily_prompt(
         )
     if fb.get("notes"):
         fb_lines.append("READER NOTES:\n" + "\n".join(f"  • {n}" for n in fb["notes"]))
+    pins = resolved_pins(fb)
+    if pins:
+        fb_lines.append(
+            "PINNED — always include at least a one-line pulse for, in this order: "
+            + ", ".join(pins)
+        )
     feedback_block = (
         ("\n## READER OVERRIDES\n" + "\n".join(fb_lines)) if fb_lines else ""
     )
@@ -990,20 +997,31 @@ evidence. Do NOT give buy/sell advice or price targets. Surface what is worth th
 reader's attention; the reader decides what to do with it.
 """
 
+    market_section = (
+        f"\n## MARKET PULSE (what moved — you supply the why)\n{market_block}\n"
+        if market_block
+        else ""
+    )
+
     return f"""Today is {today} (UTC). Produce the morning brief.
 {feedback_block}
 
-## RSS / WEB SOURCE MATERIAL
+## SOURCE MATERIAL
+Each source is tagged [WIRE|ANALYST|REGIONAL|PRIMARY]. Treat WIRE as the record of
+what happened (anchor facts here), but lead your interpretation with ANALYST /
+REGIONAL / PRIMARY material and the market action below. Compress recap; do not
+echo a headline the market has already priced.
 {feed_content}
 {web_content}
 
 ## PODCAST ANALYST CONTEXT
 Relevant excerpts from an indexed archive of geopolitical/macro podcast episodes.
-Use for analytical framing where appropriate. Cite the show name if drawing on a specific insight.
+Use for forward-looking analytical framing. Cite the show name if drawing on a specific insight.
 {chroma_context}
-
+{market_section}
 ## WEB SEARCH TOPICS
-Search for current developments on each before writing. Prioritise Reuters.
+Search for current developments on each before writing. Anchor facts on Reuters; for
+local colour and forward framing, prefer the region-native sources above.
 {search_list}
 {yesterday_block}{weekly_block}{portfolio_block}
 {perf_block}
@@ -1014,36 +1032,37 @@ Telegram HTML only. Allowed tags: <b>, <i>, <code>, <a href="...">
 Use <b> for section headings. Bullets with •. No markdown. No # headers. No asterisks.
 Output only the HTML — no preamble, no sign-off, no code fences.
 
+Structure — a fixed spine with a dynamic middle:
+
 <b>🌍 TOP STORIES</b>
 - [3–5 bullets, only genuinely significant developments]
 
-<b>🇺🇦 UKRAINE</b>
-[paragraph, or: No significant change — one sentence]
+<b>📈 MARKET PULSE — WHAT MOVED</b>
+[2–4 bullets: the notable moves above and the likely why. Flag any move NOT explained
+by today's news as a potential early signal. Omit only if no market data was provided.]
 
-<b>🇮🇷 US–IRAN / STRAIT OF HORMUZ</b>
-[paragraph, or one-liner. Include BCA dashboard context if available.]
-
-<b>🇰🇷🇰🇵 KOREA</b>
-[paragraph, or: No significant change — one sentence]
-
-<b>🇯🇵 JAPAN</b>
-[paragraph, or: No significant change — one sentence]
-
-<b>🇨🇳 CHINA</b>
-[paragraph, or: No significant change — one sentence]
+[DYNAMIC TOPIC SECTIONS — your discretion:
+• Render a section for EVERY pinned topic listed under READER OVERRIDES, even if quiet
+  (a quiet pin collapses to: "No significant change — one sentence"). Never drop a pin.
+• ALSO add a section for any UNPINNED topic that is materially significant today.
+• Order by significance. Use a <b>flag + NAME</b> heading per section.]
 
 <b>📊 MACRO SIGNAL</b>
 [paragraph if material; omit entirely if nothing significant]
 
 <b>📌 POSITION SIGNALS</b>
-- [news that confirms or challenges a held position or thesis — name the ticker/thesis and the signal direction. Omit the section entirely if nothing in today's news is materially relevant to the portfolio.]
+- [news that confirms or challenges a held position or thesis — name the ticker/thesis and
+  the signal direction. Omit the section entirely if nothing is materially relevant.]
 
-<b>👁 WATCH LIST</b>
-- [2–4 things to monitor in next 24–72h that could move markets]
+<b>👁 WATCH / FORWARD</b>
+- [2–4 forward-looking things to monitor in the next 24–72h that could move markets]
 
-After the WATCH LIST and a blank line, output the delimiter token below on its own line, exactly as written — it is a literal parsing marker, NOT a section divider, so reproduce it verbatim and do not shorten, restyle, or drop it:
+After the WATCH / FORWARD section and a blank line, output the delimiter token below on its
+own line, exactly as written — it is a literal parsing marker, NOT a section divider, so
+reproduce it verbatim and do not shorten, restyle, or drop it:
 @@@SIGNALS@@@
-Then output a JSON array (and nothing else after it) capturing any position-relevant signals. Empty array if none. Schema:
+Then output a JSON array (and nothing else after it) capturing any position-relevant signals.
+Empty array if none. Schema:
 [
   {{
     "ticker": "the primary listing symbol — e.g. SHEL or BP for equities, BTC or ETH for crypto; null only for macro-level signals with no single tradable instrument",
