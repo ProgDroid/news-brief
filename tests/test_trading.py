@@ -230,3 +230,24 @@ def test_daily_move_none_on_failure(monkeypatch):
 
     monkeypatch.setattr(trading.requests, "get", _boom)
     assert trading.fetch_daily_move("equity", "aapl.us") is None
+
+
+def test_build_market_pulse_includes_spine_and_pinned(monkeypatch):
+    monkeypatch.setattr(trading, "fetch_daily_move", lambda ac, inst: 1.5)
+    monkeypatch.setattr(trading, "load_book", lambda: {"positions": []})
+    monkeypatch.setattr(
+        trading, "_load_json_or", lambda *a, **k: {}
+    )  # empty vol history
+    block = trading.build_market_pulse(["iran"])
+    assert "MARKET PULSE" in block or "WHAT MOVED" in block
+    assert "+1.5%" in block
+    assert "S&P 500" in block  # spine label always present
+    assert "Brent" in block  # pinned-iran instrument present
+
+
+def test_build_market_pulse_skips_unresolvable(monkeypatch):
+    monkeypatch.setattr(trading, "fetch_daily_move", lambda ac, inst: None)
+    monkeypatch.setattr(trading, "load_book", lambda: {"positions": []})
+    monkeypatch.setattr(trading, "_load_json_or", lambda *a, **k: {})
+    block = trading.build_market_pulse([])
+    assert "—" in block  # em-dash sentinel for unresolved moves; never raises

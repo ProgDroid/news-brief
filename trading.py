@@ -70,6 +70,22 @@ _KRAKEN_BASE = {
 PAPER_HORIZONS = {"1w": 7, "2w": 14, "4w": 28}  # days from entry_date
 PAPER_CLOSE_HORIZON = "4w"  # close the position once this checkpoint is recorded
 
+# Market-pulse instruments. Each entry: (label, asset_class, instrument).
+# Tier 1 — macro spine, always fetched (universal risk-on/off pulse).
+MARKET_SPINE = [
+    ("S&P 500", "equity", "^spx"),
+    ("US Dollar (DXY)", "equity", "dx.f"),
+    ("Gold", "equity", "xauusd"),
+    ("Bitcoin", "crypto", "XBTUSD"),
+]
+# Tier 2 — pin-derived: only fetched for currently pinned topics. Gaps allowed
+# (a pin with no clean instrument simply contributes no market line).
+PIN_INSTRUMENTS = {
+    "iran": [("Brent crude", "equity", "cb.f")],
+    "japan": [("USD/JPY", "equity", "usdjpy"), ("Nikkei 225", "equity", "^nkx")],
+    "china": [("Hang Seng", "equity", "^hsi")],
+}
+
 # ── PolyGram (prediction markets) ─────────────────────────────────────────────
 POLYGRAM_BASE = "https://polygram.ink/api"
 POLYGRAM_TOKEN_FILE = PAPER_DIR / "polygram_token.json"
@@ -939,6 +955,66 @@ def run_volume_monitor(now: datetime | None = None) -> list[str]:
         hist[key] = entry
     _write_json_atomic(VOLUME_HISTORY_FILE, hist)
     return alerts
+
+
+def build_market_pulse(pins: list[str]) -> str:
+    """Assemble the 'what moved & why' block: macro spine + pin-derived
+    instruments + open-position moves + current volume anomalies. Pure data —
+    the model supplies the 'why'. Best-effort: a failed fetch renders '—' and
+    never raises into the brief pipeline.
+    """
+    seen: set[tuple[str, str]] = set()
+    instruments: list[tuple[str, str, str]] = []
+    for label, ac, inst in MARKET_SPINE:
+        if (ac, inst) not in seen:
+            seen.add((ac, inst))
+            instruments.append((label, ac, inst))
+    for topic in pins:
+        for label, ac, inst in PIN_INSTRUMENTS.get(topic, []):
+            if (ac, inst) not in seen:
+                seen.add((ac, inst))
+                instruments.append((label, ac, inst))
+
+    def _fmt(move: float | None) -> str:
+        return f"{move:+.1f}%" if move is not None else "—"
+
+    lines = ["### MARKET PULSE — WHAT MOVED (open→last)"]
+    for label, ac, inst in instruments:
+        try:
+            move = fetch_daily_move(ac, inst)
+        except Exception as e:
+            log.warning(f"Market pulse move failed for {inst}: {e}")
+            move = None
+        lines.append(f"- {label}: {_fmt(move)}")
+
+    pos_lines = []
+    for p in load_book().get("positions", []):
+        if p.get("status") != "open":
+            continue
+        inst = p.get("instrument")
+        if not inst:
+            continue
+        ac = p.get("asset_class", "equity")
+        try:
+            move = fetch_daily_move(ac, inst)
+        except Exception:
+            move = None
+        pos_lines.append(f"- {p.get('ticker', inst)}: {_fmt(move)}")
+    if pos_lines:
+        lines.append("\n### YOUR POSITIONS — TODAY'S MOVE")
+        lines.extend(pos_lines)
+
+    hist = _load_json_or(VOLUME_HISTORY_FILE, {})
+    anomalies = []
+    for key, entry in hist.items():
+        ts = entry.get("last_alert_ts")
+        if ts:
+            anomalies.append(f"- {key}: recent volume spike ({ts[:10]})")
+    if anomalies:
+        lines.append("\n### VOLUME ANOMALIES (last alerts)")
+        lines.extend(anomalies)
+
+    return "\n".join(lines)
 
 
 def _signal_return(direction: str, entry: float, price: float) -> float:
