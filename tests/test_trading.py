@@ -108,3 +108,89 @@ def test_fetch_pg_half_spread_none_on_garbage(monkeypatch):
 
     monkeypatch.setattr(trading, "_polygram_get", lambda path: None)
     assert trading._fetch_pg_half_spread("tok") is None
+
+
+def _closed_equity(**kw):
+    p = {
+        "ticker": "SHEL",
+        "asset_class": "equity",
+        "direction": "bullish",
+        "realized_return": 0.10,
+        "benchmark_entry": 100.0,
+        "play_type": None,
+    }
+    p.update(kw)
+    return p
+
+
+def test_stamp_close_metrics_equity_with_benchmark(monkeypatch):
+    import trading
+
+    monkeypatch.setattr(trading, "fetch_benchmark_level", lambda ac: 104.0)
+    p = _closed_equity()
+    trading._stamp_close_metrics(p, "2026-06-14")
+    assert p["haircut"] == trading.HAIRCUT_BPS_EQUITY / 10_000
+    assert abs(p["net_return"] - (0.10 - 0.0010)) < 1e-9
+    assert abs(p["benchmark_return"] - 0.04) < 1e-9  # (104-100)/100
+    assert abs(p["edge"] - (p["net_return"] - 0.04)) < 1e-9
+
+
+def test_stamp_close_metrics_legacy_no_benchmark(monkeypatch):
+    import trading
+
+    monkeypatch.setattr(trading, "fetch_benchmark_level", lambda ac: 104.0)
+    p = _closed_equity(benchmark_entry=None)
+    trading._stamp_close_metrics(p, "2026-06-14")
+    assert p["net_return"] is not None
+    assert p["benchmark_return"] is None
+    assert p["edge"] is None
+
+
+def test_stamp_close_metrics_benchmark_fetch_failure(monkeypatch):
+    import trading
+
+    def _boom(_):
+        raise RuntimeError("down")
+
+    monkeypatch.setattr(trading, "fetch_benchmark_level", _boom)
+    p = _closed_equity()
+    trading._stamp_close_metrics(p, "2026-06-14")  # must not raise
+    assert p["net_return"] is not None
+    assert p["benchmark_return"] is None
+    assert p["edge"] is None
+
+
+def test_stamp_close_metrics_prediction_resolution():
+    import trading
+
+    p = {
+        "ticker": "mkt1",
+        "asset_class": "prediction",
+        "play_type": "resolution",
+        "realized_return": 0.30,
+        "entry_spread": 0.02,
+        "benchmark_entry": None,
+    }
+    trading._stamp_close_metrics(p, "2026-06-14")
+    # resolution settles at 1/0 — entry spread only, no exit leg
+    assert p["haircut"] == 0.02
+    assert abs(p["net_return"] - 0.28) < 1e-9
+    assert p["benchmark_return"] == 0.0  # naive coin-flip baseline
+    assert abs(p["edge"] - 0.28) < 1e-9
+
+
+def test_stamp_close_metrics_prediction_momentum_fallback():
+    import trading
+
+    p = {
+        "ticker": "mkt2",
+        "asset_class": "prediction",
+        "play_type": "momentum",
+        "realized_return": 0.10,
+        "entry_spread": None,
+        "benchmark_entry": None,
+    }
+    trading._stamp_close_metrics(p, "2026-06-14")
+    bps = trading.HAIRCUT_BPS_PREDICTION / 10_000
+    assert abs(p["haircut"] - 2 * bps) < 1e-9  # entry fallback + exit bps
+    assert abs(p["net_return"] - (0.10 - 2 * bps)) < 1e-9

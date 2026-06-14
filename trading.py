@@ -22,9 +22,9 @@ from common import (
     ANTHROPIC_HEADERS,
     POLYGRAM_EMAIL,
     POLYGRAM_PASSWORD,
-    HAIRCUT_BPS_EQUITY,  # noqa: F401  consumed by close-time haircut (later task)
-    HAIRCUT_BPS_CRYPTO,  # noqa: F401
-    HAIRCUT_BPS_PREDICTION,  # noqa: F401
+    HAIRCUT_BPS_EQUITY,
+    HAIRCUT_BPS_CRYPTO,
+    HAIRCUT_BPS_PREDICTION,
 )
 
 PAPER_DIR = DATA_DIR / "paper"
@@ -215,6 +215,59 @@ def _stamp_open_benchmark(p: dict) -> None:
     except Exception as e:
         log.warning(f"Benchmark fetch failed for {p.get('ticker')}: {e}")
         p["benchmark_entry"] = None
+
+
+def _haircut_fraction(p: dict) -> float:
+    """Round-trip cost fraction for a closed position, by asset class.
+
+    Prediction: entry = real orderbook half-spread if captured at open, else the
+    config fallback; resolution settles at 1/0 (entry leg only), momentum adds a
+    config-bps exit leg. Equity/crypto: a single config round-trip constant.
+    """
+    ac = p.get("asset_class", "equity")
+    if ac == "prediction":
+        entry = p.get("entry_spread")
+        if entry is None:
+            entry = HAIRCUT_BPS_PREDICTION / 10_000
+        if p.get("play_type") == "momentum":
+            return entry + HAIRCUT_BPS_PREDICTION / 10_000
+        return entry
+    if ac == "crypto":
+        return HAIRCUT_BPS_CRYPTO / 10_000
+    return HAIRCUT_BPS_EQUITY / 10_000
+
+
+def _stamp_close_metrics(p: dict, day: str) -> None:
+    """Stamp haircut/net_return/benchmark_return/edge on a just-closed position.
+
+    Call AFTER status is set to "closed" and realized_return is stamped. Best-effort
+    on the benchmark fetch — never raises out of a close path. A fetch failure or a
+    legacy position with no benchmark_entry leaves benchmark_return/edge None, but
+    net_return is always set.
+    """
+    gross = p.get("realized_return")
+    if gross is None:
+        return
+    haircut = _haircut_fraction(p)
+    p["haircut"] = haircut
+    net = gross - haircut
+    p["net_return"] = net
+    ac = p.get("asset_class", "equity")
+    bench = None
+    if ac == "prediction":
+        bench = 0.0  # naive coin-flip baseline
+    else:
+        entry = p.get("benchmark_entry")
+        if entry:
+            try:
+                level = fetch_benchmark_level(ac)
+            except Exception as e:
+                log.warning(f"Benchmark fetch failed for {p.get('ticker')}: {e}")
+                level = None
+            if level is not None:
+                bench = _signal_return("bullish", entry, level)
+    p["benchmark_return"] = bench
+    p["edge"] = (net - bench) if bench is not None else None
 
 
 def _parse_pg_market(m: dict) -> dict | None:
@@ -665,6 +718,7 @@ def _close_position_at_market(p: dict, day: str, reason: str) -> bool:
     p["status"] = "closed"
     p["close_reason"] = reason
     p["closed_date"] = day
+    _stamp_close_metrics(p, day)
     return True
 
 
@@ -897,6 +951,7 @@ def mark_to_market(book: dict, today_str: str) -> dict:
             p["close_reason"] = "horizon"
             p["closed_date"] = today_str
             p["realized_return"] = p["checkpoints"][PAPER_CLOSE_HORIZON]["return"]
+            _stamp_close_metrics(p, today_str)
     return book
 
 
@@ -906,6 +961,7 @@ def _settle_prediction(p: dict, day: str, price: float, ret: float, reason: str)
     p["close_reason"] = reason
     p["closed_date"] = day
     p["realized_return"] = ret
+    _stamp_close_metrics(p, day)
 
 
 def _mtm_prediction(p: dict, today, today_str: str):
