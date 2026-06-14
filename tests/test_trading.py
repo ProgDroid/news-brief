@@ -12,7 +12,6 @@ def test_trading_exposes_equity_paper_layer():
         "_signal_return",
         "mode_paper",
         "mark_to_market",
-        "paper_scorecard",
         "load_book",
         "save_book",
     ):

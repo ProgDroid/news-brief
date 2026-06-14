@@ -106,3 +106,53 @@ def evaluate_gate(book: dict) -> dict:
             continue
         out[ac] = {"ready": False, "reason": reason}
     return out
+
+
+def _fmt(s: dict) -> str:
+    edge = f"{100 * s['mean_edge']:+.1f}%" if s["mean_edge"] is not None else "n/a"
+    return (
+        f"{s['hit_rate']:.0f}% hit · net {100 * s['mean_net']:+.1f}% "
+        f"· edge {edge} (n={s['n']})"
+    )
+
+
+def performance_report(book: dict) -> str:
+    """Telegram-HTML weekly performance report: overall + dimensions + go-live gate.
+
+    Supersedes the old paper_scorecard. Pure — gate history is read, not written
+    (record_gate_history is called separately in the weekly job).
+    """
+    agg = aggregate_performance(book)
+    overall = agg["overall"]
+    lines = ["<b>📊 PERFORMANCE REPORT</b>"]
+    if overall is None:
+        lines.append("No closed trades yet — nothing to score.")
+        return "\n".join(lines)
+
+    lines.append(f"• Overall: {_fmt(overall)}")
+    for dim in _DIMENSIONS:
+        groups = agg["dimensions"].get(dim, {})
+        if not groups:
+            continue
+        lines.append(f"<b>by {dim}</b>")
+        for key, s in sorted(groups.items(), key=lambda kv: -kv[1]["n"]):
+            lines.append(f"  – {key}: {_fmt(s)}")
+
+    # Chronically-wrong theses (negative mean net over a meaningful sample).
+    bad = [
+        (k, s)
+        for k, s in agg["dimensions"].get("thesis_ref", {}).items()
+        if s["n"] >= 3 and s["mean_net"] < 0
+    ]
+    if bad:
+        lines.append("<b>⚠ chronically wrong</b> (consider /mute or /thesis):")
+        for k, s in bad:
+            lines.append(f"  – {k}: net {100 * s['mean_net']:+.1f}% (n={s['n']})")
+
+    lines.append("<b>🚦 Go-live gate</b>")
+    gate = evaluate_gate(book)
+    for ac in _ASSET_CLASSES:
+        g = gate[ac]
+        mark = "✅ READY" if g["ready"] else "⛔ not ready"
+        lines.append(f"  – {ac}: {mark} — {g['reason']}")
+    return "\n".join(lines)

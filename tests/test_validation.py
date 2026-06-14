@@ -102,3 +102,24 @@ def test_record_gate_history_appends(monkeypatch, tmp_path):
     assert len(data["crypto"]) == 1
     assert abs(data["crypto"][0] - 0.10) < 1e-9
     assert data["equity"] == [None]  # no equity trades → null entry
+
+
+def test_performance_report_renders(monkeypatch, tmp_path):
+    monkeypatch.setattr(validation, "GATE_HISTORY_FILE", tmp_path / "g.json")
+    book = {
+        "positions": [
+            _closed("equity", 0.10, edge=0.04, confidence="high", thesis_ref="oil"),
+            _closed("equity", -0.05, edge=-0.02, confidence="medium", thesis_ref="oil"),
+            _closed("crypto", 0.20, edge=0.10, confidence="high"),
+        ]
+    }
+    out = validation.performance_report(book)
+    assert "PERFORMANCE" in out
+    assert "equity" in out
+    assert "Go-live" in out or "go-live" in out.lower()
+
+
+def test_performance_report_empty_book(monkeypatch, tmp_path):
+    monkeypatch.setattr(validation, "GATE_HISTORY_FILE", tmp_path / "g.json")
+    out = validation.performance_report({"positions": []})
+    assert "No closed" in out or "no closed" in out.lower()

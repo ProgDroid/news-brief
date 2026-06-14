@@ -57,7 +57,10 @@ from trading import (
     refresh_instruments_cache,
     mode_paper,
     mark_to_market,
-    paper_scorecard,
+)
+from validation import (
+    performance_report,
+    record_gate_history,
 )
 
 
@@ -1383,7 +1386,8 @@ def mode_weekly():
     refresh_instruments_cache(force=True)
     book = mark_to_market(load_book(), datetime.now(timezone.utc).strftime("%Y-%m-%d"))
     save_book(book)
-    telegram_send(paper_scorecard(book))
+    record_gate_history(book)
+    telegram_send(performance_report(book))
     log.info("Paper book marked to market")
 
 
