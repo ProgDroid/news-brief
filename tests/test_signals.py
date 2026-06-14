@@ -214,3 +214,9 @@ def test_prompt_defaults_pins_when_key_absent():
     kw["fb"] = {"focus": [], "mute": [], "notes": []}
     out = brief.build_daily_prompt(**kw)
     assert "ukraine" in out  # default pins surfaced
+
+
+def test_system_prompt_is_forward_tilted():
+    sp = brief.SYSTEM_PROMPT.lower()
+    assert "reuters" in sp  # still anchors facts
+    assert "forward" in sp or "anticipat" in sp  # explicit forward tilt

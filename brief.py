@@ -63,6 +63,7 @@ from trading import (
     resolve_watch_entry,
     price_position,
     _signal_return,
+    build_market_pulse,
 )
 from validation import (
     performance_report,
@@ -927,12 +928,15 @@ The reader:
 - Tracks geopolitics as a leading indicator for markets, not as an end in itself
 - Is familiar with constraint-based analysis (Papic/BCA style)
 - Does not need hedging language or excessive caveats — be direct
-- Prefers Reuters as a primary news source
+- Prefers Reuters as a primary news source for facts
 - Trades equities and major cryptocurrencies (BTC, ETH, and other large-cap coins); surface directional crypto calls the same way as equities when news warrants
 
 Your job is to synthesise the provided source material into a structured morning brief.
-Use the web search tool to fill gaps on the listed search topics — prioritise Reuters results.
-Do not pad or repeat. If nothing significant happened on a topic, say so in one line."""
+Anchor facts on Reuters/wire sources, but LEAD your interpretation with forward-looking,
+anticipatory material — regional analysts, primary statements, podcast framing, and the
+market action provided — over backward-looking wire recap. Use the web search tool to fill
+gaps on the listed topics. Do not echo headlines the market has already priced. Do not pad
+or repeat. If nothing significant happened on a topic, say so in one line."""
 
 
 def build_daily_prompt(
@@ -1517,6 +1521,8 @@ def mode_submit():
     log.info(f"Portfolio: {'fetched' if portfolio else 'none'}")
 
     perf_block = performance_prompt_block(load_book())
+    market_block = build_market_pulse(resolved_pins(fb))
+    log.info(f"Market pulse: {len(market_block)} chars")
     prompt = build_daily_prompt(
         feed_content,
         web_content,
@@ -1526,6 +1532,7 @@ def mode_submit():
         fb,
         portfolio,
         perf_block,
+        market_block,
     )
     batch_id = submit_batch(SYSTEM_PROMPT, prompt, custom_id=f"newsbrief-{today}")
     save_state(
