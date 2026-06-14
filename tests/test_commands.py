@@ -171,3 +171,35 @@ def test_resolved_pins_empty_list_is_respected():
     # An explicit empty list means "no pins" — distinct from "key absent".
     fb = {"focus": [], "mute": [], "notes": [], "pin": []}
     assert brief.resolved_pins(fb) == []
+
+
+def test_pin_seeds_defaults_then_adds(monkeypatch):
+    sent = []
+    monkeypatch.setattr(brief, "telegram_send", lambda m: sent.append(m))
+    fb = {"focus": [], "mute": [], "notes": []}
+    fb = brief._handle_telegram_update(_update("/pin taiwan"), fb)
+    # First pin materialises the defaults, then appends the new topic.
+    assert fb["pin"] == ["ukraine", "iran", "korea", "japan", "china", "taiwan"]
+    assert "taiwan" in sent[-1].lower()
+
+
+def test_pin_lowercases_and_dedupes(monkeypatch):
+    monkeypatch.setattr(brief, "telegram_send", lambda m: None)
+    fb = {"focus": [], "mute": [], "notes": [], "pin": ["china"]}
+    fb = brief._handle_telegram_update(_update("/pin China"), fb)
+    assert fb["pin"] == ["china"]  # case-folded, no duplicate
+
+
+def test_unpin_removes(monkeypatch):
+    monkeypatch.setattr(brief, "telegram_send", lambda m: None)
+    fb = {"focus": [], "mute": [], "notes": [], "pin": ["china", "japan"]}
+    fb = brief._handle_telegram_update(_update("/unpin japan"), fb)
+    assert fb["pin"] == ["china"]
+
+
+def test_unpin_default_member_materialises_then_removes(monkeypatch):
+    monkeypatch.setattr(brief, "telegram_send", lambda m: None)
+    fb = {"focus": [], "mute": [], "notes": []}  # no pin key → defaults active
+    fb = brief._handle_telegram_update(_update("/unpin korea"), fb)
+    assert "korea" not in fb["pin"]
+    assert fb["pin"] == ["ukraine", "iran", "japan", "china"]

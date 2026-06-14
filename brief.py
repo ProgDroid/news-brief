@@ -449,6 +449,27 @@ def _handle_telegram_update(update: dict, fb: dict) -> dict:
         else:
             telegram_send(f"<b>{html.escape(token)}</b> is not on the watchlist.")
 
+    elif text.startswith("/pin "):
+        topic = text[5:].strip().lower()
+        fb.setdefault("pin", list(DEFAULT_PINS))
+        if topic and topic not in fb["pin"]:
+            fb["pin"].append(topic)
+        telegram_send(
+            f"📌 Pinned: <b>{html.escape(topic)}</b> — always shown.\n\n"
+            f"{feedback_summary(fb)}"
+        )
+
+    elif text.startswith("/unpin "):
+        topic = text[7:].strip().lower()
+        fb.setdefault("pin", list(DEFAULT_PINS))
+        if topic in fb["pin"]:
+            fb["pin"].remove(topic)
+            telegram_send(
+                f"📍 Unpinned: <b>{html.escape(topic)}</b>.\n\n{feedback_summary(fb)}"
+            )
+        else:
+            telegram_send(f"<b>{html.escape(topic)}</b> is not pinned.")
+
     elif text == "/positions":
         book = load_book()
         opens = [p for p in book["positions"] if p.get("status") == "open"]
