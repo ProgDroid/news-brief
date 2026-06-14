@@ -409,8 +409,8 @@ def _handle_telegram_update(update: dict, fb: dict) -> dict:
         else:
             wl = load_watchlist()
             dup = any(
-                i["asset_class"] == entry["asset_class"]
-                and i["instrument"] == entry["instrument"]
+                i.get("asset_class") == entry["asset_class"]
+                and i.get("instrument") == entry["instrument"]
                 for i in wl["items"]
             )
             if not dup:
@@ -427,7 +427,9 @@ def _handle_telegram_update(update: dict, fb: dict) -> dict:
         token = text[9:].strip()
         wl = load_watchlist()
         before = len(wl["items"])
-        wl["items"] = [i for i in wl["items"] if i["raw"].lower() != token.lower()]
+        wl["items"] = [
+            i for i in wl["items"] if (i.get("raw") or "").lower() != token.lower()
+        ]
         if len(wl["items"]) < before:
             save_watchlist(wl)
             telegram_send(f"🚫 Unwatched <b>{html.escape(token)}</b>.")
