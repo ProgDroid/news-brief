@@ -203,3 +203,16 @@ def test_unpin_default_member_materialises_then_removes(monkeypatch):
     fb = brief._handle_telegram_update(_update("/unpin korea"), fb)
     assert "korea" not in fb["pin"]
     assert fb["pin"] == ["ukraine", "iran", "japan", "china"]
+
+
+def test_feedback_summary_lists_pins():
+    fb = {"focus": [], "mute": [], "notes": [], "pin": ["china", "iran"]}
+    out = brief.feedback_summary(fb)
+    assert "Pinned:" in out
+    assert "china" in out and "iran" in out
+
+
+def test_feedback_summary_shows_default_pins_when_absent():
+    out = brief.feedback_summary({"focus": [], "mute": [], "notes": []})
+    assert "Pinned:" in out
+    assert "ukraine" in out  # defaults surfaced, not hidden

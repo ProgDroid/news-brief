@@ -61,8 +61,12 @@ Send these to your bot (processed by the `commands` cron, or immediately in `run
 | `/help` | Command list |
 | `/watch <symbol>` | Track an instrument for volume alerts (crypto/equity inferred from symbol; prediction markets need an explicit market id) |
 | `/unwatch <symbol>` | Stop watching an instrument |
+| `/pin <topic>` | Always show a topic, even when quiet (one-liner minimum). Default pins: ukraine, iran, korea, japan, china. |
+| `/unpin <topic>` | Make a topic dynamic again. |
 | `/positions` | Open positions with live marks |
 | `/performance` | Performance report + go-live gate status |
+
+Pins are listed by `/status`. `/reset` restores the default pin set.
 
 ---
 

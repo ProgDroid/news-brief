@@ -229,6 +229,9 @@ def feedback_summary(fb: dict) -> str:
         lines.append(
             "Notes:\n" + "\n".join(f"  • {html.escape(n)}" for n in fb["notes"])
         )
+    pins = resolved_pins(fb)
+    if pins:
+        lines.append("Pinned: " + ", ".join(html.escape(p) for p in pins))
     return "\n".join(lines) if lines else "No active overrides."
 
 
@@ -257,6 +260,13 @@ HELP_TEXT = """<b>newsbrief commands</b>
 
 /unwatch [SYMBOL]
   Stop watching an instrument.
+
+/pin [topic]
+  Always show a topic, even when quiet (at least a one-liner).
+  e.g. <code>/pin taiwan</code>
+
+/unpin [topic]
+  Stop forcing a topic; it becomes dynamic again.
 
 /positions — open positions with live marks
 /performance — performance report + go-live gate
