@@ -190,3 +190,44 @@ def performance_prompt_block(book: dict) -> str:
         "Calibrate confidence against your realized performance below. This is "
         "context for self-correction, not a rule change.\n" + "\n".join(rows)
     )
+
+
+def daily_trade_message(book: dict, today: str) -> str:
+    """Unified daily trade message (Telegram-HTML). Pure — uses last-known marks.
+
+    Three sections, each omitted when empty; returns "" when there is nothing to
+    say. Marks are last-known (refreshed by the weekly mark-to-market), not re-priced
+    here, to keep the collect path light.
+    """
+    positions = book.get("positions", [])
+    opened = [p for p in positions if p.get("opened") == today]
+    open_now = [p for p in positions if p.get("status") == "open"]
+    opened_dir = [p for p in opened if p.get("asset_class") != "prediction"]
+    opened_pred = [p for p in opened if p.get("asset_class") == "prediction"]
+    if not (opened or open_now):
+        return ""
+
+    lines = ["<b>📈 TRADE UPDATE</b>"]
+    if opened_dir:
+        lines.append("<b>Opened today</b>")
+        for p in opened_dir:
+            lines.append(
+                f"  • {p['ticker']} ({p['asset_class']}) {p['direction']} "
+                f"@ {p['entry_price']:g}"
+            )
+    if opened_pred:
+        lines.append("<b>Prediction suggestions</b>")
+        for p in opened_pred:
+            lines.append(
+                f"  • {p['ticker']} {p.get('outcome', '')} · {p.get('play_type', '')} "
+                f"· {p.get('rationale', '')}"
+            )
+    if open_now:
+        lines.append(f"<b>Open positions ({len(open_now)})</b>")
+        for p in open_now:
+            mark = p.get("last_mark")
+            mstr = f"{100 * mark['return']:+.1f}%" if mark else "—"
+            lines.append(
+                f"  • {p['ticker']} ({p['asset_class']}) {p['direction']}: {mstr}"
+            )
+    return "\n".join(lines)

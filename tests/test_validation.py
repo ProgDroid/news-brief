@@ -140,3 +140,51 @@ def test_prompt_block_includes_qualifying_dimension():
     out = validation.performance_prompt_block(book)
     assert out  # non-empty
     assert "high" in out or "equity" in out
+
+
+def test_daily_trade_message_empty_when_nothing():
+    assert validation.daily_trade_message({"positions": []}, "2026-06-14") == ""
+
+
+def test_daily_trade_message_opened_and_open():
+    book = {
+        "positions": [
+            {
+                "status": "open",
+                "opened": "2026-06-14",
+                "asset_class": "equity",
+                "ticker": "SHEL",
+                "direction": "bullish",
+                "play_type": None,
+                "entry_price": 30.0,
+                "last_mark": None,
+            },
+            {
+                "status": "open",
+                "opened": "2026-06-14",
+                "asset_class": "prediction",
+                "ticker": "mkt1",
+                "direction": "bullish",
+                "play_type": "momentum",
+                "outcome": "Yes",
+                "entry_price": 0.4,
+                "last_mark": None,
+                "rationale": "matched (similarity=0.7)",
+            },
+            {
+                "status": "open",
+                "opened": "2026-05-01",
+                "asset_class": "crypto",
+                "ticker": "BTC",
+                "direction": "bullish",
+                "play_type": None,
+                "entry_price": 60000.0,
+                "last_mark": {"date": "2026-06-08", "price": 66000.0, "return": 0.10},
+            },
+        ]
+    }
+    out = validation.daily_trade_message(book, "2026-06-14")
+    assert "SHEL" in out  # opened today
+    assert "mkt1" in out  # prediction suggestion
+    assert "BTC" in out  # open-positions summary
+    assert "+10" in out  # last-known mark for the older open position

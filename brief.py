@@ -62,6 +62,7 @@ from validation import (
     performance_report,
     record_gate_history,
     performance_prompt_block,
+    daily_trade_message,
 )
 
 
@@ -1337,6 +1338,10 @@ def mode_collect():
         # PolyGram / Claude failure must never re-collect and duplicate the brief.
         try:
             mode_paper()
+            book = load_book()
+            msg = daily_trade_message(book, today)
+            if msg:
+                telegram_send(msg)
         except Exception as e:
             log.error(f"Trading stage failed (brief already delivered): {e}")
             telegram_alert(f"trading stage failed after brief: {e}")
