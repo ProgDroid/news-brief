@@ -255,3 +255,99 @@ def test_watched_instruments_skips_incomplete_entries(tmp_path, monkeypatch):
     assert ("crypto", "XBTUSD") in watched
     assert ("equity", "shel.uk") in watched
     assert len(watched) == 2  # the two incomplete entries skipped
+
+
+def _setup_monitor(monkeypatch, tmp_path, watched, volumes, history=None):
+    monkeypatch.setattr(trading, "VOLUME_HISTORY_FILE", tmp_path / "vh.json")
+    monkeypatch.setattr(trading, "_watched_instruments", lambda: watched)
+    monkeypatch.setattr(
+        trading, "fetch_volume", lambda ac, inst: volumes.get((ac, inst))
+    )
+    if history is not None:
+        trading._write_json_atomic(tmp_path / "vh.json", history)
+
+
+def test_monitor_emits_alert_on_spike(monkeypatch, tmp_path):
+    prior = {
+        "crypto:XBTUSD": {"samples": [100, 100, 100, 100, 100], "last_alert_ts": None}
+    }
+    _setup_monitor(
+        monkeypatch,
+        tmp_path,
+        [("crypto", "XBTUSD")],
+        {("crypto", "XBTUSD"): 500.0},
+        prior,
+    )
+    now = datetime(2026, 6, 14, 12, 0, tzinfo=timezone.utc)
+    alerts = trading.run_volume_monitor(now=now)
+    assert len(alerts) == 1
+    assert "XBTUSD" in alerts[0]
+    # last_alert_ts persisted and current sample appended
+    hist = trading._load_json_or(tmp_path / "vh.json", {})
+    assert hist["crypto:XBTUSD"]["last_alert_ts"] == now.isoformat()
+    assert hist["crypto:XBTUSD"]["samples"][-1] == 500.0
+
+
+def test_monitor_respects_cooldown(monkeypatch, tmp_path):
+    now = datetime(2026, 6, 14, 12, 0, tzinfo=timezone.utc)
+    recent = (now - timedelta(hours=1)).isoformat()
+    prior = {
+        "crypto:XBTUSD": {"samples": [100, 100, 100, 100, 100], "last_alert_ts": recent}
+    }
+    _setup_monitor(
+        monkeypatch,
+        tmp_path,
+        [("crypto", "XBTUSD")],
+        {("crypto", "XBTUSD"): 500.0},
+        prior,
+    )
+    alerts = trading.run_volume_monitor(now=now)
+    assert alerts == []  # suppressed by cooldown
+    # sample still appended (baseline keeps tracking during cooldown)
+    hist = trading._load_json_or(tmp_path / "vh.json", {})
+    assert hist["crypto:XBTUSD"]["samples"][-1] == 500.0
+
+
+def test_monitor_skips_unpriceable_without_aborting(monkeypatch, tmp_path):
+    prior = {
+        "equity:a.us": {"samples": [100, 100, 100, 100, 100], "last_alert_ts": None},
+        "equity:b.us": {"samples": [100, 100, 100, 100, 100], "last_alert_ts": None},
+    }
+    _setup_monitor(
+        monkeypatch,
+        tmp_path,
+        [("equity", "a.us"), ("equity", "b.us")],
+        {("equity", "a.us"): None, ("equity", "b.us"): 500.0},
+        prior,
+    )
+    now = datetime(2026, 6, 14, 12, 0, tzinfo=timezone.utc)
+    alerts = trading.run_volume_monitor(now=now)
+    assert len(alerts) == 1 and "b.us" in alerts[0]  # a.us skipped, b.us still alerts
+
+
+def test_monitor_raising_fetch_does_not_abort(monkeypatch, tmp_path):
+    monkeypatch.setattr(trading, "VOLUME_HISTORY_FILE", tmp_path / "vh.json")
+    monkeypatch.setattr(
+        trading,
+        "_watched_instruments",
+        lambda: [("equity", "boom.us"), ("crypto", "XBTUSD")],
+    )
+
+    def _fetch(ac, inst):
+        if inst == "boom.us":
+            raise RuntimeError("network on fire")
+        return 500.0
+
+    monkeypatch.setattr(trading, "fetch_volume", _fetch)
+    trading._write_json_atomic(
+        tmp_path / "vh.json",
+        {
+            "crypto:XBTUSD": {
+                "samples": [100, 100, 100, 100, 100],
+                "last_alert_ts": None,
+            }
+        },
+    )
+    now = datetime(2026, 6, 14, 12, 0, tzinfo=timezone.utc)
+    alerts = trading.run_volume_monitor(now=now)  # must not raise
+    assert len(alerts) == 1 and "XBTUSD" in alerts[0]

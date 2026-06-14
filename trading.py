@@ -847,6 +847,41 @@ def _watched_instruments() -> list[tuple[str, str]]:
     return out
 
 
+def run_volume_monitor(now: datetime | None = None) -> list[str]:
+    """Sweep watched instruments + open positions for volume anomalies.
+
+    Returns a list of Telegram-HTML alert strings (empty when quiet). Updates
+    volume-history.json (trailing samples + last_alert_ts) in place. Each
+    instrument is isolated: a fetch returning None or raising is logged and
+    skipped without aborting the sweep. `now` is injectable for tests.
+    """
+    now = now or datetime.now(timezone.utc)
+    hist = _load_json_or(VOLUME_HISTORY_FILE, {})
+    alerts: list[str] = []
+    for asset_class, instrument in _watched_instruments():
+        key = f"{asset_class}:{instrument}"
+        entry = hist.get(key) or {"samples": [], "last_alert_ts": None}
+        try:
+            current = fetch_volume(asset_class, instrument)
+        except Exception as e:
+            log.warning(f"Volume fetch raised for {key}: {e}")
+            current = None
+        if current is None:
+            continue
+        prior = entry.get("samples", [])
+        is_spike, ratio = _volume_anomaly(prior, current, _floor_for(asset_class))
+        if is_spike and not _in_cooldown(entry.get("last_alert_ts"), now):
+            baseline = sum(prior) / len(prior)
+            alerts.append(
+                _format_alert(asset_class, instrument, current, baseline, ratio)
+            )
+            entry["last_alert_ts"] = now.isoformat()
+        entry["samples"] = _append_sample(prior, current)
+        hist[key] = entry
+    _write_json_atomic(VOLUME_HISTORY_FILE, hist)
+    return alerts
+
+
 def _signal_return(direction: str, entry: float, price: float) -> float:
     """Directional return ratio: +1 for bullish, -1 for bearish, FX/unit-neutral."""
     sign = 1.0 if direction == "bullish" else -1.0
