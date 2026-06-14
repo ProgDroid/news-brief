@@ -229,3 +229,29 @@ def test_watched_instruments_unions_and_dedups(tmp_path, monkeypatch):
     assert ("equity", "shel.uk") in watched
     assert ("equity", "bp.uk") not in watched
     assert len(watched) == 2  # XBTUSD deduped
+
+
+def test_watched_instruments_skips_incomplete_entries(tmp_path, monkeypatch):
+    monkeypatch.setattr(trading, "WATCHLIST_FILE", tmp_path / "wl.json")
+    trading.save_watchlist(
+        {
+            "items": [
+                {"raw": "BTC", "asset_class": "crypto", "instrument": "XBTUSD"},
+                {"raw": "BROKEN"},  # missing asset_class + instrument
+            ]
+        }
+    )
+    monkeypatch.setattr(
+        trading,
+        "load_book",
+        lambda: {
+            "positions": [
+                {"status": "open", "asset_class": "equity"},  # missing instrument
+                {"status": "open", "asset_class": "equity", "instrument": "shel.uk"},
+            ]
+        },
+    )
+    watched = trading._watched_instruments()
+    assert ("crypto", "XBTUSD") in watched
+    assert ("equity", "shel.uk") in watched
+    assert len(watched) == 2  # the two incomplete entries skipped

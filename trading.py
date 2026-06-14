@@ -42,7 +42,9 @@ TICKER_MAP_FILE = PAPER_DIR / "ticker_map.json"
 INSTRUMENTS_CACHE_FILE = PAPER_DIR / "instruments-cache.json"
 CRYPTO_TICKER_MAP_FILE = PAPER_DIR / "crypto_ticker_map.json"
 WATCHLIST_FILE = PAPER_DIR / "watchlist.json"
-VOLUME_HISTORY_FILE = PAPER_DIR / "volume-history.json"
+VOLUME_HISTORY_FILE = (
+    PAPER_DIR / "volume-history.json"
+)  # used by the Phase 5 volume monitor (Task 5)
 
 # Asset-class → informational venue tag stamped on opened positions.
 _VENUE_BY_ASSET = {"equity": "t212", "crypto": "kraken", "prediction": "polygram"}
@@ -820,18 +822,25 @@ def resolve_watch_entry(token: str, asset_class: str | None = None) -> dict | No
 
 def _watched_instruments() -> list[tuple[str, str]]:
     """Union of watchlist entries and OPEN-position instruments, deduped by
-    (asset_class, instrument)."""
+    (asset_class, instrument). Entries missing either field are skipped rather
+    than crashing the sweep (mirrors the codebase's corruption-resilient posture)."""
     seen: set[tuple[str, str]] = set()
     out: list[tuple[str, str]] = []
     for it in load_watchlist().get("items", []):
-        key = (it["asset_class"], it["instrument"])
+        ac, inst = it.get("asset_class"), it.get("instrument")
+        if not ac or not inst:
+            continue
+        key = (ac, inst)
         if key not in seen:
             seen.add(key)
             out.append(key)
     for p in load_book().get("positions", []):
         if p.get("status") != "open":
             continue
-        key = (p.get("asset_class", "equity"), p["instrument"])
+        inst = p.get("instrument")
+        if not inst:
+            continue
+        key = (p.get("asset_class", "equity"), inst)
         if key not in seen:
             seen.add(key)
             out.append(key)
