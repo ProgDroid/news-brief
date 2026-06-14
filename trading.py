@@ -150,6 +150,80 @@ def fetch_kraken_price(pair: str) -> float | None:
     return price
 
 
+def fetch_stooq_volume(stooq_symbol: str) -> float | None:
+    """Latest daily Volume for a Stooq symbol (column 7 of the same CSV the pricer
+    uses). None on network error / 'N/D' — caller skips (mirrors fetch_stooq_price)."""
+    url = f"https://stooq.com/q/l/?s={stooq_symbol}&f=sd2t2ohlcv&h&e=csv"
+    try:
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
+    except Exception as e:
+        log.warning(f"Stooq volume fetch failed for {stooq_symbol}: {e}")
+        return None
+    lines = resp.text.strip().splitlines()
+    if len(lines) < 2:
+        return None
+    cols = lines[1].split(",")  # Symbol,Date,Time,Open,High,Low,Close,Volume
+    if len(cols) < 8 or cols[7] in ("N/D", ""):
+        return None
+    try:
+        vol = float(cols[7])
+    except ValueError:
+        return None
+    return vol if vol >= 0 else None
+
+
+def fetch_kraken_volume(pair: str) -> float | None:
+    """Last-24h traded volume for a Kraken pair (Ticker 'v' = [today, last 24h]).
+    None on error / garbled result — caller skips (mirrors fetch_kraken_price)."""
+    url = f"https://api.kraken.com/0/public/Ticker?pair={pair}"
+    try:
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        log.warning(f"Kraken volume fetch failed for {pair}: {e}")
+        return None
+    if data.get("error"):
+        return None
+    result = data.get("result") or {}
+    if not result:
+        return None
+    entry = next(iter(result.values()))
+    try:
+        vol = float(entry["v"][1])
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
+    return vol if vol >= 0 else None
+
+
+def fetch_pg_volume(market_id: str) -> float | None:
+    """24h volume for a PolyGram market, read from market detail (volume lives on
+    the market object in the Polymarket mirror, not in the price series). None if
+    the market is unfetchable or exposes no volume field — caller skips. This is
+    the spec's graceful-degradation path for prediction volume."""
+    m = polygram_market(market_id)
+    if m is None:
+        return None
+    for field in ("volume24hr", "volume24Hr", "volume"):
+        v = m.get(field)
+        if v is not None:
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def fetch_volume(asset_class: str, instrument: str) -> float | None:
+    """Mark one instrument's volume via the fetcher for its asset class."""
+    if asset_class == "crypto":
+        return fetch_kraken_volume(instrument)
+    if asset_class == "prediction":
+        return fetch_pg_volume(instrument)
+    return fetch_stooq_volume(instrument)
+
+
 def fetch_benchmark_level(asset_class: str) -> float | None:
     """Current benchmark index level for an asset class (best-effort, None on failure).
 
