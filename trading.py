@@ -1355,8 +1355,12 @@ def mark_to_market(book: dict, today_str: str) -> dict:
     return book
 
 
-def _settle_prediction(p: dict, day: str, price: float, ret: float, reason: str):
-    """Close a prediction position at the given mark with the given reason."""
+def _settle_prediction(p: dict, day: str, ret: float, reason: str):
+    """Close a prediction position with the given return and reason.
+
+    The mark price is intentionally not a parameter: the caller has already
+    written p["last_mark"] before settling, so this only flips status/return.
+    """
     p["status"] = "closed"
     p["close_reason"] = reason
     p["closed_date"] = day
@@ -1388,12 +1392,12 @@ def _mtm_prediction(p: dict, today, today_str: str):
 
     if p["play_type"] == "resolution":
         if parsed["closed"] and parsed["uma_status"] == "resolved":
-            _settle_prediction(p, today_str, price, ret, "settlement")
+            _settle_prediction(p, today_str, ret, "settlement")
         elif days_open >= PG_MAX_HOLD_DAYS:
-            _settle_prediction(p, today_str, price, ret, "max_hold")
+            _settle_prediction(p, today_str, ret, "max_hold")
     else:  # momentum
         target = p.get("target")
         if target is not None and price >= target:
-            _settle_prediction(p, today_str, price, ret, "target")
+            _settle_prediction(p, today_str, ret, "target")
         elif PAPER_CLOSE_HORIZON in p["checkpoints"]:
-            _settle_prediction(p, today_str, price, ret, "horizon")
+            _settle_prediction(p, today_str, ret, "horizon")
