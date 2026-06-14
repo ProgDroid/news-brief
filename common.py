@@ -82,6 +82,19 @@ GATE_MIN_TRADES = int(os.environ.get("GATE_MIN_TRADES", "30"))
 GATE_MIN_HIT_RATE = float(os.environ.get("GATE_MIN_HIT_RATE", "0.55"))
 GATE_SUSTAINED_EVALS = int(os.environ.get("GATE_SUSTAINED_EVALS", "2"))
 
+# ── Volume monitor (Phase 5) ──────────────────────────────────────────────────
+# Anomaly = current-period volume / trailing-mean >= VOL_SPIKE_MULT, gated by an
+# optional absolute per-asset floor and a minimum trailing-sample warm-up. A
+# per-instrument cooldown suppresses re-alerting (daily equity volume fires once;
+# intraday crypto can re-fire after the window).
+VOL_SPIKE_MULT = float(os.environ.get("VOL_SPIKE_MULT", "2.5"))
+VOL_TRAILING_N = int(os.environ.get("VOL_TRAILING_N", "20"))
+VOL_MIN_SAMPLES = int(os.environ.get("VOL_MIN_SAMPLES", "5"))
+VOL_ALERT_COOLDOWN_HRS = float(os.environ.get("VOL_ALERT_COOLDOWN_HRS", "12"))
+VOL_FLOOR_EQUITY = float(os.environ.get("VOL_FLOOR_EQUITY", "0"))
+VOL_FLOOR_CRYPTO = float(os.environ.get("VOL_FLOOR_CRYPTO", "0"))
+VOL_FLOOR_PREDICTION = float(os.environ.get("VOL_FLOOR_PREDICTION", "0"))
+
 
 def t212_auth_header() -> str:
     """Build the T212 HTTP Basic Authorization value from the configured credentials.
