@@ -136,3 +136,39 @@ def test_normalize_unknown_asset_class_falls_back_to_equity():
     s = dict(SIGNAL, asset_class="forex")
     clean, _ = brief.normalize_signals([s])
     assert clean[0]["asset_class"] == "equity"
+
+
+# ── Feed source structure ─────────────────────────────────────────────────────
+def test_every_feed_has_a_kind():
+    valid = {"wire", "analyst", "regional", "primary"}
+    for f in brief.RSS_FEEDS:
+        assert f.get("kind") in valid, f"{f['name']} missing/invalid kind"
+    for s in brief.WEB_SOURCES:
+        assert s.get("kind") in valid, f"{s['name']} missing/invalid kind"
+
+
+def test_sources_diversified_beyond_reuters():
+    names = " ".join(f["name"] for f in brief.RSS_FEEDS).lower()
+    for needle in ("kyiv", "yonhap", "scmp", "nhk", "38 north", "isw", "al jazeera"):
+        assert needle in names, f"expected source containing '{needle}'"
+
+
+def test_fetch_rss_header_includes_kind(monkeypatch):
+    sample = (
+        b'<?xml version="1.0"?><rss><channel>'
+        b"<item><title>Hello</title><description>Body</description>"
+        b"<pubDate>Mon, 01 Jan 2026</pubDate></item></channel></rss>"
+    )
+
+    class _Resp:
+        content = sample
+        ok = True
+
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr(brief.requests, "get", lambda *a, **k: _Resp())
+    feed = {"name": "Test Wire", "url": "http://x", "category": "geo", "kind": "wire"}
+    out = brief.fetch_rss(feed)
+    assert "WIRE" in out
+    assert "Test Wire" in out

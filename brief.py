@@ -107,36 +107,43 @@ RSS_FEEDS = [
         # volume control — markets still returns 100 items inside 2d.
         "url": "https://news.google.com/rss/search?q=when:2d+site%3Areuters.com%2Fmarkets&hl=en-US&gl=US&ceid=US%3Aen",
         "category": "macro",
+        "kind": "wire",
     },
     {
         "name": "Reuters World",
         "url": "https://news.google.com/rss/search?q=when:2d+site%3Areuters.com%2Fworld&hl=en-US&gl=US&ceid=US%3Aen",
         "category": "geo",
+        "kind": "wire",
     },
     {
         "name": "Sinica Podcast",
         "url": "https://sinica.substack.com/feed",
         "category": "china",
+        "kind": "analyst",
     },
     {
         "name": "Un-Diplomatic",
         "url": "https://www.un-diplomatic.com/feed",
         "category": "geo",
+        "kind": "analyst",
     },
     {
         "name": "Observing Japan",
         "url": "https://observingjapan.substack.com/feed",
         "category": "japan",
+        "kind": "analyst",
     },
     {
         "name": "Pinecone Weekly Brief",
         "url": "https://pineconemacroresearch.substack.com/feed",
         "category": "geo",
+        "kind": "analyst",
     },
     {
         "name": "Intersubjectively Transmissible",
         "url": "https://jashap.substack.com/feed",
         "category": "macro",
+        "kind": "analyst",
     },
     {
         "name": "Marko Papic (@geo_papic)",
@@ -144,11 +151,70 @@ RSS_FEEDS = [
         # served via the self-hosted Nitter on the container's Docker network.
         "url": f"{NITTER_BASE_URL}/geo_papic/rss",
         "category": "geo",
+        "kind": "analyst",
     },
     {
         "name": "Jacob Shapiro (@jacobshap)",
         "url": f"{NITTER_BASE_URL}/jacobshap/rss",
         "category": "geo",
+        "kind": "analyst",
+    },
+    # ── Region-native / primary sources (added 2026-06-14) ────────────────────
+    {
+        "name": "Al Jazeera",
+        # Native RSS — 25 entries verified 2026-06-14
+        "url": "https://www.aljazeera.com/xml/rss/all.xml",
+        "category": "geo",
+        "kind": "regional",
+    },
+    {
+        "name": "Kyiv Independent",
+        # Native feed returns 0; proxy verified 56 entries 2026-06-14
+        "url": "https://news.google.com/rss/search?q=when:2d+site%3Akyivindependent.com&hl=en-US&gl=US&ceid=US%3Aen",
+        "category": "ukraine",
+        "kind": "regional",
+    },
+    {
+        "name": "ISW Daily Assessment",
+        # Proxy — 8 entries verified 2026-06-14
+        "url": "https://news.google.com/rss/search?q=when:2d+site%3Aunderstandingwar.org&hl=en-US&gl=US&ceid=US%3Aen",
+        "category": "ukraine",
+        "kind": "primary",
+    },
+    {
+        "name": "Yonhap (English)",
+        # Proxy — 64 entries verified 2026-06-14
+        "url": "https://news.google.com/rss/search?q=when:2d+site%3Aen.yna.co.kr&hl=en-US&gl=US&ceid=US%3Aen",
+        "category": "korea",
+        "kind": "regional",
+    },
+    {
+        "name": "38 North",
+        # Native feed returns 0; proxy (when:7d) verified 4 entries 2026-06-14
+        "url": "https://news.google.com/rss/search?q=when:7d+site%3A38north.org&hl=en-US&gl=US&ceid=US%3Aen",
+        "category": "korea",
+        "kind": "primary",
+    },
+    {
+        "name": "NHK World",
+        # Proxy — 39 entries verified 2026-06-14
+        "url": "https://news.google.com/rss/search?q=when:2d+site%3Awww3.nhk.or.jp%2Fnhkworld&hl=en-US&gl=US&ceid=US%3Aen",
+        "category": "japan",
+        "kind": "regional",
+    },
+    {
+        "name": "BOJ Statements",
+        # Proxy (when:7d for low-frequency releases) — 7 entries verified 2026-06-14
+        "url": "https://news.google.com/rss/search?q=when:7d+site%3Aboj.or.jp&hl=en-US&gl=US&ceid=US%3Aen",
+        "category": "japan",
+        "kind": "primary",
+    },
+    {
+        "name": "SCMP",
+        # Native RSS — 50 entries verified 2026-06-14
+        "url": "https://www.scmp.com/rss/91/feed",
+        "category": "china",
+        "kind": "regional",
     },
 ]
 
@@ -157,6 +223,7 @@ WEB_SOURCES = [
         "name": "BCA Research — Iran Conflict Daily Dashboard",
         "url": "https://www.bcaresearch.com/collection/bcas-iran-conflict-daily-dashboard",
         "category": "iran",
+        "kind": "regional",
     },
 ]
 
@@ -591,7 +658,8 @@ def fetch_rss(feed: dict, max_items: int = 5) -> str:
             bozo_exc = getattr(parsed, "bozo_exception", None)
             log.warning(f"No entries: {feed['name']} ({bozo_exc or 'empty feed'})")
             return ""
-        lines = [f"\n### {feed['name']} ({feed['category'].upper()})"]
+        kind = feed.get("kind", "wire").upper()
+        lines = [f"\n### {feed['name']} [{kind}] ({feed['category'].upper()})"]
         for entry in parsed.entries[:max_items]:
             title = entry.get("title", "").strip()
             summary = re.sub(
