@@ -104,16 +104,34 @@ the model draws on general material for it. This decoupling is intentional and a
 
 ### 3. Market injection — "what moved & why"
 
-- **New `MARKET_PULSE` config** — a themed instrument set mapped to the pins, each entry
-  `(label, asset_class, instrument)`: S&P 500 (`^spx`), DXY, gold, Brent, USD/JPY, Nikkei,
-  Hang Seng, BTC. Exact Stooq/Kraken symbols are verified during planning; any symbol that
-  does not resolve is dropped (logged), not fatal.
-- **New `build_market_pulse()` in `trading.py`.** It lives in `trading.py` because it
+The market pulse is **pin-derived**, not a fixed instrument list, so it follows whatever the
+reader has pinned (consistent with the pinned-hybrid structure — a fixed list would keep
+showing e.g. Hang Seng after `/unpin china`). It can't be fully config-free — the model can't
+fetch prices (that's why we inject them), macro instruments aren't positions, and mapping a
+pin to an instrument needs a lookup — but the predefined part is reduced to two principled,
+pin-responsive pieces. Three tiers:
+
+1. **Macro spine** (small, always fetched): `^spx`, `DXY`, `gold`, `BTC` — the universal
+   risk-on/off pulse (~4 symbols).
+2. **Pin-derived** (dynamic): a `topic → [instruments]` map (e.g. iran → Brent;
+   japan → USD/JPY, Nikkei; china → Hang Seng). Only instruments for **currently pinned**
+   topics are fetched, so the pulse tracks the pin set automatically. A pinned topic with no
+   mapped instrument simply contributes no market line (the map is allowed gaps — e.g.
+   Ukraine has no clean single instrument).
+3. **Positions + watchlist** (fully dynamic, zero config): open-position daily moves from
+   `book.json`, plus the watchlist, plus their volume anomalies.
+
+- **New config:** `MARKET_SPINE` (tier 1, list of `(label, asset_class, instrument)`) and
+  `PIN_INSTRUMENTS` (tier 2, `dict[topic_label, list[(label, asset_class, instrument)]]`).
+  Exact Stooq/Kraken symbols are verified during planning; any symbol that does not resolve
+  is dropped (logged), not fatal.
+- **New `build_market_pulse(pins)` in `trading.py`.** It lives in `trading.py` because it
   consumes price/volume plumbing that already lives there (`fetch_price`, Stooq/Kraken
   fetchers, `load_book`, `volume-history.json`) and the one-way import chain
-  (`common ← trading ← brief`) forbids `trading` importing `brief`. It returns a formatted
-  text block containing, best-effort:
-  - each `MARKET_PULSE` instrument's latest daily move (% vs prior close);
+  (`common ← trading ← brief`) forbids `trading` importing `brief`. It takes the current pin
+  list, fetches the spine + the pin-derived instruments + positions/watchlist, dedupes, and
+  returns a formatted text block containing, best-effort:
+  - each instrument's latest daily move (% vs prior close);
   - open-position daily moves from `book.json`;
   - current volume anomalies from the monitor's `volume-history.json`.
   Any individual fetch that fails renders as `—` and never blocks the brief.
@@ -140,7 +158,7 @@ versus forward-looking.
 fetch RSS (expanded RSS_FEEDS, tagged by kind)
   + fetch web sources
   + build Chroma podcast context
-  + build_market_pulse()            # NEW — themed macro set + positions + anomalies
+  + build_market_pulse(pins)        # NEW — macro spine + pin-derived + positions/anomalies
   + fetch portfolio weights
   + performance_prompt_block
   + pin list (from feedback.json)   # NEW — drives PINNED override + dynamic template
@@ -193,8 +211,9 @@ experience; if the brief still feels priced-in, the next step is a deeper edge-l
 
 - Exact RSS URLs for Kyiv Independent, ISW, Yonhap, 38 North, NHK World, BOJ, SCMP, Al
   Jazeera; fall back to `site:` proxy or drop per source.
-- Exact Stooq/Kraken symbols for the `MARKET_PULSE` set (S&P, DXY, gold, Brent, USD/JPY,
-  Nikkei, Hang Seng, BTC).
+- Exact Stooq/Kraken symbols for the `MARKET_SPINE` (S&P, DXY, gold, BTC) and the
+  `PIN_INSTRUMENTS` map (Brent, USD/JPY, Nikkei, Hang Seng, …); confirm the per-pin
+  instrument mapping and accept gaps for pins with no clean instrument.
 - Whether `MARKET PULSE` is its own brief section or folds visually into `MACRO SIGNAL` —
   current design gives it its own spine slot; planning confirms against output length budget
   (`MAX_TOKENS` = 16384 whole-turn).
