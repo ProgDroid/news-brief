@@ -41,6 +41,8 @@ LEGACY_PAPER_BOOK_FILE = PAPER_DIR / "paper-book.json"
 TICKER_MAP_FILE = PAPER_DIR / "ticker_map.json"
 INSTRUMENTS_CACHE_FILE = PAPER_DIR / "instruments-cache.json"
 CRYPTO_TICKER_MAP_FILE = PAPER_DIR / "crypto_ticker_map.json"
+WATCHLIST_FILE = PAPER_DIR / "watchlist.json"
+VOLUME_HISTORY_FILE = PAPER_DIR / "volume-history.json"
 
 # Asset-class → informational venue tag stamped on opened positions.
 _VENUE_BY_ASSET = {"equity": "t212", "crypto": "kraken", "prediction": "polygram"}
@@ -781,6 +783,59 @@ def load_book() -> dict:
 
 def save_book(book: dict):
     _write_json_atomic(BOOK_FILE, book)
+
+
+def load_watchlist() -> dict:
+    """Cross-asset watch list: {"items": [{raw, asset_class, instrument, added?}]}."""
+    return _load_json_or(WATCHLIST_FILE, {"items": []})
+
+
+def save_watchlist(wl: dict) -> None:
+    _write_json_atomic(WATCHLIST_FILE, wl)
+
+
+def resolve_watch_entry(token: str, asset_class: str | None = None) -> dict | None:
+    """Resolve a /watch token into a watchlist entry, or None if unresolvable.
+
+    Inference order is crypto → equity. Prediction is never inferred (a market
+    can't be guessed from a ticker-shaped token): it needs an explicit class and a
+    market id, validated via polygram_market.
+    """
+    token = token.strip()
+    if asset_class == "prediction":
+        if polygram_market(token) is None:
+            return None
+        return {"raw": token, "asset_class": "prediction", "instrument": token}
+    if asset_class in (None, "crypto"):
+        pair = resolve_kraken_pair(token, load_crypto_ticker_overrides())
+        if pair:
+            return {"raw": token, "asset_class": "crypto", "instrument": pair}
+        if asset_class == "crypto":
+            return None
+    sym = resolve_stooq_symbol(token, load_instruments_cache(), load_ticker_overrides())
+    if sym:
+        return {"raw": token, "asset_class": "equity", "instrument": sym}
+    return None
+
+
+def _watched_instruments() -> list[tuple[str, str]]:
+    """Union of watchlist entries and OPEN-position instruments, deduped by
+    (asset_class, instrument)."""
+    seen: set[tuple[str, str]] = set()
+    out: list[tuple[str, str]] = []
+    for it in load_watchlist().get("items", []):
+        key = (it["asset_class"], it["instrument"])
+        if key not in seen:
+            seen.add(key)
+            out.append(key)
+    for p in load_book().get("positions", []):
+        if p.get("status") != "open":
+            continue
+        key = (p.get("asset_class", "equity"), p["instrument"])
+        if key not in seen:
+            seen.add(key)
+            out.append(key)
+    return out
 
 
 def _signal_return(direction: str, entry: float, price: float) -> float:

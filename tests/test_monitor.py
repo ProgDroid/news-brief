@@ -153,3 +153,79 @@ def test_cooldown_handles_naive_timestamp():
     now = datetime(2026, 6, 14, 12, 0, tzinfo=timezone.utc)
     naive = "2026-06-14T11:00:00"  # no offset — must be treated as UTC, not crash
     assert trading._in_cooldown(naive, now) is True
+
+
+def test_watchlist_roundtrip(tmp_path, monkeypatch):
+    f = tmp_path / "watchlist.json"
+    monkeypatch.setattr(trading, "WATCHLIST_FILE", f)
+    assert trading.load_watchlist() == {"items": []}
+    trading.save_watchlist(
+        {"items": [{"raw": "BTC", "asset_class": "crypto", "instrument": "XBTUSD"}]}
+    )
+    assert trading.load_watchlist()["items"][0]["instrument"] == "XBTUSD"
+
+
+def test_resolve_watch_infers_crypto():
+    entry = trading.resolve_watch_entry("BTC")
+    assert entry == {"raw": "BTC", "asset_class": "crypto", "instrument": "XBTUSD"}
+
+
+def test_resolve_watch_infers_equity_when_not_crypto(monkeypatch):
+    monkeypatch.setattr(trading, "resolve_stooq_symbol", lambda t, c, o: "shel.uk")
+    entry = trading.resolve_watch_entry("SHEL")
+    assert entry == {"raw": "SHEL", "asset_class": "equity", "instrument": "shel.uk"}
+
+
+def test_resolve_watch_explicit_equity_skips_crypto(monkeypatch):
+    # 'BTC' is a known crypto symbol, but an explicit equity class must not infer crypto.
+    monkeypatch.setattr(trading, "resolve_stooq_symbol", lambda t, c, o: "btc.us")
+    entry = trading.resolve_watch_entry("BTC", asset_class="equity")
+    assert entry["asset_class"] == "equity"
+    assert entry["instrument"] == "btc.us"
+
+
+def test_resolve_watch_prediction_validates_market(monkeypatch):
+    monkeypatch.setattr(trading, "polygram_market", lambda mid: {"question": "x"})
+    entry = trading.resolve_watch_entry("0xabc", asset_class="prediction")
+    assert entry == {"raw": "0xabc", "asset_class": "prediction", "instrument": "0xabc"}
+
+
+def test_resolve_watch_prediction_bad_market_returns_none(monkeypatch):
+    monkeypatch.setattr(trading, "polygram_market", lambda mid: None)
+    assert trading.resolve_watch_entry("0xbad", asset_class="prediction") is None
+
+
+def test_resolve_watch_unresolvable_returns_none(monkeypatch):
+    monkeypatch.setattr(trading, "resolve_stooq_symbol", lambda t, c, o: None)
+    assert trading.resolve_watch_entry("NOTATHING") is None
+
+
+def test_watched_instruments_unions_and_dedups(tmp_path, monkeypatch):
+    monkeypatch.setattr(trading, "WATCHLIST_FILE", tmp_path / "wl.json")
+    trading.save_watchlist(
+        {"items": [{"raw": "BTC", "asset_class": "crypto", "instrument": "XBTUSD"}]}
+    )
+    monkeypatch.setattr(
+        trading,
+        "load_book",
+        lambda: {
+            "positions": [
+                {
+                    "status": "open",
+                    "asset_class": "crypto",
+                    "instrument": "XBTUSD",
+                },  # dup of watchlist
+                {"status": "open", "asset_class": "equity", "instrument": "shel.uk"},
+                {
+                    "status": "closed",
+                    "asset_class": "equity",
+                    "instrument": "bp.uk",
+                },  # ignored
+            ]
+        },
+    )
+    watched = trading._watched_instruments()
+    assert ("crypto", "XBTUSD") in watched
+    assert ("equity", "shel.uk") in watched
+    assert ("equity", "bp.uk") not in watched
+    assert len(watched) == 2  # XBTUSD deduped
