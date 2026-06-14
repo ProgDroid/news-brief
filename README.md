@@ -35,6 +35,7 @@ The script is a single file (`brief.py`) with several modes, driven by cron:
 | `collect` | Poll for the result, deliver the brief, split off signals, open paper positions, then post a daily trade update | `0 6 * * *` |
 | `weekly` | Synthesise the last 7 briefs; mark the paper book to market + post the performance report | `0 21 * * 0` (Sun) |
 | `commands` | Process pending Telegram commands (no brief submitted) | `*/30 * * * *` |
+| `monitor` | Hourly cross-asset volume-anomaly alerts | `0 * * * *` |
 | `run` | `submit` + `collect` synchronously — for testing | — |
 | `paper` | Open paper positions from today's signals snapshot (also run automatically inside `collect`) | — |
 
@@ -58,6 +59,10 @@ Send these to your bot (processed by the `commands` cron, or immediately in `run
 | `/reset` | Clear all focus/mute/note overrides |
 | `/status` | Show current overrides |
 | `/help` | Command list |
+| `/watch <symbol>` | Track an instrument for volume alerts (crypto/equity inferred from symbol; prediction markets need an explicit market id) |
+| `/unwatch <symbol>` | Stop watching an instrument |
+| `/positions` | Open positions with live marks |
+| `/performance` | Performance report + go-live gate status |
 
 ---
 
@@ -192,6 +197,7 @@ Trigger the modes from your container scheduler or host cron:
 0  6 * * *   docker compose run --rm newsbrief-collect
 0 21 * * 0   docker compose run --rm newsbrief-weekly
 */30 * * * * docker compose run --rm newsbrief-commands
+0  *  * * *  docker compose run --rm newsbrief-monitor
 ```
 
 Adding a mode is one new two-line service in the compose file. The `/app/logs` volume holds all

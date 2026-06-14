@@ -15,6 +15,7 @@
 #   0  6 * * *   docker compose run --rm newsbrief-collect
 #   0 21 * * 0   docker compose run --rm newsbrief-weekly
 #   */30 * * * * docker compose run --rm newsbrief-commands
+#   0  *  * * *  docker compose run --rm newsbrief-monitor
 
 x-newsbrief: &newsbrief
   image: ghcr.io/progdroid/news-brief:latest
@@ -58,6 +59,10 @@ services:
   newsbrief-commands:
     <<: *newsbrief
     command: [commands]
+
+  newsbrief-monitor:
+    <<: *newsbrief
+    command: [monitor]
 
 # Uncomment to attach to a network shared with your self-hosted RSSHub/Nitter stack:
 # networks:
