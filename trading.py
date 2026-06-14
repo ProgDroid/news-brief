@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Equity paper-trading layer: Stooq ticker resolution + pricing, the paper
-book, return math, position close, and the open/mark-to-market/scorecard
-functions. Imports infra from common.py. (Later phases generalise this to a
+book, return math, position close, and the open/mark-to-market functions.
+Imports infra from common.py. (Later phases generalise this to a
 multi-asset subsystem.)"""
 
 import json
