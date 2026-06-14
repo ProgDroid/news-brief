@@ -15,7 +15,8 @@ On top of the brief it runs two analytics layers:
   (ticker, topic, direction, confidence, thesis, rationale, provenance), persisted for review.
 - **Paper trade tracker** — a pure-paper (no money, no orders) tracker that opens notional
   positions from medium/high-confidence directional signals, prices them via Stooq, marks them
-  to market weekly at 1w/2w/4w horizons, and reports a hit-rate scorecard.
+  to market weekly at 1w/2w/4w horizons, and reports a net-of-cost performance report with a
+  per-asset-class go-live readiness gate.
 
 > **Privacy:** an optional Trading212 integration reads your portfolio to weight news against
 > your actual positions, but **no absolute monetary value ever leaves your machine** — only
@@ -31,8 +32,8 @@ The script is a single file (`brief.py`) with several modes, driven by cron:
 | Mode | What it does | Suggested cron (UTC) |
 |------|--------------|----------------------|
 | `submit` | Fetch feeds + Chroma context + portfolio, submit the batch job | `0 20 * * *` |
-| `collect` | Poll for the result, deliver the brief, split off signals, open paper positions | `0 6 * * *` |
-| `weekly` | Synthesise the last 7 briefs; mark the paper book to market + post the scorecard | `0 21 * * 0` (Sun) |
+| `collect` | Poll for the result, deliver the brief, split off signals, open paper positions, then post a daily trade update | `0 6 * * *` |
+| `weekly` | Synthesise the last 7 briefs; mark the paper book to market + post the performance report | `0 21 * * 0` (Sun) |
 | `commands` | Process pending Telegram commands (no brief submitted) | `*/30 * * * *` |
 | `run` | `submit` + `collect` synchronously — for testing | — |
 | `paper` | Open paper positions from today's signals snapshot (also run automatically inside `collect`) | — |
@@ -89,8 +90,21 @@ position (deduped per ticker+direction). Positions are:
 - **Closed early** when a later opposite-direction signal fires for the same ticker
   (`reversal`), or manually via `/close TICKER`.
 
-The weekly job posts a **scorecard**: realized hit-rate (overall and by confidence) and mean
-returns per horizon — percentages only, no monetary figures.
+After delivering the brief, the `collect` job also posts a **daily trade update**: positions
+opened today, prediction-market suggestions, and a summary of open positions with their
+last-known marks.
+
+When a position closes it is stamped with a per-asset-class round-trip cost **haircut**, a
+**net return** (return minus haircut), the **benchmark return** over the same window (the market
+index for the asset class — equity → S&P 500 `^spx`, crypto → BTC, prediction → a naive `0`
+baseline, captured at open), and the **edge** (net return minus benchmark).
+
+The weekly job marks the book to market and posts a **performance report** — net hit-rate, net
+return, and edge over benchmark, both overall and broken down by `asset_class`, `confidence`,
+`play_type`, and `thesis_ref` — percentages only, no monetary figures. Chronically-wrong theses
+are flagged for manual `/mute`/`/thesis`, and the report shows a **per-asset-class go-live
+readiness gate** status. Each weekly run also appends to `paper/gate_history.json` (per-week
+per-asset mean edge), which the gate uses for its sustained-window check.
 
 ### Symbol mapping
 
@@ -148,6 +162,12 @@ cp .env.example .env
 | `T212_API_KEY` | no | Read-only Trading212 key — enables portfolio weights + paper symbol mapping |
 | `T212_BASE_URL` | no | `https://live.trading212.com` (default) or the demo host |
 | `NITTER_BASE_URL` | no | Self-hosted Nitter base URL for X/Twitter feeds (default `http://nitter:8080`) |
+| `HAIRCUT_BPS_EQUITY` | no | Per-asset round-trip cost haircut in basis points, applied to returns — equity (default `10`) |
+| `HAIRCUT_BPS_CRYPTO` | no | Cost haircut in bps — crypto (default `26`) |
+| `HAIRCUT_BPS_PREDICTION` | no | Cost haircut in bps — prediction (default `200`; uses the real PolyGram half-spread when available) |
+| `GATE_MIN_TRADES` | no | Go-live readiness gate: minimum closed trades per asset class (default `30`) |
+| `GATE_MIN_HIT_RATE` | no | Go-live gate: minimum net hit-rate (default `0.55`) |
+| `GATE_SUSTAINED_EVALS` | no | Go-live gate: number of consecutive weekly evals the gate must pass (default `2`) |
 
 ### 4. Build & test
 
@@ -218,7 +238,8 @@ news-brief/
     ├── ticker_map.json        # Manual T212→Stooq symbol overrides (equity)
     ├── crypto_ticker_map.json # Manual crypto-ticker→Kraken-pair overrides
     ├── instruments-cache.json
-    └── polygram_token.json    # PolyGram JWT (prediction markets), refreshed on 401
+    ├── polygram_token.json    # PolyGram JWT (prediction markets), refreshed on 401
+    └── gate_history.json      # Per-week per-asset mean edge, for the go-live gate's sustained-window check
 ```
 
 Every brief is archived to disk regardless of delivery success, so a Telegram hiccup never loses one.
