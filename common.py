@@ -7,8 +7,10 @@ import base64
 import os
 import re
 import json
+import time
 import logging
 import requests
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -106,6 +108,63 @@ def t212_auth_header() -> str:
         f"{T212_API_KEY_ID}:{T212_API_KEY}".encode("utf-8")
     ).decode("utf-8")
     return f"Basic {token}"
+
+
+# ── Cross-process locking ─────────────────────────────────────────────────────
+class LockTimeout(RuntimeError):
+    """Raised when file_lock cannot acquire within its timeout."""
+
+
+@contextmanager
+def file_lock(
+    path,
+    *,
+    timeout: float = 30.0,
+    poll: float = 0.05,
+    stale_after: float = 300.0,
+):
+    """Serialise a read-merge-write span across processes via an O_EXCL lock file.
+
+    _write_json_atomic makes each write crash-safe, but two cron-driven
+    containers that each load -> mutate -> save can still lose an update (e.g.
+    `/close` writing the paper book while a collect run marks it to market). The
+    lock makes those spans mutually exclusive.
+
+    `path` may be the data file itself (the lock lives at "<path>.lock", the data
+    file is never touched) or an explicit "*.lock" path. A lock left behind by a
+    crashed holder is broken once it is older than `stale_after` so a dead process
+    can't wedge the pipeline forever. Raises LockTimeout if the holder won't let
+    go within `timeout`.
+    """
+    p = Path(path)
+    lock = p if p.suffix == ".lock" else p.with_name(p.name + ".lock")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + timeout
+    fd = None
+    while True:
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            break
+        except FileExistsError:
+            try:
+                if time.time() - lock.stat().st_mtime > stale_after:
+                    log.warning(f"Breaking stale lock {lock.name}")
+                    os.unlink(lock)
+                    continue
+            except FileNotFoundError:
+                continue  # released between our open and stat — retry at once
+            if time.monotonic() >= deadline:
+                raise LockTimeout(f"could not acquire {lock.name} within {timeout}s")
+            time.sleep(poll)
+    try:
+        os.write(fd, str(os.getpid()).encode())
+        yield
+    finally:
+        os.close(fd)
+        try:
+            os.unlink(lock)
+        except FileNotFoundError:
+            pass
 
 
 # ── JSON persistence ──────────────────────────────────────────────────────────
