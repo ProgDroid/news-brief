@@ -251,3 +251,21 @@ def test_build_market_pulse_skips_unresolvable(monkeypatch):
     monkeypatch.setattr(trading, "_load_json_or", lambda *a, **k: {})
     block = trading.build_market_pulse([])
     assert "—" in block  # em-dash sentinel for unresolved moves; never raises
+
+
+def test_build_market_pulse_filters_stale_anomalies(monkeypatch):
+    from datetime import datetime, timezone, timedelta
+
+    monkeypatch.setattr(trading, "fetch_daily_move", lambda ac, inst: None)
+    monkeypatch.setattr(trading, "load_book", lambda: {"positions": []})
+    now = datetime.now(timezone.utc)
+    fresh = (now - timedelta(hours=6)).isoformat()
+    stale = (now - timedelta(days=30)).isoformat()
+    hist = {
+        "equity:FRESHX": {"last_alert_ts": fresh},
+        "equity:STALEX": {"last_alert_ts": stale},
+    }
+    monkeypatch.setattr(trading, "_load_json_or", lambda *a, **k: hist)
+    block = trading.build_market_pulse([])
+    assert "FRESHX" in block  # recent alert shown
+    assert "STALEX" not in block  # 30-day-old alert filtered out

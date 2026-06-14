@@ -1004,11 +1004,18 @@ def build_market_pulse(pins: list[str]) -> str:
         lines.append("\n### YOUR POSITIONS — TODAY'S MOVE")
         lines.extend(pos_lines)
 
+    now = datetime.now(timezone.utc)
     hist = _load_json_or(VOLUME_HISTORY_FILE, {})
     anomalies = []
     for key, entry in hist.items():
         ts = entry.get("last_alert_ts")
-        if ts:
+        if not ts:
+            continue
+        try:
+            when = datetime.fromisoformat(ts)
+        except (ValueError, TypeError):
+            continue
+        if now - when < timedelta(days=2):
             anomalies.append(f"- {key}: recent volume spike ({ts[:10]})")
     if anomalies:
         lines.append("\n### VOLUME ANOMALIES (last alerts)")
