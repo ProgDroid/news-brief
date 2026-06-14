@@ -14,6 +14,7 @@ from common import (
     log,
     _write_json_atomic,
     _load_json_or,
+    file_lock,
     T212_API_KEY_ID,
     T212_API_KEY,
     T212_BASE_URL,
@@ -36,6 +37,11 @@ from common import (
 
 PAPER_DIR = DATA_DIR / "paper"
 BOOK_FILE = PAPER_DIR / "book.json"
+# Generous timeout for the paper-book lock: mode_paper holds it across the whole
+# load->open->save span, which (when PolyGram is configured) can include the
+# creds-gated Claude prediction matcher. A coincident /close that can't acquire
+# within this window degrades to "command failed, retry", never to corruption.
+BOOK_LOCK_TIMEOUT = 120.0
 # Legacy equity-only book; read once and migrated into BOOK_FILE on first load.
 LEGACY_PAPER_BOOK_FILE = PAPER_DIR / "paper-book.json"
 TICKER_MAP_FILE = PAPER_DIR / "ticker_map.json"
@@ -1193,6 +1199,9 @@ def mode_paper():
     priced via Stooq/Kraken. Prediction: the Claude matcher maps ALL of today's signals
     to live PolyGram markets (creds-gated) and opens long-the-held-side positions.
     Unmappable/unpriced/macro signals are skipped and logged. MtM + close run weekly.
+
+    The whole load->open->save span runs under the book lock so a concurrent /close
+    (commands mode) can't clobber this collect run's writes (see BOOK_LOCK_TIMEOUT).
     """
     log.info("=== PAPER ===")
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -1214,95 +1223,96 @@ def mode_paper():
         and s.get("ticker")
     ]
 
-    book = load_book()
+    with file_lock(BOOK_FILE, timeout=BOOK_LOCK_TIMEOUT):
+        book = load_book()
 
-    def _open_keys() -> set:
-        return {
-            (p.get("asset_class", "equity"), p["ticker"], p["direction"])
-            for p in book["positions"]
-            if p["status"] == "open"
-        }
+        def _open_keys() -> set:
+            return {
+                (p.get("asset_class", "equity"), p["ticker"], p["direction"])
+                for p in book["positions"]
+                if p["status"] == "open"
+            }
 
-    open_keys = _open_keys()
-    opened = 0
+        open_keys = _open_keys()
+        opened = 0
 
-    if actionable:
-        cache = refresh_instruments_cache()
-        overrides = load_ticker_overrides()
-        crypto_overrides = load_crypto_ticker_overrides()
+        if actionable:
+            cache = refresh_instruments_cache()
+            overrides = load_ticker_overrides()
+            crypto_overrides = load_crypto_ticker_overrides()
 
-        for s in actionable:
-            ac = s.get("asset_class", "equity")
-            ticker, direction = s["ticker"], s["direction"]
-            opposite = "bearish" if direction == "bullish" else "bullish"
+            for s in actionable:
+                ac = s.get("asset_class", "equity")
+                ticker, direction = s["ticker"], s["direction"]
+                opposite = "bearish" if direction == "bullish" else "bullish"
 
-            # Reversal: a fresh opposite-direction call closes the standing position first.
-            if (ac, ticker, opposite) in open_keys:
-                for p in book["positions"]:
-                    if (
-                        p["status"] == "open"
-                        and p.get("asset_class", "equity") == ac
-                        and p["ticker"] == ticker
-                        and p["direction"] == opposite
-                        and _close_position_at_market(p, today, "reversal")
-                    ):
-                        log.info(f"Paper reversal: closed {ac} {ticker} {opposite}")
-                open_keys = _open_keys()
+                # Reversal: a fresh opposite-direction call closes the standing position first.
                 if (ac, ticker, opposite) in open_keys:
-                    # Reversal close couldn't be priced — don't open the opposite yet.
-                    log.warning(
-                        f"Paper skip: unpriced reversal for {ticker}; not opening {direction}"
-                    )
+                    for p in book["positions"]:
+                        if (
+                            p["status"] == "open"
+                            and p.get("asset_class", "equity") == ac
+                            and p["ticker"] == ticker
+                            and p["direction"] == opposite
+                            and _close_position_at_market(p, today, "reversal")
+                        ):
+                            log.info(f"Paper reversal: closed {ac} {ticker} {opposite}")
+                    open_keys = _open_keys()
+                    if (ac, ticker, opposite) in open_keys:
+                        # Reversal close couldn't be priced — don't open the opposite yet.
+                        log.warning(
+                            f"Paper skip: unpriced reversal for {ticker}; not opening {direction}"
+                        )
+                        continue
+
+                if (ac, ticker, direction) in open_keys:
+                    continue  # dedup: a position for this call is already open
+                if ac == "crypto":
+                    symbol = resolve_kraken_pair(ticker, crypto_overrides)
+                else:
+                    symbol = resolve_stooq_symbol(ticker, cache, overrides)
+                if not symbol:
+                    log.warning(f"Paper skip: no instrument for {ticker} ({ac})")
                     continue
+                price = fetch_price(ac, symbol)
+                if price is None:
+                    log.warning(f"Paper skip: no price for {ticker} ({symbol})")
+                    continue
+                book["positions"].append(
+                    {
+                        "id": f"{today}:{ac}:{ticker}:{direction}",
+                        "opened": today,
+                        "asset_class": ac,
+                        "venue": _VENUE_BY_ASSET.get(ac, ""),
+                        "execution": "paper",
+                        "ticker": ticker,
+                        "instrument": symbol,
+                        "play_type": None,
+                        "direction": direction,
+                        "confidence": s.get("confidence"),
+                        "topic": s.get("topic"),
+                        "thesis_ref": s.get("thesis_ref"),
+                        "rationale": s.get("rationale"),
+                        "entry_price": price,
+                        "entry_date": today,
+                        "status": "open",
+                        "close_reason": None,
+                        "closed_date": None,
+                        "checkpoints": {},
+                        "last_mark": None,
+                        "realized_return": None,
+                    }
+                )
+                _stamp_open_benchmark(book["positions"][-1])
+                open_keys.add((ac, ticker, direction))
+                opened += 1
+        else:
+            log.info("No actionable equity/crypto signals today")
 
-            if (ac, ticker, direction) in open_keys:
-                continue  # dedup: a position for this call is already open
-            if ac == "crypto":
-                symbol = resolve_kraken_pair(ticker, crypto_overrides)
-            else:
-                symbol = resolve_stooq_symbol(ticker, cache, overrides)
-            if not symbol:
-                log.warning(f"Paper skip: no instrument for {ticker} ({ac})")
-                continue
-            price = fetch_price(ac, symbol)
-            if price is None:
-                log.warning(f"Paper skip: no price for {ticker} ({symbol})")
-                continue
-            book["positions"].append(
-                {
-                    "id": f"{today}:{ac}:{ticker}:{direction}",
-                    "opened": today,
-                    "asset_class": ac,
-                    "venue": _VENUE_BY_ASSET.get(ac, ""),
-                    "execution": "paper",
-                    "ticker": ticker,
-                    "instrument": symbol,
-                    "play_type": None,
-                    "direction": direction,
-                    "confidence": s.get("confidence"),
-                    "topic": s.get("topic"),
-                    "thesis_ref": s.get("thesis_ref"),
-                    "rationale": s.get("rationale"),
-                    "entry_price": price,
-                    "entry_date": today,
-                    "status": "open",
-                    "close_reason": None,
-                    "closed_date": None,
-                    "checkpoints": {},
-                    "last_mark": None,
-                    "realized_return": None,
-                }
-            )
-            _stamp_open_benchmark(book["positions"][-1])
-            open_keys.add((ac, ticker, direction))
-            opened += 1
-    else:
-        log.info("No actionable equity/crypto signals today")
+        opened += _open_prediction_positions(book, signals, today, open_keys)
 
-    opened += _open_prediction_positions(book, signals, today, open_keys)
-
-    save_book(book)
-    log.info(f"Opened {opened} paper position(s)")
+        save_book(book)
+        log.info(f"Opened {opened} paper position(s)")
 
 
 def _record_checkpoints(

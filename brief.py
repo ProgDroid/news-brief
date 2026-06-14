@@ -45,11 +45,13 @@ from common import (
     _write_json_atomic,
     _load_json_or,
     _redact,
+    file_lock,
     telegram_send,
     telegram_alert,
     sanitise_html,
     split_html_message,
 )
+import trading
 from trading import (
     load_book,
     save_book,
@@ -462,23 +464,30 @@ def _handle_telegram_update(update: dict, fb: dict) -> dict:
 
     elif text.startswith("/close "):
         tkr = text[7:].strip()
-        book = load_book()
-        matches = [
-            p for p in book["positions"] if p["status"] == "open" and p["ticker"] == tkr
-        ]
-        if not matches:
-            telegram_send(f"No open paper position for <b>{html.escape(tkr)}</b>.")
-        else:
-            day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            closed_n = sum(_close_position_at_market(p, day, "manual") for p in matches)
-            if closed_n:
-                save_book(book)
-                telegram_send(
-                    f"✅ Closed {closed_n} paper position(s) for "
-                    f"<b>{html.escape(tkr)}</b> (manual)."
-                )
+        # Hold the book lock across the whole load->close->save so a concurrent
+        # mode_paper (collect) write can't clobber this manual close.
+        with file_lock(trading.BOOK_FILE):
+            book = load_book()
+            matches = [
+                p
+                for p in book["positions"]
+                if p["status"] == "open" and p["ticker"] == tkr
+            ]
+            if not matches:
+                telegram_send(f"No open paper position for <b>{html.escape(tkr)}</b>.")
             else:
-                telegram_send(f"⚠️ Couldn't price {html.escape(tkr)} — left open.")
+                day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                closed_n = sum(
+                    _close_position_at_market(p, day, "manual") for p in matches
+                )
+                if closed_n:
+                    save_book(book)
+                    telegram_send(
+                        f"✅ Closed {closed_n} paper position(s) for "
+                        f"<b>{html.escape(tkr)}</b> (manual)."
+                    )
+                else:
+                    telegram_send(f"⚠️ Couldn't price {html.escape(tkr)} — left open.")
 
     elif text.startswith("/watch "):
         body = text[7:].strip()
@@ -1447,16 +1456,20 @@ def load_state() -> dict | None:
 
 
 def save_state(updates: dict):
-    state = load_state() or {}
-    state.update(updates)
-    _write_json_atomic(STATE_FILE, state, indent=None)
+    # Lock the whole read-merge-write: a concurrent poller/submit must not
+    # interleave between our load and write and lose the other's keys.
+    with file_lock(STATE_FILE):
+        state = load_state() or {}
+        state.update(updates)
+        _write_json_atomic(STATE_FILE, state, indent=None)
 
 
 def clear_batch_state():
-    state = load_state() or {}
-    for key in ("batch_id", "submitted_at", "date", "weekly_batch_id"):
-        state.pop(key, None)
-    _write_json_atomic(STATE_FILE, state, indent=None)
+    with file_lock(STATE_FILE):
+        state = load_state() or {}
+        for key in ("batch_id", "submitted_at", "date", "weekly_batch_id"):
+            state.pop(key, None)
+        _write_json_atomic(STATE_FILE, state, indent=None)
 
 
 # ── Delivery ──────────────────────────────────────────────────────────────────
@@ -1627,8 +1640,11 @@ def mode_weekly():
 
     # Mark the paper book to market regardless of the weekly-summary outcome
     refresh_instruments_cache(force=True)
-    book = mark_to_market(load_book(), datetime.now(timezone.utc).strftime("%Y-%m-%d"))
-    save_book(book)
+    with file_lock(trading.BOOK_FILE):
+        book = mark_to_market(
+            load_book(), datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        )
+        save_book(book)
     record_gate_history(book)
     telegram_send(performance_report(book))
     log.info("Paper book marked to market")

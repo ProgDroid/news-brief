@@ -6,12 +6,24 @@ serialises those spans. The paper book feeds the go-live gate, so a lost write
 there is money-adjacent — hence the dedicated coverage.
 """
 
+import json
 import os
 import time
+from datetime import datetime, timezone
 
 import pytest
 
+import brief
 import common
+import trading
+
+
+def _fb():
+    return {"focus": [], "mute": [], "notes": []}
+
+
+def _update(text):
+    return {"message": {"text": text, "chat": {"id": brief.TELEGRAM_CHAT_ID}}}
 
 
 def test_file_lock_is_exclusive_while_held(tmp_path):
@@ -59,3 +71,87 @@ def test_file_lock_derives_lockfile_from_target_path(tmp_path):
     with common.file_lock(target, timeout=0.3):
         assert (tmp_path / "book.json.lock").exists()
         assert target.read_text() == '{"positions": []}'  # data untouched
+
+
+# ── Wiring: the lock is actually engaged around the read-merge-write spans ──────
+def test_save_state_writes_under_lock(monkeypatch, tmp_path):
+    state_file = tmp_path / "batch_state.json"
+    monkeypatch.setattr(brief, "STATE_FILE", state_file)
+    seen = {}
+    real_write = brief._write_json_atomic
+
+    def spy(path, data, **kw):
+        seen["lock_held"] = (tmp_path / "batch_state.json.lock").exists()
+        return real_write(path, data, **kw)
+
+    monkeypatch.setattr(brief, "_write_json_atomic", spy)
+    brief.save_state({"tg_offset": 7})
+
+    assert seen["lock_held"] is True  # the merge-write happened under the lock
+    assert brief.load_state() == {"tg_offset": 7}
+    assert not (tmp_path / "batch_state.json.lock").exists()  # released on exit
+
+
+def test_close_command_writes_book_under_lock(monkeypatch, tmp_path):
+    book_file = tmp_path / "book.json"
+    monkeypatch.setattr(trading, "BOOK_FILE", book_file)
+    monkeypatch.setattr(brief, "telegram_send", lambda m: True)
+    trading.save_book(
+        {
+            "positions": [
+                {
+                    "status": "open",
+                    "ticker": "BP",
+                    "direction": "bullish",
+                    "asset_class": "equity",
+                    "instrument": "bp.uk",
+                    "entry_price": 5.0,
+                }
+            ]
+        }
+    )
+    monkeypatch.setattr(
+        brief,
+        "_close_position_at_market",
+        lambda p, day, reason: p.__setitem__("status", "closed") or True,
+    )
+    seen = {}
+    real_save = brief.save_book
+
+    def spy_save(book):
+        seen["lock_held"] = (tmp_path / "book.json.lock").exists()
+        return real_save(book)
+
+    monkeypatch.setattr(brief, "save_book", spy_save)
+    brief._handle_telegram_update(_update("/close BP"), _fb())
+
+    assert seen["lock_held"] is True
+    assert not (tmp_path / "book.json.lock").exists()  # released on exit
+
+
+def test_mode_paper_writes_book_under_lock(monkeypatch, tmp_path):
+    # The canonical race the lock exists for: collect's mode_paper write vs a
+    # concurrent /close. mode_paper must hold the book lock across its save.
+    book_file = tmp_path / "book.json"
+    sig_dir = tmp_path / "signals"
+    sig_dir.mkdir()
+    monkeypatch.setattr(trading, "BOOK_FILE", book_file)
+    monkeypatch.setattr(trading, "SIGNALS_DIR", sig_dir)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    # A non-actionable signal: mode_paper still runs the load->save span (opens 0),
+    # so no network is touched (PolyGram is unconfigured in the test env).
+    (sig_dir / f"signals-{today}.json").write_text(
+        json.dumps({"signals": [{"direction": "neutral", "ticker": "X"}]})
+    )
+    seen = {}
+    real_save = trading.save_book
+
+    def spy_save(book):
+        seen["lock_held"] = (tmp_path / "book.json.lock").exists()
+        return real_save(book)
+
+    monkeypatch.setattr(trading, "save_book", spy_save)
+    trading.mode_paper()
+
+    assert seen["lock_held"] is True
+    assert not (tmp_path / "book.json.lock").exists()  # released on exit
