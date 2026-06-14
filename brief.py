@@ -57,6 +57,7 @@ from trading import (
     refresh_instruments_cache,
     mode_paper,
     mark_to_market,
+    run_volume_monitor,
 )
 from validation import (
     performance_report,
@@ -1431,6 +1432,15 @@ def mode_commands():
     process_telegram_commands()
 
 
+def mode_monitor():
+    """Hourly cross-asset volume-anomaly alerts. Decoupled from the brief: its own
+    cron mode, so a monitor failure can never delay or duplicate the morning brief."""
+    log.info("=== MONITOR ===")
+    alerts = run_volume_monitor()
+    if alerts:
+        telegram_send("🔔 <b>Volume alerts</b>\n\n" + "\n".join(alerts))
+
+
 # ── Entry ─────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import sys
@@ -1448,6 +1458,7 @@ if __name__ == "__main__":
         "run": mode_run,
         "commands": mode_commands,
         "paper": mode_paper,
+        "monitor": mode_monitor,
     }
     fn = dispatch.get(mode)
     if fn:
@@ -1460,5 +1471,5 @@ if __name__ == "__main__":
             telegram_alert(f"{mode} crashed: {type(e).__name__}: {e}")
             sys.exit(1)
     else:
-        print("Usage: brief.py [submit|collect|weekly|run|commands]")
+        print("Usage: brief.py [submit|collect|weekly|run|commands|monitor]")
         sys.exit(1)

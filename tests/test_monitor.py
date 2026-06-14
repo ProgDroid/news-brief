@@ -351,3 +351,28 @@ def test_monitor_raising_fetch_does_not_abort(monkeypatch, tmp_path):
     now = datetime(2026, 6, 14, 12, 0, tzinfo=timezone.utc)
     alerts = trading.run_volume_monitor(now=now)  # must not raise
     assert len(alerts) == 1 and "XBTUSD" in alerts[0]
+
+
+import brief  # noqa: E402
+
+
+def test_mode_monitor_sends_message_when_alerts(monkeypatch):
+    sent = []
+    monkeypatch.setattr(brief, "telegram_send", lambda text: sent.append(text) or True)
+    monkeypatch.setattr(
+        brief,
+        "run_volume_monitor",
+        lambda: ["📈 <b>crypto</b> XBTUSD: 5.0× avg volume (5.0k vs 1.0k)"],
+    )
+    brief.mode_monitor()
+    assert len(sent) == 1
+    assert "Volume alerts" in sent[0]
+    assert "XBTUSD" in sent[0]
+
+
+def test_mode_monitor_silent_when_quiet(monkeypatch):
+    sent = []
+    monkeypatch.setattr(brief, "telegram_send", lambda text: sent.append(text) or True)
+    monkeypatch.setattr(brief, "run_volume_monitor", lambda: [])
+    brief.mode_monitor()
+    assert sent == []
