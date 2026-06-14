@@ -147,3 +147,9 @@ def test_cooldown_expired_after_window():
 def test_cooldown_none_is_not_active():
     now = datetime(2026, 6, 14, 12, 0, tzinfo=timezone.utc)
     assert trading._in_cooldown(None, now) is False
+
+
+def test_cooldown_handles_naive_timestamp():
+    now = datetime(2026, 6, 14, 12, 0, tzinfo=timezone.utc)
+    naive = "2026-06-14T11:00:00"  # no offset — must be treated as UTC, not crash
+    assert trading._in_cooldown(naive, now) is True

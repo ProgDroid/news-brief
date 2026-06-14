@@ -822,6 +822,8 @@ def _in_cooldown(last_alert_ts: str | None, now: datetime) -> bool:
         last = datetime.fromisoformat(last_alert_ts)
     except ValueError:
         return False
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
     return (now - last) < timedelta(hours=VOL_ALERT_COOLDOWN_HRS)
 
 
