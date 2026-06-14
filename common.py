@@ -70,6 +70,18 @@ T212_BASE_URL = os.environ.get("T212_BASE_URL", "https://live.trading212.com").s
 POLYGRAM_EMAIL = os.environ.get("POLYGRAM_EMAIL")
 POLYGRAM_PASSWORD = os.environ.get("POLYGRAM_PASSWORD")
 
+# ── Phase 4: validation / performance ─────────────────────────────────────────
+# Round-trip cost haircut (basis points) applied to gross return at close, by asset
+# class. Prediction uses the real orderbook half-spread when available (see trading
+# ._fetch_pg_half_spread); this is the fallback / momentum-exit cost.
+HAIRCUT_BPS_EQUITY = int(os.environ.get("HAIRCUT_BPS_EQUITY", "10"))
+HAIRCUT_BPS_CRYPTO = int(os.environ.get("HAIRCUT_BPS_CRYPTO", "26"))
+HAIRCUT_BPS_PREDICTION = int(os.environ.get("HAIRCUT_BPS_PREDICTION", "200"))
+# Go-live readiness gate (per asset class). Informational — nothing auto-enables live.
+GATE_MIN_TRADES = int(os.environ.get("GATE_MIN_TRADES", "30"))
+GATE_MIN_HIT_RATE = float(os.environ.get("GATE_MIN_HIT_RATE", "0.55"))
+GATE_SUSTAINED_EVALS = int(os.environ.get("GATE_SUSTAINED_EVALS", "2"))
+
 
 def t212_auth_header() -> str:
     """Build the T212 HTTP Basic Authorization value from the configured credentials.
