@@ -90,3 +90,60 @@ def test_fetch_volume_dispatches_by_asset_class(monkeypatch):
     assert trading.fetch_volume("equity", "aapl.us") == 1.0
     assert trading.fetch_volume("crypto", "XBTUSD") == 2.0
     assert trading.fetch_volume("prediction", "0xabc") == 3.0
+
+
+from datetime import datetime, timezone, timedelta  # noqa: E402
+
+
+def test_anomaly_fires_above_multiplier():
+    prior = [100, 100, 100, 100, 100]  # mean 100, >= VOL_MIN_SAMPLES
+    is_spike, ratio = trading._volume_anomaly(prior, 300.0, floor=0.0)
+    assert is_spike is True
+    assert ratio == 3.0
+
+
+def test_anomaly_below_multiplier_is_quiet():
+    prior = [100, 100, 100, 100, 100]
+    is_spike, _ = trading._volume_anomaly(prior, 200.0, floor=0.0)  # 2.0 < 2.5
+    assert is_spike is False
+
+
+def test_anomaly_warmup_suppresses_when_too_few_samples():
+    prior = [100, 100]  # < VOL_MIN_SAMPLES (5)
+    is_spike, _ = trading._volume_anomaly(prior, 9999.0, floor=0.0)
+    assert is_spike is False
+
+
+def test_anomaly_floor_suppresses_thin_instrument():
+    prior = [1, 1, 1, 1, 1]
+    is_spike, _ = trading._volume_anomaly(prior, 5.0, floor=100.0)  # 5x but under floor
+    assert is_spike is False
+
+
+def test_append_sample_dedups_consecutive_duplicates():
+    assert trading._append_sample([100, 200], 200.0) == [100, 200]
+    assert trading._append_sample([100, 200], 300.0) == [100, 200, 300]
+
+
+def test_append_sample_caps_at_trailing_n():
+    big = list(range(common.VOL_TRAILING_N + 5))
+    out = trading._append_sample(big, 999.0)
+    assert len(out) == common.VOL_TRAILING_N
+    assert out[-1] == 999.0
+
+
+def test_cooldown_active_within_window():
+    now = datetime(2026, 6, 14, 12, 0, tzinfo=timezone.utc)
+    recent = (now - timedelta(hours=1)).isoformat()
+    assert trading._in_cooldown(recent, now) is True
+
+
+def test_cooldown_expired_after_window():
+    now = datetime(2026, 6, 14, 12, 0, tzinfo=timezone.utc)
+    old = (now - timedelta(hours=common.VOL_ALERT_COOLDOWN_HRS + 1)).isoformat()
+    assert trading._in_cooldown(old, now) is False
+
+
+def test_cooldown_none_is_not_active():
+    now = datetime(2026, 6, 14, 12, 0, tzinfo=timezone.utc)
+    assert trading._in_cooldown(None, now) is False

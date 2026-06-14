@@ -25,6 +25,13 @@ from common import (
     HAIRCUT_BPS_EQUITY,
     HAIRCUT_BPS_CRYPTO,
     HAIRCUT_BPS_PREDICTION,
+    VOL_SPIKE_MULT,
+    VOL_TRAILING_N,
+    VOL_MIN_SAMPLES,
+    VOL_ALERT_COOLDOWN_HRS,
+    VOL_FLOOR_EQUITY,
+    VOL_FLOOR_CRYPTO,
+    VOL_FLOOR_PREDICTION,
 )
 
 PAPER_DIR = DATA_DIR / "paper"
@@ -780,6 +787,67 @@ def _signal_return(direction: str, entry: float, price: float) -> float:
     """Directional return ratio: +1 for bullish, -1 for bearish, FX/unit-neutral."""
     sign = 1.0 if direction == "bullish" else -1.0
     return sign * (price / entry - 1.0)
+
+
+def _volume_anomaly(prior: list, current: float, floor: float) -> tuple[bool, float]:
+    """(is_spike, ratio) for current volume vs the mean of prior samples.
+
+    Pure. Warm-up (need >= VOL_MIN_SAMPLES prior samples), an absolute floor, and a
+    positive baseline all gate the ratio test, so a cold start or a thin instrument
+    never alerts.
+    """
+    if len(prior) < VOL_MIN_SAMPLES or current < floor:
+        return (False, 0.0)
+    baseline = sum(prior) / len(prior)
+    if baseline <= 0:
+        return (False, 0.0)
+    ratio = current / baseline
+    return (ratio >= VOL_SPIKE_MULT, ratio)
+
+
+def _append_sample(samples: list, current: float) -> list:
+    """Append current to the trailing window, deduping a consecutive duplicate
+    (daily-resolution equity volume is identical all day -> one sample/day, not 24),
+    capped at VOL_TRAILING_N most-recent samples."""
+    if samples and samples[-1] == current:
+        return samples
+    return (samples + [current])[-VOL_TRAILING_N:]
+
+
+def _in_cooldown(last_alert_ts: str | None, now: datetime) -> bool:
+    """True if the last alert for this instrument is within VOL_ALERT_COOLDOWN_HRS."""
+    if not last_alert_ts:
+        return False
+    try:
+        last = datetime.fromisoformat(last_alert_ts)
+    except ValueError:
+        return False
+    return (now - last) < timedelta(hours=VOL_ALERT_COOLDOWN_HRS)
+
+
+def _floor_for(asset_class: str) -> float:
+    return {
+        "equity": VOL_FLOOR_EQUITY,
+        "crypto": VOL_FLOOR_CRYPTO,
+        "prediction": VOL_FLOOR_PREDICTION,
+    }.get(asset_class, 0.0)
+
+
+def _fmt_vol(v: float) -> str:
+    if v >= 1e6:
+        return f"{v / 1e6:.1f}M"
+    if v >= 1e3:
+        return f"{v / 1e3:.1f}k"
+    return f"{v:.0f}"
+
+
+def _format_alert(
+    asset_class: str, instrument: str, current: float, baseline: float, ratio: float
+) -> str:
+    return (
+        f"📈 <b>{asset_class}</b> {instrument}: {ratio:.1f}× avg volume "
+        f"({_fmt_vol(current)} vs {_fmt_vol(baseline)})"
+    )
 
 
 def _close_position_at_market(p: dict, day: str, reason: str) -> bool:
