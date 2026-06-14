@@ -61,6 +61,8 @@ from trading import (
     load_watchlist,
     save_watchlist,
     resolve_watch_entry,
+    price_position,
+    _signal_return,
 )
 from validation import (
     performance_report,
@@ -431,6 +433,38 @@ def _handle_telegram_update(update: dict, fb: dict) -> dict:
             telegram_send(f"🚫 Unwatched <b>{html.escape(token)}</b>.")
         else:
             telegram_send(f"<b>{html.escape(token)}</b> is not on the watchlist.")
+
+    elif text == "/positions":
+        book = load_book()
+        opens = [p for p in book["positions"] if p.get("status") == "open"]
+        if not opens:
+            telegram_send("No open positions.")
+        else:
+            by_class: dict[str, list[str]] = {}
+            for p in opens:
+                mark = price_position(p)
+                if mark is None:
+                    line = (
+                        f"  – {html.escape(p.get('ticker', p['instrument']))}: mark —"
+                    )
+                else:
+                    ret = _signal_return(p["direction"], p["entry_price"], mark)
+                    line = (
+                        f"  – {html.escape(p.get('ticker', p['instrument']))}: "
+                        f"{100 * ret:+.1f}%"
+                    )
+                by_class.setdefault(p.get("asset_class", "equity"), []).append(line)
+            lines = ["<b>📂 Open positions</b>"]
+            for ac in ("equity", "crypto", "prediction"):
+                if by_class.get(ac):
+                    lines.append(f"<b>{ac}</b>")
+                    lines.extend(by_class[ac])
+            telegram_send("\n".join(lines))
+
+    elif text == "/performance":
+        for chunk in split_html_message(performance_report(load_book())):
+            telegram_send(chunk)
+            time.sleep(0.4)
 
     else:
         telegram_send("Unknown command — send /help for options.")

@@ -76,3 +76,76 @@ def test_unwatch_missing_reports(monkeypatch, tmp_path):
     monkeypatch.setattr(trading, "WATCHLIST_FILE", tmp_path / "wl.json")
     brief._handle_telegram_update(_update("/unwatch GHOST"), _fb())
     assert "not on the watchlist" in sent[0]
+
+
+def test_positions_lists_open_with_marks(monkeypatch):
+    sent = _capture(monkeypatch)
+    monkeypatch.setattr(
+        brief,
+        "load_book",
+        lambda: {
+            "positions": [
+                {
+                    "status": "open",
+                    "asset_class": "crypto",
+                    "instrument": "XBTUSD",
+                    "ticker": "BTC",
+                    "direction": "bullish",
+                    "entry_price": 100.0,
+                },
+                {
+                    "status": "closed",
+                    "asset_class": "equity",
+                    "instrument": "bp.uk",
+                    "ticker": "BP",
+                    "direction": "bullish",
+                    "entry_price": 5.0,
+                },
+            ]
+        },
+    )
+    monkeypatch.setattr(brief, "price_position", lambda p: 150.0)
+    brief._handle_telegram_update(_update("/positions"), _fb())
+    assert "BTC" in sent[0] and "crypto" in sent[0]
+    assert "+50.0%" in sent[0]
+    assert "BP" not in sent[0]  # closed excluded
+
+
+def test_positions_empty(monkeypatch):
+    sent = _capture(monkeypatch)
+    monkeypatch.setattr(brief, "load_book", lambda: {"positions": []})
+    brief._handle_telegram_update(_update("/positions"), _fb())
+    assert "No open positions" in sent[0]
+
+
+def test_positions_unpriceable_shows_dash(monkeypatch):
+    sent = _capture(monkeypatch)
+    monkeypatch.setattr(
+        brief,
+        "load_book",
+        lambda: {
+            "positions": [
+                {
+                    "status": "open",
+                    "asset_class": "equity",
+                    "instrument": "x.us",
+                    "ticker": "X",
+                    "direction": "bullish",
+                    "entry_price": 10.0,
+                },
+            ]
+        },
+    )
+    monkeypatch.setattr(brief, "price_position", lambda p: None)
+    brief._handle_telegram_update(_update("/positions"), _fb())
+    assert "—" in sent[0]
+
+
+def test_performance_wraps_report(monkeypatch):
+    sent = _capture(monkeypatch)
+    monkeypatch.setattr(brief, "load_book", lambda: {"positions": []})
+    monkeypatch.setattr(
+        brief, "performance_report", lambda book: "📊 PERFORMANCE REPORT\nstub"
+    )
+    brief._handle_telegram_update(_update("/performance"), _fb())
+    assert "PERFORMANCE REPORT" in sent[0]
