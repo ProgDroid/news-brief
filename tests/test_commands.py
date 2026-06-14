@@ -149,3 +149,25 @@ def test_performance_wraps_report(monkeypatch):
     )
     brief._handle_telegram_update(_update("/performance"), _fb())
     assert "PERFORMANCE REPORT" in sent[0]
+
+
+def test_resolved_pins_defaults_when_absent():
+    # A feedback dict with no "pin" key resolves to the default five.
+    assert brief.resolved_pins({"focus": [], "mute": [], "notes": []}) == [
+        "ukraine",
+        "iran",
+        "korea",
+        "japan",
+        "china",
+    ]
+
+
+def test_resolved_pins_uses_explicit_list():
+    fb = {"focus": [], "mute": [], "notes": [], "pin": ["china", "taiwan"]}
+    assert brief.resolved_pins(fb) == ["china", "taiwan"]
+
+
+def test_resolved_pins_empty_list_is_respected():
+    # An explicit empty list means "no pins" — distinct from "key absent".
+    fb = {"focus": [], "mute": [], "notes": [], "pin": []}
+    assert brief.resolved_pins(fb) == []

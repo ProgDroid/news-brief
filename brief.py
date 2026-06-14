@@ -160,6 +160,11 @@ WEB_SOURCES = [
     },
 ]
 
+# Default pinned topics — always rendered (at least a one-liner) when the
+# reader has not customised the pin set via /pin /unpin. Matches the legacy
+# hardcoded country sections so day-one behaviour is unchanged.
+DEFAULT_PINS = ["ukraine", "iran", "korea", "japan", "china"]
+
 # Each topic drives both a web search query and a Chroma query
 TOPICS = [
     {
@@ -202,6 +207,14 @@ def load_feedback() -> dict:
 
 def save_feedback(fb: dict):
     _write_json_atomic(FEEDBACK_FILE, fb)
+
+
+def resolved_pins(fb: dict) -> list[str]:
+    """The active pin set: an explicit fb['pin'] list (even empty) wins;
+    a missing key resolves to DEFAULT_PINS. Distinguishing absent-vs-empty
+    lets /reset restore the defaults by dropping the key."""
+    pins = fb.get("pin")
+    return list(pins) if pins is not None else list(DEFAULT_PINS)
 
 
 def feedback_summary(fb: dict) -> str:
