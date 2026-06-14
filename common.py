@@ -257,6 +257,20 @@ def telegram_alert(text: str) -> None:
         log.error(f"Alert send failed: {_redact(str(e))}")
 
 
+# A surviving allowed tag (open/close, optional attrs) OR an existing HTML entity.
+# Text NOT matched here is literal prose whose <, >, & must be escaped, else
+# "oil <$60" / "AT&T" leave a bare < or & that 400s the whole Telegram chunk.
+_PRESERVE_RE = re.compile(
+    r"</?(?:" + "|".join(ALLOWED_TAGS) + r")(?:\s[^>]*)?>"
+    r"|&(?:#\d+|#x[0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]*);"
+)
+
+
+def _escape_bare_html(s: str) -> str:
+    # & first, else the & in &lt;/&gt; we emit would itself get double-escaped.
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def sanitise_html(text: str) -> str:
     text = re.sub(r"```[a-z]*\n?", "", text)
     text = re.sub(
@@ -264,6 +278,15 @@ def sanitise_html(text: str) -> str:
         "",
         text,
     )
+    # Whitelist-preserving escape: leave the surviving allowed tags and existing
+    # entities verbatim, escape stray <, >, & in the literal text between them.
+    out, pos = [], 0
+    for m in _PRESERVE_RE.finditer(text):
+        out.append(_escape_bare_html(text[pos : m.start()]))
+        out.append(m.group(0))
+        pos = m.end()
+    out.append(_escape_bare_html(text[pos:]))
+    text = "".join(out)
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 

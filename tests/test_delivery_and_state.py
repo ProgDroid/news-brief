@@ -20,6 +20,31 @@ def test_sanitise_script_not_confused_with_s_tag():
     assert brief.sanitise_html("<s>ok</s><script>bad</script>") == "<s>ok</s>bad"
 
 
+def test_sanitise_escapes_bare_lt_in_prose():
+    # "oil <$60" is the canonical 400-the-chunk case: a bare < is not tag-shaped,
+    # so the disallowed-tag strip leaves it, and Telegram's HTML parser rejects it.
+    assert brief.sanitise_html("oil <$60 soon") == "oil &lt;$60 soon"
+
+
+def test_sanitise_escapes_bare_ampersand_and_gt():
+    assert brief.sanitise_html("AT&T yields > 5%") == "AT&amp;T yields &gt; 5%"
+
+
+def test_sanitise_preserves_existing_entities():
+    # An already-escaped entity must not be double-escaped.
+    assert brief.sanitise_html("5 &lt; 10 &amp; rising") == "5 &lt; 10 &amp; rising"
+
+
+def test_sanitise_escapes_bare_chars_around_stripped_tag():
+    assert brief.sanitise_html("<div>oil <$60</div>") == "oil &lt;$60"
+
+
+def test_sanitise_keeps_allowed_tag_with_ampersand_url():
+    # & inside a surviving allowed tag's attributes is left intact (not escaped).
+    raw = '<a href="https://x.test?a=1&b=2">link</a>'
+    assert brief.sanitise_html(raw) == raw
+
+
 # ── split_html_message ────────────────────────────────────────────────────────
 def test_split_short_text_passthrough():
     assert brief.split_html_message("hello", max_len=40) == ["hello"]
