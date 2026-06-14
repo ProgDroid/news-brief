@@ -118,8 +118,11 @@ pin-responsive pieces. Three tiers:
    topics are fetched, so the pulse tracks the pin set automatically. A pinned topic with no
    mapped instrument simply contributes no market line (the map is allowed gaps — e.g.
    Ukraine has no clean single instrument).
-3. **Positions + watchlist** (fully dynamic, zero config): open-position daily moves from
-   `book.json`, plus the watchlist, plus their volume anomalies.
+3. **Positions + anomalies** (fully dynamic, zero config): open-position daily moves from
+   `book.json`, plus *recent* volume anomalies (within a 2-day cutoff) read from
+   `volume-history.json`. (Per-watchlist-instrument price moves are intentionally omitted to
+   keep the block tight — the watchlist's purpose is volume alerting, which the anomaly tier
+   already surfaces.)
 
 - **New config:** `MARKET_SPINE` (tier 1, list of `(label, asset_class, instrument)`) and
   `PIN_INSTRUMENTS` (tier 2, `dict[topic_label, list[(label, asset_class, instrument)]]`).
