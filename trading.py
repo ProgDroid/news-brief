@@ -243,7 +243,9 @@ def _stamp_close_metrics(p: dict, day: str) -> None:
     Call AFTER status is set to "closed" and realized_return is stamped. Best-effort
     on the benchmark fetch — never raises out of a close path. A fetch failure or a
     legacy position with no benchmark_entry leaves benchmark_return/edge None, but
-    net_return is always set.
+    net_return is always set. `day` is currently unused (the benchmark is marked at
+    the live level, not an as-of-`day` historical level); retained for call-site
+    symmetry and a possible future as-of lookup.
     """
     gross = p.get("realized_return")
     if gross is None:
