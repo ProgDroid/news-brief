@@ -319,6 +319,78 @@ def fetch_kraken_volume(pair: str) -> float | None:
     return vol if vol >= 0 else None
 
 
+# Yahoo market suffixes. US is bare; the rest carry an exchange suffix.
+_YAHOO_SUFFIX = {"us": "", "uk": ".L", "de": ".DE", "fr": ".PA"}
+
+# A browser UA is enough for the keyless v8/chart endpoint (no crumb/cookie needed).
+_YAHOO_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+
+
+def _yahoo_format_symbol(base: str, market: str) -> str:
+    """Translate a neutral (base, market) to a Yahoo ticker ('rr','uk' -> 'RR.L')."""
+    return f"{base.upper()}{_YAHOO_SUFFIX.get(market, '')}"
+
+
+def _yahoo_fetch(yahoo_symbol: str) -> Quote | None:
+    """Fetch a daily Quote for an already-formatted Yahoo symbol via v8/chart.
+
+    Handles the GBp (pence) -> GBP (pounds) /100 conversion via the response's
+    currency field. Returns None on any network/parse failure or non-positive
+    close — callers treat None as 'could not price' and skip.
+    """
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol}"
+    try:
+        resp = requests.get(
+            url,
+            params={"interval": "1d", "range": "1d"},
+            headers=_YAHOO_HEADERS,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        log.warning(f"Yahoo fetch failed for {yahoo_symbol}: {e}")
+        return None
+    result = (data.get("chart") or {}).get("result")
+    if not result:
+        log.warning(f"Yahoo returned no result for {yahoo_symbol}")
+        return None
+    node = result[0]
+    meta = node.get("meta") or {}
+    try:
+        quote = node["indicators"]["quote"][0]
+    except (KeyError, IndexError, TypeError):
+        return None
+
+    def _last(key):  # last non-null entry in the series, else None
+        seq = quote.get(key) or []
+        for v in reversed(seq):
+            if v is not None:
+                return float(v)
+        return None
+
+    close = _last("close")
+    if close is None:
+        close = meta.get("regularMarketPrice")
+        close = float(close) if close is not None else None
+    if close is None or close <= 0:
+        log.warning(f"Yahoo returned no usable close for {yahoo_symbol}")
+        return None
+    open_ = _last("open")
+    volume = _last("volume")
+    # GBp is pence; convert price fields (not volume) to the major unit.
+    if meta.get("currency") == "GBp":
+        close /= 100.0
+        if open_ is not None:
+            open_ /= 100.0
+    return Quote(close=close, open_=open_, volume=volume)
+
+
+def _yahoo_quote(base: str, market: str) -> Quote | None:
+    """Daily Quote for a neutral (base, market) from Yahoo."""
+    return _yahoo_fetch(_yahoo_format_symbol(base, market))
+
+
 def fetch_pg_volume(market_id: str) -> float | None:
     """24h volume for a PolyGram market, read from market detail (volume lives on
     the market object in the Polymarket mirror, not in the price series). None if

@@ -110,3 +110,108 @@ def test_stooq_zero_price_returns_none(monkeypatch):
 def test_stooq_short_response_returns_none(monkeypatch):
     _patch_stooq(monkeypatch, "Symbol,Date,Time,Open,High,Low,Close,Volume")
     assert trading.fetch_stooq_price("aapl.us") is None
+
+
+# ── _yahoo_format_symbol ──────────────────────────────────────────────────────
+def test_yahoo_format_us():
+    assert trading._yahoo_format_symbol("aapl", "us") == "AAPL"
+
+
+def test_yahoo_format_lse():
+    assert trading._yahoo_format_symbol("rr", "uk") == "RR.L"
+
+
+def test_yahoo_format_xetra():
+    assert trading._yahoo_format_symbol("exv1", "de") == "EXV1.DE"
+
+
+def test_yahoo_format_paris():
+    assert trading._yahoo_format_symbol("mc", "fr") == "MC.PA"
+
+
+# ── _yahoo_quote ──────────────────────────────────────────────────────────────
+# A JSON-returning fake response; the Stooq _FakeResp above is text-only, so the
+# Yahoo tests use their own fake (distinct shape, distinct name).
+class _FakeJsonResp:
+    def __init__(self, payload, status=200):
+        self._payload = payload
+        self.status_code = status
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+    def json(self):
+        return self._payload
+
+
+def _yahoo_payload(currency="USD", close=123.45, open_=120.0, volume=1000):
+    return {
+        "chart": {
+            "result": [
+                {
+                    "meta": {
+                        "currency": currency,
+                        "regularMarketPrice": close,
+                    },
+                    "indicators": {
+                        "quote": [
+                            {
+                                "open": [open_],
+                                "close": [close],
+                                "volume": [volume],
+                            }
+                        ]
+                    },
+                }
+            ],
+            "error": None,
+        }
+    }
+
+
+def test_yahoo_quote_us_parses_fields(monkeypatch):
+    monkeypatch.setattr(
+        trading.requests, "get", lambda *a, **k: _FakeJsonResp(_yahoo_payload())
+    )
+    q = trading._yahoo_quote("aapl", "us")
+    assert q == trading.Quote(close=123.45, open_=120.0, volume=1000.0)
+
+
+def test_yahoo_quote_lse_converts_pence_to_pounds(monkeypatch):
+    # GBp = pence; 2750 pence -> 27.50, open 2700 -> 27.00
+    monkeypatch.setattr(
+        trading.requests,
+        "get",
+        lambda *a, **k: _FakeJsonResp(
+            _yahoo_payload(currency="GBp", close=2750.0, open_=2700.0)
+        ),
+    )
+    q = trading._yahoo_quote("rr", "uk")
+    assert q.close == 27.5
+    assert q.open_ == 27.0
+
+
+def test_yahoo_quote_http_error_returns_none(monkeypatch):
+    monkeypatch.setattr(
+        trading.requests, "get", lambda *a, **k: _FakeJsonResp({}, status=429)
+    )
+    assert trading._yahoo_quote("aapl", "us") is None
+
+
+def test_yahoo_quote_nonpositive_close_returns_none(monkeypatch):
+    monkeypatch.setattr(
+        trading.requests,
+        "get",
+        lambda *a, **k: _FakeJsonResp(_yahoo_payload(close=0.0)),
+    )
+    assert trading._yahoo_quote("aapl", "us") is None
+
+
+def test_yahoo_quote_empty_result_returns_none(monkeypatch):
+    monkeypatch.setattr(
+        trading.requests,
+        "get",
+        lambda *a, **k: _FakeJsonResp({"chart": {"result": None, "error": "x"}}),
+    )
+    assert trading._yahoo_quote("aapl", "us") is None
