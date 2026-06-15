@@ -102,8 +102,9 @@ PG_MAX_HOLD_DAYS = 182  # ~26w backstop close for never-resolving resolution mar
 
 
 class Quote(NamedTuple):
-    """A single instrument's daily quote. Any field may be None when the provider
-    omits it; callers treat a None field as 'unavailable' and skip (never guess)."""
+    """A single instrument's daily quote. open_ and volume may be None when the
+    provider omits them; callers treat a None field as 'unavailable' and skip. A
+    provider that can't supply a usable close returns None instead of a Quote."""
 
     close: float
     open_: float | None
