@@ -9,6 +9,7 @@ import requests
 from datetime import datetime, timezone, timedelta
 from typing import NamedTuple
 
+import common
 from common import (
     DATA_DIR,
     SIGNALS_DIR,
@@ -395,6 +396,46 @@ def _yahoo_fetch(yahoo_symbol: str) -> Quote | None:
 def _yahoo_quote(base: str, market: str) -> Quote | None:
     """Daily Quote for a neutral (base, market) from Yahoo."""
     return _yahoo_fetch(_yahoo_format_symbol(base, market))
+
+
+def _alpaca_quote(symbol: str) -> Quote | None:
+    """Daily Quote for a US symbol from Alpaca's snapshot endpoint (free IEX feed).
+
+    Returns None when Alpaca is unconfigured or on any network/parse failure /
+    non-positive close — callers skip (mirrors the other pricers). US-only: the
+    free feed has no international listings, so the router only routes US here.
+    """
+    if not common.ALPACA_API_KEY_ID or not common.ALPACA_API_SECRET:
+        return None
+    url = f"{common.ALPACA_DATA_URL}/v2/stocks/{symbol}/snapshot"
+    headers = {
+        "APCA-API-KEY-ID": common.ALPACA_API_KEY_ID,
+        "APCA-API-SECRET-KEY": common.ALPACA_API_SECRET,
+    }
+    try:
+        resp = requests.get(url, headers=headers, params={"feed": "iex"}, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        log.warning(f"Alpaca fetch failed for {symbol}: {e}")
+        return None
+    bar = data.get("dailyBar") or data.get("prevDailyBar") or {}
+    try:
+        close = float(bar["c"])
+    except (KeyError, TypeError, ValueError):
+        log.warning(f"Alpaca returned no usable close for {symbol}")
+        return None
+    if close <= 0:
+        return None
+
+    def _opt(key):
+        v = bar.get(key)
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    return Quote(close=close, open_=_opt("o"), volume=_opt("v"))
 
 
 def fetch_pg_volume(market_id: str) -> float | None:

@@ -226,3 +226,41 @@ def test_yahoo_quote_nonnumeric_close_returns_none(monkeypatch):
         lambda *a, **k: _FakeJsonResp(_yahoo_payload(close="N/A")),
     )
     assert trading._yahoo_quote("aapl", "us") is None
+
+
+def _alpaca_snapshot(close=200.0, open_=198.0, volume=5000):
+    return {
+        "dailyBar": {"o": open_, "h": 0, "l": 0, "c": close, "v": volume},
+        "latestTrade": {"p": close},
+        "prevDailyBar": {"o": 0, "h": 0, "l": 0, "c": close, "v": volume},
+    }
+
+
+def test_alpaca_quote_parses_daily_bar(monkeypatch):
+    monkeypatch.setattr(trading.common, "ALPACA_API_KEY_ID", "k")
+    monkeypatch.setattr(trading.common, "ALPACA_API_SECRET", "s")
+    monkeypatch.setattr(
+        trading.requests, "get", lambda *a, **k: _FakeJsonResp(_alpaca_snapshot())
+    )
+    q = trading._alpaca_quote("AAPL")
+    assert q == trading.Quote(close=200.0, open_=198.0, volume=5000.0)
+
+
+def test_alpaca_quote_no_keys_returns_none(monkeypatch):
+    monkeypatch.setattr(trading.common, "ALPACA_API_KEY_ID", "")
+    monkeypatch.setattr(trading.common, "ALPACA_API_SECRET", "")
+
+    def _boom(*a, **k):
+        raise AssertionError("should not call the network without keys")
+
+    monkeypatch.setattr(trading.requests, "get", _boom)
+    assert trading._alpaca_quote("AAPL") is None
+
+
+def test_alpaca_quote_http_error_returns_none(monkeypatch):
+    monkeypatch.setattr(trading.common, "ALPACA_API_KEY_ID", "k")
+    monkeypatch.setattr(trading.common, "ALPACA_API_SECRET", "s")
+    monkeypatch.setattr(
+        trading.requests, "get", lambda *a, **k: _FakeJsonResp({}, status=429)
+    )
+    assert trading._alpaca_quote("AAPL") is None

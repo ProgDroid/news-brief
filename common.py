@@ -73,6 +73,12 @@ T212_API_KEY_ID = os.environ.get("T212_API_KEY_ID", "").strip()
 T212_API_KEY = os.environ.get("T212_API_KEY", "").strip()
 T212_BASE_URL = os.environ.get("T212_BASE_URL", "https://live.trading212.com").strip()
 
+# Alpaca market-data credentials (optional, like T212). Free signup gives a
+# paper account with full Basic/IEX data access — no funding required.
+ALPACA_API_KEY_ID = os.environ.get("APCA_API_KEY_ID", "").strip()
+ALPACA_API_SECRET = os.environ.get("APCA_API_SECRET_KEY", "").strip()
+ALPACA_DATA_URL = os.environ.get("APCA_DATA_URL", "https://data.alpaca.markets").strip()
+
 
 # PolyGram (prediction markets) credentials — optional, like T212. Login is
 # JWT-based; registration is manual/one-time and never in the cron path.
