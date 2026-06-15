@@ -225,6 +225,26 @@ def test_daily_move_none_on_failure(monkeypatch):
     assert trading.fetch_daily_move("equity", "aapl.us") is None
 
 
+def test_index_daily_move_uses_raw_yahoo_symbol(monkeypatch):
+    # Market-pulse indices/commodities/FX price via _yahoo_fetch with the raw
+    # symbol (^GSPC, GC=F, …), NOT through fetch_quote's base.market resolver.
+    seen = []
+    monkeypatch.setattr(
+        trading,
+        "_yahoo_fetch",
+        lambda s: (
+            seen.append(s) or trading.Quote(close=110.0, open_=100.0, volume=None)
+        ),
+    )
+
+    def _boom(*a, **k):
+        raise AssertionError("index must not route through fetch_quote")
+
+    monkeypatch.setattr(trading, "fetch_quote", _boom)
+    assert trading.fetch_daily_move("index", "^GSPC") == 10.0
+    assert seen == ["^GSPC"]  # raw symbol passed straight through
+
+
 def test_build_market_pulse_includes_spine_and_pinned(monkeypatch):
     monkeypatch.setattr(trading, "fetch_daily_move", lambda ac, inst: 1.5)
     monkeypatch.setattr(trading, "load_book", lambda: {"positions": []})

@@ -81,17 +81,17 @@ PAPER_CLOSE_HORIZON = "4w"  # close the position once this checkpoint is recorde
 # Market-pulse instruments. Each entry: (label, asset_class, instrument).
 # Tier 1 — macro spine, always fetched (universal risk-on/off pulse).
 MARKET_SPINE = [
-    ("S&P 500", "equity", "^spx"),
-    ("US Dollar (DXY)", "equity", "dx.f"),
-    ("Gold", "equity", "xauusd"),
+    ("S&P 500", "index", "^GSPC"),
+    ("US Dollar (DXY)", "index", "DX-Y.NYB"),
+    ("Gold", "index", "GC=F"),
     ("Bitcoin", "crypto", "XBTUSD"),
 ]
 # Tier 2 — pin-derived: only fetched for currently pinned topics. Gaps allowed
 # (a pin with no clean instrument simply contributes no market line).
 PIN_INSTRUMENTS = {
-    "iran": [("Brent crude", "equity", "cb.f")],
-    "japan": [("USD/JPY", "equity", "usdjpy"), ("Nikkei 225", "equity", "^nkx")],
-    "china": [("Hang Seng", "equity", "^hsi")],
+    "iran": [("Brent crude", "index", "BZ=F")],
+    "japan": [("USD/JPY", "index", "USDJPY=X"), ("Nikkei 225", "index", "^N225")],
+    "china": [("Hang Seng", "index", "^HSI")],
 }
 
 # ── PolyGram (prediction markets) ─────────────────────────────────────────────
@@ -182,13 +182,15 @@ def fetch_kraken_price(pair: str) -> float | None:
 def fetch_daily_move(asset_class: str, instrument: str) -> float | None:
     """Intraday percent move (open → last) for one instrument, single fetch.
 
-    Equity → multi-provider (Alpaca/Yahoo) quote (open → close); crypto → Kraken
-    Ticker (o=today's open, c[0]=last). Returns the percent change rounded to 2dp,
-    or None on any failure / non-positive open — callers render '—', never guess.
+    Equity → multi-provider (Alpaca/Yahoo) quote (open → close); index → a raw
+    Yahoo symbol (market-pulse indices/commodities/FX: '^GSPC', 'GC=F', 'USDJPY=X',
+    …) fetched directly, bypassing the base.market resolver; crypto → Kraken Ticker
+    (o=today's open, c[0]=last). Returns the percent change rounded to 2dp, or None
+    on any failure / non-positive open — callers render '—', never guess.
     """
     if asset_class == "crypto":
         return _kraken_daily_move(instrument)
-    q = fetch_quote(instrument)
+    q = _yahoo_fetch(instrument) if asset_class == "index" else fetch_quote(instrument)
     if q is None or q.open_ is None or q.open_ <= 0:
         return None
     return round((q.close - q.open_) / q.open_ * 100, 2)
