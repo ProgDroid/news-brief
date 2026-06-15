@@ -50,6 +50,17 @@ def test_xetra_eur_resolved_by_isin_country():
     assert trading.resolve_symbol("EXV1d_EQ", CACHE, {}) == "exv1.de"
 
 
+def test_plain_lse_marker_symbol_strips_marker():
+    # A signal can carry the plain marker-laden LSE symbol ('RRl', no underscore,
+    # like the real-world 'SGLNl'/'ARMGl'); it base-matches 'RRl_EQ' and the
+    # trailing 'l' marker must still be stripped -> 'rr.uk', not 'rrl.uk'.
+    assert trading.resolve_symbol("RRl", CACHE, {}) == "rr.uk"
+
+
+def test_plain_xetra_marker_symbol_strips_marker():
+    assert trading.resolve_symbol("EXV1d", CACHE, {}) == "exv1.de"
+
+
 def test_unknown_currency_returns_none():
     assert trading.resolve_symbol("XYZ_PL_EQ", CACHE, {}) is None
 

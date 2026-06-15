@@ -857,13 +857,16 @@ def refresh_instruments_cache(max_age_days: int = 14, force: bool = False) -> di
     return cache
 
 
-def _match_instrument_by_base(symbol: str, instruments: dict) -> dict | None:
+def _match_instrument_by_base(
+    symbol: str, instruments: dict
+) -> tuple[str, dict] | None:
     """Find the cached T212 instrument whose base symbol matches `symbol`.
 
     Signals carry plain exchange symbols ('SHEL'), while T212 tickers are
     '<SYMBOL>_<COUNTRY>_EQ' (US) or '<SYMBOLl>_EQ' (LSE). The base is the part
     before the first '_'. When several listings share a base, prefer the US one
-    (signals use US-style symbols). Returns the metadata dict or None.
+    (signals use US-style symbols). Returns (matched_ticker, metadata) — the
+    matched T212 ticker is the authoritative form for marker-stripping — or None.
     """
     want = symbol.split("_")[0].upper()
     candidates = []
@@ -876,7 +879,7 @@ def _match_instrument_by_base(symbol: str, instruments: dict) -> dict | None:
     if not candidates:
         return None
     candidates.sort(key=lambda c: (c[0], c[1]))
-    return candidates[0][2]
+    return candidates[0][1], candidates[0][2]
 
 
 def resolve_symbol(ticker: str, cache: dict, overrides: dict) -> str | None:
@@ -894,12 +897,18 @@ def resolve_symbol(ticker: str, cache: dict, overrides: dict) -> str | None:
     if ticker in overrides:
         return overrides[ticker]
     instruments = cache.get("instruments", {})
+    # Derive base + marker from the MATCHED T212 ticker, not the input. A plain
+    # signal can carry the marker baked in ('SGLNl', no underscore) yet base-match
+    # the 2-segment LSE listing 'SGLNl_EQ'; using the matched ticker is what lets
+    # the marker get stripped in that case (input-based parsing kept the 'l').
     meta = instruments.get(ticker)
+    matched = ticker  # exact-match path: the input already IS the T212 ticker
     if meta is None:
-        meta = _match_instrument_by_base(ticker, instruments)
-    if not meta:
-        return None
-    parts = ticker.split("_")
+        found = _match_instrument_by_base(ticker, instruments)
+        if found is None:
+            return None
+        matched, meta = found
+    parts = matched.split("_")
     base = parts[0].lower()
     ccy = (meta.get("currencyCode") or "").upper()
     suffix = _STOOQ_SUFFIX.get(ccy)
@@ -907,9 +916,9 @@ def resolve_symbol(ticker: str, cache: dict, overrides: dict) -> str | None:
         suffix = _STOOQ_EUR_BY_ISIN.get((meta.get("isin") or "")[:2].upper())
     if suffix is None:
         return None
-    # Only the two-part LSE/Xetra form ('RRl_EQ', 'EXV1d_EQ') carries the trailing
-    # market-marker letter; the three-part US/country form ('AAPL_US_EQ') is clean,
-    # and a plain signal symbol ('SHEL') has no underscore — neither is stripped.
+    # The two-part LSE/Xetra form ('RRl_EQ', 'SGLNl_EQ', 'EXV1d_EQ') carries a
+    # trailing market-marker letter; strip it. The three-part US/country form
+    # ('AAPL_US_EQ') is clean, so a US-resolved symbol is never stripped.
     marker = _STOOQ_MARKET_MARKER.get(suffix)
     if len(parts) == 2 and marker and base.endswith(marker):
         base = base[:-1]
