@@ -5,7 +5,7 @@ import trading
 
 def test_trading_exposes_equity_paper_layer():
     for name in (
-        "resolve_stooq_symbol",
+        "resolve_symbol",
         "fetch_stooq_price",
         "fetch_price",
         "price_position",

@@ -7,6 +7,7 @@ multi-asset subsystem.)"""
 import json
 import requests
 from datetime import datetime, timezone, timedelta
+from typing import NamedTuple
 
 from common import (
     DATA_DIR,
@@ -98,6 +99,31 @@ POLYGRAM_TOKEN_FILE = PAPER_DIR / "polygram_token.json"
 PG_CANDIDATE_CAP = 25  # max candidate markets fed to the matcher (prompt-size bound)
 PG_SIMILARITY_FLOOR = 0.60  # open only matches at/above this matcher similarity
 PG_MAX_HOLD_DAYS = 182  # ~26w backstop close for never-resolving resolution markets
+
+
+class Quote(NamedTuple):
+    """A single instrument's daily quote. Any field may be None when the provider
+    omits it; callers treat a None field as 'unavailable' and skip (never guess)."""
+
+    close: float
+    open_: float | None
+    volume: float | None
+
+
+# Neutral instrument symbol is '<base>.<market>' with market in this set.
+_MARKETS = {"us", "uk", "de", "fr"}
+
+
+def _parse_symbol(symbol: str) -> tuple[str, str] | None:
+    """Split a neutral instrument symbol ('aapl.us') into (base, market).
+
+    Returns None when the string has no recognised market suffix — callers skip.
+    """
+    base, _, market = symbol.rpartition(".")
+    if not base or market not in _MARKETS:
+        return None
+    return base, market
+
 
 # Map a T212 instrument currency (and ISIN country for EUR) to a Stooq market suffix.
 _STOOQ_SUFFIX = {"USD": "us", "GBP": "uk", "GBX": "uk"}
@@ -776,8 +802,8 @@ def _match_instrument_by_base(symbol: str, instruments: dict) -> dict | None:
     return candidates[0][2]
 
 
-def resolve_stooq_symbol(ticker: str, cache: dict, overrides: dict) -> str | None:
-    """Map a signal ticker to a Stooq symbol (e.g. 'aapl.us').
+def resolve_symbol(ticker: str, cache: dict, overrides: dict) -> str | None:
+    """Map a signal ticker to a neutral instrument symbol (e.g. 'aapl.us').
 
     Resolution order:
       1. Manual override file (authoritative).
@@ -895,7 +921,7 @@ def resolve_watch_entry(token: str, asset_class: str | None = None) -> dict | No
             return {"raw": token, "asset_class": "crypto", "instrument": pair}
         if asset_class == "crypto":
             return None
-    sym = resolve_stooq_symbol(token, load_instruments_cache(), load_ticker_overrides())
+    sym = resolve_symbol(token, load_instruments_cache(), load_ticker_overrides())
     if sym:
         return {"raw": token, "asset_class": "equity", "instrument": sym}
     return None
@@ -1270,7 +1296,7 @@ def mode_paper():
                 if ac == "crypto":
                     symbol = resolve_kraken_pair(ticker, crypto_overrides)
                 else:
-                    symbol = resolve_stooq_symbol(ticker, cache, overrides)
+                    symbol = resolve_symbol(ticker, cache, overrides)
                 if not symbol:
                     log.warning(f"Paper skip: no instrument for {ticker} ({ac})")
                     continue

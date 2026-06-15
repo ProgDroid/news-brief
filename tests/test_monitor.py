@@ -171,14 +171,14 @@ def test_resolve_watch_infers_crypto():
 
 
 def test_resolve_watch_infers_equity_when_not_crypto(monkeypatch):
-    monkeypatch.setattr(trading, "resolve_stooq_symbol", lambda t, c, o: "shel.uk")
+    monkeypatch.setattr(trading, "resolve_symbol", lambda t, c, o: "shel.uk")
     entry = trading.resolve_watch_entry("SHEL")
     assert entry == {"raw": "SHEL", "asset_class": "equity", "instrument": "shel.uk"}
 
 
 def test_resolve_watch_explicit_equity_skips_crypto(monkeypatch):
     # 'BTC' is a known crypto symbol, but an explicit equity class must not infer crypto.
-    monkeypatch.setattr(trading, "resolve_stooq_symbol", lambda t, c, o: "btc.us")
+    monkeypatch.setattr(trading, "resolve_symbol", lambda t, c, o: "btc.us")
     entry = trading.resolve_watch_entry("BTC", asset_class="equity")
     assert entry["asset_class"] == "equity"
     assert entry["instrument"] == "btc.us"
@@ -196,7 +196,7 @@ def test_resolve_watch_prediction_bad_market_returns_none(monkeypatch):
 
 
 def test_resolve_watch_unresolvable_returns_none(monkeypatch):
-    monkeypatch.setattr(trading, "resolve_stooq_symbol", lambda t, c, o: None)
+    monkeypatch.setattr(trading, "resolve_symbol", lambda t, c, o: None)
     assert trading.resolve_watch_entry("NOTATHING") is None
 
 

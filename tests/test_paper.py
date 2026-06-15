@@ -16,34 +16,46 @@ INSTRUMENTS = {
 CACHE = {"fetched_at": "2026-01-01T00:00:00+00:00", "instruments": INSTRUMENTS}
 
 
-# ── resolve_stooq_symbol ──────────────────────────────────────────────────────
+# ── _parse_symbol ─────────────────────────────────────────────────────────────
+def test_parse_symbol_us():
+    assert trading._parse_symbol("aapl.us") == ("aapl", "us")
+
+
+def test_parse_symbol_uk():
+    assert trading._parse_symbol("rr.uk") == ("rr", "uk")
+
+
+def test_parse_symbol_no_market_returns_none():
+    assert trading._parse_symbol("garbage") is None
+
+
+# ── resolve_symbol (renamed from resolve_stooq_symbol; same outputs) ──────────
 def test_override_is_authoritative():
-    assert trading.resolve_stooq_symbol("FOO", CACHE, {"FOO": "foo.us"}) == "foo.us"
+    assert trading.resolve_symbol("FOO", CACHE, {"FOO": "foo.us"}) == "foo.us"
 
 
 def test_exact_t212_us_ticker():
-    assert trading.resolve_stooq_symbol("AAPL_US_EQ", CACHE, {}) == "aapl.us"
+    assert trading.resolve_symbol("AAPL_US_EQ", CACHE, {}) == "aapl.us"
 
 
 def test_plain_symbol_base_match_prefers_us_listing():
-    # SHEL matches both SHEL_US_EQ (USD) and SHEL_FR_EQ (EUR/FR) — US wins
-    assert trading.resolve_stooq_symbol("SHEL", CACHE, {}) == "shel.us"
+    assert trading.resolve_symbol("SHEL", CACHE, {}) == "shel.us"
 
 
 def test_lse_two_part_ticker_strips_market_marker():
-    assert trading.resolve_stooq_symbol("RRl_EQ", CACHE, {}) == "rr.uk"
+    assert trading.resolve_symbol("RRl_EQ", CACHE, {}) == "rr.uk"
 
 
 def test_xetra_eur_resolved_by_isin_country():
-    assert trading.resolve_stooq_symbol("EXV1d_EQ", CACHE, {}) == "exv1.de"
+    assert trading.resolve_symbol("EXV1d_EQ", CACHE, {}) == "exv1.de"
 
 
 def test_unknown_currency_returns_none():
-    assert trading.resolve_stooq_symbol("XYZ_PL_EQ", CACHE, {}) is None
+    assert trading.resolve_symbol("XYZ_PL_EQ", CACHE, {}) is None
 
 
 def test_unknown_symbol_returns_none():
-    assert trading.resolve_stooq_symbol("NOPE", CACHE, {}) is None
+    assert trading.resolve_symbol("NOPE", CACHE, {}) is None
 
 
 # ── _signal_return ────────────────────────────────────────────────────────────

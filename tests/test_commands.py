@@ -46,7 +46,7 @@ def test_watch_explicit_prediction(monkeypatch, tmp_path):
 def test_watch_unresolvable_reports_and_skips(monkeypatch, tmp_path):
     sent = _capture(monkeypatch)
     monkeypatch.setattr(trading, "WATCHLIST_FILE", tmp_path / "wl.json")
-    monkeypatch.setattr(trading, "resolve_stooq_symbol", lambda t, c, o: None)
+    monkeypatch.setattr(trading, "resolve_symbol", lambda t, c, o: None)
     brief._handle_telegram_update(_update("/watch NOTATHING"), _fb())
     assert trading.load_watchlist()["items"] == []
     assert "Couldn't resolve" in sent[0]
