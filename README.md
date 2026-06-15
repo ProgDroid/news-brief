@@ -7,7 +7,7 @@ Each evening it gathers source material — wire feeds (Reuters), region-native 
 (ISW, 38 North, BOJ) tagged by `kind`, X (Twitter) feeds via a self-hosted Nitter mirror,
 the BCA *Iran Conflict Daily Dashboard*, recent podcast commentary from a vector (Chroma)
 database, and a **market pulse** ("what moved & why" — index/FX/commodity + position moves
-and volume anomalies, pin-derived from Stooq/Kraken) — and submits a
+and volume anomalies, pin-derived from Alpaca/Yahoo/Kraken) — and submits a
 [Claude Batch API](https://docs.anthropic.com/en/docs/build-with-claude/batch-processing)
 job with web search enabled. The next morning it delivers a structured brief to Telegram and
 archives it to disk. A weekly job synthesises the week; an always-on command listener lets you
@@ -24,7 +24,7 @@ On top of the brief it runs two analytics layers:
 - **Signals** — each brief emits a structured JSON array of position-relevant signals
   (ticker, topic, direction, confidence, thesis, rationale, provenance), persisted for review.
 - **Paper trade tracker** — a pure-paper (no money, no orders) tracker that opens notional
-  positions from medium/high-confidence directional signals, prices them via Stooq, marks them
+  positions from medium/high-confidence directional signals, prices them via Alpaca/Yahoo, marks them
   to market weekly at 1w/2w/4w horizons, and reports a net-of-cost performance report with a
   per-asset-class go-live readiness gate.
 
@@ -101,10 +101,11 @@ Signals are file-only; the human-readable version is the `📌 POSITION SIGNALS`
 A medium/high-confidence directional signal with a resolvable ticker opens one notional paper
 position (deduped per ticker+direction). Positions are:
 
-- **Priced via Stooq** (free CSV quote endpoint, no API key). Entry and every mark come from the
-  same source, so returns (`mark / entry − 1`, sign-adjusted for direction) are internally
-  consistent and FX-neutral. Tickers that can't be priced or mapped are **skipped and logged,
-  never guessed**.
+- **Priced via Alpaca + Yahoo** — US equities quote from Alpaca (primary) with Yahoo as
+  fallback; UK/DE/FR quote from Yahoo. Entry and every mark use the same routing, so returns
+  (`mark / entry − 1`, sign-adjusted for direction) are internally consistent and FX-neutral.
+  Tickers that can't be priced or mapped are **skipped and logged, never guessed**.
+  (Stooq was the original source; removed 2026-06-15 after it took down its free CSV API.)
 - **Marked to market weekly** with 1w/2w/4w checkpoint returns, then **auto-closed at 4 weeks**.
 - **Closed early** when a later opposite-direction signal fires for the same ticker
   (`reversal`), or manually via `/close TICKER`.
@@ -115,7 +116,8 @@ last-known marks.
 
 When a position closes it is stamped with a per-asset-class round-trip cost **haircut**, a
 **net return** (return minus haircut), the **benchmark return** over the same window (the market
-index for the asset class — equity → S&P 500 `^spx`, crypto → BTC, prediction → a naive `0`
+index for the asset class — equity → S&P 500 (Yahoo `^GSPC`, Alpaca `SPY` ETF fallback),
+crypto → BTC, prediction → a naive `0`
 baseline, captured at open), and the **edge** (net return minus benchmark).
 
 The weekly job marks the book to market and posts a **performance report** — net hit-rate, net
@@ -127,14 +129,16 @@ per-asset mean edge), which the gate uses for its sustained-window check.
 
 ### Symbol mapping
 
-Trading212 has no quote endpoint for unheld instruments, so tickers are mapped to Stooq symbols:
+Trading212 has no quote endpoint for unheld instruments, so tickers are mapped to a neutral
+`base.market` symbol (e.g. `aapl.us`), which the pricer then translates to the right Alpaca/Yahoo
+ticker per market:
 
-1. **`paper/ticker_map.json`** — manual `{"T212_TICKER": "stooq.symbol"}` overrides (authoritative).
+1. **`paper/ticker_map.json`** — manual `{"T212_TICKER": "base.market"}` overrides (authoritative).
 2. **Derived** from the cached Trading212 instrument catalogue (`currencyCode`/ISIN →
    `.us`/`.uk`/`.de`/`.fr`). The cache (`paper/instruments-cache.json`) refreshes weekly and
    lazily.
 
-If you see `Paper skip: no Stooq symbol …` in the logs for a ticker you care about, add a line to
+If you see `Paper skip: no symbol …` in the logs for a ticker you care about, add a line to
 `ticker_map.json` — that's the intended escape hatch.
 
 ---
@@ -148,7 +152,7 @@ in the brief, and automatic symbol mapping for the paper tracker.
 normalised percentage weights, tickers, instrument names, and a `▲`/`▼` P/L *direction* glyph are
 ever included in the prompt. No absolute monetary value — balance, position value, or P/L amount —
 is written to any file that could reach the API, or into any prompt. The paper tracker likewise
-stores only tickers, public Stooq prices, and percentage returns.
+stores only tickers, public market prices, and percentage returns.
 
 ---
 
@@ -180,6 +184,9 @@ cp .env.example .env
 | `T212_API_KEY_ID` | no | Trading212 key **ID** — paired with `T212_API_KEY` for HTTP Basic auth |
 | `T212_API_KEY` | no | Read-only Trading212 key — enables portfolio weights + paper symbol mapping |
 | `T212_BASE_URL` | no | `https://live.trading212.com` (default) or the demo host |
+| `APCA_API_KEY_ID` | no | Alpaca key ID — primary US-equity price source (Yahoo is the fallback when unset) |
+| `APCA_API_SECRET_KEY` | no | Alpaca secret — paired with `APCA_API_KEY_ID` |
+| `APCA_DATA_URL` | no | Alpaca market-data base URL (default `https://data.alpaca.markets`) |
 | `NITTER_BASE_URL` | no | Self-hosted Nitter base URL for X/Twitter feeds (default `http://nitter:8080`) |
 | `HAIRCUT_BPS_EQUITY` | no | Per-asset round-trip cost haircut in basis points, applied to returns — equity (default `10`) |
 | `HAIRCUT_BPS_CRYPTO` | no | Cost haircut in bps — crypto (default `26`) |
@@ -255,7 +262,7 @@ news-brief/
 └── paper/
     ├── book.json              # Open + closed paper positions (equity + crypto + prediction)
     ├── paper-book.json        # Legacy equity-only book, kept as backup after one-time migration
-    ├── ticker_map.json        # Manual T212→Stooq symbol overrides (equity)
+    ├── ticker_map.json        # Manual T212→neutral symbol overrides (equity)
     ├── crypto_ticker_map.json # Manual crypto-ticker→Kraken-pair overrides
     ├── instruments-cache.json
     ├── polygram_token.json    # PolyGram JWT (prediction markets), refreshed on 401

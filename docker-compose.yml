@@ -29,6 +29,9 @@ x-newsbrief: &newsbrief
     - T212_API_KEY_ID=${T212_API_KEY_ID:-}
     - T212_API_KEY=${T212_API_KEY:-}
     - T212_BASE_URL=${T212_BASE_URL:-https://live.trading212.com}
+    - APCA_API_KEY_ID=${APCA_API_KEY_ID:-}
+    - APCA_API_SECRET_KEY=${APCA_API_SECRET_KEY:-}
+    - APCA_DATA_URL=${APCA_DATA_URL:-https://data.alpaca.markets}
     - POLYGRAM_EMAIL=${POLYGRAM_EMAIL:-}
     - POLYGRAM_PASSWORD=${POLYGRAM_PASSWORD:-}
     # Self-hosted Nitter on the shared network (Twitter/X feeds). Defaults to the
