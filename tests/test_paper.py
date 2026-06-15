@@ -264,3 +264,67 @@ def test_alpaca_quote_http_error_returns_none(monkeypatch):
         trading.requests, "get", lambda *a, **k: _FakeJsonResp({}, status=429)
     )
     assert trading._alpaca_quote("AAPL") is None
+
+
+def test_fetch_quote_us_prefers_alpaca(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        trading,
+        "_alpaca_quote",
+        lambda s: calls.append(("alpaca", s)) or trading.Quote(1.0, None, None),
+    )
+    monkeypatch.setattr(
+        trading,
+        "_yahoo_quote",
+        lambda b, m: calls.append(("yahoo", b, m)) or trading.Quote(9.0, None, None),
+    )
+    q = trading.fetch_quote("aapl", "us")
+    assert q.close == 1.0
+    assert calls == [("alpaca", "AAPL")]  # Yahoo not tried when Alpaca succeeds
+
+
+def test_fetch_quote_us_falls_back_to_yahoo(monkeypatch):
+    monkeypatch.setattr(trading, "_alpaca_quote", lambda s: None)
+    monkeypatch.setattr(
+        trading, "_yahoo_quote", lambda b, m: trading.Quote(9.0, None, None)
+    )
+    assert trading.fetch_quote("aapl", "us").close == 9.0
+
+
+def test_fetch_quote_uk_uses_yahoo_only(monkeypatch):
+    def _boom(s):
+        raise AssertionError("Alpaca has no UK data; must not be called")
+
+    monkeypatch.setattr(trading, "_alpaca_quote", _boom)
+    monkeypatch.setattr(
+        trading, "_yahoo_quote", lambda b, m: trading.Quote(27.5, None, None)
+    )
+    assert trading.fetch_quote("rr", "uk").close == 27.5
+
+
+def test_fetch_quote_unparseable_symbol_returns_none():
+    assert trading.fetch_quote("garbage", "zz") is None
+
+
+def test_fetch_benchmark_prefers_yahoo_gspc(monkeypatch):
+    seen = []
+    monkeypatch.setattr(
+        trading,
+        "_yahoo_fetch",
+        lambda s: seen.append(s) or trading.Quote(5000.0, None, None),
+    )
+    monkeypatch.setattr(
+        trading, "_alpaca_quote", lambda s: trading.Quote(500.0, None, None)
+    )
+    assert trading.fetch_benchmark() == 5000.0
+    assert seen == ["^GSPC"]
+
+
+def test_fetch_benchmark_falls_back_to_spy(monkeypatch):
+    monkeypatch.setattr(trading, "_yahoo_fetch", lambda s: None)
+    monkeypatch.setattr(
+        trading,
+        "_alpaca_quote",
+        lambda s: trading.Quote(500.0, None, None) if s == "SPY" else None,
+    )
+    assert trading.fetch_benchmark() == 500.0

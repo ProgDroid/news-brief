@@ -438,6 +438,34 @@ def _alpaca_quote(symbol: str) -> Quote | None:
     return Quote(close=close, open_=_opt("o"), volume=_opt("v"))
 
 
+def fetch_quote(base_or_symbol: str, market: str | None = None) -> Quote | None:
+    """Daily Quote for an instrument, routed by market with failover.
+
+    Accepts either (base, market) or a single neutral symbol ('aapl.us'). US
+    routes Alpaca -> Yahoo; UK/DE/FR route Yahoo only. Returns the first non-None
+    provider result, or None when nothing prices it (callers skip, never guess).
+    """
+    if market is None:
+        parsed = _parse_symbol(base_or_symbol)
+        if parsed is None:
+            return None
+        base, market = parsed
+    else:
+        base = base_or_symbol
+    if market not in _MARKETS:
+        return None
+    if market == "us":
+        return _alpaca_quote(base.upper()) or _yahoo_quote(base, market)
+    return _yahoo_quote(base, market)
+
+
+def fetch_benchmark() -> float | None:
+    """S&P 500 level: Yahoo ^GSPC (true index) -> Alpaca SPY ETF (degraded proxy).
+    None when neither prices — caller treats as benchmark unavailable."""
+    q = _yahoo_fetch("^GSPC") or _alpaca_quote("SPY")
+    return q.close if q else None
+
+
 def fetch_pg_volume(market_id: str) -> float | None:
     """24h volume for a PolyGram market, read from market detail (volume lives on
     the market object in the Polymarket mirror, not in the price series). None if
