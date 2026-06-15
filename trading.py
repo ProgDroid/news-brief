@@ -362,17 +362,23 @@ def _yahoo_fetch(yahoo_symbol: str) -> Quote | None:
     except (KeyError, IndexError, TypeError):
         return None
 
-    def _last(key):  # last non-null entry in the series, else None
-        seq = quote.get(key) or []
-        for v in reversed(seq):
-            if v is not None:
+    def _last(key):  # last usable (non-null, numeric) entry in the series, else None
+        for v in reversed(quote.get(key) or []):
+            if v is None:
+                continue
+            try:
                 return float(v)
+            except (TypeError, ValueError):
+                return None
         return None
 
     close = _last("close")
     if close is None:
-        close = meta.get("regularMarketPrice")
-        close = float(close) if close is not None else None
+        rmp = meta.get("regularMarketPrice")
+        try:
+            close = float(rmp) if rmp is not None else None
+        except (TypeError, ValueError):
+            close = None
     if close is None or close <= 0:
         log.warning(f"Yahoo returned no usable close for {yahoo_symbol}")
         return None

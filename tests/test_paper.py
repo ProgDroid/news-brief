@@ -215,3 +215,14 @@ def test_yahoo_quote_empty_result_returns_none(monkeypatch):
         lambda *a, **k: _FakeJsonResp({"chart": {"result": None, "error": "x"}}),
     )
     assert trading._yahoo_quote("aapl", "us") is None
+
+
+def test_yahoo_quote_nonnumeric_close_returns_none(monkeypatch):
+    # A garbled (non-numeric) close must degrade to None, not raise — the
+    # file's None-on-failure contract: never crash the caller.
+    monkeypatch.setattr(
+        trading.requests,
+        "get",
+        lambda *a, **k: _FakeJsonResp(_yahoo_payload(close="N/A")),
+    )
+    assert trading._yahoo_quote("aapl", "us") is None
