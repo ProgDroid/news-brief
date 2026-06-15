@@ -87,12 +87,23 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # OCI references must be lowercase, but github.repository preserves the
+      # owner's case (e.g. ProgDroid). metadata-action lowercases its tags
+      # internally, so build/push is fine — but trivy gets the raw IMAGE_NAME
+      # and rejects an uppercase ref ("could not parse reference"). Lowercase once.
+      - name: Lowercase image ref
+        id: img
+        run: echo "ref=${REGISTRY}/${IMAGE_NAME,,}:latest" >> "$GITHUB_OUTPUT"
+        env:
+          REGISTRY: ${{ env.REGISTRY }}
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+
       # Scan the published image for OS/library CVEs. Fails the run on a fixable
       # CRITICAL/HIGH so a vulnerable base image surfaces instead of shipping silently.
       - name: Scan image for vulnerabilities
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          image-ref: ${{ steps.img.outputs.ref }}
           format: table
           exit-code: '1'
           ignore-unfixed: true
