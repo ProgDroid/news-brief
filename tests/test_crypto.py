@@ -79,9 +79,13 @@ def test_kraken_non_positive_returns_none(monkeypatch):
 
 # ── fetch_price / price_position dispatch ─────────────────────────────────────
 def test_fetch_price_routes_by_asset_class(monkeypatch):
-    monkeypatch.setattr(trading, "fetch_stooq_price", lambda s: ("stooq", s))
+    monkeypatch.setattr(
+        trading,
+        "fetch_quote",
+        lambda s: trading.Quote(close=42.0, open_=None, volume=None),
+    )
     monkeypatch.setattr(trading, "fetch_kraken_price", lambda s: ("kraken", s))
-    assert trading.fetch_price("equity", "aapl.us") == ("stooq", "aapl.us")
+    assert trading.fetch_price("equity", "aapl.us") == 42.0
     assert trading.fetch_price("crypto", "XBTUSD") == ("kraken", "XBTUSD")
 
 

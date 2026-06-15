@@ -1,4 +1,4 @@
-"""Paper-tracker pure logic: ticker resolution, returns, and Stooq parsing."""
+"""Paper-tracker pure logic: ticker resolution, returns, and quote parsing."""
 
 import pytest
 
@@ -64,54 +64,6 @@ def test_signal_return_directionality():
     assert trading._signal_return("bearish", 100.0, 110.0) == pytest.approx(-0.10)
 
 
-# ── fetch_stooq_price ─────────────────────────────────────────────────────────
-class _FakeResp:
-    def __init__(self, text):
-        self.text = text
-
-    def raise_for_status(self):
-        pass
-
-
-def _patch_stooq(monkeypatch, csv_text):
-    monkeypatch.setattr(
-        trading.requests, "get", lambda url, timeout=None: _FakeResp(csv_text)
-    )
-
-
-def test_stooq_parses_close(monkeypatch):
-    _patch_stooq(
-        monkeypatch,
-        "Symbol,Date,Time,Open,High,Low,Close,Volume\n"
-        "aapl.us,2026-06-08,22:00:00,1,2,3,123.45,1000",
-    )
-    assert trading.fetch_stooq_price("aapl.us") == 123.45
-
-
-def test_stooq_nd_sentinel_returns_none(monkeypatch):
-    _patch_stooq(
-        monkeypatch,
-        "Symbol,Date,Time,Open,High,Low,Close,Volume\n"
-        "nope.us,N/D,N/D,N/D,N/D,N/D,N/D,N/D",
-    )
-    assert trading.fetch_stooq_price("nope.us") is None
-
-
-def test_stooq_zero_price_returns_none(monkeypatch):
-    # 0.0 would later divide-by-zero in _signal_return; must be rejected
-    _patch_stooq(
-        monkeypatch,
-        "Symbol,Date,Time,Open,High,Low,Close,Volume\n"
-        "halt.us,2026-06-08,22:00:00,0,0,0,0,0",
-    )
-    assert trading.fetch_stooq_price("halt.us") is None
-
-
-def test_stooq_short_response_returns_none(monkeypatch):
-    _patch_stooq(monkeypatch, "Symbol,Date,Time,Open,High,Low,Close,Volume")
-    assert trading.fetch_stooq_price("aapl.us") is None
-
-
 # ── _yahoo_format_symbol ──────────────────────────────────────────────────────
 def test_yahoo_format_us():
     assert trading._yahoo_format_symbol("aapl", "us") == "AAPL"
@@ -130,8 +82,7 @@ def test_yahoo_format_paris():
 
 
 # ── _yahoo_quote ──────────────────────────────────────────────────────────────
-# A JSON-returning fake response; the Stooq _FakeResp above is text-only, so the
-# Yahoo tests use their own fake (distinct shape, distinct name).
+# A JSON-returning fake response used by the Yahoo/Alpaca tests.
 class _FakeJsonResp:
     def __init__(self, payload, status=200):
         self._payload = payload

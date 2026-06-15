@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Equity paper-trading layer: Stooq ticker resolution + pricing, the paper
-book, return math, position close, and the open/mark-to-market functions.
+"""Equity paper-trading layer: ticker resolution + multi-provider pricing, the
+paper book, return math, position close, and the open/mark-to-market functions.
 Imports infra from common.py. (Later phases generalise this to a
 multi-asset subsystem.)"""
 
@@ -143,44 +143,12 @@ _STOOQ_MARKET_MARKER = {"uk": "l", "de": "d"}
 _COUNTRY_PREFERENCE = {"US": 0, "GB": 1, "UK": 1, "DE": 2, "FR": 3}
 
 
-def fetch_stooq_price(stooq_symbol: str) -> float | None:
-    """Fetch the latest close price for a Stooq symbol (e.g. 'aapl.us').
-
-    Returns None on network error or Stooq's 'N/D' not-found sentinel — callers MUST treat
-    None as 'could not price' and skip, never substitute a guessed value.
-    """
-    url = f"https://stooq.com/q/l/?s={stooq_symbol}&f=sd2t2ohlcv&h&e=csv"
-    try:
-        resp = requests.get(url, timeout=15)
-        resp.raise_for_status()
-    except Exception as e:
-        log.warning(f"Stooq fetch failed for {stooq_symbol}: {e}")
-        return None
-    lines = resp.text.strip().splitlines()
-    if len(lines) < 2:
-        return None
-    cols = lines[1].split(",")  # Symbol,Date,Time,Open,High,Low,Close,Volume
-    if len(cols) < 7 or cols[6] in ("N/D", ""):
-        log.warning(f"Stooq returned no price for {stooq_symbol}")
-        return None
-    try:
-        price = float(cols[6])
-    except ValueError:
-        return None
-    if price <= 0:
-        # Stooq emits 0 for some halted/delisted lines; a 0 entry_price would
-        # later divide-by-zero in _signal_return and kill the weekly MtM run.
-        log.warning(f"Stooq returned non-positive price for {stooq_symbol}: {price}")
-        return None
-    return price
-
-
 def fetch_kraken_price(pair: str) -> float | None:
     """Fetch the last-trade price for a Kraken pair (e.g. 'XBTUSD') via the public API.
 
     Returns None on network error, a non-empty Kraken error array, an empty/garbled
     result, or a non-positive price — callers MUST treat None as 'could not price' and
-    skip, never substitute a guessed value (mirrors fetch_stooq_price).
+    skip, never substitute a guessed value.
     """
     url = f"https://api.kraken.com/0/public/Ticker?pair={pair}"
     try:
@@ -211,63 +179,19 @@ def fetch_kraken_price(pair: str) -> float | None:
     return price
 
 
-def fetch_stooq_volume(stooq_symbol: str) -> float | None:
-    """Latest daily Volume for a Stooq symbol (column 7 of the same CSV the pricer
-    uses). None on network error / 'N/D' — caller skips (mirrors fetch_stooq_price)."""
-    url = f"https://stooq.com/q/l/?s={stooq_symbol}&f=sd2t2ohlcv&h&e=csv"
-    try:
-        resp = requests.get(url, timeout=15)
-        resp.raise_for_status()
-    except Exception as e:
-        log.warning(f"Stooq volume fetch failed for {stooq_symbol}: {e}")
-        return None
-    lines = resp.text.strip().splitlines()
-    if len(lines) < 2:
-        return None
-    cols = lines[1].split(",")  # Symbol,Date,Time,Open,High,Low,Close,Volume
-    if len(cols) < 8 or cols[7] in ("N/D", ""):
-        log.warning(f"Stooq returned no volume for {stooq_symbol}")
-        return None
-    try:
-        vol = float(cols[7])
-    except ValueError:
-        return None
-    return vol if vol >= 0 else None
-
-
 def fetch_daily_move(asset_class: str, instrument: str) -> float | None:
     """Intraday percent move (open → last) for one instrument, single fetch.
 
-    Equity → Stooq light quote (Open=col3, Close=col6); crypto → Kraken Ticker
-    (o=today's open, c[0]=last). Returns the percent change rounded to 2dp, or
-    None on any failure / non-positive open — callers render '—', never guess.
+    Equity → multi-provider (Alpaca/Yahoo) quote (open → close); crypto → Kraken
+    Ticker (o=today's open, c[0]=last). Returns the percent change rounded to 2dp,
+    or None on any failure / non-positive open — callers render '—', never guess.
     """
     if asset_class == "crypto":
         return _kraken_daily_move(instrument)
-    return _stooq_daily_move(instrument)
-
-
-def _stooq_daily_move(stooq_symbol: str) -> float | None:
-    url = f"https://stooq.com/q/l/?s={stooq_symbol}&f=sd2t2ohlcv&h&e=csv"
-    try:
-        resp = requests.get(url, timeout=15)
-        resp.raise_for_status()
-    except Exception as e:
-        log.warning(f"Stooq move fetch failed for {stooq_symbol}: {e}")
+    q = fetch_quote(instrument)
+    if q is None or q.open_ is None or q.open_ <= 0:
         return None
-    lines = resp.text.strip().splitlines()
-    if len(lines) < 2:
-        return None
-    cols = lines[1].split(",")  # Symbol,Date,Time,Open,High,Low,Close,Volume
-    if len(cols) < 7 or cols[3] in ("N/D", "") or cols[6] in ("N/D", ""):
-        return None
-    try:
-        open_, close = float(cols[3]), float(cols[6])
-    except ValueError:
-        return None
-    if open_ <= 0:
-        return None
-    return round((close - open_) / open_ * 100, 2)
+    return round((q.close - q.open_) / q.open_ * 100, 2)
 
 
 def _kraken_daily_move(pair: str) -> float | None:
@@ -490,17 +414,19 @@ def fetch_volume(asset_class: str, instrument: str) -> float | None:
         return fetch_kraken_volume(instrument)
     if asset_class == "prediction":
         return fetch_pg_volume(instrument)
-    return fetch_stooq_volume(instrument)
+    q = fetch_quote(instrument)
+    return q.volume if q else None
 
 
 def fetch_benchmark_level(asset_class: str) -> float | None:
     """Current benchmark index level for an asset class (best-effort, None on failure).
 
-    Equity → S&P 500 (^spx via Stooq); crypto → BTC/XBT (Kraken); prediction → None
-    (naive coin-flip baseline, handled at close as benchmark_return=0).
+    Equity → S&P 500 (multi-provider benchmark); crypto → BTC/XBT (Kraken);
+    prediction → None (naive coin-flip baseline, handled at close as
+    benchmark_return=0).
     """
     if asset_class == "equity":
-        return fetch_stooq_price("^spx")
+        return fetch_benchmark()
     if asset_class == "crypto":
         pair = resolve_kraken_pair("BTC", load_crypto_ticker_overrides())
         return fetch_kraken_price(pair) if pair else None
@@ -845,12 +771,13 @@ def run_prediction_matcher(signals: list, candidates: list) -> list:
 def fetch_price(asset_class: str, instrument: str) -> float | None:
     """Mark one instrument to market via the pricer for its asset class.
 
-    Equity → Stooq, crypto → Kraken. Returns None on any pricing failure —
-    callers skip, never guess.
+    Equity → multi-provider (Alpaca/Yahoo) pricer, crypto → Kraken. Returns None
+    on any pricing failure — callers skip, never guess.
     """
     if asset_class == "crypto":
         return fetch_kraken_price(instrument)
-    return fetch_stooq_price(instrument)
+    q = fetch_quote(instrument)
+    return q.close if q else None
 
 
 def price_position(p: dict) -> float | None:

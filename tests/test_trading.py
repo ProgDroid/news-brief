@@ -6,7 +6,7 @@ import trading
 def test_trading_exposes_equity_paper_layer():
     for name in (
         "resolve_symbol",
-        "fetch_stooq_price",
+        "fetch_quote",
         "fetch_price",
         "price_position",
         "_signal_return",
@@ -61,7 +61,7 @@ def test_paper_horizon_config():
 def test_stamp_open_benchmark_equity(monkeypatch):
     import trading
 
-    monkeypatch.setattr(trading, "fetch_stooq_price", lambda s: 5000.0)
+    monkeypatch.setattr(trading, "fetch_benchmark_level", lambda ac: 5000.0)
     p = {"asset_class": "equity"}
     trading._stamp_open_benchmark(p)
     assert p["benchmark_entry"] == 5000.0
@@ -84,7 +84,7 @@ def test_stamp_open_benchmark_best_effort(monkeypatch):
     def _boom(_):
         raise RuntimeError("network down")
 
-    monkeypatch.setattr(trading, "fetch_stooq_price", _boom)
+    monkeypatch.setattr(trading, "fetch_benchmark_level", _boom)
     p = {"asset_class": "equity"}
     trading._stamp_open_benchmark(p)  # must not raise
     assert p["benchmark_entry"] is None
@@ -195,17 +195,13 @@ def test_stamp_close_metrics_prediction_momentum_fallback():
     assert abs(p["net_return"] - (0.10 - 2 * bps)) < 1e-9
 
 
-def test_stooq_daily_move_open_to_last(monkeypatch):
-    # CSV: Symbol,Date,Time,Open,High,Low,Close,Volume — open 100, close 110 → +10%
-    csv = "Symbol,Date,Time,Open,High,Low,Close,Volume\nAAPL.US,2026-06-13,22:00:00,100,111,99,110,5000"
-
-    class _R:
-        text = csv
-
-        def raise_for_status(self):
-            pass
-
-    monkeypatch.setattr(trading.requests, "get", lambda *a, **k: _R())
+def test_equity_daily_move_open_to_last(monkeypatch):
+    # open 100, close 110 → +10%
+    monkeypatch.setattr(
+        trading,
+        "fetch_quote",
+        lambda s: trading.Quote(close=110.0, open_=100.0, volume=5000.0),
+    )
     assert trading.fetch_daily_move("equity", "aapl.us") == 10.0
 
 
@@ -225,10 +221,7 @@ def test_kraken_daily_move(monkeypatch):
 
 
 def test_daily_move_none_on_failure(monkeypatch):
-    def _boom(*a, **k):
-        raise RuntimeError("network")
-
-    monkeypatch.setattr(trading.requests, "get", _boom)
+    monkeypatch.setattr(trading, "fetch_quote", lambda s: None)
     assert trading.fetch_daily_move("equity", "aapl.us") is None
 
 

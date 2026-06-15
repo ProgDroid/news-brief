@@ -32,20 +32,18 @@ class _FakeResp:
         return self._payload
 
 
-def test_stooq_volume_parses_column_7(monkeypatch):
-    csv = "Symbol,Date,Time,Open,High,Low,Close,Volume\nAAPL.US,2026-06-13,22:00:02,1,2,0.5,1.5,123456\n"
+def test_equity_volume_reads_quote_volume(monkeypatch):
     monkeypatch.setattr(
-        trading.requests, "get", lambda url, timeout=None: _FakeResp(text=csv)
+        trading,
+        "fetch_quote",
+        lambda s: trading.Quote(close=1.5, open_=1.0, volume=123456.0),
     )
-    assert trading.fetch_stooq_volume("aapl.us") == 123456.0
+    assert trading.fetch_volume("equity", "aapl.us") == 123456.0
 
 
-def test_stooq_volume_nd_returns_none(monkeypatch):
-    csv = "Symbol,Date,Time,Open,High,Low,Close,Volume\nFOO.US,N/D,N/D,N/D,N/D,N/D,N/D,N/D\n"
-    monkeypatch.setattr(
-        trading.requests, "get", lambda url, timeout=None: _FakeResp(text=csv)
-    )
-    assert trading.fetch_stooq_volume("foo.us") is None
+def test_equity_volume_none_when_unpriced(monkeypatch):
+    monkeypatch.setattr(trading, "fetch_quote", lambda s: None)
+    assert trading.fetch_volume("equity", "foo.us") is None
 
 
 def test_kraken_volume_parses_24h(monkeypatch):
@@ -84,7 +82,11 @@ def test_pg_volume_unfetchable_market_returns_none(monkeypatch):
 
 
 def test_fetch_volume_dispatches_by_asset_class(monkeypatch):
-    monkeypatch.setattr(trading, "fetch_stooq_volume", lambda s: 1.0)
+    monkeypatch.setattr(
+        trading,
+        "fetch_quote",
+        lambda s: trading.Quote(close=1.0, open_=1.0, volume=1.0),
+    )
     monkeypatch.setattr(trading, "fetch_kraken_volume", lambda p: 2.0)
     monkeypatch.setattr(trading, "fetch_pg_volume", lambda m: 3.0)
     assert trading.fetch_volume("equity", "aapl.us") == 1.0
