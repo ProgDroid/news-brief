@@ -1878,7 +1878,8 @@ def _dump_raw_batch_result(result: dict, joined_text: str) -> None:
     response is off (notably a max_tokens truncation that surfaces downstream as
     a signals parse_error) there is no record of what it actually returned. On
     every run this logs a one-line summary (stop_reason, content-block makeup,
-    text length and tail). Only when the result looks anomalous — the model did
+    text length, token usage + estimated batch cost, and tail). Only when the
+    result looks anomalous — the model did
     not finish cleanly (stop_reason != "end_turn", e.g. "max_tokens") or emitted
     no text — does it also write the entire result object and the flattened text
     to /app/logs/debug, so the daily cron does not accumulate dumps on healthy
@@ -1892,11 +1893,25 @@ def _dump_raw_batch_result(result: dict, joined_text: str) -> None:
             t = b.get("type", "?")
             block_types[t] = block_types.get(t, 0) + 1
         stop_reason = message.get("stop_reason")
+        usage = message.get("usage") or {}
+        in_tok = usage.get("input_tokens", 0)
+        out_tok = usage.get("output_tokens", 0)
+        cache_read = usage.get("cache_read_input_tokens", 0)
+        searches = (usage.get("server_tool_use") or {}).get("web_search_requests", 0)
+        # Sonnet 4.6 Batch API: $1.50/M input, $7.50/M output, web_search $0.01/req.
+        # Cache reads (~0.1x input) ignored here — estimate only, not a billing source.
+        est_cost = in_tok / 1e6 * 1.50 + out_tok / 1e6 * 7.50 + searches * 0.01
         log.warning(
-            "Batch result: stop_reason=%s blocks=%s text_len=%d tail=%r",
+            "Batch result: stop_reason=%s blocks=%s text_len=%d "
+            "usage(in=%s out=%s cache_read=%s searches=%s) est_batch_cost=$%.4f tail=%r",
             stop_reason,
             block_types,
             len(joined_text),
+            in_tok,
+            out_tok,
+            cache_read,
+            searches,
+            est_cost,
             joined_text[-400:],
         )
         if stop_reason == "end_turn" and joined_text.strip():
