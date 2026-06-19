@@ -127,15 +127,13 @@ def test_poison_message_does_not_jam_offset(monkeypatch, tmp_path):
     monkeypatch.setattr(brief, "TELEGRAM_CHAT_ID", "123")
     monkeypatch.setattr(brief, "STATE_FILE", tmp_path / "state.json")
     monkeypatch.setattr(brief, "FEEDBACK_FILE", tmp_path / "feedback.json")
-    # load_feedback returning {} makes /focus raise KeyError — the poison
-    monkeypatch.setattr(brief, "load_feedback", lambda: {})
+    # fb without a "focus" key makes /focus raise KeyError — the poison
     updates = [
         {"update_id": 7, "message": {"text": "/focus boom", "chat": {"id": 123}}},
         {"update_id": 8, "message": {"text": "/help", "chat": {"id": 123}}},
     ]
-    monkeypatch.setattr(brief, "telegram_get_updates", lambda offset: updates)
 
-    brief.process_telegram_commands()
+    brief._drain_update_batch(updates, {}, 0)
 
     assert any("Command failed" in m for m in sent)  # poison reported
     assert brief.HELP_TEXT in sent  # later update still handled
@@ -152,9 +150,9 @@ def test_offset_saved_without_clobbering_other_state(monkeypatch, tmp_path):
     monkeypatch.setattr(brief, "FEEDBACK_FILE", tmp_path / "feedback.json")
     state_file.write_text(json.dumps({"batch_id": "batch_abc", "tg_offset": 5}))
     updates = [{"update_id": 5, "message": {"text": "/help", "chat": {"id": 123}}}]
-    monkeypatch.setattr(brief, "telegram_get_updates", lambda offset: updates)
+    offset = (brief.load_state() or {}).get("tg_offset", 0)
 
-    brief.process_telegram_commands()
+    brief._drain_update_batch(updates, {"focus": [], "mute": [], "notes": []}, offset)
 
     state = json.loads(state_file.read_text())
     assert state["tg_offset"] == 6

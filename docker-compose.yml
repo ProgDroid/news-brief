@@ -10,12 +10,18 @@
 #   PUID / PGID    — host uid:gid that OWNS the logs volume (runs the container non-root)
 #   APPDATA_DIR    — host path for persistent state + archives
 #
-# Schedule the modes with your container scheduler or host cron, e.g.:
+# Schedule the batch modes with your container scheduler or host cron, e.g.:
 #   0 20 * * *   docker compose run --rm newsbrief-submit
 #   0  6 * * *   docker compose run --rm newsbrief-collect
 #   0 21 * * 0   docker compose run --rm newsbrief-weekly
-#   */30 * * * * docker compose run --rm newsbrief-commands
 #   0  *  * * *  docker compose run --rm newsbrief-monitor
+#
+# newsbrief-commands is NOT a cron job — it's a long-lived bot daemon that handles
+# Telegram commands and buttons in real time via long polling. Start it once and
+# leave it running (it restarts on its own):
+#   docker compose up -d newsbrief-commands
+# Only ONE getUpdates consumer may run per bot, so do not also poll the bot from a
+# cron `run` — the other modes deliberately don't.
 
 x-newsbrief: &newsbrief
   image: ghcr.io/progdroid/news-brief:latest
@@ -59,9 +65,12 @@ services:
     <<: *newsbrief
     command: [weekly]
 
+  # Long-lived bot daemon (real-time Telegram commands + buttons). Unlike the cron
+  # modes, this stays up; override the anchor's `restart: "no"` so it self-heals.
   newsbrief-commands:
     <<: *newsbrief
     command: [commands]
+    restart: unless-stopped
 
   newsbrief-monitor:
     <<: *newsbrief

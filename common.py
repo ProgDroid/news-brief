@@ -270,6 +270,78 @@ def telegram_alert(text: str) -> None:
         log.error(f"Alert send failed: {_redact(str(e))}")
 
 
+# ── Telegram Bot API (interactive: buttons, callbacks, command menu) ───────────
+# Used by the real-time commands daemon. Inline keyboards are JSON of the shape
+# {"inline_keyboard": [[{"text": ..., "callback_data": ...}], ...]}; callback_data
+# is capped at 64 bytes by Telegram, so callers key buttons by short ids.
+def _tg_api(method: str, payload: dict, *, timeout: float = 15.0) -> dict | None:
+    """POST one Bot API method; return the parsed JSON, or None on any failure.
+
+    Errors are logged (token-redacted) and swallowed: a transient API hiccup must
+    never crash the long-lived daemon, and a button action that fails just leaves
+    the chat unchanged rather than taking the process down."""
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}"
+    try:
+        resp = requests.post(url, json=payload, timeout=timeout)
+        if not resp.ok:
+            log.error(f"Telegram {method} {resp.status_code}: {resp.text[:300]}")
+            return None
+        return resp.json()
+    except Exception as e:
+        log.error(f"Telegram {method} failed: {_redact(str(e))}")
+        return None
+
+
+def telegram_send_buttons(text: str, inline_keyboard: list) -> int | None:
+    """Send an HTML message carrying an inline keyboard; return its message_id
+    (so the daemon can edit the same message through subsequent wizard steps)."""
+    r = _tg_api(
+        "sendMessage",
+        {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+            "disable_notification": True,
+            "reply_markup": {"inline_keyboard": inline_keyboard},
+        },
+    )
+    return r["result"]["message_id"] if r and r.get("ok") else None
+
+
+def telegram_edit_text(
+    message_id: int, text: str, inline_keyboard: list | None = None
+) -> None:
+    """Edit an existing message's text (and optionally its keyboard). Passing an
+    empty list for inline_keyboard strips the buttons; None leaves them as-is."""
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "message_id": message_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+    if inline_keyboard is not None:
+        payload["reply_markup"] = {"inline_keyboard": inline_keyboard}
+    _tg_api("editMessageText", payload)
+
+
+def telegram_answer_callback(callback_id: str, text: str | None = None) -> None:
+    """Acknowledge a callback query. Telegram shows a spinner on the tapped button
+    until this is called, so every callback MUST be answered even with no text."""
+    payload = {"callback_query_id": callback_id}
+    if text:
+        payload["text"] = text
+    _tg_api("answerCallbackQuery", payload)
+
+
+def telegram_set_my_commands(commands: list) -> bool:
+    """Register the bot's command menu (the autocomplete list). `commands` is a
+    list of {"command", "description"} dicts. Returns True on success."""
+    r = _tg_api("setMyCommands", {"commands": commands})
+    return bool(r and r.get("ok"))
+
+
 # A surviving allowed tag (open/close, optional attrs) OR an existing HTML entity.
 # Text NOT matched here is literal prose whose <, >, & must be escaped, else
 # "oil <$60" / "AT&T" leave a bare < or & that 400s the whole Telegram chunk.

@@ -6,17 +6,19 @@ Modes:
   submit   — fetch feeds, query Chroma, submit batch job (~8pm UTC)
   collect  — poll for results, deliver via Telegram, save signals, open paper positions (~6am UTC)
   weekly   — weekly summary from last 7 briefs + mark the paper book to market (Sunday ~9pm UTC)
-  commands — process pending Telegram commands without submitting
+  commands — long-running bot daemon: real-time Telegram commands + buttons (long polling)
   run      — submit + collect synchronously (for testing)
   paper    — open paper positions from today's signals (also run inside collect)
 
 The image entrypoint is `python brief.py`, so the MODE is the command argument. The
-committed docker-compose.yml defines one service per mode from a single shared anchor;
-schedule them with your container scheduler or host cron:
+committed docker-compose.yml defines one service per mode from a single shared anchor.
+Schedule the batch modes with your container scheduler or host cron, and run the
+commands daemon as a persistent service (it's the sole getUpdates consumer — a second
+poller would 409):
   0 20 * * *   docker compose run --rm newsbrief-submit
   0  6 * * *   docker compose run --rm newsbrief-collect
   0 21 * * 0   docker compose run --rm newsbrief-weekly
-  */30 * * * * docker compose run --rm newsbrief-commands
+  docker compose up -d newsbrief-commands   # daemon, not cron
 """
 
 import html
@@ -24,10 +26,12 @@ import os
 import re
 import json
 import time
+import hashlib
 import requests
 import feedparser
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from urllib.parse import quote_plus, urlsplit
 
 from common import (
     TELEGRAM_BOT_TOKEN,
@@ -48,6 +52,10 @@ from common import (
     file_lock,
     telegram_send,
     telegram_alert,
+    telegram_send_buttons,
+    telegram_edit_text,
+    telegram_answer_callback,
+    telegram_set_my_commands,
     sanitise_html,
     split_html_message,
 )
@@ -230,6 +238,108 @@ WEB_SOURCES = [
     },
 ]
 
+# ── Temporary sources (Telegram-managed, persisted on the volume) ─────────────
+# RSS_FEEDS above is the always-on baseline, baked into the image. Temporary
+# sources live in a JSON file on the persistent volume so they can be added or
+# dropped (via /addsource, /sources, or by hand-editing the file in an emergency)
+# WITHOUT rebuilding the image or restarting anything — the next submit run reads
+# the file fresh and appends them to RSS_FEEDS. A malformed file degrades to "no
+# temp sources" with a logged warning; it can never break the always-on feeds.
+TEMP_SOURCES_FILE = DATA_DIR / "sources.json"
+VALID_KINDS = ("wire", "analyst", "regional", "primary")
+
+
+def _short_id(text: str) -> str:
+    """Short stable id for inline-button callback_data, which Telegram caps at 64
+    bytes — so a long ticker/URL/market-id can't be embedded directly. The picker
+    renders buttons keyed by this hash and the callback re-derives it over the live
+    list, so taps stay correct even if the list shifted between render and tap."""
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:10]
+
+
+def _source_id(url: str) -> str:
+    """Stable id for a temp source, derived from its URL."""
+    return _short_id(url)
+
+
+def build_google_news_url(domain: str) -> str:
+    """Build a Google News RSS proxy feed for a bare domain, matching the recipe
+    the built-in regional feeds use (`when:2d site:<domain>`). Most temp sources
+    are publisher domains whose native RSS is dead or absent, so this is the
+    common path; a full feed URL is used verbatim instead."""
+    q = quote_plus(f"when:2d site:{domain}")
+    return f"https://news.google.com/rss/search?q={q}&hl=en-US&gl=US&ceid=US:en"
+
+
+def load_temp_sources() -> list[dict]:
+    """Read + validate the temp-source file, returning feed dicts shaped exactly
+    like RSS_FEEDS entries. Invalid entries are dropped with a warning rather than
+    raised: one bad hand-edit must not take down the morning brief."""
+    raw = _load_json_or(TEMP_SOURCES_FILE, [])
+    if not isinstance(raw, list):
+        log.warning("sources.json is not a list — ignoring all temp sources")
+        return []
+    out: list[dict] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            log.warning(f"temp source not an object, dropped: {entry!r}")
+            continue
+        name, url, category = entry.get("name"), entry.get("url"), entry.get("category")
+        if not (name and url and category):
+            log.warning(f"temp source missing name/url/category, dropped: {entry!r}")
+            continue
+        kind = entry.get("kind", "regional")
+        if kind not in VALID_KINDS:
+            kind = "regional"
+        out.append(
+            {
+                "name": str(name),
+                "url": str(url),
+                "category": str(category).lower(),
+                "kind": kind,
+            }
+        )
+    return out
+
+
+def add_temp_source(entry: dict) -> None:
+    """Append a source (deduped by URL) under a lock so a concurrent edit can't
+    lose it. `entry` must already be a valid {name,url,category,kind} dict."""
+    with file_lock(TEMP_SOURCES_FILE):
+        srcs = _load_json_or(TEMP_SOURCES_FILE, [])
+        if not isinstance(srcs, list):
+            srcs = []
+        srcs = [
+            s
+            for s in srcs
+            if not (isinstance(s, dict) and s.get("url") == entry["url"])
+        ]
+        srcs.append(entry)
+        _write_json_atomic(TEMP_SOURCES_FILE, srcs)
+
+
+def remove_temp_source(source_id: str) -> dict | None:
+    """Remove the source whose id matches; return the removed dict, or None if no
+    match. Locked read-modify-write, same as add."""
+    with file_lock(TEMP_SOURCES_FILE):
+        srcs = _load_json_or(TEMP_SOURCES_FILE, [])
+        if not isinstance(srcs, list):
+            return None
+        removed, kept = None, []
+        for s in srcs:
+            if (
+                removed is None
+                and isinstance(s, dict)
+                and _source_id(str(s.get("url", ""))) == source_id
+            ):
+                removed = s
+            else:
+                kept.append(s)
+        if removed is not None:
+            _write_json_atomic(TEMP_SOURCES_FILE, kept)
+        return removed
+
+
 # Default pinned topics — always rendered (at least a one-liner) when the
 # reader has not customised the pin set via /pin /unpin. Matches the legacy
 # hardcoded country sections so day-one behaviour is unchanged.
@@ -322,21 +432,29 @@ HELP_TEXT = """<b>newsbrief commands</b>
 
 /close [TICKER]
   Close an open paper position early at the current mark.
-  e.g. <code>/close AAPL_US_EQ</code>
+  e.g. <code>/close AAPL_US_EQ</code> — or send <code>/close</code> alone to pick from a button list.
 
 /watch [SYMBOL]
   Track an instrument for volume alerts (crypto/equity inferred).
   e.g. <code>/watch BTC</code> · <code>/watch prediction 0xMARKETID</code>
 
 /unwatch [SYMBOL]
-  Stop watching an instrument.
+  Stop watching an instrument. Send <code>/unwatch</code> alone to pick from a button list.
 
 /pin [topic]
   Always show a topic, even when quiet (at least a one-liner).
   e.g. <code>/pin taiwan</code>
 
 /unpin [topic]
-  Stop forcing a topic; it becomes dynamic again.
+  Stop forcing a topic; it becomes dynamic again. Send <code>/unpin</code> alone to pick from a button list.
+
+/addsource
+  Add a temporary news source (guided — tap through category, kind, then paste a
+  domain or feed URL). Temp sources merge into the daily brief until removed.
+
+/sources — list temporary sources, each with a 🗑 remove button
+/removesource [name]
+  Remove a temp source by name (the button on /sources does the same).
 
 /positions — open positions with live marks
 /performance — performance report + go-live gate
@@ -347,47 +465,396 @@ HELP_TEXT = """<b>newsbrief commands</b>
 """
 
 
-def telegram_get_updates(offset: int = 0) -> list:
+def telegram_get_updates(
+    offset: int = 0, *, timeout: int = 0, allowed_updates: list | None = None
+) -> list | None:
+    """Fetch updates via long polling. Returns the update list (possibly empty) on
+    success, or None on a transport/API error so the daemon can back off instead of
+    hot-looping. `timeout` is the server-side long-poll hold; the HTTP read timeout
+    is set above it so a held connection isn't cut early."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+    params = {"offset": offset, "timeout": timeout}
+    if allowed_updates is not None:
+        params["allowed_updates"] = json.dumps(allowed_updates)
     try:
-        resp = requests.get(url, params={"offset": offset, "timeout": 5}, timeout=10)
-        return resp.json().get("result", []) if resp.ok else []
+        resp = requests.get(url, params=params, timeout=timeout + 15)
+        if not resp.ok:
+            # 409 = another getUpdates consumer is running (e.g. a stray daemon or a
+            # leftover submit poll). Surface it loudly; it self-resolves once the
+            # other poller stops.
+            log.warning(f"getUpdates {resp.status_code}: {resp.text[:200]}")
+            return None
+        return resp.json().get("result", [])
     except Exception as e:
         log.warning(f"getUpdates failed: {_redact(str(e))}")
-        return []
+        return None
 
 
-def process_telegram_commands():
-    """Poll for bot messages and apply feedback commands.
+# ── /addsource wizard + /sources (interactive, button-driven) ─────────────────
+# In-memory only: a button wizard needs multi-step state, but the daemon is the
+# sole process and the flow lasts seconds, so persisting it isn't worth it — a
+# restart mid-wizard just drops the half-built source and the user re-taps.
+_WIZARD: dict[str, dict] = {}
+_DOMAIN_RE = re.compile(r"^(?!-)[a-z0-9-]{1,63}(?:\.[a-z0-9-]{1,63})+$", re.I)
 
-    Each update is handled in isolation and the offset always advances past it,
-    so one malformed message (a "poison message") can fail without jamming the
-    queue: before this, an exception mid-loop meant the offset was never saved
-    and the same update crashed every subsequent run forever.
-    """
-    state = load_state() or {}
-    offset = state.get("tg_offset", 0)
-    updates = telegram_get_updates(offset)
-    if not updates:
+
+def _known_categories() -> list[str]:
+    cats = {f["category"] for f in RSS_FEEDS} | {
+        s["category"] for s in load_temp_sources()
+    }
+    return sorted(cats)
+
+
+def _btn_rows(buttons: list[tuple[str, str]], per_row: int = 3) -> list[list[dict]]:
+    """Chunk (label, callback_data) pairs into inline-keyboard rows."""
+    btns = [{"text": t, "callback_data": d} for t, d in buttons]
+    return [btns[i : i + per_row] for i in range(0, len(btns), per_row)]
+
+
+_CANCEL_ROW = [{"text": "❌ Cancel", "callback_data": "as:cancel"}]
+
+
+def _wizard_start(chat_id: str) -> None:
+    buttons = [(c, f"as:cat:{c}") for c in _known_categories()]
+    buttons.append(("✏️ Other", "as:cat:__other__"))
+    rows = _btn_rows(buttons) + [_CANCEL_ROW]
+    msg_id = telegram_send_buttons("➕ <b>Add a source</b>\n\nPick a category:", rows)
+    _WIZARD[chat_id] = {"step": "category", "msg_id": msg_id}
+
+
+def _wizard_kind_prompt(chat_id: str) -> None:
+    w = _WIZARD[chat_id]
+    w["step"] = "kind"
+    rows = _btn_rows([(k, f"as:kind:{k}") for k in VALID_KINDS], per_row=2) + [
+        _CANCEL_ROW
+    ]
+    telegram_edit_text(
+        w["msg_id"],
+        f"➕ <b>Add a source</b>\nCategory: <b>{html.escape(w['category'])}</b>\n\n"
+        "What kind of source is it?",
+        rows,
+    )
+
+
+def _wizard_url_prompt(chat_id: str) -> None:
+    w = _WIZARD[chat_id]
+    w["step"] = "url"
+    telegram_edit_text(
+        w["msg_id"],
+        f"➕ <b>Add a source</b>\nCategory: <b>{html.escape(w['category'])}</b> · "
+        f"Kind: <b>{w['kind']}</b>\n\n"
+        "Now send the source as a new message — either:\n"
+        "• a bare domain, e.g. <code>timesofisrael.com</code> "
+        "(I'll build a Google News feed), or\n"
+        "• a full RSS/Atom URL, e.g. <code>https://site.com/feed.xml</code>",
+        [],
+    )
+
+
+def _wizard_confirm_prompt(chat_id: str) -> None:
+    w = _WIZARD[chat_id]
+    w["step"] = "confirm"
+    rows = [
+        [
+            {"text": "✅ Add", "callback_data": "as:confirm"},
+            {"text": "✏️ Rename", "callback_data": "as:rename"},
+            {"text": "❌ Cancel", "callback_data": "as:cancel"},
+        ]
+    ]
+    telegram_edit_text(
+        w["msg_id"],
+        "➕ <b>Add this source?</b>\n\n"
+        f"Name: <b>{html.escape(w['name'])}</b>\n"
+        f"Category: <b>{html.escape(w['category'])}</b> · Kind: <b>{w['kind']}</b>\n"
+        f"URL: <code>{html.escape(w['url'])}</code>",
+        rows,
+    )
+
+
+def _wizard_handle_text(chat_id: str, text: str) -> None:
+    """Handle a free-text reply while a wizard is awaiting one (category name,
+    domain/URL, or a rename). No-op if the step doesn't expect text."""
+    w = _WIZARD.get(chat_id)
+    if not w:
         return
+    step = w.get("step")
+    if step == "category_text":
+        w["category"] = text.strip().lower()
+        _wizard_kind_prompt(chat_id)
+    elif step == "rename":
+        w["name"] = text.strip()
+        _wizard_confirm_prompt(chat_id)
+    elif step == "url":
+        raw = text.strip()
+        if "://" in raw:
+            w["url"] = raw
+            w["name"] = urlsplit(raw).netloc or raw
+        elif _DOMAIN_RE.match(raw):
+            w["url"] = build_google_news_url(raw)
+            w["name"] = raw
+        else:
+            telegram_send(
+                "⚠️ That's neither a domain nor a URL. Send something like "
+                "<code>timesofisrael.com</code> or "
+                "<code>https://site.com/feed.xml</code>."
+            )
+            return
+        _wizard_confirm_prompt(chat_id)
 
-    fb = load_feedback()
-    new_offset = offset
 
-    for update in updates:
-        new_offset = update.get("update_id", new_offset) + 1
-        try:
-            fb = _handle_telegram_update(update, fb)
-        except Exception as e:
-            log.exception(f"Command failed (update {update.get('update_id')}): {e}")
-            telegram_send("⚠️ Command failed — check logs.")
+def _sources_render(message_id: int | None = None) -> None:
+    """Render the temp-source list with a 🗑 button per source. When message_id is
+    given the existing message is edited in place (used to refresh after a removal),
+    otherwise a fresh message is sent (the /sources command)."""
+    srcs = load_temp_sources()
+    if not srcs:
+        text = "🗂 No temporary sources. Add one with /addsource."
+        if message_id:
+            telegram_edit_text(message_id, text, [])
+        else:
+            telegram_send(text)
+        return
+    lines = ["🗂 <b>Temporary sources</b>"]
+    rows = []
+    for s in srcs:
+        lines.append(
+            f"• <b>{html.escape(s['name'])}</b> [{s['kind']}] "
+            f"({html.escape(s['category'])})"
+        )
+        rows.append(
+            [
+                {
+                    "text": f"🗑 {s['name'][:48]}",
+                    "callback_data": f"rmsrc:{_source_id(s['url'])}",
+                }
+            ]
+        )
+    text = "\n".join(lines)
+    if message_id:
+        telegram_edit_text(message_id, text, rows)
+    else:
+        telegram_send_buttons(text, rows)
 
-    save_feedback(fb)
-    # Persist ONLY the offset via read-merge-write. A concurrent submit may have
-    # saved a batch_id while this loop ran (a /dig can take minutes), and writing
-    # back the whole stale snapshot loaded above would erase it — losing the
-    # day's brief.
-    save_state({"tg_offset": new_offset})
+
+# ── Button pick-lists (/close, /unwatch, /unpin) + /reset confirm ─────────────
+# Each of these commands takes a target that's tedious/error-prone to type exactly
+# (a paper ticker, a watchlist symbol, a pinned topic). The no-arg form renders the
+# current list as tappable buttons; the text form (e.g. `/close AAPL_US_EQ`) still
+# works. Buttons are keyed by _short_id over a stable field and re-resolved against
+# the live list on tap, so a list that shifted between render and tap stays correct.
+def _picker_send(text: str, rows: list, message_id: int | None) -> None:
+    if message_id:
+        telegram_edit_text(message_id, text, rows)
+    else:
+        telegram_send_buttons(text, rows)
+
+
+def _picker_empty(text: str, message_id: int | None) -> None:
+    if message_id:
+        telegram_edit_text(message_id, text, [])
+    else:
+        telegram_send(text)
+
+
+def _pos_ticker(p: dict) -> str:
+    """A position's display/close key — ticker if present, else the raw instrument
+    (some positions, e.g. prediction markets, carry no separate ticker)."""
+    return p.get("ticker") or p.get("instrument", "")
+
+
+def _close_ticker(tkr: str) -> None:
+    """Close all open paper positions for one ticker at the current mark. Shared by
+    the `/close TICKER` text command and the close-picker button."""
+    # Hold the book lock across load->close->save so a concurrent mode_paper
+    # (collect) write can't clobber this manual close.
+    with file_lock(trading.BOOK_FILE):
+        book = load_book()
+        matches = [
+            p
+            for p in book["positions"]
+            if p["status"] == "open" and _pos_ticker(p) == tkr
+        ]
+        if not matches:
+            telegram_send(f"No open paper position for <b>{html.escape(tkr)}</b>.")
+            return
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        closed_n = sum(_close_position_at_market(p, day, "manual") for p in matches)
+        if closed_n:
+            save_book(book)
+            telegram_send(
+                f"✅ Closed {closed_n} paper position(s) for "
+                f"<b>{html.escape(tkr)}</b> (manual)."
+            )
+        else:
+            telegram_send(f"⚠️ Couldn't price {html.escape(tkr)} — left open.")
+
+
+def _close_picker_render(message_id: int | None = None) -> None:
+    book = load_book()
+    seen, rows = set(), []
+    for p in book["positions"]:
+        if p.get("status") != "open":
+            continue
+        tkr = _pos_ticker(p)
+        if tkr in seen:
+            continue  # one button per ticker; _close_ticker closes all its lots
+        seen.add(tkr)
+        rows.append([{"text": f"❌ {tkr}", "callback_data": f"close:{_short_id(tkr)}"}])
+    if not rows:
+        _picker_empty("No open positions to close.", message_id)
+        return
+    _picker_send("📂 <b>Close which position?</b>", rows, message_id)
+
+
+def _watch_key(item: dict) -> str:
+    return f"{item.get('asset_class', '')}|{item.get('instrument', '')}"
+
+
+def _watchlist_picker_render(message_id: int | None = None) -> None:
+    items = load_watchlist()["items"]
+    if not items:
+        _picker_empty("👁️ Watchlist is empty.", message_id)
+        return
+    rows = [
+        [
+            {
+                "text": f"🚫 {(i.get('raw') or i.get('instrument', '?'))[:48]}",
+                "callback_data": f"unwatch:{_short_id(_watch_key(i))}",
+            }
+        ]
+        for i in items
+    ]
+    _picker_send("👁️ <b>Unwatch which instrument?</b>", rows, message_id)
+
+
+def _pins_picker_render(fb: dict, message_id: int | None = None) -> None:
+    pins = resolved_pins(fb)
+    if not pins:
+        _picker_empty("📌 No pinned topics.", message_id)
+        return
+    rows = [
+        [{"text": f"📍 {t}", "callback_data": f"unpin:{_short_id(t)}"}] for t in pins
+    ]
+    _picker_send("📌 <b>Unpin which topic?</b>", rows, message_id)
+
+
+def _handle_callback_query(cb: dict, fb: dict | None = None) -> dict | None:
+    """Handle an inline-button tap and return the (possibly mutated) feedback dict.
+    Covers /sources removals, the /addsource wizard, the /close /unwatch /unpin
+    pickers and /reset confirmation. Every callback is answered (Telegram shows a
+    spinner on the button until then). fb is threaded so button actions that change
+    overrides (unpin, reset) stay consistent with the daemon's in-memory copy."""
+    cb_id = cb.get("id", "")
+    chat_id = str(cb.get("message", {}).get("chat", {}).get("id", ""))
+    data = cb.get("data", "")
+    telegram_answer_callback(cb_id)
+    if chat_id != str(TELEGRAM_CHAT_ID):
+        return fb
+    msg_id = cb.get("message", {}).get("message_id")
+
+    # ── Non-wizard pickers (must come before the wizard-state guard below) ──
+    if data.startswith("rmsrc:"):
+        removed = remove_temp_source(data[len("rmsrc:") :])
+        if removed:
+            telegram_send(
+                f"🗑 Removed temp source: <b>{html.escape(removed.get('name', ''))}</b>"
+            )
+        _sources_render(msg_id)  # refresh the list in place
+        return fb
+
+    if data.startswith("close:"):
+        h = data[len("close:") :]
+        tkr = next(
+            (
+                _pos_ticker(p)
+                for p in load_book()["positions"]
+                if p.get("status") == "open" and _short_id(_pos_ticker(p)) == h
+            ),
+            None,
+        )
+        if tkr:
+            _close_ticker(tkr)
+        _close_picker_render(msg_id)
+        return fb
+
+    if data.startswith("unwatch:"):
+        h = data[len("unwatch:") :]
+        wl = load_watchlist()
+        item = next((i for i in wl["items"] if _short_id(_watch_key(i)) == h), None)
+        if item:
+            wl["items"] = [i for i in wl["items"] if i is not item]
+            save_watchlist(wl)
+            telegram_send(
+                f"🚫 Unwatched <b>"
+                f"{html.escape(item.get('raw') or item.get('instrument', ''))}</b>."
+            )
+        _watchlist_picker_render(msg_id)
+        return fb
+
+    if data.startswith("unpin:"):
+        h = data[len("unpin:") :]
+        if fb is not None:
+            fb.setdefault("pin", list(DEFAULT_PINS))
+            topic = next((t for t in fb["pin"] if _short_id(t) == h), None)
+            if topic:
+                fb["pin"].remove(topic)
+                telegram_send(f"📍 Unpinned: <b>{html.escape(topic)}</b>.")
+            _pins_picker_render(fb, msg_id)
+        return fb
+
+    if data == "reset:yes":
+        fb = {"focus": [], "mute": [], "notes": []}
+        telegram_edit_text(msg_id, "🔄 All overrides cleared.", [])
+        return fb
+    if data == "reset:no":
+        telegram_edit_text(msg_id, "Reset cancelled — nothing changed.", [])
+        return fb
+
+    # ── /addsource wizard ──
+    if data == "as:cancel":
+        w = _WIZARD.pop(chat_id, None)
+        if w:
+            telegram_edit_text(w["msg_id"], "❌ Cancelled.", [])
+        return fb
+
+    w = _WIZARD.get(chat_id)
+    if not w:
+        return fb  # stale buttons from a finished/cancelled wizard
+
+    if data.startswith("as:cat:"):
+        cat = data[len("as:cat:") :]
+        if cat == "__other__":
+            w["step"] = "category_text"
+            telegram_edit_text(
+                w["msg_id"], "➕ <b>Add a source</b>\n\nType the category name:", []
+            )
+        else:
+            w["category"] = cat
+            _wizard_kind_prompt(chat_id)
+    elif data.startswith("as:kind:"):
+        w["kind"] = data[len("as:kind:") :]
+        _wizard_url_prompt(chat_id)
+    elif data == "as:rename":
+        w["step"] = "rename"
+        telegram_edit_text(
+            w["msg_id"], "➕ <b>Add a source</b>\n\nType a display name:", []
+        )
+    elif data == "as:confirm":
+        entry = {
+            "name": w["name"],
+            "url": w["url"],
+            "category": w["category"],
+            "kind": w["kind"],
+        }
+        add_temp_source(entry)
+        _WIZARD.pop(chat_id, None)
+        telegram_edit_text(
+            w["msg_id"],
+            f"✅ Added <b>{html.escape(entry['name'])}</b> "
+            f"[{entry['kind']}] ({html.escape(entry['category'])}).",
+            [],
+        )
+    return fb
 
 
 def _handle_telegram_update(update: dict, fb: dict) -> dict:
@@ -400,6 +867,13 @@ def _handle_telegram_update(update: dict, fb: dict) -> dict:
     chat_id = str(msg.get("chat", {}).get("id", ""))
 
     if chat_id != str(TELEGRAM_CHAT_ID):
+        return fb
+
+    # A free-text reply feeding an in-progress /addsource wizard (pasting a
+    # domain/URL or typing a name/category). A new "/command" falls through and,
+    # if it starts another action, the wizard is simply abandoned (re-tap to redo).
+    if chat_id in _WIZARD and not text.startswith("/"):
+        _wizard_handle_text(chat_id, text)
         return fb
 
     if text.startswith("/focus "):
@@ -425,11 +899,37 @@ def _handle_telegram_update(update: dict, fb: dict) -> dict:
         )
 
     elif text == "/reset":
-        fb = {"focus": [], "mute": [], "notes": []}
-        telegram_send("🔄 All overrides cleared.")
+        telegram_send_buttons(
+            "🔄 Clear all overrides (focus, mute, notes) and restore default pins?",
+            [
+                [
+                    {"text": "✅ Yes, clear", "callback_data": "reset:yes"},
+                    {"text": "❌ No", "callback_data": "reset:no"},
+                ]
+            ],
+        )
 
     elif text == "/status":
         telegram_send(f"<b>Current overrides</b>\n\n{feedback_summary(fb)}")
+
+    elif text == "/addsource":
+        _wizard_start(chat_id)
+
+    elif text == "/sources":
+        _sources_render()
+
+    elif text.startswith("/removesource "):
+        name = text[len("/removesource ") :].strip()
+        match = next(
+            (s for s in load_temp_sources() if s["name"].lower() == name.lower()), None
+        )
+        if match and remove_temp_source(_source_id(match["url"])):
+            telegram_send(f"🗑 Removed temp source: <b>{html.escape(match['name'])}</b>")
+        else:
+            telegram_send(
+                f"No temp source named <b>{html.escape(name)}</b>. "
+                "Use /sources to see the list."
+            )
 
     elif text in ("/help", "/start"):
         telegram_send(HELP_TEXT)
@@ -462,32 +962,11 @@ def _handle_telegram_update(update: dict, fb: dict) -> dict:
             telegram_send(chunk)
             time.sleep(0.4)
 
+    elif text == "/close":
+        _close_picker_render()
+
     elif text.startswith("/close "):
-        tkr = text[7:].strip()
-        # Hold the book lock across the whole load->close->save so a concurrent
-        # mode_paper (collect) write can't clobber this manual close.
-        with file_lock(trading.BOOK_FILE):
-            book = load_book()
-            matches = [
-                p
-                for p in book["positions"]
-                if p["status"] == "open" and p["ticker"] == tkr
-            ]
-            if not matches:
-                telegram_send(f"No open paper position for <b>{html.escape(tkr)}</b>.")
-            else:
-                day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-                closed_n = sum(
-                    _close_position_at_market(p, day, "manual") for p in matches
-                )
-                if closed_n:
-                    save_book(book)
-                    telegram_send(
-                        f"✅ Closed {closed_n} paper position(s) for "
-                        f"<b>{html.escape(tkr)}</b> (manual)."
-                    )
-                else:
-                    telegram_send(f"⚠️ Couldn't price {html.escape(tkr)} — left open.")
+        _close_ticker(text[7:].strip())
 
     elif text.startswith("/watch "):
         body = text[7:].strip()
@@ -523,6 +1002,9 @@ def _handle_telegram_update(update: dict, fb: dict) -> dict:
                 + ("" if not dup else " — already watched")
             )
 
+    elif text == "/unwatch":
+        _watchlist_picker_render()
+
     elif text.startswith("/unwatch "):
         token = text[9:].strip()
         wl = load_watchlist()
@@ -545,6 +1027,9 @@ def _handle_telegram_update(update: dict, fb: dict) -> dict:
             f"📌 Pinned: <b>{html.escape(topic)}</b> — always shown.\n\n"
             f"{feedback_summary(fb)}"
         )
+
+    elif text == "/unpin":
+        _pins_picker_render(fb)
 
     elif text.startswith("/unpin "):
         topic = text[7:].strip().lower()
@@ -1503,7 +1988,9 @@ def deliver(text: str, header: str, archive_path: Path):
 # ── Modes ─────────────────────────────────────────────────────────────────────
 def mode_submit():
     log.info("=== SUBMIT ===")
-    process_telegram_commands()
+    # Commands are drained in real time by the long-running `commands` daemon, so
+    # feedback.json is already current here. We must NOT poll getUpdates too: only
+    # one getUpdates consumer is allowed per bot (a second one gets 409 Conflict).
 
     state = load_state() or {}
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -1511,8 +1998,14 @@ def mode_submit():
         log.info(f"Already submitted today ({state['batch_id']}), skipping")
         return
 
+    temp_sources = load_temp_sources()
+    if temp_sources:
+        log.info(
+            f"Temp sources: {len(temp_sources)} ({', '.join(s['name'] for s in temp_sources)})"
+        )
     feed_content = (
-        "\n".join(c for f in RSS_FEEDS if (c := fetch_rss(f))) or "(no RSS content)"
+        "\n".join(c for f in RSS_FEEDS + temp_sources if (c := fetch_rss(f)))
+        or "(no RSS content)"
     )
     web_content = (
         "\n".join(c for s in WEB_SOURCES if (c := fetch_web_source(s)))
@@ -1674,10 +2167,91 @@ def mode_run():
             clear_batch_state()
 
 
+# Bot command menu (Telegram autocomplete). Registered automatically by the
+# daemon; keep in sync with the handlers in _handle_telegram_update and HELP_TEXT.
+BOT_COMMANDS = [
+    ("help", "Show command help"),
+    ("status", "Show current overrides"),
+    ("addsource", "Add a temporary news source (guided)"),
+    ("sources", "List / remove temporary sources"),
+    ("removesource", "Remove a temp source by name"),
+    ("pin", "Always show a topic"),
+    ("unpin", "Stop forcing a topic"),
+    ("focus", "Emphasise something in upcoming briefs"),
+    ("mute", "Reduce a quiet topic to one line"),
+    ("note", "One-off instruction for the next brief"),
+    ("dig", "Research a question now"),
+    ("thesis", "Set a thesis for a ticker/cluster"),
+    ("watch", "Track an instrument for volume alerts"),
+    ("unwatch", "Stop watching an instrument"),
+    ("positions", "Open positions with live marks"),
+    ("performance", "Performance report + go-live gate"),
+    ("close", "Close an open paper position"),
+    ("reset", "Clear all overrides"),
+]
+
+
+def register_bot_commands_if_changed() -> None:
+    """Push the command menu to Telegram via setMyCommands, but only when it has
+    changed since last time (hash stored in state). New commands appear in the
+    client's autocomplete automatically after a deploy — no manual BotFather step."""
+    payload = [{"command": c, "description": d} for c, d in BOT_COMMANDS]
+    h = hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+    if (load_state() or {}).get("cmd_hash") == h:
+        return
+    if telegram_set_my_commands(payload):
+        save_state({"cmd_hash": h})
+        log.info(f"Registered {len(payload)} bot commands")
+
+
+def _handle_update(update: dict, fb: dict) -> dict:
+    """Route one update to the message or callback handler. Returns the (possibly
+    replaced) feedback dict — only message commands touch it; callbacks drive the
+    separate wizard/temp-source state and leave fb unchanged."""
+    if "callback_query" in update:
+        return _handle_callback_query(update["callback_query"], fb)
+    return _handle_telegram_update(update, fb)
+
+
+def _drain_update_batch(updates: list, fb: dict, offset: int) -> tuple[dict, int]:
+    """Apply one batch of updates and persist the advanced offset. Each update is
+    handled in isolation and the offset always advances past it, so one malformed
+    "poison" message fails without jamming the queue forever. The offset is saved
+    via save_state's read-merge-write so a concurrent submit's batch_id survives.
+    Factored out of the daemon loop to keep this logic unit-testable."""
+    new_offset = offset
+    for update in updates:
+        new_offset = update.get("update_id", new_offset) + 1
+        try:
+            fb = _handle_update(update, fb)
+            save_feedback(fb)
+        except Exception as e:
+            log.exception(f"Command failed (update {update.get('update_id')}): {e}")
+            telegram_send("⚠️ Command failed — check logs.")
+    if updates:
+        save_state({"tg_offset": new_offset})
+    return fb, new_offset
+
+
 def mode_commands():
-    """Process Telegram commands without submitting anything."""
-    log.info("=== COMMANDS ===")
-    process_telegram_commands()
+    """Long-running Telegram bot: real-time command + button handling via long
+    polling. This is the ONLY getUpdates consumer (a second would 409), so it
+    replaces the old per-cron drain — run it as a persistent service, not a cron.
+
+    Feedback is held in memory and saved after each message; it has a single
+    writer (this loop), so no cross-process lock is needed on it."""
+    log.info("=== COMMANDS (daemon) ===")
+    register_bot_commands_if_changed()
+    offset = (load_state() or {}).get("tg_offset", 0)
+    fb = load_feedback()
+    while True:
+        updates = telegram_get_updates(
+            offset, timeout=30, allowed_updates=["message", "callback_query"]
+        )
+        if updates is None:  # transport/API error (incl. 409) — back off, retry
+            time.sleep(5)
+            continue
+        fb, offset = _drain_update_batch(updates, fb, offset)
 
 
 def mode_monitor():

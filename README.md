@@ -44,7 +44,7 @@ The script is a single file (`brief.py`) with several modes, driven by cron:
 | `submit` | Fetch feeds + Chroma context + portfolio, submit the batch job | `0 20 * * *` |
 | `collect` | Poll for the result, deliver the brief, split off signals, open paper positions, then post a daily trade update | `0 6 * * *` |
 | `weekly` | Synthesise the last 7 briefs; mark the paper book to market + post the performance report | `0 21 * * 0` (Sun) |
-| `commands` | Process pending Telegram commands (no brief submitted) | `*/30 * * * *` |
+| `commands` | **Long-running bot daemon** — real-time Telegram commands + buttons (long polling). Run as a service, not cron. | `docker compose up -d` |
 | `monitor` | Hourly cross-asset volume-anomaly alerts | `0 * * * *` |
 | `run` | `submit` + `collect` synchronously — for testing | — |
 | `paper` | Open paper positions from today's signals snapshot (also run automatically inside `collect`) | — |
@@ -56,7 +56,10 @@ the 8pm submit and 6am collect sits comfortably inside the 24h batch turnaround.
 
 ## Telegram commands
 
-Send these to your bot (processed by the `commands` cron, or immediately in `run`):
+Handled in real time by the `commands` daemon (`docker compose up -d newsbrief-commands`).
+The daemon is the **only** `getUpdates` consumer — a second poller gets a 409, so the
+other modes deliberately don't poll. Its command menu auto-registers with Telegram
+(`setMyCommands`) on startup whenever it changes, so no manual BotFather step is needed.
 
 | Command | Effect |
 |---------|--------|
@@ -65,18 +68,34 @@ Send these to your bot (processed by the `commands` cron, or immediately in `run
 | `/note <free text>` | Inject a one-off instruction into the next brief |
 | `/thesis TICKER = <thesis>` | Annotate a position/cluster thesis (e.g. `/thesis SHEL_US_EQ = long oil supply tightness`) |
 | `/dig [since:YYYY-MM-DD] <query>` | Synchronous deep-dive with web search + recent podcast context, answered in-chat |
-| `/close TICKER` | Close an open paper position early at the current mark |
-| `/reset` | Clear all focus/mute/note overrides |
+| `/close [TICKER]` | Close an open paper position at the current mark. No arg → pick from a button list |
+| `/reset` | Clear all focus/mute/note overrides (asks for [Yes]/[No] confirmation first) |
 | `/status` | Show current overrides |
 | `/help` | Command list |
 | `/watch <symbol>` | Track an instrument for volume alerts (crypto/equity inferred from symbol; prediction markets need an explicit market id) |
-| `/unwatch <symbol>` | Stop watching an instrument |
+| `/unwatch [symbol]` | Stop watching an instrument. No arg → pick from a button list |
 | `/pin <topic>` | Always show a topic, even when quiet (one-liner minimum). Default pins: ukraine, iran, korea, japan, china. |
-| `/unpin <topic>` | Make a topic dynamic again. |
+| `/unpin [topic]` | Make a topic dynamic again. No arg → pick from a button list |
+| `/addsource` | Add a **temporary** news source — guided: tap category → tap kind → paste a domain or feed URL |
+| `/sources` | List temporary sources, each with a 🗑 remove button |
+| `/removesource <name>` | Remove a temporary source by name (the `/sources` button does the same) |
 | `/positions` | Open positions with live marks |
 | `/performance` | Performance report + go-live gate status |
 
 Pins are listed by `/status`. `/reset` restores the default pin set.
+
+### News sources: always-on vs. temporary
+
+The always-on feed list (`RSS_FEEDS` in `brief.py`) is baked into the image. **Temporary**
+sources live in `sources.json` on the persistent volume (`${APPDATA_DIR}/news-brief/sources.json`)
+and are merged into every `submit` run — so you can add or drop a source for a flaring story
+**without rebuilding the image or restarting anything**: the next brief reads the file fresh.
+
+Manage them from chat with `/addsource` / `/sources`, or hand-edit the file in an emergency.
+A bare domain (e.g. `timesofisrael.com`) is expanded to a Google News `site:` feed; a full
+URL is used as-is. Each entry is `{name, url, category, kind}` where `kind` ∈
+`wire|analyst|regional|primary`. A malformed file degrades to "no temp sources" with a logged
+warning — it can never break the always-on feeds.
 
 ---
 
@@ -211,14 +230,18 @@ config lives once in the `&newsbrief` YAML anchor, so changing the image/user/vo
 single edit that every mode inherits. The container runs **non-root** via `user: "${PUID}:${PGID}"`
 (those must own `${APPDATA_DIR}/news-brief`).
 
-Trigger the modes from your container scheduler or host cron:
+Trigger the batch modes from your container scheduler or host cron, and start the
+commands daemon once as a persistent service:
 
 ```cron
 0 20 * * *   docker compose run --rm newsbrief-submit
 0  6 * * *   docker compose run --rm newsbrief-collect
 0 21 * * 0   docker compose run --rm newsbrief-weekly
-*/30 * * * * docker compose run --rm newsbrief-commands
 0  *  * * *  docker compose run --rm newsbrief-monitor
+```
+
+```sh
+docker compose up -d newsbrief-commands   # real-time bot daemon (not cron)
 ```
 
 Adding a mode is one new two-line service in the compose file. The `/app/logs` volume holds all

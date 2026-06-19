@@ -1,5 +1,7 @@
 """Phase 5 Telegram command handlers: /watch /unwatch /positions /performance."""
 
+import json
+
 import brief
 import trading
 
@@ -216,3 +218,353 @@ def test_feedback_summary_shows_default_pins_when_absent():
     out = brief.feedback_summary({"focus": [], "mute": [], "notes": []})
     assert "Pinned:" in out
     assert "ukraine" in out  # defaults surfaced, not hidden
+
+
+# ── Temporary sources: store ──────────────────────────────────────────────────
+def _isolate_sources(monkeypatch, tmp_path):
+    monkeypatch.setattr(brief, "TEMP_SOURCES_FILE", tmp_path / "sources.json")
+
+
+def test_load_temp_sources_missing_file_is_empty(monkeypatch, tmp_path):
+    _isolate_sources(monkeypatch, tmp_path)
+    assert brief.load_temp_sources() == []
+
+
+def test_load_temp_sources_non_list_ignored(monkeypatch, tmp_path):
+    _isolate_sources(monkeypatch, tmp_path)
+    (tmp_path / "sources.json").write_text('{"not": "a list"}', encoding="utf-8")
+    assert brief.load_temp_sources() == []  # degrades, does not raise
+
+
+def test_load_temp_sources_drops_invalid_entries(monkeypatch, tmp_path):
+    _isolate_sources(monkeypatch, tmp_path)
+    (tmp_path / "sources.json").write_text(
+        json.dumps(
+            [
+                {"name": "Good", "url": "https://x/feed", "category": "Iran"},
+                {"name": "NoUrl", "category": "iran"},  # missing url → dropped
+                "garbage",  # not a dict → dropped
+                {
+                    "name": "BadKind",
+                    "url": "https://y/feed",
+                    "category": "geo",
+                    "kind": "weird",
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+    out = brief.load_temp_sources()
+    assert [s["name"] for s in out] == ["Good", "BadKind"]
+    assert out[0]["category"] == "iran"  # lower-cased
+    assert out[0]["kind"] == "regional"  # default kind
+    assert out[1]["kind"] == "regional"  # invalid kind coerced to default
+
+
+def test_add_temp_source_dedupes_by_url(monkeypatch, tmp_path):
+    _isolate_sources(monkeypatch, tmp_path)
+    e1 = {"name": "A", "url": "https://x/feed", "category": "iran", "kind": "regional"}
+    e2 = {"name": "A v2", "url": "https://x/feed", "category": "iran", "kind": "wire"}
+    brief.add_temp_source(e1)
+    brief.add_temp_source(e2)  # same URL → replaces, not duplicates
+    srcs = brief.load_temp_sources()
+    assert len(srcs) == 1 and srcs[0]["name"] == "A v2" and srcs[0]["kind"] == "wire"
+
+
+def test_remove_temp_source_by_id(monkeypatch, tmp_path):
+    _isolate_sources(monkeypatch, tmp_path)
+    e = {"name": "A", "url": "https://x/feed", "category": "iran", "kind": "regional"}
+    brief.add_temp_source(e)
+    removed = brief.remove_temp_source(brief._source_id("https://x/feed"))
+    assert removed and removed["name"] == "A"
+    assert brief.load_temp_sources() == []
+    assert brief.remove_temp_source("nope") is None
+
+
+def test_build_google_news_url_uses_site_recipe():
+    url = brief.build_google_news_url("timesofisrael.com")
+    assert "site%3Atimesofisrael.com" in url
+    assert "news.google.com/rss/search" in url
+
+
+# ── /addsource wizard + /sources + callbacks ──────────────────────────────────
+def _cb(data, msg_id=10):
+    return {
+        "id": "cbid",
+        "data": data,
+        "message": {"message_id": msg_id, "chat": {"id": brief.TELEGRAM_CHAT_ID}},
+    }
+
+
+def _wire_telegram(monkeypatch):
+    """Capture the interactive Telegram surface; send_buttons returns a msg_id."""
+    cap = {"buttons": [], "edits": [], "acks": [], "sends": []}
+    monkeypatch.setattr(
+        brief,
+        "telegram_send_buttons",
+        lambda t, kb: cap["buttons"].append((t, kb)) or 10,
+    )
+    monkeypatch.setattr(
+        brief,
+        "telegram_edit_text",
+        lambda mid, t, kb=None: cap["edits"].append((mid, t, kb)),
+    )
+    monkeypatch.setattr(
+        brief,
+        "telegram_answer_callback",
+        lambda cid, text=None: cap["acks"].append(cid),
+    )
+    monkeypatch.setattr(brief, "telegram_send", lambda t: cap["sends"].append(t))
+    return cap
+
+
+def test_addsource_wizard_quick_domain(monkeypatch, tmp_path):
+    _isolate_sources(monkeypatch, tmp_path)
+    brief._WIZARD.clear()
+    cap = _wire_telegram(monkeypatch)
+    chat = str(brief.TELEGRAM_CHAT_ID)
+
+    brief._handle_telegram_update(_update("/addsource"), _fb())
+    assert brief._WIZARD[chat]["step"] == "category"
+
+    brief._handle_callback_query(_cb("as:cat:iran"))
+    assert brief._WIZARD[chat]["category"] == "iran"
+    assert brief._WIZARD[chat]["step"] == "kind"
+
+    brief._handle_callback_query(_cb("as:kind:regional"))
+    assert brief._WIZARD[chat]["step"] == "url"
+
+    brief._handle_telegram_update(_update("timesofisrael.com"), _fb())
+    w = brief._WIZARD[chat]
+    assert w["step"] == "confirm" and w["name"] == "timesofisrael.com"
+    assert "site%3Atimesofisrael.com" in w["url"]
+
+    brief._handle_callback_query(_cb("as:confirm"))
+    assert chat not in brief._WIZARD  # wizard cleared on confirm
+    srcs = brief.load_temp_sources()
+    assert len(srcs) == 1
+    assert srcs[0]["category"] == "iran" and srcs[0]["kind"] == "regional"
+    assert cap["acks"]  # every callback acknowledged
+
+
+def test_addsource_wizard_full_url_keeps_url(monkeypatch, tmp_path):
+    _isolate_sources(monkeypatch, tmp_path)
+    brief._WIZARD.clear()
+    _wire_telegram(monkeypatch)
+    chat = str(brief.TELEGRAM_CHAT_ID)
+    brief._handle_telegram_update(_update("/addsource"), _fb())
+    brief._handle_callback_query(_cb("as:cat:geo"))
+    brief._handle_callback_query(_cb("as:kind:wire"))
+    brief._handle_telegram_update(_update("https://site.com/feed.xml"), _fb())
+    w = brief._WIZARD[chat]
+    assert w["url"] == "https://site.com/feed.xml" and w["name"] == "site.com"
+
+
+def test_addsource_wizard_rejects_garbage_url(monkeypatch, tmp_path):
+    _isolate_sources(monkeypatch, tmp_path)
+    brief._WIZARD.clear()
+    cap = _wire_telegram(monkeypatch)
+    chat = str(brief.TELEGRAM_CHAT_ID)
+    brief._handle_telegram_update(_update("/addsource"), _fb())
+    brief._handle_callback_query(_cb("as:cat:iran"))
+    brief._handle_callback_query(_cb("as:kind:regional"))
+    brief._handle_telegram_update(_update("not a url at all"), _fb())
+    assert brief._WIZARD[chat]["step"] == "url"  # stays put, re-prompts
+    assert any("neither a domain nor a URL" in s for s in cap["sends"])
+
+
+def test_addsource_wizard_cancel_clears(monkeypatch, tmp_path):
+    _isolate_sources(monkeypatch, tmp_path)
+    brief._WIZARD.clear()
+    _wire_telegram(monkeypatch)
+    chat = str(brief.TELEGRAM_CHAT_ID)
+    brief._handle_telegram_update(_update("/addsource"), _fb())
+    brief._handle_callback_query(_cb("as:cancel"))
+    assert chat not in brief._WIZARD
+
+
+def test_sources_remove_via_button(monkeypatch, tmp_path):
+    _isolate_sources(monkeypatch, tmp_path)
+    brief._WIZARD.clear()
+    _wire_telegram(monkeypatch)
+    brief.add_temp_source(
+        {"name": "X", "url": "https://x/feed", "category": "iran", "kind": "regional"}
+    )
+    brief._handle_callback_query(_cb(f"rmsrc:{brief._source_id('https://x/feed')}"))
+    assert brief.load_temp_sources() == []
+
+
+def test_removesource_by_name(monkeypatch, tmp_path):
+    _isolate_sources(monkeypatch, tmp_path)
+    sent = _capture(monkeypatch)
+    brief.add_temp_source(
+        {
+            "name": "Times",
+            "url": "https://x/feed",
+            "category": "iran",
+            "kind": "regional",
+        }
+    )
+    brief._handle_telegram_update(
+        _update("/removesource times"), _fb()
+    )  # case-insensitive
+    assert brief.load_temp_sources() == []
+    assert "Removed" in sent[0]
+
+
+def test_removesource_unknown_reports(monkeypatch, tmp_path):
+    _isolate_sources(monkeypatch, tmp_path)
+    sent = _capture(monkeypatch)
+    brief._handle_telegram_update(_update("/removesource ghost"), _fb())
+    assert "No temp source" in sent[0]
+
+
+def test_foreign_chat_callback_is_ignored(monkeypatch, tmp_path):
+    _isolate_sources(monkeypatch, tmp_path)
+    brief._WIZARD.clear()
+    cap = _wire_telegram(monkeypatch)
+    brief.add_temp_source(
+        {"name": "X", "url": "https://x/feed", "category": "iran", "kind": "regional"}
+    )
+    foreign = {
+        "id": "z",
+        "data": f"rmsrc:{brief._source_id('https://x/feed')}",
+        "message": {"message_id": 1, "chat": {"id": "999999"}},
+    }
+    brief._handle_callback_query(foreign)
+    assert len(brief.load_temp_sources()) == 1  # not removed
+    assert cap["acks"] == ["z"]  # but still acked
+
+
+# ── /close /unwatch /unpin button pickers + /reset confirm ────────────────────
+def test_close_picker_lists_distinct_open_tickers(monkeypatch):
+    cap = _wire_telegram(monkeypatch)
+    monkeypatch.setattr(
+        brief,
+        "load_book",
+        lambda: {
+            "positions": [
+                {"status": "open", "ticker": "BTC", "instrument": "XBTUSD"},
+                {"status": "open", "ticker": "BTC", "instrument": "XBTUSD"},  # dup
+                {"status": "closed", "ticker": "BP", "instrument": "bp.uk"},
+            ]
+        },
+    )
+    brief._handle_telegram_update(_update("/close"), _fb())
+    _text, kb = cap["buttons"][0]
+    assert len(kb) == 1  # one button, deduped, closed excluded
+    assert kb[0][0]["callback_data"] == f"close:{brief._short_id('BTC')}"
+
+
+def test_close_picker_empty(monkeypatch):
+    cap = _wire_telegram(monkeypatch)
+    monkeypatch.setattr(brief, "load_book", lambda: {"positions": []})
+    brief._handle_telegram_update(_update("/close"), _fb())
+    assert any("No open positions" in s for s in cap["sends"])
+
+
+def test_close_button_routes_to_close_ticker(monkeypatch):
+    _wire_telegram(monkeypatch)
+    monkeypatch.setattr(
+        brief,
+        "load_book",
+        lambda: {"positions": [{"status": "open", "ticker": "BTC", "instrument": "x"}]},
+    )
+    called = []
+    monkeypatch.setattr(brief, "_close_ticker", lambda t: called.append(t))
+    brief._handle_callback_query(_cb(f"close:{brief._short_id('BTC')}"), _fb())
+    assert called == ["BTC"]
+
+
+def test_close_text_form_still_works(monkeypatch):
+    _wire_telegram(monkeypatch)
+    called = []
+    monkeypatch.setattr(brief, "_close_ticker", lambda t: called.append(t))
+    brief._handle_telegram_update(_update("/close AAPL_US_EQ"), _fb())
+    assert called == ["AAPL_US_EQ"]
+
+
+def test_unwatch_button_removes_right_item(monkeypatch, tmp_path):
+    _wire_telegram(monkeypatch)
+    monkeypatch.setattr(trading, "WATCHLIST_FILE", tmp_path / "wl.json")
+    trading.save_watchlist(
+        {
+            "items": [
+                {"raw": "BTC", "asset_class": "crypto", "instrument": "XBTUSD"},
+                {"raw": "ETH", "asset_class": "crypto", "instrument": "ETHUSD"},
+            ]
+        }
+    )
+    brief._handle_callback_query(
+        _cb(f"unwatch:{brief._short_id('crypto|XBTUSD')}"), _fb()
+    )
+    assert [i["raw"] for i in trading.load_watchlist()["items"]] == ["ETH"]
+
+
+def test_unwatch_picker_empty(monkeypatch, tmp_path):
+    cap = _wire_telegram(monkeypatch)
+    monkeypatch.setattr(trading, "WATCHLIST_FILE", tmp_path / "wl.json")
+    brief._handle_telegram_update(_update("/unwatch"), _fb())
+    assert any("Watchlist is empty" in s for s in cap["sends"])
+
+
+def test_unpin_button_removes_pin_and_threads_fb(monkeypatch):
+    _wire_telegram(monkeypatch)
+    fb = {"focus": [], "mute": [], "notes": [], "pin": ["china", "japan"]}
+    out = brief._handle_callback_query(_cb(f"unpin:{brief._short_id('japan')}"), fb)
+    assert out["pin"] == ["china"]
+
+
+def test_unpin_picker_defaults_when_no_explicit_pins(monkeypatch):
+    cap = _wire_telegram(monkeypatch)
+    brief._handle_telegram_update(_update("/unpin"), _fb())  # no pin key → defaults
+    _text, kb = cap["buttons"][0]
+    datas = [b["callback_data"] for row in kb for b in row]
+    assert f"unpin:{brief._short_id('ukraine')}" in datas  # default pin offered
+
+
+def test_reset_asks_confirmation_not_immediate(monkeypatch):
+    cap = _wire_telegram(monkeypatch)
+    fb = {"focus": ["x"], "mute": [], "notes": []}
+    out = brief._handle_telegram_update(_update("/reset"), fb)
+    assert out["focus"] == ["x"]  # NOT cleared yet — just prompted
+    kb = cap["buttons"][0][1]
+    datas = [b["callback_data"] for row in kb for b in row]
+    assert "reset:yes" in datas and "reset:no" in datas
+
+
+def test_reset_yes_clears(monkeypatch):
+    _wire_telegram(monkeypatch)
+    out = brief._handle_callback_query(
+        _cb("reset:yes"),
+        {"focus": ["x"], "mute": ["y"], "notes": ["z"], "pin": ["china"]},
+    )
+    assert out == {"focus": [], "mute": [], "notes": []}
+
+
+def test_reset_no_keeps_overrides(monkeypatch):
+    _wire_telegram(monkeypatch)
+    fb = {"focus": ["x"], "mute": [], "notes": []}
+    out = brief._handle_callback_query(_cb("reset:no"), fb)
+    assert out == fb
+
+
+def test_handle_update_threads_fb_through_callback(monkeypatch):
+    _wire_telegram(monkeypatch)
+    fb = {"focus": [], "mute": [], "notes": [], "pin": ["china", "japan"]}
+    update = {"callback_query": _cb(f"unpin:{brief._short_id('china')}")}
+    out = brief._handle_update(update, fb)
+    assert out["pin"] == ["japan"]
+
+
+# ── setMyCommands self-registration ───────────────────────────────────────────
+def test_register_bot_commands_hash_gated(monkeypatch, tmp_path):
+    monkeypatch.setattr(brief, "STATE_FILE", tmp_path / "state.json")
+    calls = []
+    monkeypatch.setattr(
+        brief, "telegram_set_my_commands", lambda cmds: calls.append(cmds) or True
+    )
+    brief.register_bot_commands_if_changed()
+    brief.register_bot_commands_if_changed()  # unchanged → no second API call
+    assert len(calls) == 1
+    assert any(c["command"] == "addsource" for c in calls[0])
