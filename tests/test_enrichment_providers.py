@@ -1,4 +1,5 @@
 # tests/test_enrichment_providers.py
+import logging
 from pathlib import Path
 
 from enrichment import config
@@ -54,3 +55,12 @@ def test_get_provider_explicit_fixture(monkeypatch):
     p = get_provider()
     assert p.name == "fixture"
     assert p.symbol_bundle("CVX").rp_entity_id == "D54E62"
+
+
+def test_get_provider_bigdata_missing_key_warns_and_falls_back(monkeypatch, caplog):
+    monkeypatch.setattr(config, "ENRICHMENT_PROVIDER", "bigdata")
+    monkeypatch.setattr(config, "BIGDATA_API_KEY", "")
+    with caplog.at_level(logging.WARNING):
+        provider = get_provider()
+    assert provider.name == "null"
+    assert "BIGDATA_API_KEY is unset" in caplog.text

@@ -13,6 +13,8 @@ import json
 from pathlib import Path
 from typing import Protocol
 
+from common import log
+
 from . import config
 from .models import (
     SymbolBundle,
@@ -68,8 +70,14 @@ def get_provider() -> Provider:
     )
     if name == "fixture":
         return FixtureProvider(config.FIXTURE_DIR)
-    if name == "bigdata" and config.BIGDATA_API_KEY:
-        from .providers_bigdata import BigdataProvider  # added in Task 3
+    if name == "bigdata":
+        if not config.BIGDATA_API_KEY:
+            log.warning(
+                "ENRICHMENT_PROVIDER=bigdata but BIGDATA_API_KEY is unset — "
+                "falling back to null"
+            )
+        else:
+            from .providers_bigdata import BigdataProvider  # added in Task 3
 
-        return BigdataProvider(config.BIGDATA_API_KEY, config.BIGDATA_BASE_URL)
+            return BigdataProvider(config.BIGDATA_API_KEY, config.BIGDATA_BASE_URL)
     return NullProvider()
