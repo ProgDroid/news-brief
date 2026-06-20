@@ -18,6 +18,7 @@ def test_normalize_ticker_strips_venue_suffix():
 def test_normalize_ticker_strips_lse_marker():
     assert normalize_ticker("SHELl") == "SHEL"
     assert normalize_ticker("DXJGl") == "DXJG"
+    assert normalize_ticker("SIEd") == "SIE"
 
 
 def test_normalize_ticker_leaves_plain_symbol():
@@ -55,7 +56,7 @@ def test_build_universe_dedups_and_routes_etf_to_theme():
     # open equity positions + watchlist stocks + signal tickers, ETFs excluded, deduped
     assert u.tickers == ["CVX", "AVAV", "MU", "RGLD"]
     # pins + ETF-derived theme (SGLN -> gold), order: pins first then ETF themes
-    assert "ukraine" in u.themes and "iran" in u.themes and "gold" in u.themes
+    assert u.themes == ["ukraine", "iran", "gold"]
 
 
 def test_latest_signal_tickers_reads_newest_snapshot(tmp_path):
@@ -68,3 +69,17 @@ def test_latest_signal_tickers_reads_newest_snapshot(tmp_path):
 
 def test_latest_signal_tickers_empty_when_no_snapshots(tmp_path):
     assert latest_signal_tickers(Path(tmp_path)) == []
+
+
+def test_latest_signal_tickers_handles_null_and_corrupt(tmp_path):
+    # Case 1: signals key is explicitly null
+    null_dir = tmp_path / "null_case"
+    null_dir.mkdir()
+    (null_dir / "signals-2026-06-19.json").write_text('{"signals": null}')
+    assert latest_signal_tickers(null_dir) == []
+
+    # Case 2: file contains invalid JSON
+    corrupt_dir = tmp_path / "corrupt_case"
+    corrupt_dir.mkdir()
+    (corrupt_dir / "signals-2026-06-19.json").write_text("not json")
+    assert latest_signal_tickers(corrupt_dir) == []

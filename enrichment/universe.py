@@ -29,7 +29,6 @@ _ETF_THEME_MAP = {
 }
 
 _VENUE_SUFFIX_RE = re.compile(r"_(?:[A-Z]{2}_)?EQ$")  # _US_EQ, _EQ
-_LSE_MARKER_RE = re.compile(r"^([A-Z0-9]+?)[ld]$")  # trailing l/d after uppercase base
 
 
 @dataclass(frozen=True)
@@ -70,7 +69,7 @@ def latest_signal_tickers(signals_dir: Path) -> list[str]:
         return []
     return _dedup(
         normalize_ticker(s["ticker"])
-        for s in data.get("signals", [])
+        for s in data.get("signals") or []
         if s.get("ticker")
     )
 
