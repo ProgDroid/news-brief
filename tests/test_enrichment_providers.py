@@ -108,3 +108,15 @@ def test_bigdata_parse_thematic_bundle(monkeypatch):
     assert tb.docs[0].source == "FT"
     assert tb.docs[0].date == "2026-06-19"
     assert tb.error is None
+
+
+def test_bigdata_thematic_degrades_on_error(monkeypatch):
+    p = BigdataProvider("k", "https://api.bigdata.com")
+
+    def boom(_):
+        raise RuntimeError("HTTP 500")
+
+    monkeypatch.setattr(p, "_search", boom)
+    tb = p.thematic_bundle("defence")
+    assert tb.docs == []
+    assert tb.error is not None and "500" in tb.error

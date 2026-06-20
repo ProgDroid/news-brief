@@ -8,6 +8,8 @@ brief. JSON paths below must match docs.bigdata.com (confirm via Context7)."""
 
 import requests
 
+from common import log
+
 from . import config
 from .models import (
     EvidenceDoc,
@@ -106,6 +108,7 @@ class BigdataProvider:
                 ticker=ticker, rp_entity_id=eid, sentiment=sentiment, events=events
             )
         except Exception as e:  # degrade, never crash the brief
+            log.warning("Bigdata symbol_bundle(%s) degraded: %s", ticker, e)
             return SymbolBundle(
                 ticker=ticker, rp_entity_id=None, sentiment=None, error=str(e)
             )
@@ -124,4 +127,5 @@ class BigdataProvider:
             ]
             return ThematicBundle(theme=theme, docs=docs)
         except Exception as e:
+            log.warning("Bigdata thematic_bundle(%s) degraded: %s", theme, e)
             return ThematicBundle(theme=theme, error=str(e))
