@@ -5,15 +5,23 @@ and the event-conditioned slice."""
 from backtest.series import SentimentPoint, SentimentSeries
 
 
+def align_dated(
+    sentiment: SentimentSeries, fwd: dict[str, dict[int, float]], horizon: int
+) -> list[tuple[str, float, float]]:
+    """As `align`, but keeps the date on each row so callers can pool across
+    tickers and split TEMPORALLY (earlier=discovery, later=holdout)."""
+    smap = sentiment.as_of_map()
+    rows = []
+    for d in sentiment.dates():
+        if d in fwd and horizon in fwd[d]:
+            rows.append((d, smap[d], fwd[d][horizon]))
+    return rows
+
+
 def align(
     sentiment: SentimentSeries, fwd: dict[str, dict[int, float]], horizon: int
 ) -> list[tuple[float, float]]:
-    smap = sentiment.as_of_map()
-    pairs = []
-    for d in sentiment.dates():
-        if d in fwd and horizon in fwd[d]:
-            pairs.append((smap[d], fwd[d][horizon]))
-    return pairs
+    return [(s, r) for _, s, r in align_dated(sentiment, fwd, horizon)]
 
 
 def to_delta(sentiment: SentimentSeries) -> SentimentSeries:

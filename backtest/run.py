@@ -1,8 +1,9 @@
-"""End-to-end backtest runner: pool pairs across tickers, sweep horizons, emit
-metrics + a go/no-go report. Offline; fed by any SentimentSource."""
+"""End-to-end backtest runner: pool pairs across tickers, sweep horizons, select
+the horizon on a discovery split and CONFIRM it on a held-out (later) window, then
+emit metrics + a report. Offline; fed by any SentimentSource."""
 
-from backtest.align import align, to_delta
-from backtest.evaluation import best_horizon, bonferroni_note
+from backtest.align import align_dated, to_delta
+from backtest.evaluation import best_horizon, bonferroni_note, split_pairs
 from backtest.metrics import hit_rate, quantile_returns, spearman_rank_ic
 from backtest.returns import forward_returns
 from backtest.series import PriceSeries, SentimentSeries
@@ -15,53 +16,102 @@ def run_backtest(
     *,
     mode: str = "level",
     q: int = 5,
+    split_frac: float = 0.5,
 ) -> dict:
-    horizons_out: dict[int, dict] = {}
+    """Discovery/confirmation discipline:
+    1. Pool (date, sentiment, fwd_return) across tickers per horizon, sort by date.
+    2. Split TEMPORALLY: earlier `split_frac` = discovery, rest = held-out.
+    3. Select best_horizon by arg-max |IC| on DISCOVERY only.
+    4. Report the full metric suite on the HELD-OUT set (the confirmation).
+    The discovery IC table is in-sample/selection-biased; only the held-out
+    confirmation is out-of-sample.
+    """
+    discovery_ic: dict[int, float] = {}
+    holdout: dict[int, dict] = {}
+    counts: dict[int, dict] = {}
     for h in horizons:
-        pooled: list[tuple[float, float]] = []
+        pooled: list[tuple[str, float, float]] = []
         for tkr, s in sentiment_by_ticker.items():
             if tkr not in prices_by_ticker:
                 continue
             series = to_delta(s) if mode == "delta" else s
             fwd = forward_returns(prices_by_ticker[tkr], [h])
-            pooled.extend(align(series, fwd, h))
-        horizons_out[h] = {
-            "ic": spearman_rank_ic(pooled),
-            "quantiles": quantile_returns(pooled, q=q),
-            "hit_rate": hit_rate(pooled),
-            "n": len(pooled),
+            pooled.extend(align_dated(series, fwd, h))
+        pooled.sort(key=lambda row: row[0])  # temporal order for an honest split
+        disc_rows, hold_rows = split_pairs(pooled, split_frac)
+        disc = [(sv, r) for _, sv, r in disc_rows]
+        hold = [(sv, r) for _, sv, r in hold_rows]
+        discovery_ic[h] = spearman_rank_ic(disc)
+        holdout[h] = {
+            "ic": spearman_rank_ic(hold),
+            "quantiles": quantile_returns(hold, q=q),
+            "hit_rate": hit_rate(hold),
+            "n": len(hold),
         }
-    ic_by_h = {h: horizons_out[h]["ic"] for h in horizons}
+        counts[h] = {
+            "n_total": len(pooled),
+            "n_discovery": len(disc),
+            "n_holdout": len(hold),
+        }
+    best = best_horizon(discovery_ic) if discovery_ic else None
     return {
-        "horizons": horizons_out,
-        "best_horizon": best_horizon(ic_by_h) if ic_by_h else None,
-        "caveat": bonferroni_note(len(horizons)),
         "mode": mode,
+        "split_frac": split_frac,
+        "discovery_ic": discovery_ic,
+        "holdout": holdout,
+        "best_horizon": best,
+        "confirmation": holdout.get(best) if best is not None else None,
+        "counts": counts,
+        "caveat": bonferroni_note(len(horizons)),
     }
 
 
-_IN_SAMPLE_WARNING = (
-    "⚠ **IN-SAMPLE / DISCOVERY ONLY — NOT a sizing verdict.** Every IC, quantile and "
-    "hit-rate figure below is computed in-sample, and `best horizon` is the arg-max "
-    "|IC| across the swept horizons (selection-biased upward). Confirm the chosen "
-    "horizon on held-out data (`backtest.evaluation.split_pairs`) before any sizing "
-    "decision."
+_DISCOVERY_CAVEAT = (
+    "⚠ The discovery sweep below is **IN-SAMPLE and selection-biased** (best horizon "
+    "= arg-max |IC| over the swept horizons). Only the **held-out confirmation** row "
+    "is out-of-sample. Treat the discovery table as exploratory; base any sizing "
+    "decision on the held-out confirmation, not the discovery IC."
 )
 
 
 def report_markdown(result: dict) -> str:
+    best = result["best_horizon"]
+    frac = result["split_frac"]
     lines = [
-        "## Bigdata.com sentiment backtest — discovery report (https://bigdata.com)",
-        f"> {_IN_SAMPLE_WARNING}",
+        "## Bigdata.com sentiment backtest — discovery + held-out confirmation "
+        "(https://bigdata.com)",
+        f"> {_DISCOVERY_CAVEAT}",
         "",
-        f"Mode: **{result['mode']}** · best horizon (discovery, in-sample): "
-        f"**{result['best_horizon']}d**",
+        f"Mode: **{result['mode']}** · split: {frac:.0%} discovery / "
+        f"{1 - frac:.0%} held-out (temporal: earlier→discovery, later→held-out)",
         "",
-        "| Horizon (d) | n | Rank IC (in-sample) | Hit rate | Quantile fwd returns (low→high) |",
-        "|---|---|---|---|---|",
+        "### Discovery — in-sample horizon selection (selection-biased)",
+        "| Horizon (d) | n (discovery) | Rank IC (in-sample) |",
+        "|---|---|---|",
     ]
-    for h, m in sorted(result["horizons"].items()):
-        qs = ", ".join(f"{x:.4f}" for x in m["quantiles"])
-        lines.append(f"| {h} | {m['n']} | {m['ic']:.4f} | {m['hit_rate']:.2%} | {qs} |")
+    for h in sorted(result["discovery_ic"]):
+        nd = result["counts"][h]["n_discovery"]
+        lines.append(f"| {h} | {nd} | {result['discovery_ic'][h]:.4f} |")
+    lines += [
+        "",
+        (
+            f"Selected horizon (arg-max |IC| on discovery): **{best}d**"
+            if best is not None
+            else "Selected horizon: **n/a** (no data)"
+        ),
+        "",
+        "### Held-out confirmation — out-of-sample, at the selected horizon",
+    ]
+    conf = result["confirmation"]
+    if conf and conf["n"] > 0:
+        qs = ", ".join(f"{x:.4f}" for x in conf["quantiles"])
+        lines += [
+            "| Horizon (d) | n (held-out) | Rank IC | Hit rate | "
+            "Quantile fwd returns (low→high) |",
+            "|---|---|---|---|---|",
+            f"| {best} | {conf['n']} | {conf['ic']:.4f} | {conf['hit_rate']:.2%} | {qs} |",
+        ]
+    else:
+        lines.append("_Insufficient held-out data to confirm — widen the sample._")
     lines += ["", f"> {result['caveat']}"]
     return "\n".join(lines)
