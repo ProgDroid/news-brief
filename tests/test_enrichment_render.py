@@ -73,6 +73,9 @@ def test_annotate_signals_attaches_descriptive_field():
     assert "bigdata_sentiment" not in out[2]  # null ticker
     # inputs not mutated
     assert "bigdata_sentiment" not in signals[0]
+    # returned list and unmatched elements must be independent objects
+    assert out is not signals
+    assert out[1] is not signals[1]
 
 
 def test_annotate_signals_no_op_when_empty():
@@ -81,3 +84,5 @@ def test_annotate_signals_no_op_when_empty():
     ]
     out = annotate_signals(signals, EnrichmentBundles(as_of=AS_OF))
     assert out == signals
+    assert out is not signals
+    assert out[0] is not signals[0]

@@ -63,7 +63,7 @@ def annotate_signals(signals: list[dict], bundles: EnrichmentBundles) -> list[di
     matches a symbol bundle. Read-only/informational — explicitly distinct from
     any sizing input. Returns new dicts; never mutates the inputs."""
     if bundles.is_empty():
-        return signals
+        return [dict(sig) for sig in signals]
     by_ticker = {
         s.ticker: s for s in bundles.symbols if s.sentiment is not None and not s.error
     }
@@ -72,7 +72,7 @@ def annotate_signals(signals: list[dict], bundles: EnrichmentBundles) -> list[di
         tkr = sig.get("ticker")
         bundle = by_ticker.get(normalize_ticker(tkr)) if tkr else None
         if bundle is None:
-            out.append(sig)
+            out.append(dict(sig))
             continue
         s = bundle.sentiment
         out.append(
