@@ -81,6 +81,15 @@ from validation import (
     performance_prompt_block,
     daily_trade_message,
 )
+from enrichment import (
+    annotate_signals,
+    build_enrichment,
+    build_universe,
+    is_enabled as enrichment_enabled,
+    latest_signal_tickers,
+    render_prompt_block,
+)
+from enrichment.models import bundles_from_dict
 
 
 # Chroma MCP HTTP endpoint
@@ -1443,6 +1452,7 @@ def build_daily_prompt(
     portfolio: str,
     perf_block: str = "",
     market_block: str = "",
+    enrichment_block: str = "",
 ) -> str:
     today = datetime.now(timezone.utc).strftime("%A, %d %B %Y")
     search_list = "\n".join(f"- {t['search']}" for t in TOPICS)
@@ -1495,6 +1505,8 @@ evidence. Do NOT give buy/sell advice or price targets. Surface what is worth th
 reader's attention; the reader decides what to do with it.
 """
 
+    enrichment_section = f"\n{enrichment_block}\n" if enrichment_block else ""
+
     market_section = (
         f"\n## MARKET PULSE (what moved — you supply the why)\n{market_block}\n"
         if market_block
@@ -1521,7 +1533,7 @@ Use for forward-looking analytical framing. Cite the show name if drawing on a s
 Search for current developments on each before writing. Anchor facts on Reuters; for
 local colour and forward framing, prefer the region-native sources above.
 {search_list}
-{yesterday_block}{weekly_block}{portfolio_block}
+{yesterday_block}{weekly_block}{portfolio_block}{enrichment_section}
 {perf_block}
 
 ## OUTPUT FORMAT
@@ -2044,6 +2056,31 @@ def mode_submit():
     perf_block = performance_prompt_block(load_book())
     market_block = build_market_pulse(resolved_pins(fb))
     log.info(f"Market pulse: {len(market_block)} chars")
+    enrichment_block = ""
+    try:
+        universe = build_universe(
+            load_book(),
+            load_watchlist(),
+            latest_signal_tickers(SIGNALS_DIR),
+            resolved_pins(fb),
+        )
+        bundles = build_enrichment(
+            universe, as_of=datetime.now(timezone.utc).isoformat()
+        )
+        if not bundles.is_empty():
+            _write_json_atomic(
+                DATA_DIR / "enrichment" / f"enrichment-{today}.json", bundles.to_dict()
+            )
+            enrichment_block = render_prompt_block(bundles)
+        log.info(
+            "Enrichment: enabled=%s symbols=%d themes=%d block=%dch",
+            enrichment_enabled(),
+            len(bundles.symbols),
+            len(bundles.themes),
+            len(enrichment_block),
+        )
+    except Exception as e:
+        log.error(f"Enrichment skipped (brief unaffected): {e}")
     prompt = build_daily_prompt(
         feed_content,
         web_content,
@@ -2054,6 +2091,7 @@ def mode_submit():
         portfolio,
         perf_block,
         market_block,
+        enrichment_block,
     )
     batch_id = submit_batch(SYSTEM_PROMPT, prompt, custom_id=f"newsbrief-{today}")
     save_state(
@@ -2081,6 +2119,13 @@ def mode_collect():
         signals, dropped = normalize_signals(raw_signals)
         if dropped or status != "ok":
             log.warning(f"Signals: status={status}, dropped={dropped}")
+        try:
+            enr_path = DATA_DIR / "enrichment" / f"enrichment-{today}.json"
+            if enr_path.exists():
+                raw = json.loads(enr_path.read_text(encoding="utf-8"))
+                signals = annotate_signals(signals, bundles_from_dict(raw))
+        except Exception as e:
+            log.error(f"Signal annotation skipped (signals unaffected): {e}")
         deliver(
             brief,
             header=f"🌐 <b>Morning Brief — {datetime.now(timezone.utc).strftime('%d %b %Y')}</b>",
