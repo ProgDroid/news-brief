@@ -40,13 +40,24 @@ def run_backtest(
     }
 
 
+_IN_SAMPLE_WARNING = (
+    "⚠ **IN-SAMPLE / DISCOVERY ONLY — NOT a sizing verdict.** Every IC, quantile and "
+    "hit-rate figure below is computed in-sample, and `best horizon` is the arg-max "
+    "|IC| across the swept horizons (selection-biased upward). Confirm the chosen "
+    "horizon on held-out data (`backtest.evaluation.split_pairs`) before any sizing "
+    "decision."
+)
+
+
 def report_markdown(result: dict) -> str:
     lines = [
-        "## Bigdata.com sentiment backtest — go/no-go (https://bigdata.com)",
-        f"Mode: **{result['mode']}** · best horizon (discovery): "
+        "## Bigdata.com sentiment backtest — discovery report (https://bigdata.com)",
+        f"> {_IN_SAMPLE_WARNING}",
+        "",
+        f"Mode: **{result['mode']}** · best horizon (discovery, in-sample): "
         f"**{result['best_horizon']}d**",
         "",
-        "| Horizon (d) | n | Rank IC | Hit rate | Quantile fwd returns (low→high) |",
+        "| Horizon (d) | n | Rank IC (in-sample) | Hit rate | Quantile fwd returns (low→high) |",
         "|---|---|---|---|---|",
     ]
     for h, m in sorted(result["horizons"].items()):

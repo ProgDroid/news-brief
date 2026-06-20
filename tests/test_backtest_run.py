@@ -30,6 +30,20 @@ def test_run_backtest_positive_ic_when_sentiment_leads_returns():
     assert "Bigdata.com" in md and "IC" in md
 
 
+def test_report_marks_results_in_sample_and_selection_biased():
+    # The runner selects best_horizon by max|IC| on the full sample and reports
+    # in-sample IC; the report MUST flag that so an IC table is never read as a
+    # sizing verdict before held-out confirmation.
+    s = SentimentSeries(
+        "X", [SentimentPoint(f"2025-{m:02d}-01", float(m)) for m in range(1, 8)]
+    )
+    prices = _prices_with_step_returns("X", [m * 0.01 for m in range(1, 8)])
+    md = report_markdown(run_backtest({"X": s}, {"X": prices}, [1, 5], mode="level"))
+    low = md.lower()
+    assert "in-sample" in low
+    assert "split_pairs" in low  # points the reader to held-out confirmation
+
+
 def test_run_backtest_inverting_sentiment_flips_ic_negative():
     # Same returns, sentiment negated -> rank IC must go strongly negative.
     # Guards against the test passing for the wrong (sign-agnostic) reason.
