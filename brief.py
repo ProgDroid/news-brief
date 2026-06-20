@@ -2122,8 +2122,8 @@ def mode_collect():
         try:
             enr_path = DATA_DIR / "enrichment" / f"enrichment-{today}.json"
             if enr_path.exists():
-                raw = json.loads(enr_path.read_text(encoding="utf-8"))
-                signals = annotate_signals(signals, bundles_from_dict(raw))
+                enr_raw = json.loads(enr_path.read_text(encoding="utf-8"))
+                signals = annotate_signals(signals, bundles_from_dict(enr_raw))
         except Exception as e:
             log.error(f"Signal annotation skipped (signals unaffected): {e}")
         deliver(
