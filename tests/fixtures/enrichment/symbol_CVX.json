@@ -1,0 +1,16 @@
+{
+  "ticker": "CVX",
+  "rp_entity_id": "D54E62",
+  "sentiment": {
+    "current": -0.068, "baseline": 0.0,
+    "zscore_1mo": -0.9, "zscore_1qt": -1.4,
+    "regime": "Neutral", "confidence": "reduced"
+  },
+  "events": [
+    {"category": "earnings-call", "title": "Q2 earnings call", "date": "2026-07-25", "url": null}
+  ],
+  "evidence": [
+    {"headline": "Tengiz incident", "source": "Reuters", "date": "2026-06-18", "url": "https://example.com/a", "sentiment": -0.73}
+  ],
+  "error": null
+}
