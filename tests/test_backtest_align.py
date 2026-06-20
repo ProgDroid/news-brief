@@ -19,3 +19,13 @@ def test_to_delta_first_difference():
 def test_event_filtered_keeps_only_event_window():
     rows = [("d1", 0.1, 0.01), ("d2", 0.2, 0.02), ("d3", 0.3, 0.03)]
     assert event_filtered(rows, {"d3"}, window=0) == [(0.3, 0.03)]
+
+
+def test_to_delta_single_point_is_empty():
+    s = SentimentSeries("MU", [SentimentPoint("d1", 0.1)])
+    assert to_delta(s).points == []
+
+
+def test_event_filtered_missing_event_date_returns_empty():
+    rows = [("d1", 0.1, 0.01), ("d2", 0.2, 0.02)]
+    assert event_filtered(rows, {"dX"}, window=1) == []

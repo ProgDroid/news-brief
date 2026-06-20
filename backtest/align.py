@@ -31,6 +31,11 @@ def event_filtered(
     event_dates: set[str],
     window: int,
 ) -> list[tuple[float, float]]:
+    """Keep rows within `window` positions of an event-dated row.
+
+    Precondition: `pairs_by_date` MUST be ordered by date ascending — the
+    window is POSITIONAL, so unsorted input yields wrong neighbors.
+    """
     dates = [d for d, _, _ in pairs_by_date]
     keep_idx: set[int] = set()
     for i, d in enumerate(dates):
