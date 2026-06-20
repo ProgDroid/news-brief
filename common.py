@@ -356,6 +356,28 @@ def _escape_bare_html(s: str) -> str:
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+# Telegram <a href> only honours web/Telegram links; a model (or an injected
+# source) emitting javascript:/data:/file: etc. is a defang target.
+_A_TAG_RE = re.compile(r"<a\b[^>]*>", re.IGNORECASE)
+_HREF_RE = re.compile(r"""href\s*=\s*(["'])(.*?)\1""", re.IGNORECASE)
+_SAFE_SCHEMES = {"http", "https", "tg", "mailto"}
+
+
+def _defang_a_href(open_tag: str) -> str:
+    """Rewrite an <a> open tag's href to '#' when its URL scheme isn't in the
+    allowlist. Keeps the <a>...</a> PAIR intact (no orphaned </a>) — only the
+    unsafe destination is neutralised."""
+
+    def repl(m: "re.Match[str]") -> str:
+        quote, url = m.group(1), m.group(2)
+        scheme = re.match(r"\s*([a-zA-Z][a-zA-Z0-9+.\-]*):", url)
+        if scheme and scheme.group(1).lower() not in _SAFE_SCHEMES:
+            return f"href={quote}#{quote}"
+        return m.group(0)
+
+    return _HREF_RE.sub(repl, open_tag)
+
+
 def sanitise_html(text: str) -> str:
     text = re.sub(r"```[a-z]*\n?", "", text)
     text = re.sub(
@@ -372,6 +394,8 @@ def sanitise_html(text: str) -> str:
         pos = m.end()
     out.append(_escape_bare_html(text[pos:]))
     text = "".join(out)
+    # Surviving <a> tags are now verbatim; defang any unsafe href scheme.
+    text = _A_TAG_RE.sub(lambda m: _defang_a_href(m.group(0)), text)
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 

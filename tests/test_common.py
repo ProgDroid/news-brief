@@ -27,6 +27,28 @@ def test_sanitise_html_strips_disallowed_tags():
     assert "script" not in out
 
 
+def test_sanitise_html_keeps_http_and_https_links():
+    out = common.sanitise_html('<a href="https://example.com">ok</a>')
+    assert 'href="https://example.com"' in out
+    out2 = common.sanitise_html('<a href="http://example.com">ok</a>')
+    assert 'href="http://example.com"' in out2
+
+
+def test_sanitise_html_defangs_javascript_scheme():
+    out = common.sanitise_html('<a href="javascript:alert(1)">click</a>')
+    # the <a>...</a> pair survives (no orphaned </a>) but the scheme is defanged
+    assert "javascript:" not in out
+    assert 'href="#"' in out
+    assert "<a " in out and "</a>" in out
+    assert ">click</a>" in out
+
+
+def test_sanitise_html_defangs_data_scheme():
+    out = common.sanitise_html("<a href='data:text/html;base64,PHNjcmlwdD4='>x</a>")
+    assert "data:" not in out
+    assert "href='#'" in out
+
+
 def test_log_handlers_include_rotating_file_handler():
     # newsbrief.log must rotate, not grow unbounded for the life of the container.
     from logging.handlers import RotatingFileHandler
