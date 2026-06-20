@@ -1,0 +1,67 @@
+{
+  "ticker": "CVX",
+  "rp_entity_id": "D54E62",
+  "note": "Representative headlines per monthly window from bigdata_search (fast mode, entity-filtered, category=news, max_chunks 6). Captured 2026-06-20.",
+  "windows": {
+    "2025-04": [
+      "Chevron's Q1 Earnings Likely Flat Sequentially, RBC Capital Markets Says (EPS est $2.07 below consensus)",
+      "Should You Stick With Chevron Before Its Q1 Earnings Drop? — 'Hold the Stock'",
+      "Chevron has underperformed Exxon in the sell-off, seen as less defensive"
+    ],
+    "2025-05": [
+      "Chevron Updates Stockholders at Annual Meeting — 'strong performance and consistent strategy'",
+      "Chevron planning to lay off 800 workers in Texas as part of global workforce reduction; shares rose 1%",
+      "Chevron received permission to maintain assets in Venezuela; shareholders rejected three proposals; shares -0.5%"
+    ],
+    "2025-06": [
+      "Should You Buy, Sell, or Hold Chevron Stock for July 2025? (Q1 narrow beat, revenue miss, upstream/downstream down)",
+      "Chevron Enters US Lithium Sector with Acreage Deal; shares advanced",
+      "CVX stock down 1.2% YTD, ~14% over past three months, 15% off 52-week high"
+    ],
+    "2025-07": [
+      "How Will Chevron's Stock React To Its Upcoming Earnings? (Q2 est 29% EPS decrease, 9% sales decline)",
+      "Chevron resumed with an Outperform at Evercore ISI, $180 PT (Hess/Guyana boost)",
+      "Chevron received restricted license to resume limited Venezuela operations; shares fell 2.7%"
+    ],
+    "2025-08": [
+      "Chevron second-quarter earnings hit by lower crude oil prices (H1 net income -40%, revenue -12%)",
+      "Chevron Achieves Record Production, Sees Future Growth After Hess Deal; cash flow +37%; shares +0.6%",
+      "Chevron near 52-week lows; FCF to grow >10% through 2027; 4.5% yield"
+    ],
+    "2025-09": [
+      "Decoding Chevron's Options Activity: 77% of unusual trades bearish; stock approaching oversold at $154",
+      "Should You Buy Chevron Stock With Oil Prices Below $70 a Barrel? — fortress balance sheet, strong FCF",
+      "Chevron Flags Modest Q3 HES Transaction Impact on Earnings, UBS Says (broadly neutral)"
+    ],
+    "2025-10": [
+      "Chevron posted better-than-expected Q3 earnings; shares rose 2.7%, second-best on the Dow",
+      "Chevron reports Q3 adjusted EPS $1.85, consensus $1.71; record production; returned $6B to shareholders",
+      "Chevron third-quarter profit slips on lower oil prices, Hess costs (net income -20% YoY)"
+    ],
+    "2025-11": [
+      "Chevron Details 5-Year Financial, Operational Plan — EPS growth >10% at $70 Brent through 2030",
+      "Chevron looks to lower capex, cost savings to support earnings growth; $10-20B annual buybacks",
+      "3 Non-AI Stocks to Buy: 'strong quarter for Chevron despite lower commodity prices'; record production"
+    ],
+    "2025-12": [
+      "Chevron sets capital budget prioritising efficiency, shareholder value (2026 capex disciplined); shares +0.9%",
+      "Chevron delivered Venezuelan crude to US ports amid partial maritime blockade; shares +0.7%",
+      "3 Dividend-Paying Value Stocks to Buy — but Chevron sales and earnings declined throughout 2025"
+    ],
+    "2026-01": [
+      "Chevron earnings fall despite record production as oil price dips (Q4 net income -13%, FY -30%)",
+      "Chevron, Exxon Mobil Beat Fourth-Quarter Estimates Amid Higher Oil Production (adj EPS $1.52 vs $1.42)",
+      "Chevron declared a 4% dividend increase; shares approaching 52-week high of $174.92"
+    ],
+    "2026-02": [
+      "A Look Into Chevron's Price Over Earnings — stock +8.2% past month, +16.78% past year, $185",
+      "Chevron in talks to take over Russian Lukoil's operations at Iraq's West Qurna 2 oilfield (output could double)",
+      "Is Chevron Stock Going to $200? — break-even reduced to $50 Brent"
+    ],
+    "2026-03": [
+      "Warren Buffett Made a $19.8 Billion Bet — Chevron stock up 37% YTD at $209 on Strait of Hormuz closure/soaring oil",
+      "Oil Prices Are Near Multiyear Highs — Chevron set for huge windfall; record $27B returned to shareholders",
+      "Chevron Announces Senior Leadership Changes (HSE officer transitions)"
+    ]
+  }
+}

@@ -1,0 +1,67 @@
+{
+  "ticker": "RGLD",
+  "rp_entity_id": "263216",
+  "note": "Representative headlines per monthly window from bigdata_search (fast mode, entity-filtered, category=news, max_chunks 6). Captured 2026-06-20. RGLD = Royal Gold (streaming/royalty; tracks gold price).",
+  "windows": {
+    "2025-04": [
+      "Royal Gold reinstated with a Market Perform at BMO Capital, $196 PT (lowest forward growth in coverage)",
+      "Royal Gold Stock: Time To Cash Out? — Forbes says yes, stock overextended (+40% YTD)",
+      "Royal Gold Announces Publication of 2024 Asset Handbook and Investment Stewardship Report"
+    ],
+    "2025-05": [
+      "Royal Gold Posts Strong Q1 Beat: net income +140% YoY to $113.5M, revenue +30%; adj EPS $1.51 beat by $0.12",
+      "Royal Gold reports Q1 adjusted EPS $1.51, consensus $1.39 — 'excellent start to 2025'",
+      "Gold Likely to Shine More on Demand Supply Imbalance: Royal Gold a Top Pick (24% rev / 35% EPS growth)"
+    ],
+    "2025-06": [
+      "Royal Gold added to Russell 1000 Value-Defensive Index",
+      "Royal Gold acquires Warintza gold purchase + NSR royalty agreement (Ecuador) for $200M",
+      "Here's Why Royal Gold (RGLD) is a Strong Growth Stock (35.9% forecast EPS growth)"
+    ],
+    "2025-07": [
+      "Royal Gold Strikes Deals to Buy Sandstorm Gold, Horizon Copper — accretive, +26% GEO production for 2025",
+      "Acquisitions cement Royal Gold as a leading North American streaming and royalty company; NAV accretive",
+      "Will Royal Gold Beat Estimates Again? — average 9.81% surprise past two quarters"
+    ],
+    "2025-08": [
+      "Royal Gold reports Q2 EPS $2.01, consensus $1.68 — record revenue, earnings and operating cash flow",
+      "Royal Gold Delivers Strong Q2: adj EPS $1.81 vs $1.25, EBITDA margin 83.8%; maintained 2025 guidance",
+      "RGLD total shareholder return 27% in last twelve months (better than 5-year annualised)"
+    ],
+    "2025-09": [
+      "Royal Gold Receives All Regulatory Approvals For Sandstorm Gold And Horizon Copper Acquisitions",
+      "Shareholder votes scheduled for October 9, 2025; ISS recommends voting FOR the proposals",
+      "Royal Gold provides update on timing for closing of the acquisitions"
+    ],
+    "2025-10": [
+      "Royal Gold Completes Sandstorm Gold and Horizon Copper Acquisitions — 'premier growth company'",
+      "Gold Holds Above $4,100; Miners Poised to Capture Explosive Profit Margins",
+      "Royal Gold Stock Can Bounce Back — strong margins, low debt, top-10-percentile momentum (13% below peak)"
+    ],
+    "2025-11": [
+      "Royal Gold reports Q3 adjusted EPS $2.06, consensus $2.16 (MISS); revenue $252.1M missed; shares -1.9% AH",
+      "Royal Gold Announces 25th Consecutive Annual Dividend Increase to $1.90 (+6% for 2026)",
+      "Royal Gold (RGLD): Assessing Valuation After Strong Momentum — 49.4% YTD share price return"
+    ],
+    "2025-12": [
+      "Royal Gold Hits 52-Week High: What's Driving Its Performance? — stream rev +24.8%, royalty +41.5% YoY",
+      "Zacks featured highlights: Royal Gold benefiting from solid streaming agreements, gold uptrend",
+      "Royal Gold to Participate in Renmark Virtual Non-Deal Roadshow; ex-dividend reminder"
+    ],
+    "2026-01": [
+      "Royal Gold downgraded to Sector Perform from Outperform at Scotiabank (PT raised to $335)",
+      "Does Royal Gold's 10th Straight Dividend Hike Reveal Capital Priorities? — BofA Sell, Cramer profit-taking, valuation concerns",
+      "Royal Gold Provides Updates on Q4 2025 Stream Segment Sales, Balance Sheet, Non-Core Asset Rationalization"
+    ],
+    "2026-02": [
+      "Royal Gold reports Q4 adjusted EPS $1.92, consensus $2.64 (large MISS); revenue $375.3M missed",
+      "Royal Gold Reports Record Revenue and Cash Flow for Q4 and full year 2025 — 'transformational year'",
+      "CFRA Maintains Strong Buy Opinion On Shares Of Royal Gold; Scotiabank trims PT to $331"
+    ],
+    "2026-03": [
+      "Royal Gold Issues 2026 Sales Guidance — gold sales midpoint +32% YoY; inaugural 5-year outlook 430-480K GEOs",
+      "Royal Gold announces further $125M debt repayment; shares up 2% in early trading",
+      "Royal Gold publishes 2025/2026 Asset Handbook"
+    ]
+  }
+}

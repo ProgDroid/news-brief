@@ -1,0 +1,92 @@
+{
+  "ticker": "MU",
+  "rp_entity_id": "49BBBC",
+  "note": "Representative headlines per monthly window from bigdata_search (fast mode, entity-filtered, category=news, max_chunks 10-12). Captured 2026-06-20.",
+  "windows": {
+    "2025-04": [
+      "Micron restructures business into four units to capture AI demand",
+      "UBS cuts Micron price target to $92 from $130, shares drop 3%",
+      "US Equity Indexes Drop as Mag-7 Stocks Retreat Ahead of Big Week of Earnings",
+      "TrendForce DRAM pricing outlook 'good news' for Micron, says Citi (Buy, $110 PT)",
+      "Is Micron Technology (MU) the Cheap Semiconductor Stock to Buy Now?"
+    ],
+    "2025-05": [
+      "Micron Stock Soars 23% in a Month: Time to Hold or Book Profits?",
+      "Micron shares appreciated 25% over the past month, outperforming sector",
+      "NVIDIA confirmed Micron is a core HBM supplier for RTX 50 Blackwell GPUs",
+      "Strong Forecasts Reinforce Micron's Financial Strength (153% EPS jump guided)",
+      "Cramer: Micron 'getting a little toppy', a trade not an investment for the moment"
+    ],
+    "2025-06": [
+      "Micron Technology Issues Upbeat Outlook as Fiscal Third-Quarter Results Beat Views",
+      "Micron reports Q3 EPS $1.91, consensus $1.61; revenue $9.3B beats",
+      "Micron Impresses Wall Street With Strong Q3 Earnings, 'Continued Strength In AI Data Center'",
+      "Strong AI Revenue Lifts Micron Stock; HBM at $6B annualized run-rate",
+      "Micron Earnings Soar, But Weak PC And Phone Demand Keep It Grounded"
+    ],
+    "2025-07": [
+      "Micron initiated with a Buy at Deutsche Bank, $150 price target",
+      "Micron (MU) Unveils World's First PCIe Gen6 SSD for AI Data Centers",
+      "Micron Launches First Space-Ready Memory Chip To Power AI Missions In Orbit",
+      "Allianz factsheet: overweight Micron detracted as shares declined amid oversupply concerns",
+      "Smart Money Is Betting Big In Micron Technology Options (avg PT $140)"
+    ],
+    "2025-08": [
+      "Micron raises sales, earnings guidance amid improved pricing; shares rose 3%",
+      "Micron's Fiscal Q4 Guidance Boost Signals Strength in Data Center, Consumer Markets, UBS Says",
+      "Allianz: overweight Micron aided results as company raised revenue and profit guidance",
+      "2 Tech Stocks That Could Go Parabolic (Micron)",
+      "UBS raised HBM demand forecast, maintained Buy with $155 target"
+    ],
+    "2025-09": [
+      "Micron Technology touts AI opportunity ahead as revenue beats guidance (record FY25)",
+      "Micron reports Q4 EPS $3.03 vs $2.86 consensus; revenue $11.32B beats",
+      "Move Over, Nvidia - Micron's Rally Just Rewired The AI ETF Playbook",
+      "Micron rises on earnings beat in positive sign for AI trade; DRAM up 70% YoY",
+      "Micron Could Face Pressure From High Bandwidth Memory Competition With Samsung, BofA Says"
+    ],
+    "2025-10": [
+      "Micron's Stratospheric Rally; stock surged 33% in a month, 113% in three months",
+      "S&P 500: Micron rose 11% on $100B megafab power-substation approval",
+      "Morgan Stanley upgrades Micron to Overweight, PT $220",
+      "Micron Technology Stock Rally Brings Risk (overbought)",
+      "Market Chatter: Micron Plans China Server Chips Business Exit",
+      "Micron CEO Mehrotra sells 22,500 shares"
+    ],
+    "2025-11": [
+      "Micron Stock Soars after Dell and HP Confirm Memory Price Shock; +174% YTD",
+      "Micron climbed 8% on tightening memory supply ('crisis... not available at any price')",
+      "Morgan Stanley boosts Micron PT to $325 from $220; shares jumped 6%",
+      "Micron among S&P 500 top performers on AI-sector demand",
+      "Unusual options: bearish tilt detected (35% bearish vs 31% bullish)"
+    ],
+    "2025-12": [
+      "Micron Technology delivers record revenue and bullish sales forecast",
+      "Micron Q1 revenue $13.64B, adjusted EPS $4.78 beat; guides Q2 ~$18.7B",
+      "Investors continued to pile into Micron; stock closed 7% higher",
+      "Micron Gains Momentum, Again - 30% to 80% Upside in 2026",
+      "Micron Stock Cools Off After Massive Surge In 2025 (profit-taking, +230% YTD)"
+    ],
+    "2026-01": [
+      "Micron Technology invests $24 billion in Singapore manufacturing",
+      "Micron initiated with an Outperform at William Blair ('supercycle', +275% earnings)",
+      "Think Micron's Stock May Have Peaked? This Is Why Its CEO Remains Bullish",
+      "Micron started construction on high-tech wafer site in Singapore; shares +4% premarket",
+      "Micron shares closed down 2.6% at $389.09"
+    ],
+    "2026-02": [
+      "Micron started shipments of advanced HBM4 chips ahead of schedule, sold out through 2026; +9.9%",
+      "Micron's $2.75 Billion India Facility Targets AI-Driven Chip Boom",
+      "Micron trading ~9.8% below 100-day SMA, bearish MACD, near 52-week lows (mixed technicals)",
+      "Up 326%, Should You Buy Micron Technology Right Now?",
+      "Needham/Morgan Stanley raise targets to $450"
+    ],
+    "2026-03": [
+      "Micron CEO says 'new records' set for revenue, gross margin, EPS, free cash flow; 30% dividend increase",
+      "Micron Q2 revenue nearly trebled to $23.86B; net income $13.79B; EPS $12.07",
+      "Micron Technology Is Having Its Nvidia Moment. Is It Still a Buy?",
+      "Micron's Strong Quarterly Results, Guidance Overshadowed by High Spending Plans; stock down early",
+      "Stock fell after Google Research paper on reducing KV-cache size raised chip-demand questions"
+    ]
+  }
+}
