@@ -6,6 +6,7 @@ evidence into the daily brief as READ-ONLY context behind a vendor-neutral
 provider seam. The bundle types here are the future digest<->trading seam.
 """
 
+from .build import build_enrichment
 from .config import ENRICHMENT_ENABLED as _ENABLED
 from .models import (
     EnrichmentBundles,
@@ -15,6 +16,7 @@ from .models import (
     SymbolBundle,
     ThematicBundle,
 )
+from .universe import Universe, build_universe, latest_signal_tickers
 
 
 def is_enabled() -> bool:
@@ -23,6 +25,10 @@ def is_enabled() -> bool:
 
 __all__ = [
     "is_enabled",
+    "build_enrichment",
+    "build_universe",
+    "latest_signal_tickers",
+    "Universe",
     "EnrichmentBundles",
     "EvidenceDoc",
     "Event",
