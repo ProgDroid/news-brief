@@ -16,4 +16,4 @@ def test_fixture_source_reads_series(tmp_path):
 
 def test_fixture_source_missing_is_empty(tmp_path):
     src = FixtureSentimentSource(str(tmp_path))
-    assert src.series("NOPE").points == []
+    assert src.series("NOPE").points == ()

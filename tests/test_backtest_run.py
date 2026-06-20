@@ -86,6 +86,33 @@ def test_split_is_temporal_not_by_ticker_iteration():
     assert res["confirmation"]["ic"] > 0.9  # holdout = later window (A, positive)
 
 
+def test_standardize_removes_cross_ticker_level_offset():
+    # Two tickers, opposite level offsets but the SAME within-ticker truth:
+    # higher sentiment -> lower return. Pooling RAW levels lets the cross-ticker
+    # offset (A high-sentiment+high-return, B low+low) dominate -> spurious
+    # POSITIVE pooled IC. Per-ticker standardization strips the offset and the
+    # true within-ticker NEGATIVE signal reappears. The sign flip is the proof.
+    a_s, a_p = _ticker_window("A", 5, [10, 11, 12, 13], [0.40, 0.30, 0.20, 0.10])
+    b_s, b_p = _ticker_window("B", 1, [0, 1, 2, 3], [0.04, 0.03, 0.02, 0.01])
+    series, prices = {"A": a_s, "B": b_s}, {"A": a_p, "B": b_p}
+
+    raw = run_backtest(series, prices, [1], mode="level", split_frac=1.0)
+    std = run_backtest(
+        series, prices, [1], mode="level", split_frac=1.0, standardize=True
+    )
+    assert raw["discovery_ic"][1] > 0.3  # contaminated by the cross-ticker offset
+    assert std["discovery_ic"][1] < -0.3  # within-ticker truth recovered
+
+
+def test_report_discloses_standardization():
+    # A reader must be able to tell whether the IC numbers were standardized.
+    s, prices = _monotonic(10)
+    on = report_markdown(run_backtest({"X": s}, {"X": prices}, [1], standardize=True))
+    off = report_markdown(run_backtest({"X": s}, {"X": prices}, [1]))
+    assert "standardiz" in on.lower()
+    assert "raw" in off.lower() or "standardiz" in off.lower()
+
+
 def test_report_marks_discovery_in_sample_and_shows_holdout_confirmation():
     s, prices = _monotonic(10)
     md = report_markdown(run_backtest({"X": s}, {"X": prices}, [1, 5], mode="level"))

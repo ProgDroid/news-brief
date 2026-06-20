@@ -2,7 +2,7 @@
 the horizon on a discovery split and CONFIRM it on a held-out (later) window, then
 emit metrics + a report. Offline; fed by any SentimentSource."""
 
-from backtest.align import align_dated, to_delta
+from backtest.align import align_dated, to_delta, to_zscore
 from backtest.evaluation import best_horizon, bonferroni_note, split_pairs
 from backtest.metrics import hit_rate, quantile_returns, spearman_rank_ic
 from backtest.returns import forward_returns
@@ -17,6 +17,7 @@ def run_backtest(
     mode: str = "level",
     q: int = 5,
     split_frac: float = 0.5,
+    standardize: bool = False,
 ) -> dict:
     """Discovery/confirmation discipline:
     1. Pool (date, sentiment, fwd_return) across tickers per horizon, sort by date.
@@ -25,6 +26,9 @@ def run_backtest(
     4. Report the full metric suite on the HELD-OUT set (the confirmation).
     The discovery IC table is in-sample/selection-biased; only the held-out
     confirmation is out-of-sample.
+
+    `standardize=True` z-scores sentiment WITHIN each ticker before pooling, so
+    cross-ticker level offsets don't contaminate the cross-sectional rank IC.
     """
     discovery_ic: dict[int, float] = {}
     holdout: dict[int, dict] = {}
@@ -35,6 +39,8 @@ def run_backtest(
             if tkr not in prices_by_ticker:
                 continue
             series = to_delta(s) if mode == "delta" else s
+            if standardize:
+                series = to_zscore(series)
             fwd = forward_returns(prices_by_ticker[tkr], [h])
             pooled.extend(align_dated(series, fwd, h))
         pooled.sort(key=lambda row: row[0])  # temporal order for an honest split
@@ -56,6 +62,7 @@ def run_backtest(
     best = best_horizon(discovery_ic) if discovery_ic else None
     return {
         "mode": mode,
+        "standardize": standardize,
         "split_frac": split_frac,
         "discovery_ic": discovery_ic,
         "holdout": holdout,
@@ -77,12 +84,16 @@ _DISCOVERY_CAVEAT = (
 def report_markdown(result: dict) -> str:
     best = result["best_horizon"]
     frac = result["split_frac"]
+    sentiment_scale = (
+        "per-ticker standardized" if result.get("standardize") else "raw levels"
+    )
     lines = [
         "## Bigdata.com sentiment backtest — discovery + held-out confirmation "
         "(https://bigdata.com)",
         f"> {_DISCOVERY_CAVEAT}",
         "",
-        f"Mode: **{result['mode']}** · split: {frac:.0%} discovery / "
+        f"Mode: **{result['mode']}** · sentiment: **{sentiment_scale}** · "
+        f"split: {frac:.0%} discovery / "
         f"{1 - frac:.0%} held-out (temporal: earlier→discovery, later→held-out)",
         "",
         "### Discovery — in-sample horizon selection (selection-biased)",

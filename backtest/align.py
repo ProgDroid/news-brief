@@ -24,6 +24,25 @@ def align(
     return [(s, r) for _, s, r in align_dated(sentiment, fwd, horizon)]
 
 
+def to_zscore(sentiment: SentimentSeries) -> SentimentSeries:
+    """Standardize a ticker's sentiment to zero mean / unit std (population).
+
+    Pooling RAW sentiment levels across tickers lets cross-sectional level
+    offsets dominate the rank IC; z-scoring WITHIN each ticker first removes
+    that offset so the pooled IC reflects within-name signal. A flat series
+    (std == 0) maps to all zeros — it carries no signal, no divide-by-zero."""
+    dates = sentiment.dates()
+    smap = sentiment.as_of_map()
+    vals = [smap[d] for d in dates]
+    n = len(vals)
+    if n == 0:
+        return SentimentSeries(ticker=sentiment.ticker, points=())
+    mean = sum(vals) / n
+    std = (sum((v - mean) ** 2 for v in vals) / n) ** 0.5
+    pts = [SentimentPoint(d, (smap[d] - mean) / std if std else 0.0) for d in dates]
+    return SentimentSeries(ticker=sentiment.ticker, points=pts)
+
+
 def to_delta(sentiment: SentimentSeries) -> SentimentSeries:
     dates = sentiment.dates()
     smap = sentiment.as_of_map()

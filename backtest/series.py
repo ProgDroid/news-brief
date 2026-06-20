@@ -14,7 +14,13 @@ class SentimentPoint:
 @dataclass(frozen=True)
 class SentimentSeries:
     ticker: str
-    points: list[SentimentPoint]
+    points: tuple[SentimentPoint, ...]
+
+    def __post_init__(self):
+        # frozen=True blocks reassigning the field but not mutating a list in
+        # place; coerce to a tuple so the series is genuinely immutable.
+        if not isinstance(self.points, tuple):
+            object.__setattr__(self, "points", tuple(self.points))
 
     def dates(self) -> list[str]:
         return sorted(p.date for p in self.points)

@@ -1,4 +1,6 @@
 # tests/test_backtest_series.py
+import pytest
+
 from backtest.series import (
     PriceSeries,
     SentimentPoint,
@@ -6,6 +8,15 @@ from backtest.series import (
     load_price_series,
     load_sentiment_series,
 )
+
+
+def test_points_coerced_to_immutable_tuple():
+    # frozen=True only blocks reassigning the field; a list `points` is still
+    # mutable in place. Coerce to a tuple so the series is genuinely immutable.
+    s = SentimentSeries("MU", [SentimentPoint("d1", 0.1)])
+    assert isinstance(s.points, tuple)
+    with pytest.raises(AttributeError):
+        s.points.append(SentimentPoint("d2", 0.2))
 
 
 def test_sentiment_series_sorts_and_maps():
