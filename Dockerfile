@@ -11,6 +11,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY common.py trading.py validation.py brief.py .
+COPY enrichment/ ./enrichment/
 
 # Logs and brief archive persist via volume mount. Run as a real non-root user
 # so a bare `docker run` is unprivileged too — docker-compose's `user:` still

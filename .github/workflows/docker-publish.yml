@@ -8,6 +8,7 @@ on:
       - 'common.py'
       - 'trading.py'
       - 'validation.py'
+      - 'enrichment/**'
       - 'tests/**'
       - 'Dockerfile'
       - 'requirements.txt'
@@ -43,8 +44,8 @@ jobs:
 
       - name: Lint
         run: |
-          ruff check brief.py common.py trading.py tests
-          ruff format --check brief.py common.py trading.py tests
+          ruff check brief.py common.py trading.py enrichment tests
+          ruff format --check brief.py common.py trading.py enrichment tests
 
       - name: Test
         run: pytest -q
