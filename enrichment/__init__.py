@@ -16,6 +16,7 @@ from .models import (
     SymbolBundle,
     ThematicBundle,
 )
+from .render import annotate_signals, render_prompt_block
 from .universe import Universe, build_universe, latest_signal_tickers
 
 
@@ -35,4 +36,6 @@ __all__ = [
     "SentimentScore",
     "SymbolBundle",
     "ThematicBundle",
+    "render_prompt_block",
+    "annotate_signals",
 ]
