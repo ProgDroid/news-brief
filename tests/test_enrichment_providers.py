@@ -1,4 +1,5 @@
 # tests/test_enrichment_providers.py
+import json as _json
 import logging
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from enrichment.providers import (
     NullProvider,
     get_provider,
 )
+from enrichment.providers_bigdata import BigdataProvider
 
 FIX = str(Path(__file__).parent / "fixtures" / "enrichment")
 
@@ -64,3 +66,45 @@ def test_get_provider_bigdata_missing_key_warns_and_falls_back(monkeypatch, capl
         provider = get_provider()
     assert provider.name == "null"
     assert "BIGDATA_API_KEY is unset" in caplog.text
+
+
+RAW = Path(__file__).parent / "fixtures" / "bigdata_raw"
+
+
+def _raw(name):
+    return _json.loads((RAW / name).read_text(encoding="utf-8"))
+
+
+def test_bigdata_parse_symbol_bundle(monkeypatch):
+    p = BigdataProvider("k", "https://api.bigdata.com")
+    monkeypatch.setattr(p, "_find_entity", lambda t: _raw("find_securities_AVAV.json"))
+    monkeypatch.setattr(p, "_get_sentiment", lambda eid: _raw("sentiment_F1EB39.json"))
+    monkeypatch.setattr(p, "_get_events", lambda eid: _raw("events_F1EB39.json"))
+
+    sb = p.symbol_bundle("AVAV")
+    assert sb.rp_entity_id == "F1EB39"
+    assert sb.sentiment.regime == "Negative"
+    assert sb.sentiment.zscore_1qt == -2.0
+    assert {e.category for e in sb.events} == {"conference-call", "earnings-call"}
+    assert sb.error is None
+
+
+def test_bigdata_symbol_degrades_on_error(monkeypatch):
+    p = BigdataProvider("k", "https://api.bigdata.com")
+
+    def boom(_):
+        raise RuntimeError("HTTP 500")
+
+    monkeypatch.setattr(p, "_find_entity", boom)
+    sb = p.symbol_bundle("AVAV")
+    assert sb.sentiment is None
+    assert sb.error is not None and "500" in sb.error
+
+
+def test_bigdata_parse_thematic_bundle(monkeypatch):
+    p = BigdataProvider("k", "https://api.bigdata.com")
+    monkeypatch.setattr(p, "_search", lambda q: _raw("search_defence.json"))
+    tb = p.thematic_bundle("defence")
+    assert tb.docs[0].source == "FT"
+    assert tb.docs[0].date == "2026-06-19"
+    assert tb.error is None
