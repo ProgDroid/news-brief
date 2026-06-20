@@ -1204,23 +1204,13 @@ def fetch_web_source(source: dict) -> str:
 
 
 # ── Chroma DB ─────────────────────────────────────────────────────────────────
-def query_chroma(query: str, n_results: int = 2) -> list[str]:
-    """
-    Query the podcast Chroma MCP server via HTTP.
+def _chroma_call(payload: dict, log_label: str) -> list[str]:
+    """POST a JSON-RPC tools/call to the podcast Chroma MCP server and return the
+    plain-text excerpts. Shared transport for query_chroma / query_chroma_latest.
     The server speaks JSON-RPC 2.0 over MCP's Streamable HTTP transport, which
     requires the client to advertise it accepts both application/json and
     text/event-stream; omitting that Accept header yields 406 Not Acceptable.
-    Returns a list of plain-text excerpt strings.
     """
-    payload = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "params": {
-            "name": "search_podcasts",
-            "arguments": {"query": query, "n_results": n_results},
-        },
-    }
     try:
         resp = requests.post(
             CHROMA_MCP_URL,
@@ -1236,8 +1226,22 @@ def query_chroma(query: str, n_results: int = 2) -> list[str]:
         content = resp.json().get("result", {}).get("content", [])
         return [b["text"] for b in content if b.get("type") == "text"]
     except Exception as e:
-        log.warning(f"Chroma failed '{query}': {e}")
+        log.warning(f"Chroma failed '{log_label}': {e}")
         return []
+
+
+def query_chroma(query: str, n_results: int = 2) -> list[str]:
+    """Semantic podcast search via the Chroma MCP server."""
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "search_podcasts",
+            "arguments": {"query": query, "n_results": n_results},
+        },
+    }
+    return _chroma_call(payload, query)
 
 
 def query_chroma_latest(
@@ -1258,23 +1262,7 @@ def query_chroma_latest(
             ),
         },
     }
-    try:
-        resp = requests.post(
-            CHROMA_MCP_URL,
-            json=payload,
-            headers={
-                "Content-Type": "application/json",
-                "Accept": "application/json, text/event-stream",
-            },
-            # Modal serverless cold-starts can exceed 20s on the first call of a run.
-            timeout=60,
-        )
-        resp.raise_for_status()
-        content = resp.json().get("result", {}).get("content", [])
-        return [b["text"] for b in content if b.get("type") == "text"]
-    except Exception as e:
-        log.warning(f"Chroma query failed '{topic}': {e}")
-        return []
+    return _chroma_call(payload, topic)
 
 
 def build_chroma_context(fb: dict) -> str:
@@ -1803,21 +1791,20 @@ def save_signals(signals: list, date_str: str, status: str = "ok", dropped: int 
 
 
 # ── Batch API ─────────────────────────────────────────────────────────────────
-def submit_batch(system: str, prompt_user: str, custom_id: str) -> str:
-    payload = {
-        "requests": [
-            {
-                "custom_id": custom_id,
-                "params": {
-                    "model": MODEL,
-                    "max_tokens": MAX_TOKENS,
-                    "system": system,
-                    "tools": [{"type": "web_search_20250305", "name": "web_search"}],
-                    "messages": [{"role": "user", "content": prompt_user}],
-                },
-            }
-        ]
+def submit_batch(
+    system: str, prompt_user: str, custom_id: str, *, web_search: bool = True
+) -> str:
+    """Submit a single-request Anthropic batch job. `web_search=False` drops the
+    web_search tool (used for the weekly summary, which must not browse)."""
+    params = {
+        "model": MODEL,
+        "max_tokens": MAX_TOKENS,
+        "system": system,
+        "messages": [{"role": "user", "content": prompt_user}],
     }
+    if web_search:
+        params["tools"] = [{"type": "web_search_20250305", "name": "web_search"}]
+    payload = {"requests": [{"custom_id": custom_id, "params": params}]}
     resp = requests.post(
         "https://api.anthropic.com/v1/messages/batches",
         headers=ANTHROPIC_HEADERS,
@@ -1826,35 +1813,13 @@ def submit_batch(system: str, prompt_user: str, custom_id: str) -> str:
     )
     resp.raise_for_status()
     batch_id = resp.json()["id"]
-    log.info(f"Batch submitted: {batch_id}")
+    log.info(f"Batch submitted ({'search' if web_search else 'no-search'}): {batch_id}")
     return batch_id
 
 
 def submit_batch_no_search(system: str, prompt_user: str, custom_id: str) -> str:
     """Submit a batch job without web search — used for the weekly summary."""
-    payload = {
-        "requests": [
-            {
-                "custom_id": custom_id,
-                "params": {
-                    "model": MODEL,
-                    "max_tokens": MAX_TOKENS,
-                    "system": system,
-                    "messages": [{"role": "user", "content": prompt_user}],
-                },
-            }
-        ]
-    }
-    resp = requests.post(
-        "https://api.anthropic.com/v1/messages/batches",
-        headers=ANTHROPIC_HEADERS,
-        json=payload,
-        timeout=30,
-    )
-    resp.raise_for_status()
-    batch_id = resp.json()["id"]
-    log.info(f"Weekly batch submitted: {batch_id}")
-    return batch_id
+    return submit_batch(system, prompt_user, custom_id, web_search=False)
 
 
 def poll_batch(batch_id: str, max_wait_secs: int = 43200) -> str | None:
