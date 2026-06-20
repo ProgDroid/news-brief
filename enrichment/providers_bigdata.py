@@ -28,6 +28,12 @@ def _iso_date(ts: str | None) -> str:
 
 
 class BigdataProvider:
+    """Production REST client for Bigdata.com (RavenPack) enrichment.
+
+    v1 does not populate SymbolBundle.evidence (no per-symbol evidence search
+    yet) — it defaults to []; thematic evidence comes via thematic_bundle.
+    """
+
     name = "bigdata"
 
     def __init__(self, api_key: str, base_url: str):
@@ -104,6 +110,7 @@ class BigdataProvider:
                 )
                 for e in self._get_events(eid).get("events", [])
             ]
+            # NOTE: evidence not fetched in v1 — defaults to [] (see class docstring).
             return SymbolBundle(
                 ticker=ticker, rp_entity_id=eid, sentiment=sentiment, events=events
             )

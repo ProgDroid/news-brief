@@ -69,6 +69,12 @@ def get_provider() -> Provider:
         "bigdata" if config.BIGDATA_API_KEY else "null"
     )
     if name == "fixture":
+        if not config.FIXTURE_DIR:
+            log.warning(
+                "ENRICHMENT_PROVIDER=fixture but ENRICHMENT_FIXTURE_DIR is unset — "
+                "falling back to null"
+            )
+            return NullProvider()
         return FixtureProvider(config.FIXTURE_DIR)
     if name == "bigdata":
         if not config.BIGDATA_API_KEY:

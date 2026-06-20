@@ -59,6 +59,15 @@ def test_get_provider_explicit_fixture(monkeypatch):
     assert p.symbol_bundle("CVX").rp_entity_id == "D54E62"
 
 
+def test_get_provider_fixture_without_dir_falls_back(monkeypatch, caplog):
+    monkeypatch.setattr(config, "ENRICHMENT_PROVIDER", "fixture")
+    monkeypatch.setattr(config, "FIXTURE_DIR", "")
+    with caplog.at_level("WARNING"):
+        provider = get_provider()
+    assert provider.name == "null"
+    assert "ENRICHMENT_FIXTURE_DIR is unset" in caplog.text
+
+
 def test_get_provider_bigdata_missing_key_warns_and_falls_back(monkeypatch, caplog):
     monkeypatch.setattr(config, "ENRICHMENT_PROVIDER", "bigdata")
     monkeypatch.setattr(config, "BIGDATA_API_KEY", "")
