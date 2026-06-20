@@ -42,6 +42,8 @@ def spearman_rank_ic(pairs: list[tuple[float, float]]) -> float:
 
 
 def quantile_returns(pairs: list[tuple[float, float]], q: int = 5) -> list[float]:
+    if q < 1:
+        raise ValueError(f"q must be >= 1, got {q}")
     if not pairs:
         return [float("nan")] * q
     ordered = sorted(pairs, key=lambda p: p[0])
@@ -58,6 +60,6 @@ def quantile_returns(pairs: list[tuple[float, float]], q: int = 5) -> list[float
 def hit_rate(pairs: list[tuple[float, float]]) -> float:
     rel = [(s, r) for s, r in pairs if s != 0 and r != 0]
     if not rel:
-        return 0.0
+        return float("nan")  # undefined (no directional pairs), not 0% agreement
     agree = sum(1 for s, r in rel if (s > 0) == (r > 0))
     return agree / len(rel)
