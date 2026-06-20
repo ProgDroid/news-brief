@@ -1,0 +1,44 @@
+{
+  "ticker": "ESLT",
+  "rp_entity_id": "0401A0",
+  "sentiment": {
+    "current": -0.233,
+    "baseline": -0.065,
+    "zscore_1mo": -1.8,
+    "zscore_1qt": -2.1,
+    "regime": "Negative",
+    "confidence": "reduced"
+  },
+  "events": [
+    {
+      "category": "earnings-call",
+      "title": "Q2 2026 earnings",
+      "date": "2026-08-11",
+      "url": "https://quartr.com/companies/elbit-systems-ltd_15932"
+    }
+  ],
+  "evidence": [
+    {
+      "headline": "Elbit Systems Q1 2026 Earnings Call - Transcript",
+      "source": "Quartr Transcripts",
+      "date": "2026-05-26",
+      "url": null,
+      "sentiment": 0.741
+    },
+    {
+      "headline": "ELBIT SYSTEMS LTD files FORM 6-K on May 26, 2026",
+      "source": "Edgar SEC Filings",
+      "date": "2026-05-26",
+      "url": "https://www.sec.gov/Archives/edgar/data/1027664/000102766426000011/coveresltq120266k.htm",
+      "sentiment": 0.459
+    },
+    {
+      "headline": "Elbit Systems Awarded ~$1.4 Billion European Military Modernization Contract",
+      "source": "Benzinga",
+      "date": "2026-05-26",
+      "url": "https://www.benzinga.com/node/52769087",
+      "sentiment": 0.82
+    }
+  ],
+  "error": null
+}

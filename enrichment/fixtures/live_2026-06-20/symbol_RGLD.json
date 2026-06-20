@@ -1,0 +1,44 @@
+{
+  "ticker": "RGLD",
+  "rp_entity_id": "263216",
+  "sentiment": {
+    "current": 0.103,
+    "baseline": 0.079,
+    "zscore_1mo": 0.5,
+    "zscore_1qt": 0.9,
+    "regime": "Positive",
+    "confidence": "reduced"
+  },
+  "events": [
+    {
+      "category": "earnings-call",
+      "title": "Q2 2026 earnings",
+      "date": "2026-08-06",
+      "url": "https://quartr.com/companies/royal-gold-inc_11645"
+    }
+  ],
+  "evidence": [
+    {
+      "headline": "Royal Gold Conference on Jun 17, 2026 - Transcript",
+      "source": "Quartr Transcripts",
+      "date": "2026-06-17",
+      "url": null,
+      "sentiment": 0.527
+    },
+    {
+      "headline": "ROYAL GOLD INC files FORM 10-Q for Q1 FY2026",
+      "source": "Edgar SEC Filings",
+      "date": "2026-05-07",
+      "url": "https://www.sec.gov/Archives/edgar/data/85535/000008553526000028/rgld-20260331.htm",
+      "sentiment": -0.587
+    },
+    {
+      "headline": "Royal Gold Reports Record Q1 Revenue, Cash Flow and Earnings",
+      "source": "PubT",
+      "date": "2026-05-06",
+      "url": "https://royalgold.com/investors/press-releases/",
+      "sentiment": 0.72
+    }
+  ],
+  "error": null
+}

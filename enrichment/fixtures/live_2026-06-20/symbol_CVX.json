@@ -1,0 +1,44 @@
+{
+  "ticker": "CVX",
+  "rp_entity_id": "D54E62",
+  "sentiment": {
+    "current": -0.053,
+    "baseline": -0.028,
+    "zscore_1mo": -0.7,
+    "zscore_1qt": -1.1,
+    "regime": "Neutral",
+    "confidence": "reduced"
+  },
+  "events": [
+    {
+      "category": "earnings-call",
+      "title": "Q2 2026 earnings",
+      "date": "2026-07-31",
+      "url": "https://quartr.com/companies/chevron-corporation_3536"
+    }
+  ],
+  "evidence": [
+    {
+      "headline": "CHEVRON CORP files FORM 10-Q for Q1 FY2026",
+      "source": "Edgar SEC Filings",
+      "date": "2026-05-07",
+      "url": "https://www.sec.gov/Archives/edgar/data/93410/000009341026000113/cvx-20260331.htm",
+      "sentiment": -0.79
+    },
+    {
+      "headline": "ENEOS to acquire Chevron's APAC Downstream Fuels & Lubricants businesses",
+      "source": "Model ML - Regulatory Filings",
+      "date": "2026-05-14",
+      "url": "https://files.captide.co/",
+      "sentiment": 0.737
+    },
+    {
+      "headline": "HELLENiQ ENERGY Expands Chevron Partnership in Ionian Sea Offshore Block",
+      "source": "Benzinga",
+      "date": "2026-06-16",
+      "url": "https://www.benzinga.com/node/53218897",
+      "sentiment": 0.775
+    }
+  ],
+  "error": null
+}

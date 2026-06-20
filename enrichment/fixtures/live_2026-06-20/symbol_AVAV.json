@@ -1,0 +1,50 @@
+{
+  "ticker": "AVAV",
+  "rp_entity_id": "F1EB39",
+  "sentiment": {
+    "current": -0.311,
+    "baseline": -0.101,
+    "zscore_1mo": -1.1,
+    "zscore_1qt": -2.0,
+    "regime": "Negative",
+    "confidence": "reduced"
+  },
+  "events": [
+    {
+      "category": "earnings-call",
+      "title": "Q4 2026 earnings",
+      "date": "2026-06-29",
+      "url": "https://quartr.com/companies/aerovironment-inc_6544"
+    },
+    {
+      "category": "conference-call",
+      "title": "Investor Day 2026",
+      "date": "2026-07-08",
+      "url": "https://quartr.com/companies/aerovironment-inc_6544"
+    }
+  ],
+  "evidence": [
+    {
+      "headline": "AeroVironment to Host Investor Day in New York City on July 8",
+      "source": "PubT",
+      "date": "2026-06-17",
+      "url": "https://investor.avinc.com/news-releases/",
+      "sentiment": 0.661
+    },
+    {
+      "headline": "AeroVironment Conference on Jun 11, 2026 - Transcript",
+      "source": "Quartr Transcripts",
+      "date": "2026-06-11",
+      "url": null,
+      "sentiment": 0.344
+    },
+    {
+      "headline": "AVAV Shareholders Who Lost Money May Lead Securities Fraud Lawsuit",
+      "source": "Benzinga",
+      "date": "2026-06-18",
+      "url": "https://www.benzinga.com/node/53282737",
+      "sentiment": -0.88
+    }
+  ],
+  "error": null
+}

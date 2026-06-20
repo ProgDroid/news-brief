@@ -1,0 +1,27 @@
+{
+  "theme": "European banks",
+  "docs": [
+    {
+      "headline": "Regulatory Easing Seen Unlocking EUR2 Trillion in Lending for Europe's Banks",
+      "source": "US News & World Report",
+      "date": "2026-06-19",
+      "url": "https://app.bigdata.com/documents/04FC9393F727D650D009F69C8F89E4CE",
+      "sentiment": null
+    },
+    {
+      "headline": "Eurozone Sentiment Rebounds As Middle East Tensions Ease And Oil Prices Fall",
+      "source": "Benzinga",
+      "date": "2026-06-16",
+      "url": "https://app.bigdata.com/documents/02341FDDA7765BDAC0C5727E3A9D15B3",
+      "sentiment": null
+    },
+    {
+      "headline": "ECB hikes rates as inflation fears outweigh growth concerns",
+      "source": "Alliance News",
+      "date": "2026-06-11",
+      "url": "https://app.bigdata.com/documents/4832919368155239CB3674ECD7A944A9",
+      "sentiment": null
+    }
+  ],
+  "error": null
+}

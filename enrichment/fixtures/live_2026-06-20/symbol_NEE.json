@@ -1,0 +1,44 @@
+{
+  "ticker": "NEE",
+  "rp_entity_id": "2CB4C9",
+  "sentiment": {
+    "current": 0.167,
+    "baseline": 0.145,
+    "zscore_1mo": 1.5,
+    "zscore_1qt": 0.4,
+    "regime": "Positive",
+    "confidence": "moderate"
+  },
+  "events": [
+    {
+      "category": "earnings-call",
+      "title": "Q2 2026 earnings",
+      "date": "2026-07-22",
+      "url": "https://quartr.com/companies/nextera-energy-inc_5607"
+    }
+  ],
+  "evidence": [
+    {
+      "headline": "NEXTERA ENERGY INC files FORM 8-K on May 18, 2026",
+      "source": "Edgar SEC Filings",
+      "date": "2026-05-18",
+      "url": "https://www.sec.gov/Archives/edgar/data/753308/000110465926063001/tm2614888d1_8k.htm",
+      "sentiment": 0.403
+    },
+    {
+      "headline": "NextEra Energy Conference Call on May 18, 2026 - Transcript",
+      "source": "Quartr Transcripts",
+      "date": "2026-05-18",
+      "url": null,
+      "sentiment": 0.725
+    },
+    {
+      "headline": "Bernstein Initiates NextEra Energy with Outperform, PT $107",
+      "source": "Benzinga",
+      "date": "2026-06-17",
+      "url": "https://www.benzinga.com/node/53243035",
+      "sentiment": 0.61
+    }
+  ],
+  "error": null
+}

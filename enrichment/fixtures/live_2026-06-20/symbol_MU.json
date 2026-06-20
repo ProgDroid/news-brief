@@ -1,0 +1,50 @@
+{
+  "ticker": "MU",
+  "rp_entity_id": "49BBBC",
+  "sentiment": {
+    "current": 0.137,
+    "baseline": 0.151,
+    "zscore_1mo": -0.4,
+    "zscore_1qt": -0.6,
+    "regime": "Positive",
+    "confidence": "reduced"
+  },
+  "events": [
+    {
+      "category": "earnings-call",
+      "title": "Q3 2026 earnings",
+      "date": "2026-06-24",
+      "url": "https://quartr.com/companies/micron-technology-inc_5199"
+    },
+    {
+      "category": "earnings-call",
+      "title": "Q3 2026 earnings (post call)",
+      "date": "2026-06-24",
+      "url": "https://quartr.com/companies/micron-technology-inc_5199"
+    }
+  ],
+  "evidence": [
+    {
+      "headline": "Micron Selects Bechtel for Historic New York Semiconductor Project",
+      "source": "PubT",
+      "date": "2026-06-10",
+      "url": "https://www.bechtel.com/press-releases/micron-selects-bechtel/",
+      "sentiment": 0.753
+    },
+    {
+      "headline": "Micron Poised to Top Q3 Estimates as Memory Prices Jump, Wedbush Says",
+      "source": "MT Newswires",
+      "date": "2026-06-18",
+      "url": null,
+      "sentiment": 0.806
+    },
+    {
+      "headline": "MICRON TECHNOLOGY INC files FORM 8-K on Jun 9, 2026",
+      "source": "Edgar SEC Filings",
+      "date": "2026-06-09",
+      "url": "https://www.sec.gov/Archives/edgar/data/723125/000110465926071845/tm2617112d1_8k.htm",
+      "sentiment": 0.61
+    }
+  ],
+  "error": null
+}
