@@ -26,6 +26,31 @@ def test_normalize_ticker_leaves_plain_symbol():
     assert normalize_ticker("CVX") == "CVX"
 
 
+def test_normalize_ticker_collapses_double_underscore_venue_suffix():
+    # The live book holds a position with ticker "AVAV__US_EQ" (double
+    # underscore). Stripping "_US_EQ" must not leave a stray trailing "_" —
+    # otherwise the base symbol becomes the junk token "AVAV_", which fails to
+    # resolve and silently drops AVAV's enrichment + signal annotation.
+    assert normalize_ticker("AVAV__US_EQ") == "AVAV"
+
+
+def test_build_universe_routes_unmapped_etfs_to_themes():
+    # VEUA (European equities) and SPOL (Polish equities) are ETFs. They must
+    # not leak into per-symbol tickers: ETFs resolve as funds, so company
+    # sentiment is meaningless and the query units are wasted.
+    book = {
+        "positions": [
+            {"status": "open", "ticker": "VEUAl_EQ", "asset_class": "equity"},
+            {"status": "open", "ticker": "SPOLl_EQ", "asset_class": "equity"},
+            {"status": "open", "ticker": "CVX", "asset_class": "equity"},
+        ]
+    }
+    u = build_universe(book, {"items": []}, [], [])
+    assert u.tickers == ["CVX"]
+    assert "European equities" in u.themes
+    assert "Polish equities" in u.themes
+
+
 def test_build_universe_dedups_and_routes_etf_to_theme():
     book = {
         "positions": [

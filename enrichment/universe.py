@@ -26,6 +26,8 @@ _ETF_THEME_MAP = {
     "KSTR": "China STAR / China tech",
     "ARMG": "defence",
     "SGLN": "gold",
+    "VEUA": "European equities",
+    "SPOL": "Polish equities",
 }
 
 _VENUE_SUFFIX_RE = re.compile(r"_(?:[A-Z]{2}_)?EQ$")  # _US_EQ, _EQ
@@ -47,7 +49,9 @@ def normalize_ticker(raw: str) -> str:
     tail = re.sub(r"_(?:[A-Za-z]{2}_)?[Ee][Qq]$", "", tail)
     if tail and tail[-1] in ("l", "d") and tail[:-1].isupper():
         t = tail[:-1].upper()
-    return t
+    # Collapse any stray underscore the suffix strip leaves behind, e.g. the
+    # live book's double-underscore "AVAV__US_EQ" -> "AVAV_" -> "AVAV".
+    return t.strip("_")
 
 
 def _dedup(seq):
