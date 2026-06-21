@@ -61,6 +61,19 @@ def test_plain_xetra_marker_symbol_strips_marker():
     assert trading.resolve_symbol("EXV1d", CACHE, {}) == "exv1.de"
 
 
+def test_plain_symbol_base_matches_lse_only_listing():
+    # An LSE-only name's signal carries the plain symbol ('RR' for Rolls-Royce),
+    # but T212's LSE ticker bakes the 'l' marker into the base SEGMENT ('RRl_EQ',
+    # base 'RRL'). With no US listing to fall back on, plain 'RR' must still
+    # base-match by stripping the marker from the instrument's base -> 'rr.uk'.
+    assert trading.resolve_symbol("RR", CACHE, {}) == "rr.uk"
+
+
+def test_plain_symbol_base_matches_xetra_only_listing():
+    # Same gap for the Xetra 'd' marker: plain 'EXV1' must match 'EXV1d_EQ'.
+    assert trading.resolve_symbol("EXV1", CACHE, {}) == "exv1.de"
+
+
 def test_unknown_currency_returns_none():
     assert trading.resolve_symbol("XYZ_PL_EQ", CACHE, {}) is None
 

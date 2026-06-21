@@ -857,6 +857,35 @@ def refresh_instruments_cache(max_age_days: int = 14, force: bool = False) -> di
     return cache
 
 
+def _stooq_suffix_for(meta: dict) -> str | None:
+    """Stooq market suffix for a T212 instrument, from its currency (ISIN country
+    for EUR). Returns None when the currency maps to no known market."""
+    ccy = (meta.get("currencyCode") or "").upper()
+    suffix = _STOOQ_SUFFIX.get(ccy)
+    if suffix is None and ccy == "EUR":
+        suffix = _STOOQ_EUR_BY_ISIN.get((meta.get("isin") or "")[:2].upper())
+    return suffix
+
+
+def _instrument_base_keys(tkr: str, meta: dict) -> set[str]:
+    """The upper-case base forms a signal may carry for this T212 ticker.
+
+    Always the raw base (segment before the first '_'). For the two-part LSE/Xetra
+    form ('RRl_EQ', 'EXV1d_EQ') the exchange-marker letter is baked INTO that base
+    segment, so a plain signal ('RR', 'EXV1') would never match — also accept the
+    marker-stripped base. Additive (both 'RRL' and 'RR'), so a base whose final
+    letter is genuinely part of the symbol still matches on its raw form.
+    """
+    parts = tkr.split("_")
+    base = parts[0].upper()
+    keys = {base}
+    if len(parts) == 2:
+        marker = _STOOQ_MARKET_MARKER.get(_stooq_suffix_for(meta) or "")
+        if marker and base.endswith(marker.upper()):
+            keys.add(base[: -len(marker)])
+    return keys
+
+
 def _match_instrument_by_base(
     symbol: str, instruments: dict
 ) -> tuple[str, dict] | None:
@@ -871,9 +900,9 @@ def _match_instrument_by_base(
     want = symbol.split("_")[0].upper()
     candidates = []
     for tkr, meta in instruments.items():
-        parts = tkr.split("_")
-        if parts[0].upper() != want:
+        if want not in _instrument_base_keys(tkr, meta):
             continue
+        parts = tkr.split("_")
         country = parts[1].upper() if len(parts) > 2 else ""
         candidates.append((_COUNTRY_PREFERENCE.get(country, 9), tkr, meta))
     if not candidates:
@@ -910,10 +939,7 @@ def resolve_symbol(ticker: str, cache: dict, overrides: dict) -> str | None:
         matched, meta = found
     parts = matched.split("_")
     base = parts[0].lower()
-    ccy = (meta.get("currencyCode") or "").upper()
-    suffix = _STOOQ_SUFFIX.get(ccy)
-    if suffix is None and ccy == "EUR":
-        suffix = _STOOQ_EUR_BY_ISIN.get((meta.get("isin") or "")[:2].upper())
+    suffix = _stooq_suffix_for(meta)
     if suffix is None:
         return None
     # The two-part LSE/Xetra form ('RRl_EQ', 'SGLNl_EQ', 'EXV1d_EQ') carries a
