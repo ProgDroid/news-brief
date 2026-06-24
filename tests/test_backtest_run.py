@@ -128,3 +128,14 @@ def test_report_handles_empty_holdout_gracefully():
     prices = PriceSeries("X", {"2025-06-01": 100.0, "2025-07-01": 101.0})
     md = report_markdown(run_backtest({"X": s}, {"X": prices}, [1], mode="level"))
     assert isinstance(md, str) and "Bigdata.com" in md
+
+
+def test_report_markdown_accepts_a_source_label():
+    s, prices = _monotonic(10)
+    res = run_backtest({"X": s}, {"X": prices}, [1])
+    md = report_markdown(
+        res, source_label="Alpha Vantage", source_url="https://www.alphavantage.co"
+    )
+    assert "Alpha Vantage" in md
+    assert "https://www.alphavantage.co" in md
+    assert "Bigdata.com" not in md.splitlines()[0]  # header switched cleanly

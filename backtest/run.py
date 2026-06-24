@@ -81,15 +81,20 @@ _DISCOVERY_CAVEAT = (
 )
 
 
-def report_markdown(result: dict) -> str:
+def report_markdown(
+    result: dict,
+    *,
+    source_label: str = "Bigdata.com",
+    source_url: str = "https://bigdata.com",
+) -> str:
     best = result["best_horizon"]
     frac = result["split_frac"]
     sentiment_scale = (
         "per-ticker standardized" if result.get("standardize") else "raw levels"
     )
     lines = [
-        "## Bigdata.com sentiment backtest — discovery + held-out confirmation "
-        "(https://bigdata.com)",
+        f"## {source_label} sentiment backtest — discovery + held-out "
+        f"confirmation ({source_url})",
         f"> {_DISCOVERY_CAVEAT}",
         "",
         f"Mode: **{result['mode']}** · sentiment: **{sentiment_scale}** · "
