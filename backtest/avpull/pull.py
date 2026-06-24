@@ -1,8 +1,7 @@
 # backtest/avpull/pull.py
-"""Resumable Alpha Vantage puller. Pure helpers (CI-tested) + live fetch/run
-(operator-run, network — NOT in CI, like prices_yf / scorer_llm). The live
-functions are added in a later task; this file currently holds only the pure
-helpers."""
+"""Resumable Alpha Vantage puller. Pure helpers (CI-tested: is_throttled,
+quarters_2010_to, pending_units) + live fetch/run (operator-run, network —
+NOT in CI, like prices_yf / scorer_llm)."""
 
 import json
 import os
