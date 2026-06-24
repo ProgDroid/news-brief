@@ -3,6 +3,7 @@
 No network. AV numeric fields arrive as strings and are coerced to float."""
 
 from datetime import date, timedelta
+from statistics import mean
 
 
 def _iso_week_friday(d: date) -> str:
@@ -41,4 +42,38 @@ def news_series_from_pages(
     points = [
         {"date": wk, "value": num[wk] / den[wk]} for wk in sorted(num) if den[wk] > 0
     ]
+    return {"ticker": ticker, "points": points}
+
+
+def _is_boilerplate(seg: dict) -> bool:
+    speaker = (seg.get("speaker") or "").strip().lower()
+    title = (seg.get("title") or "").strip().lower()
+    return speaker == "operator" or "investor relations" in title
+
+
+def quarter_to_anchor_date(quarter: str, *, offset_days: int = 50) -> str:
+    year = int(quarter[:4])
+    q = int(quarter[-1])
+    end_month = q * 3
+    if end_month == 12:
+        qend = date(year, 12, 31)
+    else:
+        qend = date(year, end_month + 1, 1) - timedelta(days=1)
+    return (qend + timedelta(days=offset_days)).isoformat()
+
+
+def transcript_series_from_calls(ticker: str, calls: list[dict]) -> dict:
+    points = []
+    for call in calls:
+        segs = [
+            float(s["sentiment"])
+            for s in call.get("transcript", [])
+            if not _is_boilerplate(s)
+        ]
+        if not segs:
+            continue
+        points.append(
+            {"date": quarter_to_anchor_date(call["quarter"]), "value": mean(segs)}
+        )
+    points.sort(key=lambda p: p["date"])
     return {"ticker": ticker, "points": points}

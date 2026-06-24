@@ -1,8 +1,15 @@
 # tests/test_backtest_avpull.py
 from datetime import date
 
+import pytest
+
 from backtest.avpull.universe import UNIVERSE
-from backtest.avpull.transforms import _iso_week_friday, news_series_from_pages
+from backtest.avpull.transforms import (
+    _iso_week_friday,
+    news_series_from_pages,
+    quarter_to_anchor_date,
+    transcript_series_from_calls,
+)
 
 
 def test_universe_is_deduped_and_covers_watchlist():
@@ -53,3 +60,47 @@ def test_news_series_drops_pre_2018_and_other_tickers():
     }
     out = news_series_from_pages("MU", [page])
     assert out["points"] == [{"date": "2024-01-19", "value": 0.3}]
+
+
+def test_quarter_to_anchor_date_is_quarter_end_plus_offset():
+    # 2024Q1 calendar end = 2024-03-31; +50d = 2024-05-20
+    assert quarter_to_anchor_date("2024Q1") == "2024-05-20"
+    # 2023Q4 end = 2023-12-31; +50d = 2024-02-19
+    assert quarter_to_anchor_date("2023Q4") == "2024-02-19"
+
+
+def test_transcript_series_means_non_boilerplate_segments():
+    call = {
+        "symbol": "MU",
+        "quarter": "2024Q1",
+        "transcript": [
+            {"speaker": "Operator", "title": "", "sentiment": "0.0"},  # excluded
+            {
+                "speaker": "Satya Kumar",
+                "title": "Investor Relations",
+                "sentiment": "0.0",
+            },  # excluded
+            {
+                "speaker": "Sanjay Mehrotra",
+                "title": "President and CEO",
+                "sentiment": "0.8",
+            },
+            {"speaker": "Mark Murphy", "title": "CFO", "sentiment": "0.4"},
+        ],
+    }
+    out = transcript_series_from_calls("MU", [call])
+    assert out["ticker"] == "MU"
+    assert len(out["points"]) == 1
+    assert out["points"][0]["date"] == "2024-05-20"
+    assert out["points"][0]["value"] == pytest.approx(0.6)
+
+
+def test_transcript_series_skips_calls_with_no_usable_segments():
+    call = {
+        "symbol": "MU",
+        "quarter": "2024Q1",
+        "transcript": [
+            {"speaker": "Operator", "title": "", "sentiment": "0.0"},
+        ],
+    }
+    assert transcript_series_from_calls("MU", [call])["points"] == []
