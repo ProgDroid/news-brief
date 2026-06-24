@@ -7,6 +7,7 @@ helpers."""
 import json
 import os
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta
@@ -40,10 +41,19 @@ def pending_units(
 _BASE = "https://www.alphavantage.co/query"
 
 
-def _get(params: dict) -> dict:
+def _get(params: dict, *, retries: int = 4) -> dict:
     url = _BASE + "?" + urllib.parse.urlencode(params)
-    with urllib.request.urlopen(url, timeout=30) as r:  # noqa: S310
-        return json.loads(r.read().decode())
+    for attempt in range(retries):
+        try:
+            with urllib.request.urlopen(url, timeout=30) as r:  # noqa: S310
+                return json.loads(r.read().decode())
+        except (urllib.error.URLError, TimeoutError) as e:
+            if attempt == retries - 1:
+                raise
+            wait = 2**attempt  # 1, 2, 4s
+            print(f"network blip ({e}); retry {attempt + 1}/{retries - 1} in {wait}s")
+            time.sleep(wait)
+    raise RuntimeError("unreachable")  # loop either returns or raises
 
 
 def _news_query(
