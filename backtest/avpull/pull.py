@@ -9,6 +9,7 @@ import os
 import time
 import urllib.parse
 import urllib.request
+from datetime import datetime, timedelta
 from pathlib import Path
 
 
@@ -45,6 +46,50 @@ def _get(params: dict) -> dict:
         return json.loads(r.read().decode())
 
 
+def _news_query(
+    ticker: str, api_key: str, t_from: datetime, t_to: datetime, limit: int
+) -> dict:
+    return _get(
+        {
+            "function": "NEWS_SENTIMENT",
+            "tickers": ticker,
+            "time_from": t_from.strftime("%Y%m%dT%H%M"),
+            "time_to": t_to.strftime("%Y%m%dT%H%M"),
+            "sort": "EARLIEST",
+            "limit": str(limit),
+            "apikey": api_key,
+        }
+    )
+
+
+def _fetch_news_window(
+    ticker: str, api_key: str, t_from: datetime, t_to: datetime, limit: int
+) -> list[dict]:
+    """Fetch one [t_from, t_to] window; if it hits the `limit` cap (the window
+    holds more articles than one call returns), split it in half and recurse so
+    no part of a high-volume span is silently dropped. Stops splitting at a
+    1-day window (accepts the cap there with a warning). Raises on a non-data
+    response so the caller's manifest does not mark the unit done."""
+    resp = _news_query(ticker, api_key, t_from, t_to, limit)
+    if is_throttled(resp):
+        raise RuntimeError(f"AV error on news {ticker} {t_from:%Y-%m-%d}: {resp}")
+    feed = resp.get("feed", [])
+    if not feed:
+        return []
+    if len(feed) >= limit and (t_to - t_from) > timedelta(days=1):
+        mid = t_from + (t_to - t_from) / 2
+        time.sleep(0.8)
+        left = _fetch_news_window(ticker, api_key, t_from, mid, limit)
+        time.sleep(0.8)
+        right = _fetch_news_window(
+            ticker, api_key, mid + timedelta(minutes=1), t_to, limit
+        )
+        return left + right
+    if len(feed) >= limit:
+        print(f"WARN news {ticker} {t_from:%Y-%m-%d}: 1000-cap on a <=1-day window")
+    return [resp]
+
+
 def fetch_news_pages(
     ticker: str,
     api_key: str,
@@ -53,32 +98,20 @@ def fetch_news_pages(
     end_year: int,
     limit: int = 1000,
 ) -> list[dict]:
-    """One bounded NEWS_SENTIMENT call per calendar year (time_from + time_to).
-    AV rejects an open-ended time_from at limit=1000 with 'Invalid inputs'; a
-    bounded year window is the proven shape. A year that hits the `limit` cap
-    logs a warning — a few hyper-covered mega-cap years may drop the tail, which
-    the weekly-mean factor tolerates. Raises on a non-data response so the
-    caller's manifest does not mark the unit done."""
+    """News pages for `ticker`, one bounded year window at a time (AV rejects an
+    open-ended range), each recursively split on the per-call cap so high-volume
+    name-years are fully covered rather than truncated to the earliest 1000."""
     pages: list[dict] = []
     for year in range(start_year, end_year + 1):
-        resp = _get(
-            {
-                "function": "NEWS_SENTIMENT",
-                "tickers": ticker,
-                "time_from": f"{year}0101T0000",
-                "time_to": f"{year}1231T2359",
-                "sort": "EARLIEST",
-                "limit": str(limit),
-                "apikey": api_key,
-            }
+        pages.extend(
+            _fetch_news_window(
+                ticker,
+                api_key,
+                datetime(year, 1, 1, 0, 0),
+                datetime(year, 12, 31, 23, 59),
+                limit,
+            )
         )
-        if is_throttled(resp):
-            raise RuntimeError(f"AV error on news {ticker} {year}: {resp}")
-        feed = resp.get("feed", [])
-        if feed:
-            pages.append(resp)
-            if len(feed) >= limit:
-                print(f"WARN news {ticker} {year}: hit {limit}-article cap")
         time.sleep(0.8)
     return pages
 
