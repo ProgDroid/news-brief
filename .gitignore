@@ -9,3 +9,7 @@ __pycache__/
 .serena/
 .ruff_cache/
 .playwright-mcp/
+
+# AV backtest pulled data (raw AV JSON + manifest + results) — never commit
+av_data/
+scratch_av/
