@@ -155,3 +155,60 @@ def test_merge_caps_to_most_recent():
     out = bm.merge_ledger(prior, [], "2026-06-24", cap=2, retire_after_days=999)
     kept = [c["last_reaffirmed"] for c in out["claims"]]
     assert kept == ["2026-06-15", "2026-06-14"]
+
+
+def test_render_empty_ledger_is_blank():
+    assert bm.render_established_block({"version": 1, "claims": []}) == ""
+
+
+def test_render_lists_claims_with_instruction():
+    ledger = {
+        "version": 1,
+        "claims": [
+            {
+                "id": "c-0001",
+                "claim": "BOJ at 1.0% since 2026-06-16",
+                "topic": "japan",
+                "first_seen": "2026-06-18",
+                "last_reaffirmed": "2026-06-24",
+                "restate_count": 7,
+            },
+        ],
+    }
+    block = bm.render_established_block(ledger)
+    assert "ESTABLISHED" in block
+    assert "BOJ at 1.0% since 2026-06-16" in block
+    assert "japan" in block
+    assert "one clause" in block.lower()
+
+
+def test_build_reconcile_prompt_contains_ledger_and_brief():
+    ledger = {
+        "version": 1,
+        "claims": [
+            {
+                "id": "c-0001",
+                "claim": "BOJ at 1.0%",
+                "topic": "japan",
+                "first_seen": "2026-06-18",
+                "last_reaffirmed": "2026-06-24",
+                "restate_count": 7,
+            }
+        ],
+    }
+    p = bm.build_reconcile_prompt(ledger, "Today the BOJ left rates unchanged.")
+    assert "c-0001" in p
+    assert "Today the BOJ left rates unchanged." in p
+
+
+def test_parse_extracts_array_and_filters():
+    text = 'Here you go:\n[{"id":"c-0001","claim":"x","topic":"a"},{"claim":"y"},{"topic":"no-claim"}]'
+    out = bm.parse_reconcile_response(text)
+    assert out == [{"id": "c-0001", "claim": "x", "topic": "a"}, {"claim": "y"}]
+
+
+def test_parse_raises_without_array():
+    import pytest
+
+    with pytest.raises(ValueError):
+        bm.parse_reconcile_response("no array here")

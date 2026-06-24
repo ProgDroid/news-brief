@@ -105,3 +105,64 @@ def merge_ledger(
     ]
     result.sort(key=lambda c: c["last_reaffirmed"], reverse=True)
     return {"version": 1, "claims": result[:cap]}
+
+
+_RECONCILE_SYSTEM = (
+    "You maintain a compact memory of durable facts a daily market brief has "
+    "already told its reader, so tomorrow's brief stops re-explaining them."
+)
+
+_RECONCILE_TEMPLATE = """Below is the CURRENT memory (JSON) and TODAY'S BRIEF.
+
+Return ONLY a JSON array of the durable facts the reader now knows after today's
+brief. Rules:
+- A durable fact is something that should NOT be re-explained tomorrow unless it
+  materially changes: one-time events already reported (e.g. a rate hike), and
+  standing analytical frames/theses. NOT ephemeral daily price moves.
+- For a fact already in CURRENT memory that is still relevant, include it and
+  ECHO its existing "id". You may reword its "claim" if today refined it.
+- For a genuinely NEW durable fact, include it with NO "id".
+- Omit facts that are no longer relevant.
+Each array item: {{"id": "<existing id, omit if new>", "claim": "<short fact>", "topic": "<short label>"}}.
+Output the JSON array and nothing else.
+
+CURRENT memory:
+{current}
+
+TODAY'S BRIEF:
+{brief}
+"""
+
+
+def render_established_block(ledger: dict) -> str:
+    claims = ledger.get("claims", [])
+    if not claims:
+        return ""
+    lines = "\n".join(
+        f"  • [{c.get('topic') or 'general'}] {c['claim']}" for c in claims
+    )
+    return (
+        "## ESTABLISHED — THE READER ALREADY KNOWS THESE\n"
+        "Reference each in at most one clause, and only if still relevant. Do NOT "
+        "re-explain or restate them as news. Lead every section with what has "
+        "CHANGED since.\n\n" + lines + "\n"
+    )
+
+
+def build_reconcile_prompt(ledger: dict, brief_text: str) -> str:
+    current = json.dumps(ledger.get("claims", []), indent=2)
+    return _RECONCILE_TEMPLATE.format(current=current, brief=brief_text)
+
+
+def parse_reconcile_response(text: str) -> list[dict]:
+    m = re.search(r"\[.*\]", text, re.S)
+    if not m:
+        raise ValueError(f"no JSON array in reconcile response: {text[:200]!r}")
+    data = json.loads(m.group())
+    if not isinstance(data, list):
+        raise ValueError("reconcile response is not a JSON list")
+    out = []
+    for item in data:
+        if isinstance(item, dict) and item.get("claim"):
+            out.append({k: item[k] for k in ("id", "claim", "topic") if k in item})
+    return out
