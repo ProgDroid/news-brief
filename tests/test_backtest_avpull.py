@@ -3,6 +3,7 @@ from datetime import date
 
 import pytest
 
+from backtest.avpull.pull import is_throttled, pending_units, quarters_2010_to
 from backtest.avpull.universe import UNIVERSE
 from backtest.avpull.transforms import (
     _iso_week_friday,
@@ -120,3 +121,23 @@ def test_snap_drops_points_with_no_nearby_trading_day():
     series = {"ticker": "X", "points": [{"date": "2024-05-20", "value": 0.6}]}
     cal = {"2024-01-02"}  # months away
     assert snap_series_to_calendar(series, cal)["points"] == []
+
+
+def test_is_throttled_detects_av_notices():
+    assert is_throttled({"Information": "rate limit ..."}) is True
+    assert is_throttled({"Note": "..."}) is True
+    assert is_throttled({"feed": []}) is False
+
+
+def test_quarters_2010_to_is_inclusive():
+    qs = quarters_2010_to(2010, 3)
+    assert qs == ["2010Q1", "2010Q2", "2010Q3"]
+    assert quarters_2010_to(2011, 1)[-2:] == ["2010Q4", "2011Q1"]
+
+
+def test_pending_units_excludes_done_keeps_order():
+    done = {("news", "MU")}
+    units = pending_units(["MU", "CVX"], ["2010Q1"], done)
+    assert ("news", "MU") not in units
+    assert units[0] == ("news", "CVX")
+    assert ("transcript", "MU", "2010Q1") in units
