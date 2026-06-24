@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'brief.py'
+      - 'brief_memory.py'
       - 'common.py'
       - 'trading.py'
       - 'validation.py'
@@ -44,8 +45,8 @@ jobs:
 
       - name: Lint
         run: |
-          ruff check brief.py common.py trading.py enrichment tests
-          ruff format --check brief.py common.py trading.py enrichment tests
+          ruff check brief.py brief_memory.py common.py trading.py enrichment tests
+          ruff format --check brief.py brief_memory.py common.py trading.py enrichment tests
 
       - name: Test
         run: pytest -q
