@@ -2,6 +2,7 @@
 """Pure transforms: raw Alpha Vantage JSON -> engine SentimentSeries dicts.
 No network. AV numeric fields arrive as strings and are coerced to float."""
 
+import bisect
 from datetime import date, timedelta
 from statistics import mean
 
@@ -77,3 +78,21 @@ def transcript_series_from_calls(ticker: str, calls: list[dict]) -> dict:
         )
     points.sort(key=lambda p: p["date"])
     return {"ticker": ticker, "points": points}
+
+
+def snap_series_to_calendar(series_dict: dict, trading_days: set[str]) -> dict:
+    cal = sorted(trading_days)
+    out: dict[str, float] = {}
+    for p in series_dict.get("points", []):
+        i = bisect.bisect_right(cal, p["date"]) - 1
+        if i < 0:
+            continue
+        snapped = cal[i]
+        gap = (date.fromisoformat(p["date"]) - date.fromisoformat(snapped)).days
+        if gap > 10:
+            continue
+        out[snapped] = p["value"]  # later input point wins a collision
+    return {
+        "ticker": series_dict["ticker"],
+        "points": [{"date": d, "value": v} for d, v in sorted(out.items())],
+    }

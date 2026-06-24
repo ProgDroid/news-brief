@@ -8,6 +8,7 @@ from backtest.avpull.transforms import (
     _iso_week_friday,
     news_series_from_pages,
     quarter_to_anchor_date,
+    snap_series_to_calendar,
     transcript_series_from_calls,
 )
 
@@ -104,3 +105,18 @@ def test_transcript_series_skips_calls_with_no_usable_segments():
         ],
     }
     assert transcript_series_from_calls("MU", [call])["points"] == []
+
+
+def test_snap_maps_to_latest_trading_day_not_after():
+    series = {"ticker": "X", "points": [{"date": "2024-05-20", "value": 0.6}]}  # Mon
+    cal = {"2024-05-17", "2024-05-21"}  # Fri before, Tue after
+    out = snap_series_to_calendar(series, cal)
+    assert out["points"] == [
+        {"date": "2024-05-17", "value": 0.6}
+    ]  # nearest <=, no lookahead
+
+
+def test_snap_drops_points_with_no_nearby_trading_day():
+    series = {"ticker": "X", "points": [{"date": "2024-05-20", "value": 0.6}]}
+    cal = {"2024-01-02"}  # months away
+    assert snap_series_to_calendar(series, cal)["points"] == []
