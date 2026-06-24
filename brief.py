@@ -1468,9 +1468,9 @@ def build_daily_prompt(
     if yesterday_brief:
         yesterday_block = f"""
 ## YESTERDAY'S BRIEF
-For any section where the situation is materially unchanged from yesterday, replace the paragraph with a single sentence: "No significant change — [one-line summary]." Only write a full paragraph when something new or materially different has occurred.
+For any section where the situation is materially unchanged from yesterday, replace the paragraph with a single sentence: "No significant change — [one-line summary]." This applies to standing analytical frames too — named theses, recurring podcast framings, and one-time events already reported: state them in at most one clause and never re-explain them. Only write a full paragraph when something new or materially different has occurred.
 
-{yesterday_brief[:2000]}
+{yesterday_brief[:6000]}
 """
 
     weekly_block = ""

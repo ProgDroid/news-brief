@@ -251,3 +251,23 @@ def test_reconcile_bad_json_returns_prior():
     prior = {"version": 1, "claims": []}
     out = bm.reconcile_ledger(prior, "brief", "2026-06-24", call=lambda s, u: "garbage")
     assert out == prior
+
+
+def test_part_a_feeds_back_beyond_2000_chars():
+    import brief
+
+    fb = {}
+    yesterday = "HEAD " + ("x" * 2800) + " MARKER-3000 " + ("y" * 200)
+    prompt = brief.build_daily_prompt(
+        "feeds", "web", "chroma", yesterday, "", fb, "", "", "", ""
+    )
+    assert "MARKER-3000" in prompt  # was truncated away at [:2000]
+
+
+def test_part_a_instruction_mentions_standing_frames():
+    import brief
+
+    prompt = brief.build_daily_prompt(
+        "feeds", "web", "chroma", "yesterday text", "", {}, "", "", "", ""
+    )
+    assert "standing analytical frames" in prompt
