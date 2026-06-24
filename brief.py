@@ -90,6 +90,13 @@ from enrichment import (
     render_prompt_block,
 )
 from enrichment.models import bundles_from_dict
+from brief_memory import (
+    is_enabled as brief_memory_enabled,
+    load_ledger,
+    reconcile_ledger,
+    render_established_block,
+    save_ledger,
+)
 
 
 # Chroma MCP HTTP endpoint
@@ -1441,6 +1448,7 @@ def build_daily_prompt(
     perf_block: str = "",
     market_block: str = "",
     enrichment_block: str = "",
+    established_block: str = "",
 ) -> str:
     today = datetime.now(timezone.utc).strftime("%A, %d %B %Y")
     search_list = "\n".join(f"- {t['search']}" for t in TOPICS)
@@ -1494,6 +1502,7 @@ reader's attention; the reader decides what to do with it.
 """
 
     enrichment_section = f"\n{enrichment_block}\n" if enrichment_block else ""
+    established_section = f"\n{established_block}\n" if established_block else ""
 
     market_section = (
         f"\n## MARKET PULSE (what moved — you supply the why)\n{market_block}\n"
@@ -1521,7 +1530,7 @@ Use for forward-looking analytical framing. Cite the show name if drawing on a s
 Search for current developments on each before writing. Anchor facts on Reuters; for
 local colour and forward framing, prefer the region-native sources above.
 {search_list}
-{yesterday_block}{weekly_block}{portfolio_block}{enrichment_section}
+{established_section}{yesterday_block}{weekly_block}{portfolio_block}{enrichment_section}
 {perf_block}
 
 ## OUTPUT FORMAT
@@ -2007,6 +2016,9 @@ def mode_submit():
     fb = load_feedback()
     chroma_context = build_chroma_context(fb)
     yesterday_brief = load_yesterday_brief()
+    established_block = (
+        render_established_block(load_ledger()) if brief_memory_enabled() else ""
+    )
     weekly_summary = load_last_weekly_summary()
 
     log.info(
@@ -2057,6 +2069,7 @@ def mode_submit():
         perf_block,
         market_block,
         enrichment_block,
+        established_block,
     )
     batch_id = submit_batch(SYSTEM_PROMPT, prompt, custom_id=f"newsbrief-{today}")
     save_state(
@@ -2097,6 +2110,11 @@ def mode_collect():
             archive_path=BRIEFS_DIR / f"brief-{today}.md",
         )
         save_signals(signals, today, status=status, dropped=dropped)
+        if brief_memory_enabled():
+            try:
+                save_ledger(reconcile_ledger(load_ledger(), brief, today))
+            except Exception as e:
+                log.error(f"Brief-memory reconcile skipped (brief unaffected): {e}")
         clear_batch_state()
         # Trading stage runs AFTER clear_batch_state and is isolated: a matcher /
         # PolyGram / Claude failure must never re-collect and duplicate the brief.

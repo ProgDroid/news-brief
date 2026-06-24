@@ -271,3 +271,32 @@ def test_part_a_instruction_mentions_standing_frames():
         "feeds", "web", "chroma", "yesterday text", "", {}, "", "", "", ""
     )
     assert "standing analytical frames" in prompt
+
+
+def test_established_block_injected_into_prompt():
+    import brief
+
+    prompt = brief.build_daily_prompt(
+        "feeds",
+        "web",
+        "chroma",
+        "y",
+        "",
+        {},
+        "",
+        "",
+        "",
+        "",
+        established_block="## ESTABLISHED — THE READER ALREADY KNOWS THESE\n  • [japan] BOJ at 1.0%",
+    )
+    assert "BOJ at 1.0%" in prompt
+    assert "ESTABLISHED" in prompt
+
+
+def test_no_established_block_when_empty():
+    import brief
+
+    prompt = brief.build_daily_prompt(
+        "feeds", "web", "chroma", "y", "", {}, "", "", "", "", established_block=""
+    )
+    assert "ESTABLISHED — THE READER ALREADY KNOWS" not in prompt
