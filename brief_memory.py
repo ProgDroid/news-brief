@@ -5,8 +5,8 @@ the brief unaffected and the prior ledger intact)."""
 
 import json
 import os
-import re  # noqa: F401
-from datetime import datetime  # noqa: F401
+import re
+from datetime import datetime
 from pathlib import Path
 
 import requests  # noqa: F401
@@ -41,3 +41,67 @@ def load_ledger(path: Path = BRIEF_MEMORY_FILE) -> dict:
 
 def save_ledger(ledger: dict, path: Path = BRIEF_MEMORY_FILE) -> None:
     _write_json_atomic(path, ledger)
+
+
+def _max_id_num(ledger: dict) -> int:
+    nums = []
+    for c in ledger.get("claims", []):
+        m = re.match(r"c-(\d+)$", str(c.get("id", "")))
+        if m:
+            nums.append(int(m.group(1)))
+    return max(nums, default=0)
+
+
+def _days_between(d_old: str, d_new: str) -> int:
+    try:
+        a = datetime.strptime(d_old, "%Y-%m-%d")
+        b = datetime.strptime(d_new, "%Y-%m-%d")
+        return (b - a).days
+    except Exception:
+        return 0  # unparseable date -> never retire on this basis
+
+
+def merge_ledger(
+    prior: dict,
+    model_claims: list[dict],
+    today: str,
+    *,
+    cap: int = MAX_CLAIMS,
+    retire_after_days: int = RETIRE_AFTER_DAYS,
+) -> dict:
+    by_id = {c["id"]: c for c in prior.get("claims", []) if "id" in c}
+    next_num = _max_id_num(prior) + 1
+    returned = set()
+    result = []
+    for mc in model_claims:
+        cid = mc.get("id")
+        if cid and cid in by_id:
+            base = dict(by_id[cid])
+            base["claim"] = mc.get("claim", base.get("claim", ""))
+            base["topic"] = mc.get("topic", base.get("topic", ""))
+            base["last_reaffirmed"] = today
+            base["restate_count"] = base.get("restate_count", 0) + 1
+            result.append(base)
+            returned.add(cid)
+        elif mc.get("claim"):
+            result.append(
+                {
+                    "id": f"c-{next_num:04d}",
+                    "claim": mc["claim"],
+                    "topic": mc.get("topic", ""),
+                    "first_seen": today,
+                    "last_reaffirmed": today,
+                    "restate_count": 1,
+                }
+            )
+            next_num += 1
+    for c in prior.get("claims", []):
+        if c.get("id") not in returned:
+            result.append(dict(c))
+    result = [
+        c
+        for c in result
+        if _days_between(c["last_reaffirmed"], today) <= retire_after_days
+    ]
+    result.sort(key=lambda c: c["last_reaffirmed"], reverse=True)
+    return {"version": 1, "claims": result[:cap]}
