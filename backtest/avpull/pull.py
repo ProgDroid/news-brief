@@ -46,33 +46,39 @@ def _get(params: dict) -> dict:
 
 
 def fetch_news_pages(
-    ticker: str, api_key: str, *, time_from: str = "20180101T0000", limit: int = 1000
+    ticker: str,
+    api_key: str,
+    *,
+    start_year: int = 2018,
+    end_year: int,
+    limit: int = 1000,
 ) -> list[dict]:
-    """Page NEWS_SENTIMENT forward by time until a short/empty page. Raises on
-    throttle so the caller's manifest does not mark the unit done."""
+    """One bounded NEWS_SENTIMENT call per calendar year (time_from + time_to).
+    AV rejects an open-ended time_from at limit=1000 with 'Invalid inputs'; a
+    bounded year window is the proven shape. A year that hits the `limit` cap
+    logs a warning — a few hyper-covered mega-cap years may drop the tail, which
+    the weekly-mean factor tolerates. Raises on a non-data response so the
+    caller's manifest does not mark the unit done."""
     pages: list[dict] = []
-    cursor, prev_last = time_from, None
-    while True:
+    for year in range(start_year, end_year + 1):
         resp = _get(
             {
                 "function": "NEWS_SENTIMENT",
                 "tickers": ticker,
-                "time_from": cursor,
+                "time_from": f"{year}0101T0000",
+                "time_to": f"{year}1231T2359",
                 "sort": "EARLIEST",
                 "limit": str(limit),
                 "apikey": api_key,
             }
         )
         if is_throttled(resp):
-            raise RuntimeError(f"AV throttled on news {ticker}: {resp}")
+            raise RuntimeError(f"AV error on news {ticker} {year}: {resp}")
         feed = resp.get("feed", [])
-        if not feed:
-            break
-        pages.append(resp)
-        last_tp = feed[-1]["time_published"]
-        if len(feed) < limit or last_tp == prev_last:
-            break
-        prev_last, cursor = last_tp, last_tp
+        if feed:
+            pages.append(resp)
+            if len(feed) >= limit:
+                print(f"WARN news {ticker} {year}: hit {limit}-article cap")
         time.sleep(0.8)
     return pages
 
@@ -109,7 +115,7 @@ def run(
         if unit[0] == "news":
             _, t = unit
             (raw / f"news_{t}.json").write_text(
-                json.dumps(fetch_news_pages(t, api_key))
+                json.dumps(fetch_news_pages(t, api_key, end_year=end_year))
             )
         else:
             _, t, q = unit
