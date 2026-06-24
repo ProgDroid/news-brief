@@ -131,7 +131,24 @@ def fetch_news_pages(
     return pages
 
 
+def _is_rate_limit(resp: dict) -> bool:
+    """True only for a genuine AV rate-limit notice (transient — must halt the
+    resumable pull), NOT a missing-data / invalid-quarter error."""
+    msg = " ".join(
+        str(resp.get(k, "")) for k in ("Information", "Note", "Error Message")
+    ).lower()
+    return any(
+        s in msg
+        for s in ("rate limit", "calls per", "per day", "per minute", "thank you for")
+    )
+
+
 def fetch_transcript(symbol: str, quarter: str, api_key: str) -> dict:
+    """Return the transcript response, or an empty-transcript dict for a quarter
+    AV has no data for (it answers 'Invalid API call' for missing quarters). A
+    genuine rate-limit raises so the resumable pull halts and resumes later; a
+    missing quarter is skipped (the transform ignores empty transcripts) so one
+    gap never kills the ~2,400-call pull."""
     resp = _get(
         {
             "function": "EARNINGS_CALL_TRANSCRIPT",
@@ -140,9 +157,12 @@ def fetch_transcript(symbol: str, quarter: str, api_key: str) -> dict:
             "apikey": api_key,
         }
     )
-    if is_throttled(resp):
-        raise RuntimeError(f"AV throttled on transcript {symbol} {quarter}: {resp}")
-    return resp
+    if "transcript" in resp:
+        return resp
+    if _is_rate_limit(resp):
+        raise RuntimeError(f"AV rate-limited on transcript {symbol} {quarter}: {resp}")
+    print(f"no transcript {symbol} {quarter}; skipping ({str(resp)[:80]})")
+    return {"symbol": symbol, "quarter": quarter, "transcript": []}
 
 
 def run(
