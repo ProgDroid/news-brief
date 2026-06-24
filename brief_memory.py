@@ -9,9 +9,9 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-import requests  # noqa: F401
+import requests
 
-from common import ANTHROPIC_HEADERS, DATA_DIR, _write_json_atomic, log  # noqa: F401
+from common import ANTHROPIC_HEADERS, DATA_DIR, _write_json_atomic, log
 
 BRIEF_MEMORY_FILE = DATA_DIR / "brief_memory.json"
 MAX_CLAIMS = 25
@@ -166,3 +166,30 @@ def parse_reconcile_response(text: str) -> list[dict]:
         if isinstance(item, dict) and item.get("claim"):
             out.append({k: item[k] for k in ("id", "claim", "topic") if k in item})
     return out
+
+
+def _messages_call(system: str, user: str) -> str:
+    resp = requests.post(
+        "https://api.anthropic.com/v1/messages",
+        headers=ANTHROPIC_HEADERS,
+        json={
+            "model": RECONCILE_MODEL,
+            "max_tokens": 2048,
+            "system": system,
+            "messages": [{"role": "user", "content": user}],
+        },
+        timeout=30,
+    )
+    resp.raise_for_status()
+    blocks = resp.json().get("content", [])
+    return "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+
+
+def reconcile_ledger(prior: dict, brief_text: str, today: str, *, call=None) -> dict:
+    caller = call or _messages_call
+    try:
+        text = caller(_RECONCILE_SYSTEM, build_reconcile_prompt(prior, brief_text))
+        return merge_ledger(prior, parse_reconcile_response(text), today)
+    except Exception as e:
+        log.warning(f"Brief-memory reconcile failed; keeping prior ledger: {e}")
+        return prior

@@ -212,3 +212,42 @@ def test_parse_raises_without_array():
 
     with pytest.raises(ValueError):
         bm.parse_reconcile_response("no array here")
+
+
+def test_reconcile_success_merges(monkeypatch):
+    prior = {"version": 1, "claims": []}
+
+    def fake_call(system, user):
+        return '[{"claim":"BOJ at 1.0% since 2026-06-16","topic":"japan"}]'
+
+    out = bm.reconcile_ledger(prior, "BOJ held rates.", "2026-06-24", call=fake_call)
+    assert out["claims"][0]["claim"] == "BOJ at 1.0% since 2026-06-16"
+    assert out["claims"][0]["id"] == "c-0001"
+
+
+def test_reconcile_failure_returns_prior_unchanged():
+    prior = {
+        "version": 1,
+        "claims": [
+            {
+                "id": "c-0001",
+                "claim": "x",
+                "topic": "a",
+                "first_seen": "2026-06-24",
+                "last_reaffirmed": "2026-06-24",
+                "restate_count": 1,
+            }
+        ],
+    }
+
+    def boom(system, user):
+        raise RuntimeError("network down")
+
+    out = bm.reconcile_ledger(prior, "brief", "2026-06-25", call=boom)
+    assert out is prior  # untouched, memory never lost
+
+
+def test_reconcile_bad_json_returns_prior():
+    prior = {"version": 1, "claims": []}
+    out = bm.reconcile_ledger(prior, "brief", "2026-06-24", call=lambda s, u: "garbage")
+    assert out == prior
