@@ -70,6 +70,11 @@ def _fetch_news_window(
     no part of a high-volume span is silently dropped. Stops splitting at a
     1-day window (accepts the cap there with a warning). Raises on a non-data
     response so the caller's manifest does not mark the unit done."""
+    now = datetime.now()
+    if t_to > now:  # AV rejects a future time_from; never query past 'now'
+        t_to = now
+    if t_from >= t_to:
+        return []  # window is entirely in the future
     resp = _news_query(ticker, api_key, t_from, t_to, limit)
     if is_throttled(resp):
         raise RuntimeError(f"AV error on news {ticker} {t_from:%Y-%m-%d}: {resp}")
