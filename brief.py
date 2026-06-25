@@ -361,6 +361,15 @@ def remove_temp_source(source_id: str) -> dict | None:
         return removed
 
 
+def _split_temp_sources(temp_sources: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Partition temp sources into (feeds, pages) by source_type. Feeds are
+    fetched via fetch_rss; pages via fetch_web_source. A missing source_type
+    counts as a feed, preserving pre-source_type behaviour."""
+    feeds = [s for s in temp_sources if s.get("source_type", "feed") != "page"]
+    pages = [s for s in temp_sources if s.get("source_type") == "page"]
+    return feeds, pages
+
+
 # Default pinned topics — always rendered (at least a one-liner) when the
 # reader has not customised the pin set via /pin /unpin. Matches the legacy
 # hardcoded country sections so day-one behaviour is unchanged.
@@ -2093,12 +2102,13 @@ def mode_submit():
         log.info(
             f"Temp sources: {len(temp_sources)} ({', '.join(s['name'] for s in temp_sources)})"
         )
+    feed_temp, page_temp = _split_temp_sources(temp_sources)
     feed_content = (
-        "\n".join(c for f in RSS_FEEDS + temp_sources if (c := fetch_rss(f)))
+        "\n".join(c for f in RSS_FEEDS + feed_temp if (c := fetch_rss(f)))
         or "(no RSS content)"
     )
     web_content = (
-        "\n".join(c for s in WEB_SOURCES if (c := fetch_web_source(s)))
+        "\n".join(c for s in WEB_SOURCES + page_temp if (c := fetch_web_source(s)))
         or "(no web content)"
     )
 

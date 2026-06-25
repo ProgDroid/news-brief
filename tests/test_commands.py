@@ -604,3 +604,25 @@ def test_register_bot_commands_hash_gated(monkeypatch, tmp_path):
     brief.register_bot_commands_if_changed()  # unchanged → no second API call
     assert len(calls) == 1
     assert any(c["command"] == "addsource" for c in calls[0])
+
+
+# ── Temp sources partitioning ────────────────────────────────────────────────────
+def test_split_temp_sources_partitions_by_type():
+    feed_default = {"name": "F", "url": "u1", "category": "us", "kind": "wire"}
+    feed_explicit = {
+        "name": "F2",
+        "url": "u2",
+        "category": "us",
+        "kind": "wire",
+        "source_type": "feed",
+    }
+    page = {
+        "name": "P",
+        "url": "u3",
+        "category": "us",
+        "kind": "regional",
+        "source_type": "page",
+    }
+    feeds, pages = brief._split_temp_sources([feed_default, page, feed_explicit])
+    assert [s["name"] for s in feeds] == ["F", "F2"]
+    assert [s["name"] for s in pages] == ["P"]
