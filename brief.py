@@ -1218,7 +1218,10 @@ def fetch_web_source(source: dict) -> str:
             re.I,
         )
         content = meta.group(1).strip() if meta else resp.text[:800]
-        return f"\n### {source['name']} ({source['category'].upper()})\n{content}"
+        kind = source.get("kind", "regional").upper()
+        return (
+            f"\n### {source['name']} [{kind}] ({source['category'].upper()})\n{content}"
+        )
     except Exception as e:
         log.warning(f"Web fetch failed {source['name']}: {e}")
         return ""

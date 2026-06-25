@@ -118,6 +118,33 @@ def test_fetch_rss_header_includes_kind(monkeypatch):
     assert "Test Wire" in out
 
 
+def test_fetch_web_source_header_includes_kind(monkeypatch):
+    html_page = (
+        b"<html><head>"
+        b'<meta name="description" content="Some analyst summary">'
+        b"</head><body></body></html>"
+    )
+
+    class _Resp:
+        text = html_page.decode()
+        ok = True
+
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr(brief.requests, "get", lambda *a, **k: _Resp())
+    source = {
+        "name": "BCA Dash",
+        "url": "http://x",
+        "category": "us",
+        "kind": "regional",
+    }
+    out = brief.fetch_web_source(source)
+    assert "[REGIONAL]" in out
+    assert "BCA Dash" in out
+    assert "Some analyst summary" in out
+
+
 # ── build_daily_prompt ────────────────────────────────────────────────────────
 def _daily_kwargs():
     return dict(
