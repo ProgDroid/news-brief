@@ -11,6 +11,7 @@ from backtest.gdelt.aggregate import (
 )
 from backtest.gdelt.events import GdeltEvent, parse_row
 from backtest.gdelt.fetch import events_url, fetch_day_rows, unzip_to_rows
+from backtest.gdelt.run_gdelt_spike import daterange, summarize
 from backtest.gdelt.snap import snap_forward, to_sentiment_series
 
 
@@ -176,3 +177,45 @@ def test_fetch_day_rows_cache_hit_no_network(tmp_path):
     (tmp_path / "20260115.export.CSV.zip").write_bytes(z)
     rows = fetch_day_rows("20260115", cache_dir=str(tmp_path))
     assert rows == [["x", "y", "z"]]
+
+
+def test_daterange_inclusive():
+    assert daterange("2026-01-14", "2026-01-16") == ["20260114", "20260115", "20260116"]
+
+
+def _res(ic, hr=0.55, n=80, best=5):
+    return {"confirmation": {"ic": ic, "hit_rate": hr, "n": n}, "best_horizon": best}
+
+
+def test_summarize_marks_primary_cell_sign_ok():
+    results = [
+        {
+            "symbol": "USO",
+            "field": "conflict_mentions",
+            "mode": "level",
+            "expected_sign": +1,
+            "result": _res(0.08),
+        },  # correct sign, |IC|>0.03 -> yes
+        {
+            "symbol": "SPY",
+            "field": "conflict_mentions",
+            "mode": "level",
+            "expected_sign": -1,
+            "result": _res(0.10),
+        },  # wrong sign -> no
+        {
+            "symbol": "USO",
+            "field": "mean_tone",
+            "mode": "delta",
+            "expected_sign": +1,
+            "result": _res(0.20),
+        },  # non-primary cell -> dash
+    ]
+    grid = summarize(results)
+    lines = grid.splitlines()
+    uso = next(line for line in lines if "USO | conflict_mentions | level" in line)
+    spy = next(line for line in lines if "SPY | conflict_mentions | level" in line)
+    tone = next(line for line in lines if "USO | mean_tone | delta" in line)
+    assert uso.rstrip().endswith("yes |")
+    assert spy.rstrip().endswith("no |")
+    assert tone.rstrip().endswith("— |")  # em dash for non-primary cells
