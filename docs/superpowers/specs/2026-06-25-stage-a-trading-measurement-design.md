@@ -69,10 +69,15 @@ Five units, each independently testable:
   drop rules. No new required fields — a signal with no `source_id` is still valid.
 - Token cost lands entirely on the post-delivery extraction call (latency-free for the user).
 
-### 3. Position stamping  *(trading.py `mode_paper`)*
-- On opening an equity/crypto position, resolve the signal's `source_id` via unit 1 and stamp
-  `source_id`, `source_kind`, `source_perspective` onto the position dict — **as-of-open**,
-  mirroring how `benchmark_entry`/`haircut` are stamped. Registry drift never rewrites history.
+### 3. Signal annotation + position stamping
+- **Import constraint:** `brief.py` imports `trading`, so `trading.py` cannot import `brief.py`.
+  The resolver therefore runs in `brief.py` at **signal-save time** — a new
+  `annotate_signal_sources` step resolves `source_id` to `{source_kind, source_perspective}` and
+  writes them onto each signal in the saved snapshot, mirroring the existing `annotate_signals`
+  enrichment step. The resolver stays the single place tags are derived; no circular import.
+- `mode_paper` (trading.py) then simply **copies** the pre-resolved `source_id`/`source_kind`/
+  `source_perspective` off the signal onto the opened position — no registry access in
+  trading.py. The tag is as-of-signal-generation, the correct provenance anchor.
 - Prediction positions (opened by the matcher, many-signals→one-market) are **out of scope**:
   they carry `source_kind="unknown"`, `source_perspective=None`, and are excluded from source
   attribution. Documented, not silently dropped.
