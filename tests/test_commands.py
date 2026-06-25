@@ -371,6 +371,14 @@ def test_baked_in_feed_perspective_assignments():
         assert by_name[name].get("state_funded", False) is False, name
 
 
+def test_system_prompt_teaches_perspective_tags():
+    p = brief.SYSTEM_PROMPT
+    assert "STATE-FUNDED" in p
+    assert "perspective" in p.lower()
+    assert "attribute" in p.lower()  # attribution instruction present
+    assert "untagged" in p.lower()  # absent-tag semantics taught
+
+
 def test_add_temp_source_dedupes_by_url(monkeypatch, tmp_path):
     _isolate_sources(monkeypatch, tmp_path)
     e1 = {"name": "A", "url": "https://x/feed", "category": "iran", "kind": "regional"}

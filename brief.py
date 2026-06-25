@@ -1531,7 +1531,9 @@ Anchor facts on Reuters/wire sources, but LEAD your interpretation with forward-
 anticipatory material — regional analysts, primary statements, podcast framing, and the
 market action provided — over backward-looking wire recap. Use the web search tool to fill
 gaps on the listed topics. Do not echo headlines the market has already priced. Do not pad
-or repeat. If nothing significant happened on a topic, say so in one line."""
+or repeat. If nothing significant happened on a topic, say so in one line.
+
+Some sources carry a perspective tag (the vantage they speak from) and/or a STATE-FUNDED flag in their section header. When a tagged source makes a claim, attribute its framing to that vantage rather than stating it as neutral fact (e.g. "Beijing's read, via SCMP, is..."). Treat agreement across opposing perspectives — or a state-funded outlet corroborating an independent wire — as a stronger signal; treat divergence as a flag worth surfacing. An untagged source carries no vantage claim; weigh it on its merits."""
 
 
 def build_daily_prompt(
