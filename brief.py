@@ -1564,25 +1564,6 @@ by today's news as a potential early signal. Omit only if no market data was pro
 <b>👁 WATCH / FORWARD</b>
 - [2–4 forward-looking things to monitor in the next 24–72h that could move markets]
 
-After the WATCH / FORWARD section and a blank line, output the delimiter token below on its
-own line, exactly as written — it is a literal parsing marker, NOT a section divider, so
-reproduce it verbatim and do not shorten, restyle, or drop it:
-@@@SIGNALS@@@
-Then output a JSON array (and nothing else after it) capturing any position-relevant signals.
-Empty array if none. Schema:
-[
-  {{
-    "ticker": "the primary listing symbol — e.g. SHEL or BP for equities, BTC or ETH for crypto; null only for macro-level signals with no single tradable instrument",
-    "asset_class": "equity | crypto — equity for stocks/ETFs, crypto for major coins; default to equity if unsure",
-    "topic": "short topic label, e.g. hormuz-disruption",
-    "direction": "bullish | bearish | neutral",
-    "thesis_ref": "the held thesis this bears on, or null",
-    "confidence": "low | medium | high",
-    "rationale": "one sentence, no more",
-    "provenance": "which source/feed/search this came from"
-  }}
-]
-
 Keep the entire brief under 600 words."""
 
 

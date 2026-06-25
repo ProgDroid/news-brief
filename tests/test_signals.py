@@ -198,7 +198,6 @@ def test_prompt_has_fixed_spine_and_dynamic_instruction():
     assert "TOP STORIES" in out
     assert "MARKET PULSE" in out
     assert "WATCH" in out
-    assert "@@@SIGNALS@@@" in out
     assert "significan" in out.lower()  # dynamic-middle instruction present
 
 
@@ -300,3 +299,13 @@ def test_extract_signals_failsafe_on_missing_tool_block():
     raw_signals, status = brief.extract_signals("BRIEF", call=no_tool)
     assert raw_signals == []
     assert status == "extract_error"
+
+
+def test_daily_prompt_drops_signals_json_but_keeps_prose_section():
+    prompt = brief.build_daily_prompt(**_daily_kwargs())
+    assert "@@@SIGNALS@@@" not in prompt
+    assert "JSON array" not in prompt
+    # human-readable section stays
+    assert "POSITION SIGNALS" in prompt
+    # word-limit instruction is preserved
+    assert "under 600 words" in prompt
