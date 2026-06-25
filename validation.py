@@ -19,7 +19,14 @@ from common import (
 )
 
 GATE_HISTORY_FILE = DATA_DIR / "paper" / "gate_history.json"
-_DIMENSIONS = ("asset_class", "confidence", "play_type", "thesis_ref")
+_DIMENSIONS = (
+    "asset_class",
+    "confidence",
+    "play_type",
+    "thesis_ref",
+    "source_kind",
+    "source_perspective",
+)
 _ASSET_CLASSES = ("equity", "crypto", "prediction")
 
 
@@ -108,12 +115,18 @@ def evaluate_gate(book: dict) -> dict:
     return out
 
 
+_REPORT_MIN_N = 5  # below this, a report bucket is flagged thin (not yet meaningful)
+
+
 def _fmt(s: dict) -> str:
     edge = f"{100 * s['mean_edge']:+.1f}%" if s["mean_edge"] is not None else "n/a"
-    return (
+    out = (
         f"{s['hit_rate']:.0f}% hit · net {100 * s['mean_net']:+.1f}% "
         f"· edge {edge} (n={s['n']})"
     )
+    if s["n"] < _REPORT_MIN_N:
+        out += " ⚠thin"
+    return out
 
 
 def performance_report(book: dict) -> str:

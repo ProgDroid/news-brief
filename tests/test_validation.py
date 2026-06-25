@@ -142,6 +142,41 @@ def test_prompt_block_includes_qualifying_dimension():
     assert "high" in out or "equity" in out
 
 
+def test_aggregate_includes_source_dimensions():
+    book = {
+        "positions": [
+            dict(
+                _closed("equity", 0.10, edge=0.04),
+                source_kind="regional",
+                source_perspective="ARAB",
+            ),
+            dict(
+                _closed("equity", -0.05, edge=-0.02),
+                source_kind="wire",
+                source_perspective=None,
+            ),
+        ]
+    }
+    agg = validation.aggregate_performance(book)
+    assert agg["dimensions"]["source_kind"]["regional"]["n"] == 1
+    assert agg["dimensions"]["source_kind"]["wire"]["n"] == 1
+    assert agg["dimensions"]["source_perspective"]["ARAB"]["n"] == 1
+
+
+def test_fmt_marks_thin_samples():
+    thin = {
+        "n": 1,
+        "hit_rate": 100.0,
+        "mean_net": 0.1,
+        "median_net": 0.1,
+        "mean_edge": 0.05,
+        "n_edge": 1,
+    }
+    assert "thin" in validation._fmt(thin)
+    fat = dict(thin, n=validation._REPORT_MIN_N)
+    assert "thin" not in validation._fmt(fat)
+
+
 def test_daily_trade_message_empty_when_nothing():
     assert validation.daily_trade_message({"positions": []}, "2026-06-14") == ""
 
