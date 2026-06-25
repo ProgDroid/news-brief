@@ -69,3 +69,14 @@ null on sentiment-sizing. Backlog item #2 is closed NO-GO.
 **Possible future angle (not pursued now):** the defense-stock (ITA) direction and the *inverse* oil
 relationship are the only non-noise leads; if ever revisited, frame as an event-study around discrete
 escalation shocks (not a daily level), which this level-IC design is not built to capture.
+
+## Follow-up robustness (2026-06-25, same cached 2022-2024 data)
+
+Four cheap follow-ups on the warm cache (`scratchpad followups.py`; SE(IC)≈0.052 held-out, ≈0.063 per-year). Net effect: they **harden the null** and explain the one strong number.
+
+1. **Regime / per-year split (the decisive test).** The strong USO −0.22 is **non-stationary — the sign flips by year**: USO conflict_mentions/level h=10 IC = **+0.155 (2022) / −0.180 (2023) / −0.006 (2024)**, full-period IC ≈ −0.03. The held-out −0.22 was simply 2023 falling in the temporal holdout half. So it is a **regime artifact, not a tradeable signal**. GLD flips too (−0.05 / +0.12 / −0.12). *Lesson: a 50/50 temporal split can manufacture a confident out-of-sample IC from a non-stationary relationship; per-period sign-stability is the catch.*
+2. **Normalize + tighten region — rescues nothing.** Conflict-share-of-total-volume barely changes the IC (USO −0.27, GLD +0.06); restricting to the **oil chokepoint region (IR/SA/IZ/YM) → USO collapses to −0.0285 (≈0)**. The broad signal's apparent oil link disappears at the actually-oil-relevant states.
+3. **Broaden instruments (Mideast signal) — no coherent edge.** VIX −0.02/−0.10, Brent BNO −0.11, gas UNG −0.06, gold-miners GDX 0.00. All weak or wrong-signed.
+4. **Different theatre — Russia+Ukraine conflict → commodities — the one real lead.** Consistently correct-signed: gas UNG +0.053 (hit 58.1%), wheat WEAT +0.037 (hit 59.4%), oil USO IC +0.117. Most thesis-coherent result in the study (Ukraine = the 2022 energy/grain supply shock). **CAVEAT: not validated for stationarity** — almost certainly the same 2022-shock confound that flipped the Mideast/oil signal; correct signs ≠ persistent signal. Flagged as a **future event-study** hypothesis (its own spec), NOT a GO and NOT part of item #2.
+
+**Decision unchanged: NO-GO on the registered Middle-East hypothesis** — the follow-ups strengthen it (the lone strong cell is a regime artifact; oil/gold edge vanishes under normalization and region-tightening).
