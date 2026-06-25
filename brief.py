@@ -581,6 +581,24 @@ def _wizard_url_prompt(chat_id: str) -> None:
     )
 
 
+def _wizard_sourcetype_prompt(chat_id: str) -> None:
+    w = _WIZARD[chat_id]
+    w["step"] = "source_type"
+    rows = [
+        [
+            {"text": "📰 RSS feed", "callback_data": "as:stype:feed"},
+            {"text": "📄 Page to scrape", "callback_data": "as:stype:page"},
+        ],
+        _CANCEL_ROW,
+    ]
+    telegram_edit_text(
+        w["msg_id"],
+        f"➕ <b>Add a source</b>\nURL: <code>{html.escape(w['url'])}</code>\n\n"
+        "Is this an RSS/Atom <b>feed</b>, or a <b>page</b> to scrape?",
+        rows,
+    )
+
+
 def _wizard_confirm_prompt(chat_id: str) -> None:
     w = _WIZARD[chat_id]
     w["step"] = "confirm"
@@ -595,7 +613,8 @@ def _wizard_confirm_prompt(chat_id: str) -> None:
         w["msg_id"],
         "➕ <b>Add this source?</b>\n\n"
         f"Name: <b>{html.escape(w['name'])}</b>\n"
-        f"Category: <b>{html.escape(w['category'])}</b> · Kind: <b>{w['kind']}</b>\n"
+        f"Category: <b>{html.escape(w['category'])}</b> · Kind: <b>{w['kind']}</b> · "
+        f"Type: <b>{w.get('source_type', 'feed')}</b>\n"
         f"URL: <code>{html.escape(w['url'])}</code>",
         rows,
     )
@@ -619,17 +638,18 @@ def _wizard_handle_text(chat_id: str, text: str) -> None:
         if "://" in raw:
             w["url"] = raw
             w["name"] = urlsplit(raw).netloc or raw
+            _wizard_sourcetype_prompt(chat_id)
         elif _DOMAIN_RE.match(raw):
             w["url"] = build_google_news_url(raw)
             w["name"] = raw
+            w["source_type"] = "feed"
+            _wizard_confirm_prompt(chat_id)
         else:
             telegram_send(
                 "⚠️ That's neither a domain nor a URL. Send something like "
                 "<code>timesofisrael.com</code> or "
                 "<code>https://site.com/feed.xml</code>."
             )
-            return
-        _wizard_confirm_prompt(chat_id)
 
 
 def _sources_render(message_id: int | None = None) -> None:
@@ -864,6 +884,9 @@ def _handle_callback_query(cb: dict, fb: dict | None = None) -> dict | None:
     elif data.startswith("as:kind:"):
         w["kind"] = data[len("as:kind:") :]
         _wizard_url_prompt(chat_id)
+    elif data.startswith("as:stype:"):
+        w["source_type"] = data[len("as:stype:") :]
+        _wizard_confirm_prompt(chat_id)
     elif data == "as:rename":
         w["step"] = "rename"
         telegram_edit_text(
@@ -875,6 +898,7 @@ def _handle_callback_query(cb: dict, fb: dict | None = None) -> dict | None:
             "url": w["url"],
             "category": w["category"],
             "kind": w["kind"],
+            "source_type": w.get("source_type", "feed"),
         }
         add_temp_source(entry)
         _WIZARD.pop(chat_id, None)

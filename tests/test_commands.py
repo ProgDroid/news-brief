@@ -381,9 +381,35 @@ def test_addsource_wizard_quick_domain(monkeypatch, tmp_path):
     assert len(srcs) == 1
     assert srcs[0]["category"] == "iran" and srcs[0]["kind"] == "regional"
     assert cap["acks"]  # every callback acknowledged
+    assert srcs[0]["source_type"] == "feed"  # bare domain → feed, no extra step
 
 
-def test_addsource_wizard_full_url_keeps_url(monkeypatch, tmp_path):
+def test_addsource_wizard_full_url_asks_feed_or_page(monkeypatch, tmp_path):
+    _isolate_sources(monkeypatch, tmp_path)
+    brief._WIZARD.clear()
+    _wire_telegram(monkeypatch)
+    chat = str(brief.TELEGRAM_CHAT_ID)
+    brief._handle_telegram_update(_update("/addsource"), _fb())
+    brief._handle_callback_query(_cb("as:cat:us"))
+    brief._handle_callback_query(_cb("as:kind:regional"))
+    brief._handle_telegram_update(
+        _update("https://www.bcaresearch.com/dashboard/x"), _fb()
+    )
+    w = brief._WIZARD[chat]
+    assert w["url"] == "https://www.bcaresearch.com/dashboard/x"
+    assert w["name"] == "www.bcaresearch.com"
+    assert w["step"] == "source_type"  # full URL → asks feed-or-page
+
+    brief._handle_callback_query(_cb("as:stype:page"))
+    assert brief._WIZARD[chat]["source_type"] == "page"
+    assert brief._WIZARD[chat]["step"] == "confirm"
+
+    brief._handle_callback_query(_cb("as:confirm"))
+    srcs = brief.load_temp_sources()
+    assert len(srcs) == 1 and srcs[0]["source_type"] == "page"
+
+
+def test_addsource_wizard_full_url_feed_choice(monkeypatch, tmp_path):
     _isolate_sources(monkeypatch, tmp_path)
     brief._WIZARD.clear()
     _wire_telegram(monkeypatch)
@@ -392,8 +418,13 @@ def test_addsource_wizard_full_url_keeps_url(monkeypatch, tmp_path):
     brief._handle_callback_query(_cb("as:cat:geo"))
     brief._handle_callback_query(_cb("as:kind:wire"))
     brief._handle_telegram_update(_update("https://site.com/feed.xml"), _fb())
-    w = brief._WIZARD[chat]
-    assert w["url"] == "https://site.com/feed.xml" and w["name"] == "site.com"
+    brief._handle_callback_query(_cb("as:stype:feed"))
+    brief._handle_callback_query(_cb("as:confirm"))
+    srcs = brief.load_temp_sources()
+    assert (
+        srcs[0]["source_type"] == "feed"
+        and srcs[0]["url"] == "https://site.com/feed.xml"
+    )
 
 
 def test_addsource_wizard_rejects_garbage_url(monkeypatch, tmp_path):
