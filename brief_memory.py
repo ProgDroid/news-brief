@@ -17,6 +17,11 @@ BRIEF_MEMORY_FILE = DATA_DIR / "brief_memory.json"
 MAX_CLAIMS = 25
 RETIRE_AFTER_DAYS = 7
 RECONCILE_MODEL = "claude-haiku-4-5-20251001"
+# A full MAX_CLAIMS ledger serialises to ~2400 output tokens, so the old 2048
+# budget truncated the JSON array before its closing "]" — the parser then
+# misreported the cut-off as "no JSON array". Give generous headroom and bound
+# the model's output (see _RECONCILE_TEMPLATE) so it stays well inside this.
+RECONCILE_MAX_TOKENS = 4096
 
 
 def is_enabled() -> bool:
@@ -123,6 +128,8 @@ brief. Rules:
   ECHO its existing "id". You may reword its "claim" if today refined it.
 - For a genuinely NEW durable fact, include it with NO "id".
 - Omit facts that are no longer relevant.
+- Return at most {max_claims} items — keep only the most important durable facts,
+  and keep each "claim" to one terse sentence (no more than ~30 words).
 Each array item: {{"id": "<existing id, omit if new>", "claim": "<short fact>", "topic": "<short label>"}}.
 Output the JSON array and nothing else.
 
@@ -151,7 +158,9 @@ def render_established_block(ledger: dict) -> str:
 
 def build_reconcile_prompt(ledger: dict, brief_text: str) -> str:
     current = json.dumps(ledger.get("claims", []), indent=2)
-    return _RECONCILE_TEMPLATE.format(current=current, brief=brief_text)
+    return _RECONCILE_TEMPLATE.format(
+        current=current, brief=brief_text, max_claims=MAX_CLAIMS
+    )
 
 
 def parse_reconcile_response(text: str) -> list[dict]:
@@ -174,14 +183,22 @@ def _messages_call(system: str, user: str) -> str:
         headers=ANTHROPIC_HEADERS,
         json={
             "model": RECONCILE_MODEL,
-            "max_tokens": 2048,
+            "max_tokens": RECONCILE_MAX_TOKENS,
             "system": system,
             "messages": [{"role": "user", "content": user}],
         },
         timeout=30,
     )
     resp.raise_for_status()
-    blocks = resp.json().get("content", [])
+    body = resp.json()
+    if body.get("stop_reason") == "max_tokens":
+        # Don't return a half-written array for the parser to choke on — surface
+        # the real cause so the fail-safe logs it as truncation, not a parse bug.
+        raise ValueError(
+            "reconcile response truncated (stop_reason=max_tokens); "
+            "ledger/output exceeded the max_tokens budget"
+        )
+    blocks = body.get("content", [])
     return "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
 
 

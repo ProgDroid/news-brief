@@ -253,6 +253,53 @@ def test_reconcile_bad_json_returns_prior():
     assert out == prior
 
 
+class _FakeResp:
+    def __init__(self, body):
+        self._body = body
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._body
+
+
+def test_messages_call_raises_on_truncated_stop_reason(monkeypatch):
+    # A max_tokens cutoff must surface as a clear truncation error, not be
+    # returned as text that the parser later misreports as "no JSON array".
+    body = {
+        "stop_reason": "max_tokens",
+        "content": [{"type": "text", "text": '[{"id":"c-0001","claim":"trunc'}],
+    }
+    monkeypatch.setattr(bm.requests, "post", lambda *a, **k: _FakeResp(body))
+    import pytest
+
+    with pytest.raises(ValueError, match="(?i)truncat|max_tokens"):
+        bm._messages_call("sys", "user")
+
+
+def test_messages_call_budget_fits_full_ledger(monkeypatch):
+    # 2048 was too small for a full 25-claim ledger (~2400 tokens) and caused
+    # the truncation. The budget must comfortably exceed that.
+    captured = {}
+
+    def fake_post(*a, **k):
+        captured["json"] = k["json"]
+        return _FakeResp(
+            {"stop_reason": "end_turn", "content": [{"type": "text", "text": "[]"}]}
+        )
+
+    monkeypatch.setattr(bm.requests, "post", fake_post)
+    out = bm._messages_call("sys", "user")
+    assert out == "[]"
+    assert captured["json"]["max_tokens"] >= 4096
+
+
+def test_reconcile_prompt_bounds_output_size():
+    p = bm.build_reconcile_prompt({"version": 1, "claims": []}, "brief")
+    assert f"at most {bm.MAX_CLAIMS}" in p
+
+
 def test_part_a_feeds_back_beyond_2000_chars():
     import brief
 
