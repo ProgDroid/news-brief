@@ -86,6 +86,10 @@ def merge_ledger(
             base["topic"] = mc.get("topic", base.get("topic", ""))
             base["last_reaffirmed"] = today
             base["restate_count"] = base.get("restate_count", 0) + 1
+            base["source_count"] = max(
+                base.get("source_count", 0) or 0,
+                mc.get("source_count", 0) or 0,
+            )
             result.append(base)
             returned.add(cid)
         elif mc.get("claim"):
@@ -97,6 +101,7 @@ def merge_ledger(
                     "first_seen": today,
                     "last_reaffirmed": today,
                     "restate_count": 1,
+                    "source_count": mc.get("source_count", 0) or 0,
                 }
             )
             next_num += 1
@@ -163,6 +168,18 @@ def build_reconcile_prompt(ledger: dict, brief_text: str) -> str:
     )
 
 
+def _coerce_source_count(v) -> int | None:
+    """Best-effort non-negative int, or None to omit. bool is rejected (it is an
+    int subclass but never a real count)."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int):
+        return max(0, v)
+    if isinstance(v, str) and v.strip().lstrip("+").isdigit():
+        return max(0, int(v.strip()))
+    return None
+
+
 def parse_reconcile_response(text: str) -> list[dict]:
     m = re.search(r"\[.*\]", text, re.S)
     if not m:
@@ -173,7 +190,11 @@ def parse_reconcile_response(text: str) -> list[dict]:
     out = []
     for item in data:
         if isinstance(item, dict) and item.get("claim"):
-            out.append({k: item[k] for k in ("id", "claim", "topic") if k in item})
+            entry = {k: item[k] for k in ("id", "claim", "topic") if k in item}
+            sc = _coerce_source_count(item.get("source_count"))
+            if sc is not None:
+                entry["source_count"] = sc
+            out.append(entry)
     return out
 
 

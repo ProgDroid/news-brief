@@ -347,3 +347,91 @@ def test_no_established_block_when_empty():
         "feeds", "web", "chroma", "y", "", {}, "", "", "", "", established_block=""
     )
     assert "ESTABLISHED — THE READER ALREADY KNOWS" not in prompt
+
+
+def test_merge_keeps_peak_source_count_on_reaffirm():
+    prior = {
+        "version": 1,
+        "claims": [
+            {
+                "id": "c-0001",
+                "claim": "BOJ at 1.0%",
+                "topic": "japan",
+                "first_seen": "2026-06-18",
+                "last_reaffirmed": "2026-06-23",
+                "restate_count": 5,
+                "source_count": 6,
+            }
+        ],
+    }
+    # observed today is LOWER (story aged out) -> peak must hold at 6
+    out = bm.merge_ledger(
+        prior,
+        [{"id": "c-0001", "claim": "BOJ at 1.0%", "topic": "japan", "source_count": 2}],
+        "2026-06-24",
+    )
+    assert out["claims"][0]["source_count"] == 6
+    # observed today is HIGHER -> peak rises
+    out2 = bm.merge_ledger(
+        prior,
+        [{"id": "c-0001", "claim": "BOJ at 1.0%", "topic": "japan", "source_count": 9}],
+        "2026-06-24",
+    )
+    assert out2["claims"][0]["source_count"] == 9
+
+
+def test_merge_new_claim_takes_observed_source_count():
+    prior = {"version": 1, "claims": []}
+    out = bm.merge_ledger(
+        prior, [{"claim": "new fact", "topic": "x", "source_count": 4}], "2026-06-24"
+    )
+    assert out["claims"][0]["source_count"] == 4
+
+
+def test_merge_missing_source_count_defaults_zero():
+    prior = {"version": 1, "claims": []}
+    out = bm.merge_ledger(prior, [{"claim": "no count", "topic": "x"}], "2026-06-24")
+    assert out["claims"][0]["source_count"] == 0
+
+
+def test_merge_unreturned_claim_preserves_source_count():
+    prior = {
+        "version": 1,
+        "claims": [
+            {
+                "id": "c-0001",
+                "claim": "kept",
+                "topic": "a",
+                "first_seen": "2026-06-22",
+                "last_reaffirmed": "2026-06-23",
+                "restate_count": 2,
+                "source_count": 5,
+            }
+        ],
+    }
+    out = bm.merge_ledger(prior, [], "2026-06-24")
+    assert out["claims"][0]["source_count"] == 5
+
+
+def test_parse_extracts_source_count():
+    text = '[{"claim":"x","topic":"a","source_count":3}]'
+    assert bm.parse_reconcile_response(text) == [
+        {"claim": "x", "topic": "a", "source_count": 3}
+    ]
+
+
+def test_parse_tolerates_bad_source_count():
+    # missing, non-numeric string, bool, and negative are all dropped/clamped
+    text = (
+        '[{"claim":"a"},'
+        '{"claim":"b","source_count":"two"},'
+        '{"claim":"c","source_count":true},'
+        '{"claim":"d","source_count":"5"},'
+        '{"claim":"e","source_count":-2}]'
+    )
+    out = bm.parse_reconcile_response(text)
+    assert out[0] == {"claim": "a"}  # absent -> omitted
+    assert out[1] == {"claim": "b"}  # "two" -> omitted
+    assert out[2] == {"claim": "c"}  # bool -> omitted
+    assert out[3] == {"claim": "d", "source_count": 5}  # numeric string -> int
+    assert out[4] == {"claim": "e", "source_count": 0}  # negative -> clamped
