@@ -317,3 +317,43 @@ def test_post_messages_raises_after_exhausting_retries(monkeypatch):
     except brief.requests.exceptions.Timeout:
         raised = True
     assert raised  # propagates so extract_signals fails safe to extract_error
+
+
+# ── source-tag resolver ───────────────────────────────────────────────────────
+def test_source_tag_index_includes_hardcoded_feeds():
+    index = brief._source_tag_index()
+    # every RSS feed name resolves to its own kind
+    for f in brief.RSS_FEEDS:
+        assert index[f["name"]]["kind"] == f.get("kind", "wire")
+
+
+def test_resolve_known_source_returns_kind_and_perspective():
+    index = {"Al Jazeera": {"kind": "regional", "perspective": "ARAB"}}
+    tags = brief.resolve_source_tags("Al Jazeera", index)
+    assert tags == {"kind": "regional", "perspective": "ARAB"}
+
+
+def test_resolve_unknown_source_is_unknown():
+    assert brief.resolve_source_tags("Nonesuch", {}) == {
+        "kind": "unknown",
+        "perspective": None,
+    }
+
+
+def test_resolve_none_source_is_unknown():
+    assert brief.resolve_source_tags(None, {"X": {"kind": "wire"}}) == {
+        "kind": "unknown",
+        "perspective": None,
+    }
+
+
+def test_hardcoded_feed_wins_over_temp_on_name_collision(monkeypatch):
+    monkeypatch.setattr(
+        brief,
+        "load_temp_sources",
+        lambda: [{"name": brief.RSS_FEEDS[0]["name"], "kind": "regional"}],
+    )
+    index = brief._source_tag_index()
+    assert index[brief.RSS_FEEDS[0]["name"]]["kind"] == brief.RSS_FEEDS[0].get(
+        "kind", "wire"
+    )

@@ -349,6 +349,48 @@ def load_temp_sources() -> list[dict]:
     return out
 
 
+def all_sources() -> list[dict]:
+    """The full source universe: always-on RSS_FEEDS plus volume temp sources."""
+    return RSS_FEEDS + load_temp_sources()
+
+
+def _source_tag_index() -> dict[str, dict]:
+    """Index every source by name -> {"kind", "perspective"}.
+
+    Temp sources are added first; the hardcoded RSS_FEEDS overwrite on a name
+    collision so the baked-in registry is authoritative. The single place
+    kind/perspective are looked up, so callers never invent tag values.
+    """
+    index: dict[str, dict] = {}
+    for src in load_temp_sources():
+        index[src["name"]] = {
+            "kind": src.get("kind", "regional"),
+            "perspective": src.get("perspective"),
+        }
+    for f in RSS_FEEDS:
+        index[f["name"]] = {
+            "kind": f.get("kind", "wire"),
+            "perspective": f.get("perspective"),
+        }
+    return index
+
+
+def resolve_source_tags(source_id: str | None, index: dict) -> dict:
+    """Resolve a source name to {"kind", "perspective"}; unknown -> ("unknown", None).
+
+    Pure, never raises. `index` comes from _source_tag_index(). A None/empty/
+    unrecognised source_id yields the unknown bucket so attribution always has a
+    well-defined value.
+    """
+    if source_id and source_id in index:
+        tags = index[source_id]
+        return {
+            "kind": tags.get("kind", "unknown"),
+            "perspective": tags.get("perspective"),
+        }
+    return {"kind": "unknown", "perspective": None}
+
+
 def add_temp_source(entry: dict) -> None:
     """Append a source (deduped by URL) under a lock so a concurrent edit can't
     lose it. `entry` must already be a valid {name,url,category,kind} dict."""
