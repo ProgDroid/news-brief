@@ -425,9 +425,7 @@ def test_collect_trading_failure_does_not_duplicate_brief(monkeypatch):
     calls = {"deliver": 0, "cleared": 0}
     monkeypatch.setattr(brief, "load_state", lambda: {"batch_id": "b1"})
     monkeypatch.setattr(brief, "poll_batch", lambda bid: "RAW")
-    monkeypatch.setattr(
-        brief, "split_brief_and_signals", lambda raw: ("BRIEF", [], "ok")
-    )
+    monkeypatch.setattr(brief, "extract_signals", lambda raw, **kw: ([], "ok"))
     monkeypatch.setattr(brief, "normalize_signals", lambda raw: ([], []))
     monkeypatch.setattr(
         brief,
