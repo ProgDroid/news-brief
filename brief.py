@@ -1208,6 +1208,25 @@ def run_dig(query: str, since: str | None = None) -> str:
 
 
 # ── Feed fetching ─────────────────────────────────────────────────────────────
+def _source_header(
+    name: str,
+    kind: str,
+    category: str,
+    perspective: str | None = None,
+    state_funded: bool = False,
+) -> str:
+    """Build the LLM-facing section header for a source. The bracket carries the
+    source's kind plus, when present, its perspective and a STATE-FUNDED flag.
+    Untagged sources render exactly as before (kind only), so existing briefs are
+    unchanged. `·` separates bracket fields."""
+    parts = [kind.upper()]
+    if perspective:
+        parts.append(perspective.upper())
+    if state_funded:
+        parts.append("STATE-FUNDED")
+    return f"\n### {name} [{' · '.join(parts)}] ({category.upper()})"
+
+
 def fetch_rss(feed: dict, max_items: int = 5) -> str:
     try:
         # Fetch with requests rather than letting feedparser fetch: feedparser
@@ -1225,8 +1244,15 @@ def fetch_rss(feed: dict, max_items: int = 5) -> str:
             bozo_exc = getattr(parsed, "bozo_exception", None)
             log.warning(f"No entries: {feed['name']} ({bozo_exc or 'empty feed'})")
             return ""
-        kind = feed.get("kind", "wire").upper()
-        lines = [f"\n### {feed['name']} [{kind}] ({feed['category'].upper()})"]
+        lines = [
+            _source_header(
+                feed["name"],
+                feed.get("kind", "wire"),
+                feed["category"],
+                feed.get("perspective"),
+                feed.get("state_funded", False),
+            )
+        ]
         for entry in parsed.entries[:max_items]:
             title = entry.get("title", "").strip()
             summary = re.sub(
@@ -1260,10 +1286,14 @@ def fetch_web_source(source: dict) -> str:
             re.I,
         )
         content = meta.group(1).strip() if meta else resp.text[:800]
-        kind = source.get("kind", "regional").upper()
-        return (
-            f"\n### {source['name']} [{kind}] ({source['category'].upper()})\n{content}"
+        header = _source_header(
+            source["name"],
+            source.get("kind", "regional"),
+            source["category"],
+            source.get("perspective"),
+            source.get("state_funded", False),
         )
+        return f"{header}\n{content}"
     except Exception as e:
         log.warning(f"Web fetch failed {source['name']}: {e}")
         return ""

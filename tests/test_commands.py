@@ -327,6 +327,31 @@ def test_load_temp_sources_state_funded_and_perspective(monkeypatch, tmp_path):
     assert out[2]["state_funded"] is False and "perspective" not in out[2]
 
 
+def test_source_header_untagged_is_byte_identical():
+    # Regression guard: untagged source must match the pre-feature format exactly.
+    assert brief._source_header("Reuters World", "wire", "geo") == (
+        "\n### Reuters World [WIRE] (GEO)"
+    )
+
+
+def test_source_header_perspective_only():
+    assert brief._source_header("SCMP", "regional", "china", perspective="CHINESE") == (
+        "\n### SCMP [REGIONAL · CHINESE] (CHINA)"
+    )
+
+
+def test_source_header_state_funded_only():
+    assert brief._source_header("NHK", "regional", "japan", state_funded=True) == (
+        "\n### NHK [REGIONAL · STATE-FUNDED] (JAPAN)"
+    )
+
+
+def test_source_header_both():
+    assert brief._source_header(
+        "Al Jazeera", "regional", "geo", perspective="ARAB", state_funded=True
+    ) == ("\n### Al Jazeera [REGIONAL · ARAB · STATE-FUNDED] (GEO)")
+
+
 def test_add_temp_source_dedupes_by_url(monkeypatch, tmp_path):
     _isolate_sources(monkeypatch, tmp_path)
     e1 = {"name": "A", "url": "https://x/feed", "category": "iran", "kind": "regional"}
