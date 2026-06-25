@@ -73,5 +73,17 @@ deliberately rather than reinventing it.
 - Sample-size gating everywhere; temporal/out-of-sample validation, not in-sample fit.
 - Fail-safe: any feedback/tuning component degrades to "do nothing" on thin data or error.
 
+## Deferred / parked ideas
+- **Counterfactual scoring of declined signals** (parked 2026-06-25). Stage A ships
+  *lightweight leakage counts* only — tally *why* each signal was declined (no resolvable
+  ticker / confidence-filtered / no PolyGram match), which `mode_paper` already knows. Actually
+  *scoring* what a declined signal would have returned (price the topic over the horizon with no
+  position; macro/no-ticker signals have nothing to price) is a separate mini-engine, closer in
+  spirit to Stage D. Revisit when leakage counts show a dimension worth scoring.
+
 ## Progress log
 - 2026-06-25 — Roadmap written. Stage A brainstorming begins.
+- 2026-06-25 — Stage A decisions: source attribution at `kind`+`perspective` granularity
+  (Q2=B); resolve via upstream pick-from-list — the post-delivery extractor names the registry
+  source it cited, code derives tags (Q3=Opt 2); declined-signal handling = lightweight leakage
+  counts now, full counterfactual scoring (C) parked above (Q4=B).
