@@ -413,7 +413,6 @@ def test_addsource_wizard_full_url_feed_choice(monkeypatch, tmp_path):
     _isolate_sources(monkeypatch, tmp_path)
     brief._WIZARD.clear()
     _wire_telegram(monkeypatch)
-    chat = str(brief.TELEGRAM_CHAT_ID)
     brief._handle_telegram_update(_update("/addsource"), _fb())
     brief._handle_callback_query(_cb("as:cat:geo"))
     brief._handle_callback_query(_cb("as:kind:wire"))
