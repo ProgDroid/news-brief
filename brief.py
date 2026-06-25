@@ -2291,6 +2291,12 @@ def mode_submit():
         or "(no web content)"
     )
 
+    if brief_memory_enabled():
+        try:
+            save_source_index(build_source_index(feed_content, web_content), today)
+        except Exception as e:
+            log.warning(f"Source index persist skipped (brief unaffected): {e}")
+
     fb = load_feedback()
     chroma_context = build_chroma_context(fb)
     yesterday_brief = load_yesterday_brief()
@@ -2391,7 +2397,14 @@ def mode_collect():
         save_signals(signals, today, status=status, dropped=dropped)
         if brief_memory_enabled():
             try:
-                save_ledger(reconcile_ledger(load_ledger(), brief, today))
+                save_ledger(
+                    reconcile_ledger(
+                        load_ledger(),
+                        brief,
+                        today,
+                        source_index=load_source_index(today),
+                    )
+                )
             except Exception as e:
                 log.error(f"Brief-memory reconcile skipped (brief unaffected): {e}")
         clear_batch_state()
