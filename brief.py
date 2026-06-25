@@ -1919,6 +1919,21 @@ def normalize_signals(raw_signals: list) -> tuple[list, int]:
     return clean, dropped
 
 
+def annotate_signal_sources(signals: list[dict]) -> list[dict]:
+    """Stamp resolved source_kind / source_perspective onto each signal.
+
+    Runs at save-time (brief.py owns the registry; trading.py cannot import it),
+    so the paper tracker copies pre-resolved tags. Mirrors annotate_signals
+    (enrichment). Builds the index once. Mutates and returns `signals`.
+    """
+    index = _source_tag_index()
+    for s in signals:
+        tags = resolve_source_tags(s.get("source_id"), index)
+        s["source_kind"] = tags["kind"]
+        s["source_perspective"] = tags["perspective"]
+    return signals
+
+
 # ── Signals extraction (separate post-gen call) ───────────────────────────────
 # The brief no longer emits a trailing @@@SIGNALS@@@ JSON block; a dedicated
 # Sonnet call reads the finished brief and emits signals via a forced tool, so
@@ -2465,6 +2480,7 @@ def mode_collect():
                 signals = annotate_signals(signals, bundles_from_dict(enr_raw))
         except Exception as e:
             log.error(f"Signal annotation skipped (signals unaffected): {e}")
+        signals = annotate_signal_sources(signals)
         save_signals(signals, today, status=status, dropped=dropped)
         if brief_memory_enabled():
             try:
@@ -2569,6 +2585,7 @@ def mode_run():
             signals, dropped = normalize_signals(raw_signals)
             if dropped or status != "ok":
                 log.warning(f"Signals: status={status}, dropped={dropped}")
+            signals = annotate_signal_sources(signals)
             save_signals(signals, today, status=status, dropped=dropped)
             mode_paper()
             clear_batch_state()

@@ -377,3 +377,22 @@ def test_hardcoded_feed_wins_over_temp_on_name_collision(monkeypatch):
     assert index[brief.RSS_FEEDS[0]["name"]]["kind"] == brief.RSS_FEEDS[0].get(
         "kind", "wire"
     )
+
+
+def test_annotate_signal_sources_sets_kind_and_perspective(monkeypatch):
+    monkeypatch.setattr(
+        brief,
+        "_source_tag_index",
+        lambda: {"Al Jazeera": {"kind": "regional", "perspective": "ARAB"}},
+    )
+    sigs = [
+        {"topic": "t", "source_id": "Al Jazeera"},
+        {"topic": "u", "source_id": "Nonesuch"},
+        {"topic": "v"},  # no source_id
+    ]
+    out = brief.annotate_signal_sources(sigs)
+    assert out[0]["source_kind"] == "regional"
+    assert out[0]["source_perspective"] == "ARAB"
+    assert out[1]["source_kind"] == "unknown"
+    assert out[2]["source_kind"] == "unknown"
+    assert out[2]["source_perspective"] is None
