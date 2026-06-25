@@ -297,6 +297,36 @@ def test_load_temp_sources_accepts_and_normalizes_source_type(monkeypatch, tmp_p
     assert out[1]["source_type"] == "feed"  # invalid coerced to default
 
 
+def test_load_temp_sources_state_funded_and_perspective(monkeypatch, tmp_path):
+    _isolate_sources(monkeypatch, tmp_path)
+    (tmp_path / "sources.json").write_text(
+        json.dumps(
+            [
+                {
+                    "name": "Tagged",
+                    "url": "https://a/feed",
+                    "category": "geo",
+                    "state_funded": True,
+                    "perspective": "ARAB",
+                },
+                {
+                    "name": "BadPersp",
+                    "url": "https://b/feed",
+                    "category": "geo",
+                    "perspective": "MARTIAN",  # not in VALID_PERSPECTIVES → dropped
+                },
+                {"name": "Plain", "url": "https://c/feed", "category": "geo"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    out = brief.load_temp_sources()
+    assert out[0]["state_funded"] is True and out[0]["perspective"] == "ARAB"
+    assert out[1]["state_funded"] is False  # absent → default
+    assert "perspective" not in out[1]  # invalid value dropped, not coerced
+    assert out[2]["state_funded"] is False and "perspective" not in out[2]
+
+
 def test_add_temp_source_dedupes_by_url(monkeypatch, tmp_path):
     _isolate_sources(monkeypatch, tmp_path)
     e1 = {"name": "A", "url": "https://x/feed", "category": "iran", "kind": "regional"}

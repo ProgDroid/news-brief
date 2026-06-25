@@ -261,6 +261,24 @@ WEB_SOURCES: list[dict] = []
 TEMP_SOURCES_FILE = DATA_DIR / "sources.json"
 VALID_KINDS = ("wire", "analyst", "regional", "primary")
 VALID_SOURCE_TYPES = ("feed", "page")
+# National/bloc vantage a source speaks from. OPTIONAL and sparse: set only
+# where it changes the read (regional/primary outlets), left off neutral wires
+# and analysts. An ABSENT perspective means "no vantage claim made" — the model
+# falls back on its own priors — NOT "this source is neutral". Do not add a
+# NEUTRAL value: that would be a positive editorial claim, as contestable as
+# picking a side.
+VALID_PERSPECTIVES = (
+    "WESTERN",
+    "CHINESE",
+    "RUSSIAN",
+    "IRANIAN",
+    "ISRAELI",
+    "ARAB",
+    "UKRAINIAN",
+    "JAPANESE",
+    "KOREAN",
+    "INDIAN",
+)
 
 
 def _short_id(text: str) -> str:
@@ -308,15 +326,18 @@ def load_temp_sources() -> list[dict]:
         source_type = entry.get("source_type", "feed")
         if source_type not in VALID_SOURCE_TYPES:
             source_type = "feed"
-        out.append(
-            {
-                "name": str(name),
-                "url": str(url),
-                "category": str(category).lower(),
-                "kind": kind,
-                "source_type": source_type,
-            }
-        )
+        loaded = {
+            "name": str(name),
+            "url": str(url),
+            "category": str(category).lower(),
+            "kind": kind,
+            "source_type": source_type,
+            "state_funded": bool(entry.get("state_funded", False)),
+        }
+        perspective = entry.get("perspective")
+        if perspective in VALID_PERSPECTIVES:
+            loaded["perspective"] = perspective
+        out.append(loaded)
     return out
 
 
