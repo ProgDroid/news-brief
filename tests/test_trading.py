@@ -282,3 +282,31 @@ def test_build_market_pulse_filters_stale_anomalies(monkeypatch):
     block = trading.build_market_pulse([])
     assert "FRESHX" in block  # recent alert shown
     assert "STALEX" not in block  # 30-day-old alert filtered out
+
+
+def test_paper_position_carries_source_tags(monkeypatch, tmp_path):
+    from datetime import datetime, timezone
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    signals_dir = tmp_path / "signals"
+    signals_dir.mkdir()
+    monkeypatch.setattr(trading, "SIGNALS_DIR", signals_dir)
+    monkeypatch.setattr(trading, "BOOK_FILE", tmp_path / "book.json")
+    monkeypatch.setattr(trading, "LEGACY_PAPER_BOOK_FILE", tmp_path / "paper-book.json")
+    monkeypatch.setattr(trading, "refresh_instruments_cache", lambda *a, **k: {})
+    monkeypatch.setattr(trading, "resolve_symbol", lambda *a, **k: "shel.us")
+    monkeypatch.setattr(trading, "fetch_price", lambda ac, sym: 60.0)
+    # a snapshot signal that has ALREADY been annotated upstream with source tags
+    (signals_dir / f"signals-{today}.json").write_text(
+        '{"signals": [{"ticker": "SHEL", "asset_class": "equity", '
+        '"direction": "bullish", "confidence": "high", "topic": "hormuz", '
+        '"thesis_ref": null, "rationale": "x", "provenance": "Al Jazeera", '
+        '"source_id": "Al Jazeera", "source_kind": "regional", '
+        '"source_perspective": "ARAB"}]}',
+        encoding="utf-8",
+    )
+    trading.mode_paper()
+    pos = trading.load_book()["positions"][-1]
+    assert pos["source_kind"] == "regional"
+    assert pos["source_perspective"] == "ARAB"
+    assert pos["source_id"] == "Al Jazeera"
