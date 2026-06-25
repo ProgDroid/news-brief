@@ -26,4 +26,4 @@ def test_build_daily_prompt_omits_block_when_empty():
     prompt = brief.build_daily_prompt(**_kwargs(), enrichment_block="")
     assert "BIGDATA.COM ENRICHMENT" not in prompt
     # spine intact
-    assert "@@@SIGNALS@@@" in prompt
+    assert "Keep the entire brief under 600 words" in prompt

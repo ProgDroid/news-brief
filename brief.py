@@ -2226,7 +2226,13 @@ def mode_collect():
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     raw = poll_batch(batch_id)
     if raw:
-        brief, raw_signals, status = split_brief_and_signals(raw)
+        brief = raw.strip()
+        deliver(
+            brief,
+            header=f"🌐 <b>Morning Brief — {datetime.now(timezone.utc).strftime('%d %b %Y')}</b>",
+            archive_path=BRIEFS_DIR / f"brief-{today}.md",
+        )
+        raw_signals, status = extract_signals(brief)
         signals, dropped = normalize_signals(raw_signals)
         if dropped or status != "ok":
             log.warning(f"Signals: status={status}, dropped={dropped}")
@@ -2237,11 +2243,6 @@ def mode_collect():
                 signals = annotate_signals(signals, bundles_from_dict(enr_raw))
         except Exception as e:
             log.error(f"Signal annotation skipped (signals unaffected): {e}")
-        deliver(
-            brief,
-            header=f"🌐 <b>Morning Brief — {datetime.now(timezone.utc).strftime('%d %b %Y')}</b>",
-            archive_path=BRIEFS_DIR / f"brief-{today}.md",
-        )
         save_signals(signals, today, status=status, dropped=dropped)
         if brief_memory_enabled():
             try:
@@ -2329,15 +2330,16 @@ def mode_run():
         raw = poll_batch(batch_id, max_wait_secs=3600)
         if raw:
             today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            brief, raw_signals, status = split_brief_and_signals(raw)
-            signals, dropped = normalize_signals(raw_signals)
-            if dropped or status != "ok":
-                log.warning(f"Signals: status={status}, dropped={dropped}")
+            brief = raw.strip()
             deliver(
                 brief,
                 header=f"🌐 <b>Morning Brief — {datetime.now(timezone.utc).strftime('%d %b %Y')}</b>",
                 archive_path=BRIEFS_DIR / f"brief-{today}.md",
             )
+            raw_signals, status = extract_signals(brief)
+            signals, dropped = normalize_signals(raw_signals)
+            if dropped or status != "ok":
+                log.warning(f"Signals: status={status}, dropped={dropped}")
             save_signals(signals, today, status=status, dropped=dropped)
             mode_paper()
             clear_batch_state()
