@@ -220,3 +220,47 @@ def test_system_prompt_is_forward_tilted():
     sp = brief.SYSTEM_PROMPT.lower()
     assert "reuters" in sp  # still anchors facts
     assert "forward" in sp or "anticipat" in sp  # explicit forward tilt
+
+
+# ── Signals extraction (separate post-gen call) ───────────────────────────────
+def test_build_signals_request_forces_emit_signals_tool():
+    req = brief.build_signals_request("PROSE BRIEF TEXT")
+    assert req["model"] == "claude-sonnet-4-6"
+    assert req["tool_choice"] == {"type": "tool", "name": "emit_signals"}
+    assert req["tools"][0]["name"] == "emit_signals"
+    assert "PROSE BRIEF TEXT" in req["messages"][0]["content"]
+    item = req["tools"][0]["input_schema"]["properties"]["signals"]["items"]
+    assert item["properties"]["direction"]["enum"] == ["bullish", "bearish", "neutral"]
+    assert item["properties"]["confidence"]["enum"] == ["low", "medium", "high"]
+    assert item["properties"]["asset_class"]["enum"] == ["equity", "crypto"]
+    assert set(item["required"]) == {
+        "asset_class",
+        "topic",
+        "direction",
+        "confidence",
+        "rationale",
+    }
+
+
+def test_parse_signals_response_extracts_signal_list():
+    resp = {
+        "content": [
+            {
+                "type": "tool_use",
+                "name": "emit_signals",
+                "input": {"signals": [{"topic": "x", "direction": "bullish"}]},
+            }
+        ]
+    }
+    assert brief.parse_signals_response(resp) == [
+        {"topic": "x", "direction": "bullish"}
+    ]
+
+
+def test_parse_signals_response_raises_when_no_tool_block():
+    resp = {"content": [{"type": "text", "text": "no tool call here"}]}
+    try:
+        brief.parse_signals_response(resp)
+        assert False, "expected ValueError"
+    except ValueError:
+        pass

@@ -1767,6 +1767,129 @@ def normalize_signals(raw_signals: list) -> tuple[list, int]:
     return clean, dropped
 
 
+# ── Signals extraction (separate post-gen call) ───────────────────────────────
+# The brief no longer emits a trailing @@@SIGNALS@@@ JSON block; a dedicated
+# Sonnet call reads the finished brief and emits signals via a forced tool, so
+# the JSON is schema-guaranteed (no delimiter to mangle, no shared token budget
+# to truncate). Mirrors brief_memory.reconcile_ledger.
+SIGNALS_MODEL = "claude-sonnet-4-6"
+
+_EMIT_SIGNALS_TOOL = {
+    "name": "emit_signals",
+    "description": (
+        "Record every position-relevant signal found in the brief. Return an "
+        "empty list if the brief contains none."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "signals": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "ticker": {
+                            "type": "string",
+                            "description": (
+                                "primary listing symbol — e.g. SHEL, BP, BTC, "
+                                "ETH. Omit for macro-level signals with no single "
+                                "tradable instrument."
+                            ),
+                        },
+                        "asset_class": {
+                            "type": "string",
+                            "enum": ["equity", "crypto"],
+                            "description": "equity for stocks/ETFs, crypto for major coins",
+                        },
+                        "topic": {
+                            "type": "string",
+                            "description": "short topic label, e.g. hormuz-disruption",
+                        },
+                        "direction": {
+                            "type": "string",
+                            "enum": ["bullish", "bearish", "neutral"],
+                        },
+                        "thesis_ref": {
+                            "type": "string",
+                            "description": "the held thesis this bears on. Omit if none.",
+                        },
+                        "confidence": {
+                            "type": "string",
+                            "enum": ["low", "medium", "high"],
+                        },
+                        "rationale": {
+                            "type": "string",
+                            "description": "one sentence, no more",
+                        },
+                        "provenance": {
+                            "type": "string",
+                            "description": (
+                                "which source the brief cites for this. Omit if "
+                                "the brief does not name one."
+                            ),
+                        },
+                    },
+                    "required": [
+                        "asset_class",
+                        "topic",
+                        "direction",
+                        "confidence",
+                        "rationale",
+                    ],
+                },
+            }
+        },
+        "required": ["signals"],
+    },
+}
+
+_SIGNALS_SYSTEM = (
+    "You extract position-relevant trading signals from a finished daily market "
+    "brief. You do not add analysis of your own — you only record signals the "
+    "brief itself supports."
+)
+
+_SIGNALS_USER_TEMPLATE = """Read the entire brief below and call emit_signals with \
+every position-relevant signal it contains.
+
+Include macro-level signals (no single ticker — omit the ticker field) as well as \
+named-instrument signals. Set provenance from a source the brief cites, or omit it. \
+Return an empty list if the brief contains no actionable signals.
+
+BRIEF:
+{brief}
+"""
+
+
+def build_signals_request(brief_text: str) -> dict:
+    """Build the Anthropic Messages payload for the forced-tool signals call."""
+    return {
+        "model": SIGNALS_MODEL,
+        "max_tokens": 2048,
+        "system": _SIGNALS_SYSTEM,
+        "tools": [_EMIT_SIGNALS_TOOL],
+        "tool_choice": {"type": "tool", "name": "emit_signals"},
+        "messages": [
+            {"role": "user", "content": _SIGNALS_USER_TEMPLATE.format(brief=brief_text)}
+        ],
+    }
+
+
+def parse_signals_response(resp: dict) -> list:
+    """Pull the signals list from the emit_signals tool_use block.
+
+    Raises ValueError if no emit_signals tool_use block is present or its input
+    has no 'signals' list — the fail-safe wrapper turns that into extract_error.
+    """
+    for block in resp.get("content", []):
+        if block.get("type") == "tool_use" and block.get("name") == "emit_signals":
+            signals = block.get("input", {}).get("signals")
+            if isinstance(signals, list):
+                return signals
+            raise ValueError("emit_signals input missing 'signals' list")
+    raise ValueError("no emit_signals tool_use block in response")
+
+
 def save_signals(signals: list, date_str: str, status: str = "ok", dropped: int = 0):
     """Persist signals as a dated snapshot and append to the rolling log.
 
