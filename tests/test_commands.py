@@ -352,6 +352,25 @@ def test_source_header_both():
     ) == ("\n### Al Jazeera [REGIONAL · ARAB · STATE-FUNDED] (GEO)")
 
 
+def test_baked_in_feed_perspective_assignments():
+    by_name = {f["name"]: f for f in brief.RSS_FEEDS}
+    expected = {
+        "Al Jazeera": ("ARAB", True),
+        "NHK World": ("JAPANESE", True),
+        "Yonhap (English)": ("KOREAN", True),
+        "SCMP": ("CHINESE", False),
+        "Kyiv Independent": ("UKRAINIAN", False),
+    }
+    for name, (persp, sf) in expected.items():
+        assert by_name[name].get("perspective") == persp, name
+        assert by_name[name].get("state_funded", False) is sf, name
+        assert persp in brief.VALID_PERSPECTIVES
+    # Wires/analysts/think-tanks stay untagged (sample check).
+    for name in ("Reuters World", "ISW Daily Assessment", "38 North"):
+        assert "perspective" not in by_name[name], name
+        assert by_name[name].get("state_funded", False) is False, name
+
+
 def test_add_temp_source_dedupes_by_url(monkeypatch, tmp_path):
     _isolate_sources(monkeypatch, tmp_path)
     e1 = {"name": "A", "url": "https://x/feed", "category": "iran", "kind": "regional"}

@@ -193,6 +193,8 @@ RSS_FEEDS = [
         "url": "https://www.aljazeera.com/xml/rss/all.xml",
         "category": "geo",
         "kind": "regional",
+        "perspective": "ARAB",
+        "state_funded": True,
     },
     {
         "name": "Kyiv Independent",
@@ -200,6 +202,7 @@ RSS_FEEDS = [
         "url": "https://news.google.com/rss/search?q=when:2d+site%3Akyivindependent.com&hl=en-US&gl=US&ceid=US%3Aen",
         "category": "ukraine",
         "kind": "regional",
+        "perspective": "UKRAINIAN",
     },
     {
         "name": "ISW Daily Assessment",
@@ -214,6 +217,8 @@ RSS_FEEDS = [
         "url": "https://news.google.com/rss/search?q=when:2d+site%3Aen.yna.co.kr&hl=en-US&gl=US&ceid=US%3Aen",
         "category": "korea",
         "kind": "regional",
+        "perspective": "KOREAN",
+        "state_funded": True,
     },
     {
         "name": "38 North",
@@ -228,6 +233,8 @@ RSS_FEEDS = [
         "url": "https://news.google.com/rss/search?q=when:2d+site%3Awww3.nhk.or.jp%2Fnhkworld&hl=en-US&gl=US&ceid=US%3Aen",
         "category": "japan",
         "kind": "regional",
+        "perspective": "JAPANESE",
+        "state_funded": True,
     },
     {
         "name": "BOJ Statements",
@@ -242,6 +249,7 @@ RSS_FEEDS = [
         "url": "https://www.scmp.com/rss/91/feed",
         "category": "china",
         "kind": "regional",
+        "perspective": "CHINESE",
     },
 ]
 
