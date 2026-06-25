@@ -1913,6 +1913,7 @@ def normalize_signals(raw_signals: list) -> tuple[list, int]:
                     in _ASSET_CLASSES
                     else "equity"
                 ),
+                "source_id": _nullish(item.get("source_id")),
             }
         )
     return clean, dropped
@@ -1979,6 +1980,15 @@ _EMIT_SIGNALS_TOOL = {
                                 "the brief does not name one."
                             ),
                         },
+                        "source_id": {
+                            "type": "string",
+                            "description": (
+                                "Exact source name, copied verbatim from the "
+                                "SOURCES list provided, that the brief cites for "
+                                "this signal. Omit if no listed source clearly "
+                                "backs it."
+                            ),
+                        },
                     },
                     "required": [
                         "asset_class",
@@ -2005,15 +2015,27 @@ every position-relevant signal it contains.
 
 Include macro-level signals (no single ticker — omit the ticker field) as well as \
 named-instrument signals. Set provenance from a source the brief cites, or omit it. \
-Return an empty list if the brief contains no actionable signals.
+Set source_id to the exact name (from the SOURCES list) of the source the brief cites \
+for the signal, or omit it if none clearly applies. Return an empty list if the brief \
+contains no actionable signals.
+
+SOURCES (choose source_id from these exact names):
+{sources}
 
 BRIEF:
 {brief}
 """
 
 
-def build_signals_request(brief_text: str) -> dict:
-    """Build the Anthropic Messages payload for the forced-tool signals call."""
+def build_signals_request(brief_text: str, sources: list[dict] | None = None) -> dict:
+    """Build the Anthropic Messages payload for the forced-tool signals call.
+
+    `sources` (defaults to all_sources()) is listed by name so the model can set
+    source_id from a closed set; code re-derives kind/perspective from the registry.
+    """
+    if sources is None:
+        sources = all_sources()
+    source_names = "\n".join(f"- {s['name']}" for s in sources) or "(none)"
     return {
         "model": SIGNALS_MODEL,
         "max_tokens": 2048,
@@ -2021,7 +2043,12 @@ def build_signals_request(brief_text: str) -> dict:
         "tools": [_EMIT_SIGNALS_TOOL],
         "tool_choice": {"type": "tool", "name": "emit_signals"},
         "messages": [
-            {"role": "user", "content": _SIGNALS_USER_TEMPLATE.format(brief=brief_text)}
+            {
+                "role": "user",
+                "content": _SIGNALS_USER_TEMPLATE.format(
+                    sources=source_names, brief=brief_text
+                ),
+            }
         ],
     }
 
@@ -2070,7 +2097,9 @@ def _post_messages(payload: dict) -> dict:
     raise last_err
 
 
-def extract_signals(brief_text: str, *, call=None) -> tuple[list, str]:
+def extract_signals(
+    brief_text: str, sources: list[dict] | None = None, *, call=None
+) -> tuple[list, str]:
     """Extract position signals from a finished brief via a forced-tool call.
 
     Returns (raw_signals, status) where status is "ok" on success or
@@ -2079,7 +2108,7 @@ def extract_signals(brief_text: str, *, call=None) -> tuple[list, str]:
     """
     caller = call or _post_messages
     try:
-        resp = caller(build_signals_request(brief_text))
+        resp = caller(build_signals_request(brief_text, sources))
         return parse_signals_response(resp), "ok"
     except Exception as e:
         log.warning(f"Signals extraction failed; no signals this run: {e}")

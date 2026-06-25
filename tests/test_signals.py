@@ -61,6 +61,7 @@ def test_normalize_strips_unknown_fields():
         "rationale",
         "provenance",
         "asset_class",
+        "source_id",
     }
 
 
@@ -80,6 +81,25 @@ def test_normalize_unknown_asset_class_falls_back_to_equity():
     s = dict(SIGNAL, asset_class="forex")
     clean, _ = brief.normalize_signals([s])
     assert clean[0]["asset_class"] == "equity"
+
+
+def test_normalize_keeps_source_id():
+    s = dict(SIGNAL, source_id="Al Jazeera")
+    clean, _ = brief.normalize_signals([s])
+    assert clean[0]["source_id"] == "Al Jazeera"
+
+
+def test_normalize_nulls_missing_source_id():
+    clean, _ = brief.normalize_signals([dict(SIGNAL)])  # no source_id key
+    assert clean[0]["source_id"] is None
+
+
+def test_signals_request_lists_sources_for_the_model():
+    req = brief.build_signals_request(
+        "BRIEF", sources=[{"name": "Kyiv Independent", "kind": "regional"}]
+    )
+    user_text = req["messages"][0]["content"]
+    assert "Kyiv Independent" in user_text
 
 
 # ── Feed source structure ─────────────────────────────────────────────────────
