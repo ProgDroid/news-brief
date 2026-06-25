@@ -1,3 +1,6 @@
+import io
+import zipfile
+
 from backtest.gdelt.aggregate import (
     MIDEAST_FIPS,
     GdeltDaily,
@@ -7,6 +10,7 @@ from backtest.gdelt.aggregate import (
     merge_daily,
 )
 from backtest.gdelt.events import GdeltEvent, parse_row
+from backtest.gdelt.fetch import events_url, fetch_day_rows, unzip_to_rows
 from backtest.gdelt.snap import snap_forward, to_sentiment_series
 
 
@@ -146,3 +150,29 @@ def test_to_sentiment_series_sorted_and_field_applied():
     assert s.ticker == "USO:cm"
     assert [p.date for p in s.points] == ["2026-01-16", "2026-01-20"]
     assert s.points[0].value == 9.0
+
+
+def _make_zip(name: str, text: str) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(name, text)
+    return buf.getvalue()
+
+
+def test_events_url():
+    assert events_url("20260115") == (
+        "http://data.gdeltproject.org/events/20260115.export.CSV.zip"
+    )
+
+
+def test_unzip_to_rows_tab_split_drops_blanks():
+    z = _make_zip("20260115.export.CSV", "a\tb\tc\n\nd\te\tf\n")
+    assert unzip_to_rows(z) == [["a", "b", "c"], ["d", "e", "f"]]
+
+
+def test_fetch_day_rows_cache_hit_no_network(tmp_path):
+    # Pre-seed the cache; fetch must read it and never touch the network.
+    z = _make_zip("20260115.export.CSV", "x\ty\tz\n")
+    (tmp_path / "20260115.export.CSV.zip").write_bytes(z)
+    rows = fetch_day_rows("20260115", cache_dir=str(tmp_path))
+    assert rows == [["x", "y", "z"]]
