@@ -7,6 +7,7 @@ from backtest.gdelt.aggregate import (
     merge_daily,
 )
 from backtest.gdelt.events import GdeltEvent, parse_row
+from backtest.gdelt.snap import snap_forward, to_sentiment_series
 
 
 def _row(**over) -> list[str]:
@@ -106,3 +107,42 @@ def test_merge_daily_field_wise_sum_and_redate():
     assert m.n_region_events == 3
     assert m.mention_weight == 19.0
     assert m.goldstein_weighted_sum == -82.0
+
+
+def _daily(d, cm=1.0, mw=2.0, tws=-4.0):
+    return GdeltDaily(d, cm, 1, 1, tws, -3.0, mw)
+
+
+def test_snap_forward_weekend_folds_into_monday():
+    trading = {"2026-01-16", "2026-01-20"}  # Fri, then Tue (Mon 19th holiday)
+    dailies = {
+        "2026-01-17": _daily("2026-01-17", cm=3.0, mw=3.0),  # Sat
+        "2026-01-18": _daily("2026-01-18", cm=5.0, mw=5.0),  # Sun
+        "2026-01-20": _daily("2026-01-20", cm=2.0, mw=2.0),  # Tue (trading)
+    }
+    out = snap_forward(dailies, trading)
+    assert set(out) == {"2026-01-20"}  # all three land on Tue
+    assert out["2026-01-20"].conflict_mentions == 10.0
+    assert out["2026-01-20"].date == "2026-01-20"
+
+
+def test_snap_forward_trading_day_maps_to_itself():
+    out = snap_forward({"2026-01-16": _daily("2026-01-16", cm=7.0)}, {"2026-01-16"})
+    assert out["2026-01-16"].conflict_mentions == 7.0
+
+
+def test_snap_forward_drops_when_no_session_within_gap():
+    # next session is 10 days away -> dropped (max_gap default 4)
+    out = snap_forward({"2026-01-01": _daily("2026-01-01")}, {"2026-01-15"})
+    assert out == {}
+
+
+def test_to_sentiment_series_sorted_and_field_applied():
+    snapped = {
+        "2026-01-20": _daily("2026-01-20", cm=2.0),
+        "2026-01-16": _daily("2026-01-16", cm=9.0),
+    }
+    s = to_sentiment_series(snapped, "conflict_mentions", label="USO:cm")
+    assert s.ticker == "USO:cm"
+    assert [p.date for p in s.points] == ["2026-01-16", "2026-01-20"]
+    assert s.points[0].value == 9.0
