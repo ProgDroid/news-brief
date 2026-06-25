@@ -266,3 +266,38 @@ def test_daily_trade_message_opened_and_open():
     assert "mkt1" in out  # prediction suggestion
     assert "BTC" in out  # open-positions summary
     assert "+10" in out  # last-known mark for the older open position
+
+
+def test_leakage_summary_sums_recent_window(monkeypatch, tmp_path):
+    f = tmp_path / "leak.json"
+    monkeypatch.setattr(validation, "LEAKAGE_LOG_FILE", f)
+    validation._write_json_atomic(
+        f,
+        {
+            "2026-06-20": {"traded": 1, "no_ticker": 2},
+            "2026-06-21": {"traded": 3, "no_ticker": 1, "no_price": 1},
+        },
+    )
+    totals = validation.leakage_summary(window_days=7)
+    assert totals["traded"] == 4
+    assert totals["no_ticker"] == 3
+    assert totals["no_price"] == 1
+
+
+def test_leakage_summary_respects_window(monkeypatch, tmp_path):
+    f = tmp_path / "leak.json"
+    monkeypatch.setattr(validation, "LEAKAGE_LOG_FILE", f)
+    validation._write_json_atomic(
+        f,
+        {
+            "2026-06-01": {"traded": 99},
+            "2026-06-24": {"traded": 1},
+            "2026-06-25": {"traded": 2},
+        },
+    )
+    assert validation.leakage_summary(window_days=2)["traded"] == 3
+
+
+def test_leakage_block_empty_when_no_log(monkeypatch, tmp_path):
+    monkeypatch.setattr(validation, "LEAKAGE_LOG_FILE", tmp_path / "absent.json")
+    assert validation._leakage_block() == []

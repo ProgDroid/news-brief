@@ -19,6 +19,9 @@ from common import (
 )
 
 GATE_HISTORY_FILE = DATA_DIR / "paper" / "gate_history.json"
+LEAKAGE_LOG_FILE = (
+    DATA_DIR / "paper" / "leakage-log.json"
+)  # written by trading._record_leakage
 _DIMENSIONS = (
     "asset_class",
     "confidence",
@@ -165,6 +168,42 @@ def _calibration_block(agg: dict) -> list[str]:
     return lines
 
 
+def leakage_summary(window_days: int = 7) -> dict:
+    """Sum directional-signal leakage counts over the most recent window_days.
+
+    Reads the date-keyed log trading._record_leakage writes. Returns {} when the
+    log is missing/empty. Non-integer values are skipped defensively.
+    """
+    data = _load_json_or(LEAKAGE_LOG_FILE, {}) or {}
+    if not isinstance(data, dict):
+        return {}
+    totals: dict = {}
+    for day in sorted(data.keys())[-window_days:]:
+        for reason, n in (data.get(day) or {}).items():
+            try:
+                totals[reason] = totals.get(reason, 0) + int(n)
+            except (TypeError, ValueError):
+                continue
+    return totals
+
+
+def _leakage_block() -> list[str]:
+    """One-line directional-signal leakage summary for the report ([] when empty)."""
+    totals = leakage_summary()
+    grand = sum(totals.values())
+    if grand == 0:
+        return []
+    traded = totals.get("traded", 0)
+    drops = {k: v for k, v in totals.items() if k != "traded" and v > 0}
+    line = f"<b>🚰 Signal leakage (7d)</b>: {grand} directional → {traded} traded"
+    if drops:
+        parts = ", ".join(
+            f"{v} {k}" for k, v in sorted(drops.items(), key=lambda kv: -kv[1])
+        )
+        line += f"; dropped: {parts}"
+    return [line]
+
+
 def performance_report(book: dict) -> str:
     """Telegram-HTML weekly performance report: overall + dimensions + go-live gate.
 
@@ -199,6 +238,8 @@ def performance_report(book: dict) -> str:
             lines.append(f"  – {k}: net {100 * s['mean_net']:+.1f}% (n={s['n']})")
 
     lines.extend(_calibration_block(agg))
+
+    lines.extend(_leakage_block())
 
     lines.append("<b>🚦 Go-live gate</b>")
     gate = evaluate_gate(book)
