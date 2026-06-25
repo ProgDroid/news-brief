@@ -245,14 +245,11 @@ RSS_FEEDS = [
     },
 ]
 
-WEB_SOURCES = [
-    {
-        "name": "BCA Research — Iran Conflict Daily Dashboard",
-        "url": "https://www.bcaresearch.com/collection/bcas-iran-conflict-daily-dashboard",
-        "category": "iran",
-        "kind": "regional",
-    },
-]
+# Always-on direct-page sources baked into the image, fetched via
+# fetch_web_source. Empty by default: situational pages (e.g. a crisis
+# dashboard) belong in temp sources (source_type="page") so they can be
+# dropped without a redeploy. Parallel to RSS_FEEDS for feeds.
+WEB_SOURCES: list[dict] = []
 
 # ── Temporary sources (Telegram-managed, persisted on the volume) ─────────────
 # RSS_FEEDS above is the always-on baseline, baked into the image. Temporary

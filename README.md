@@ -300,8 +300,11 @@ Every brief is archived to disk regardless of delivery success, so a Telegram hi
 
 All of the following live in `brief.py`:
 
-- **Feeds:** edit `RSS_FEEDS` (any RSS/Substack/RSSHub source) and `WEB_SOURCES` (any page with a
-  useful meta description; extend `fetch_web_source()` for deeper scraping).
+- **Feeds:** edit `RSS_FEEDS` (any RSS/Substack/RSSHub source). For a direct
+  page, add a temp source with `"source_type": "page"` (via `/addsource` →
+  "Page to scrape", or by hand-editing `sources.json`); it is fetched with
+  `fetch_web_source` (meta description, or first 800 chars). `WEB_SOURCES` is
+  the always-on page baseline and is empty by default.
 - **Topics:** `TOPICS` drives both the web-search queries and the Chroma podcast queries per region.
 - **Prompt:** `SYSTEM_PROMPT` and `build_daily_prompt()` define the brief's tone, sections, and
   the signals schema — easy to iterate on without touching anything else.
