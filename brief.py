@@ -1806,17 +1806,33 @@ def parse_signals_response(resp: dict) -> list:
     raise ValueError("no emit_signals tool_use block in response")
 
 
+SIGNALS_TIMEOUT = 90  # generous: extraction runs AFTER delivery, so latency is free
+SIGNALS_MAX_ATTEMPTS = 2
+
+
 def _post_messages(payload: dict) -> dict:
-    """Raw Anthropic Messages API call (not unit-tested; the seam in
-    extract_signals is the test boundary)."""
-    resp = requests.post(
-        "https://api.anthropic.com/v1/messages",
-        headers=ANTHROPIC_HEADERS,
-        json=payload,
-        timeout=30,
-    )
-    resp.raise_for_status()
-    return resp.json()
+    """Raw Anthropic Messages API call with one retry on transient failures.
+
+    The 30s default was too tight for a synchronous Sonnet tool-use generation
+    and timed out (read timeout) -> extraction failed to extract_error and wiped
+    the day's signals. Because extract_signals runs AFTER the brief is delivered,
+    a slow call never delays the user, so we use a generous timeout and retry.
+    """
+    last_err = None
+    for attempt in range(1, SIGNALS_MAX_ATTEMPTS + 1):
+        try:
+            resp = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers=ANTHROPIC_HEADERS,
+                json=payload,
+                timeout=SIGNALS_TIMEOUT,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except requests.RequestException as e:
+            last_err = e
+            log.warning(f"Signals API attempt {attempt} failed: {e}")
+    raise last_err
 
 
 def extract_signals(brief_text: str, *, call=None) -> tuple[list, str]:

@@ -253,3 +253,40 @@ def test_daily_prompt_drops_signals_json_but_keeps_prose_section():
     assert "POSITION SIGNALS" in prompt
     # word-limit instruction is preserved
     assert "under 600 words" in prompt
+
+
+def test_post_messages_uses_generous_timeout_and_retries_transient(monkeypatch):
+    captured = {"n": 0, "timeouts": []}
+
+    class _OK:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"content": []}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        captured["n"] += 1
+        captured["timeouts"].append(timeout)
+        if captured["n"] == 1:
+            raise brief.requests.exceptions.Timeout("read timed out")
+        return _OK()
+
+    monkeypatch.setattr(brief.requests, "post", fake_post)
+    out = brief._post_messages({"model": "x"})
+    assert out == {"content": []}
+    assert captured["n"] == 2  # retried after the first timeout
+    assert captured["timeouts"][0] >= 60  # generous timeout, not the old 30s
+
+
+def test_post_messages_raises_after_exhausting_retries(monkeypatch):
+    def always_timeout(url, headers=None, json=None, timeout=None):
+        raise brief.requests.exceptions.Timeout("read timed out")
+
+    monkeypatch.setattr(brief.requests, "post", always_timeout)
+    raised = False
+    try:
+        brief._post_messages({"model": "x"})
+    except brief.requests.exceptions.Timeout:
+        raised = True
+    assert raised  # propagates so extract_signals fails safe to extract_error
