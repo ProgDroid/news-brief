@@ -54,6 +54,7 @@ WATCHLIST_FILE = PAPER_DIR / "watchlist.json"
 VOLUME_HISTORY_FILE = (
     PAPER_DIR / "volume-history.json"
 )  # used by the Phase 5 volume monitor (Task 5)
+LEAKAGE_LOG_FILE = PAPER_DIR / "leakage-log.json"  # Stage A: declined-signal counts
 
 # Asset-class → informational venue tag stamped on opened positions.
 _VENUE_BY_ASSET = {"equity": "t212", "crypto": "kraken", "prediction": "polygram"}
@@ -1042,6 +1043,22 @@ def save_book(book: dict):
     _write_json_atomic(BOOK_FILE, book)
 
 
+def _record_leakage(date_str: str, tally: dict) -> None:
+    """Best-effort merge of one run's directional-signal leakage tally into the log.
+
+    Keyed by date so the weekly report can sum a trailing window. A write/parse
+    failure is logged and skipped — leakage accounting never aborts a paper run.
+    """
+    try:
+        data = _load_json_or(LEAKAGE_LOG_FILE, {})
+        if not isinstance(data, dict):
+            data = {}
+        data[date_str] = tally
+        _write_json_atomic(LEAKAGE_LOG_FILE, data)
+    except Exception as e:
+        log.warning(f"Leakage log write skipped: {e}")
+
+
 def load_watchlist() -> dict:
     """Cross-asset watch list: {"items": [{raw, asset_class, instrument, added?}]}."""
     return _load_json_or(WATCHLIST_FILE, {"items": []})
@@ -1392,13 +1409,25 @@ def mode_paper():
         log.info("No signals today — nothing to paper-trade")
         return
 
-    actionable = [
-        s
-        for s in signals
-        if s.get("direction") in ("bullish", "bearish")
-        and s.get("confidence") in ("medium", "high")
-        and s.get("ticker")
-    ]
+    leakage = {
+        "traded": 0,
+        "no_ticker": 0,
+        "low_confidence": 0,
+        "neutral": 0,
+        "no_instrument": 0,
+        "no_price": 0,
+        "unpriced_reversal": 0,
+    }
+    actionable = []
+    for s in signals:
+        if s.get("direction") not in ("bullish", "bearish"):
+            leakage["neutral"] += 1
+        elif s.get("confidence") not in ("medium", "high"):
+            leakage["low_confidence"] += 1
+        elif not s.get("ticker"):
+            leakage["no_ticker"] += 1
+        else:
+            actionable.append(s)
 
     with file_lock(BOOK_FILE, timeout=BOOK_LOCK_TIMEOUT):
         book = load_book()
@@ -1440,6 +1469,7 @@ def mode_paper():
                         log.warning(
                             f"Paper skip: unpriced reversal for {ticker}; not opening {direction}"
                         )
+                        leakage["unpriced_reversal"] += 1
                         continue
 
                 if (ac, ticker, direction) in open_keys:
@@ -1450,10 +1480,12 @@ def mode_paper():
                     symbol = resolve_symbol(ticker, cache, overrides)
                 if not symbol:
                     log.warning(f"Paper skip: no instrument for {ticker} ({ac})")
+                    leakage["no_instrument"] += 1
                     continue
                 price = fetch_price(ac, symbol)
                 if price is None:
                     log.warning(f"Paper skip: no price for {ticker} ({symbol})")
+                    leakage["no_price"] += 1
                     continue
                 book["positions"].append(
                     {
@@ -1485,6 +1517,7 @@ def mode_paper():
                 )
                 _stamp_open_benchmark(book["positions"][-1])
                 open_keys.add((ac, ticker, direction))
+                leakage["traded"] += 1
                 opened += 1
         else:
             log.info("No actionable equity/crypto signals today")
@@ -1492,6 +1525,7 @@ def mode_paper():
         opened += _open_prediction_positions(book, signals, today, open_keys)
 
         save_book(book)
+        _record_leakage(today, leakage)
         log.info(f"Opened {opened} paper position(s)")
 
 

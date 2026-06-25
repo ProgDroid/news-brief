@@ -305,8 +305,66 @@ def test_paper_position_carries_source_tags(monkeypatch, tmp_path):
         '"source_perspective": "ARAB"}]}',
         encoding="utf-8",
     )
+    monkeypatch.setattr(trading, "LEAKAGE_LOG_FILE", tmp_path / "leak.json")
     trading.mode_paper()
     pos = trading.load_book()["positions"][-1]
     assert pos["source_kind"] == "regional"
     assert pos["source_perspective"] == "ARAB"
     assert pos["source_id"] == "Al Jazeera"
+
+
+def test_record_leakage_merges_by_date(monkeypatch, tmp_path):
+    monkeypatch.setattr(trading, "LEAKAGE_LOG_FILE", tmp_path / "leak.json")
+    trading._record_leakage("2026-06-25", {"traded": 2, "no_ticker": 3})
+    trading._record_leakage("2026-06-26", {"traded": 1})
+    data = trading._load_json_or(tmp_path / "leak.json", {})
+    assert data["2026-06-25"]["no_ticker"] == 3
+    assert data["2026-06-26"]["traded"] == 1
+
+
+def test_paper_tallies_leakage(monkeypatch, tmp_path):
+    import json
+    from datetime import datetime, timezone
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    signals_dir = tmp_path / "signals"
+    signals_dir.mkdir()
+    monkeypatch.setattr(trading, "SIGNALS_DIR", signals_dir)
+    monkeypatch.setattr(trading, "BOOK_FILE", tmp_path / "book.json")
+    monkeypatch.setattr(trading, "LEGACY_PAPER_BOOK_FILE", tmp_path / "pb.json")
+    monkeypatch.setattr(trading, "LEAKAGE_LOG_FILE", tmp_path / "leak.json")
+    monkeypatch.setattr(trading, "refresh_instruments_cache", lambda *a, **k: {})
+    sigs = {
+        "signals": [
+            {
+                "topic": "a",
+                "direction": "neutral",
+                "confidence": "high",
+                "ticker": "X",
+                "asset_class": "equity",
+            },
+            {
+                "topic": "b",
+                "direction": "bullish",
+                "confidence": "low",
+                "ticker": "Y",
+                "asset_class": "equity",
+            },
+            {
+                "topic": "c",
+                "direction": "bullish",
+                "confidence": "high",
+                "ticker": None,
+                "asset_class": "equity",
+            },
+        ]
+    }
+    (signals_dir / f"signals-{today}.json").write_text(
+        json.dumps(sigs), encoding="utf-8"
+    )
+    trading.mode_paper()
+    data = trading._load_json_or(tmp_path / "leak.json", {})
+    day = next(iter(data))
+    assert data[day]["neutral"] == 1
+    assert data[day]["low_confidence"] == 1
+    assert data[day]["no_ticker"] == 1
