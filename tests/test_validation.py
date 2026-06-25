@@ -177,6 +177,49 @@ def test_fmt_marks_thin_samples():
     assert "thin" not in validation._fmt(fat)
 
 
+def test_calibration_block_flags_inversion():
+    # high realizes LESS edge than medium -> inverted
+    book = {
+        "positions": [
+            *[
+                dict(_closed("equity", 0.02, edge=0.05), confidence="medium")
+                for _ in range(3)
+            ],
+            *[
+                dict(_closed("equity", 0.01, edge=0.01), confidence="high")
+                for _ in range(3)
+            ],
+        ]
+    }
+    agg = validation.aggregate_performance(book)
+    lines = validation._calibration_block(agg)
+    joined = "\n".join(lines)
+    assert "Calibration" in joined
+    assert "inverted" in joined.lower()
+
+
+def test_calibration_block_silent_when_monotonic():
+    book = {
+        "positions": [
+            *[
+                dict(_closed("equity", 0.01, edge=0.01), confidence="medium")
+                for _ in range(3)
+            ],
+            *[
+                dict(_closed("equity", 0.05, edge=0.06), confidence="high")
+                for _ in range(3)
+            ],
+        ]
+    }
+    agg = validation.aggregate_performance(book)
+    joined = "\n".join(validation._calibration_block(agg))
+    assert "inverted" not in joined.lower()
+
+
+def test_calibration_block_empty_without_confidence_data():
+    assert validation._calibration_block({"dimensions": {}, "overall": None}) == []
+
+
 def test_daily_trade_message_empty_when_nothing():
     assert validation.daily_trade_message({"positions": []}, "2026-06-14") == ""
 

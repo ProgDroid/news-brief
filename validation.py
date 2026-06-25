@@ -129,6 +129,42 @@ def _fmt(s: dict) -> str:
     return out
 
 
+_CONF_ORDER = ("low", "medium", "high")
+
+
+def _calibration_block(agg: dict) -> list[str]:
+    """Confidence → realized performance, with an inversion flag.
+
+    Lists low/medium/high (those present) via _fmt, then flags any adjacent pair
+    where the higher confidence band realized LESS than the lower — the
+    actionable miscalibration signal. Scored by mean_edge, falling back to
+    mean_net when edge is unavailable. Returns [] when no confidence data exists.
+    """
+    conf = agg.get("dimensions", {}).get("confidence", {})
+    present = [(c, conf[c]) for c in _CONF_ORDER if c in conf]
+    if not present:
+        return []
+    lines = ["<b>🎯 Calibration (confidence → realized)</b>"]
+    for c, s in present:
+        lines.append(f"  – {c}: {_fmt(s)}")
+
+    def _score(s: dict) -> float:
+        return s["mean_edge"] if s["mean_edge"] is not None else s["mean_net"]
+
+    inversions = [
+        f"{hi_c}&lt;{lo_c}"
+        for (lo_c, lo_s), (hi_c, hi_s) in zip(present, present[1:])
+        if _score(hi_s) < _score(lo_s)
+    ]
+    if inversions:
+        lines.append(
+            "  ⚠ inverted: "
+            + ", ".join(inversions)
+            + " (higher confidence underperforming)"
+        )
+    return lines
+
+
 def performance_report(book: dict) -> str:
     """Telegram-HTML weekly performance report: overall + dimensions + go-live gate.
 
@@ -161,6 +197,8 @@ def performance_report(book: dict) -> str:
         lines.append("<b>⚠ chronically wrong</b> (consider /mute or /thesis):")
         for k, s in bad:
             lines.append(f"  – {k}: net {100 * s['mean_net']:+.1f}% (n={s['n']})")
+
+    lines.extend(_calibration_block(agg))
 
     lines.append("<b>🚦 Go-live gate</b>")
     gate = evaluate_gate(book)
