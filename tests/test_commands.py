@@ -450,6 +450,8 @@ def test_addsource_wizard_quick_domain(monkeypatch, tmp_path):
     assert brief._WIZARD[chat]["step"] == "kind"
 
     brief._handle_callback_query(_cb("as:kind:regional"))
+    brief._handle_callback_query(_cb("as:sf:0"))
+    brief._handle_callback_query(_cb("as:persp:_skip"))
     assert brief._WIZARD[chat]["step"] == "url"
 
     brief._handle_telegram_update(_update("timesofisrael.com"), _fb())
@@ -474,6 +476,8 @@ def test_addsource_wizard_full_url_asks_feed_or_page(monkeypatch, tmp_path):
     brief._handle_telegram_update(_update("/addsource"), _fb())
     brief._handle_callback_query(_cb("as:cat:us"))
     brief._handle_callback_query(_cb("as:kind:regional"))
+    brief._handle_callback_query(_cb("as:sf:0"))
+    brief._handle_callback_query(_cb("as:persp:_skip"))
     brief._handle_telegram_update(
         _update("https://www.bcaresearch.com/dashboard/x"), _fb()
     )
@@ -498,6 +502,8 @@ def test_addsource_wizard_full_url_feed_choice(monkeypatch, tmp_path):
     brief._handle_telegram_update(_update("/addsource"), _fb())
     brief._handle_callback_query(_cb("as:cat:geo"))
     brief._handle_callback_query(_cb("as:kind:wire"))
+    brief._handle_callback_query(_cb("as:sf:0"))
+    brief._handle_callback_query(_cb("as:persp:_skip"))
     brief._handle_telegram_update(_update("https://site.com/feed.xml"), _fb())
     brief._handle_callback_query(_cb("as:stype:feed"))
     brief._handle_callback_query(_cb("as:confirm"))
@@ -516,9 +522,54 @@ def test_addsource_wizard_rejects_garbage_url(monkeypatch, tmp_path):
     brief._handle_telegram_update(_update("/addsource"), _fb())
     brief._handle_callback_query(_cb("as:cat:iran"))
     brief._handle_callback_query(_cb("as:kind:regional"))
+    brief._handle_callback_query(_cb("as:sf:0"))
+    brief._handle_callback_query(_cb("as:persp:_skip"))
     brief._handle_telegram_update(_update("not a url at all"), _fb())
     assert brief._WIZARD[chat]["step"] == "url"  # stays put, re-prompts
     assert any("neither a domain nor a URL" in s for s in cap["sends"])
+
+
+def test_addsource_wizard_captures_state_funded_and_perspective(monkeypatch, tmp_path):
+    _isolate_sources(monkeypatch, tmp_path)
+    brief._WIZARD.clear()
+    _wire_telegram(monkeypatch)
+    chat = str(brief.TELEGRAM_CHAT_ID)
+    brief._handle_telegram_update(_update("/addsource"), _fb())
+    brief._handle_callback_query(_cb("as:cat:geo"))
+    brief._handle_callback_query(_cb("as:kind:regional"))
+    assert brief._WIZARD[chat]["step"] == "state_funded"
+
+    brief._handle_callback_query(_cb("as:sf:1"))
+    assert brief._WIZARD[chat]["state_funded"] is True
+    assert brief._WIZARD[chat]["step"] == "perspective"
+
+    brief._handle_callback_query(_cb("as:persp:ARAB"))
+    assert brief._WIZARD[chat]["perspective"] == "ARAB"
+    assert brief._WIZARD[chat]["step"] == "url"
+
+    brief._handle_telegram_update(_update("aljazeera.com"), _fb())
+    brief._handle_callback_query(_cb("as:confirm"))
+    srcs = brief.load_temp_sources()
+    assert srcs[0]["state_funded"] is True and srcs[0]["perspective"] == "ARAB"
+
+
+def test_addsource_wizard_perspective_skip(monkeypatch, tmp_path):
+    _isolate_sources(monkeypatch, tmp_path)
+    brief._WIZARD.clear()
+    _wire_telegram(monkeypatch)
+    chat = str(brief.TELEGRAM_CHAT_ID)
+    brief._handle_telegram_update(_update("/addsource"), _fb())
+    brief._handle_callback_query(_cb("as:cat:geo"))
+    brief._handle_callback_query(_cb("as:kind:wire"))
+    brief._handle_callback_query(_cb("as:sf:0"))
+    brief._handle_callback_query(_cb("as:persp:_skip"))
+    assert brief._WIZARD[chat]["step"] == "url"
+    assert "perspective" not in brief._WIZARD[chat]
+
+    brief._handle_telegram_update(_update("example.com"), _fb())
+    brief._handle_callback_query(_cb("as:confirm"))
+    srcs = brief.load_temp_sources()
+    assert srcs[0]["state_funded"] is False and "perspective" not in srcs[0]
 
 
 def test_addsource_wizard_cancel_clears(monkeypatch, tmp_path):

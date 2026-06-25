@@ -625,6 +625,42 @@ def _wizard_sourcetype_prompt(chat_id: str) -> None:
     )
 
 
+def _wizard_statefunded_prompt(chat_id: str) -> None:
+    w = _WIZARD[chat_id]
+    w["step"] = "state_funded"
+    rows = [
+        [
+            {"text": "🏛 State-funded", "callback_data": "as:sf:1"},
+            {"text": "🏷 Independent", "callback_data": "as:sf:0"},
+        ],
+        _CANCEL_ROW,
+    ]
+    telegram_edit_text(
+        w["msg_id"],
+        f"➕ <b>Add a source</b>\nCategory: <b>{html.escape(w['category'])}</b> · "
+        f"Kind: <b>{w['kind']}</b>\n\n"
+        "Is it state-funded?",
+        rows,
+    )
+
+
+def _wizard_perspective_prompt(chat_id: str) -> None:
+    w = _WIZARD[chat_id]
+    w["step"] = "perspective"
+    rows = _btn_rows([(p, f"as:persp:{p}") for p in VALID_PERSPECTIVES], per_row=2) + [
+        [{"text": "⏭ Skip", "callback_data": "as:persp:_skip"}],
+        _CANCEL_ROW,
+    ]
+    telegram_edit_text(
+        w["msg_id"],
+        f"➕ <b>Add a source</b>\nKind: <b>{w['kind']}</b> · "
+        f"State-funded: <b>{'yes' if w.get('state_funded') else 'no'}</b>\n\n"
+        "Whose vantage does it speak from? (Skip if it's a neutral wire — "
+        "skipping makes no claim either way.)",
+        rows,
+    )
+
+
 def _wizard_confirm_prompt(chat_id: str) -> None:
     w = _WIZARD[chat_id]
     w["step"] = "confirm"
@@ -635,12 +671,19 @@ def _wizard_confirm_prompt(chat_id: str) -> None:
             {"text": "❌ Cancel", "callback_data": "as:cancel"},
         ]
     ]
+    tags = []
+    if w.get("perspective"):
+        tags.append(w["perspective"])
+    if w.get("state_funded"):
+        tags.append("state-funded")
+    tag_line = f"\nTags: <b>{' · '.join(tags)}</b>" if tags else ""
     telegram_edit_text(
         w["msg_id"],
         "➕ <b>Add this source?</b>\n\n"
         f"Name: <b>{html.escape(w['name'])}</b>\n"
         f"Category: <b>{html.escape(w['category'])}</b> · Kind: <b>{w['kind']}</b> · "
-        f"Type: <b>{w.get('source_type', 'feed')}</b>\n"
+        f"Type: <b>{w.get('source_type', 'feed')}</b>"
+        f"{tag_line}\n"
         f"URL: <code>{html.escape(w['url'])}</code>",
         rows,
     )
@@ -909,6 +952,14 @@ def _handle_callback_query(cb: dict, fb: dict | None = None) -> dict | None:
             _wizard_kind_prompt(chat_id)
     elif data.startswith("as:kind:"):
         w["kind"] = data[len("as:kind:") :]
+        _wizard_statefunded_prompt(chat_id)
+    elif data.startswith("as:sf:"):
+        w["state_funded"] = data[len("as:sf:") :] == "1"
+        _wizard_perspective_prompt(chat_id)
+    elif data.startswith("as:persp:"):
+        val = data[len("as:persp:") :]
+        if val in VALID_PERSPECTIVES:
+            w["perspective"] = val
         _wizard_url_prompt(chat_id)
     elif data.startswith("as:stype:"):
         w["source_type"] = data[len("as:stype:") :]
@@ -925,7 +976,10 @@ def _handle_callback_query(cb: dict, fb: dict | None = None) -> dict | None:
             "category": w["category"],
             "kind": w["kind"],
             "source_type": w.get("source_type", "feed"),
+            "state_funded": w.get("state_funded", False),
         }
+        if w.get("perspective"):
+            entry["perspective"] = w["perspective"]
         add_temp_source(entry)
         _WIZARD.pop(chat_id, None)
         telegram_edit_text(
