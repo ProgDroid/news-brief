@@ -263,6 +263,7 @@ WEB_SOURCES = [
 # temp sources" with a logged warning; it can never break the always-on feeds.
 TEMP_SOURCES_FILE = DATA_DIR / "sources.json"
 VALID_KINDS = ("wire", "analyst", "regional", "primary")
+VALID_SOURCE_TYPES = ("feed", "page")
 
 
 def _short_id(text: str) -> str:
@@ -307,12 +308,16 @@ def load_temp_sources() -> list[dict]:
         kind = entry.get("kind", "regional")
         if kind not in VALID_KINDS:
             kind = "regional"
+        source_type = entry.get("source_type", "feed")
+        if source_type not in VALID_SOURCE_TYPES:
+            source_type = "feed"
         out.append(
             {
                 "name": str(name),
                 "url": str(url),
                 "category": str(category).lower(),
                 "kind": kind,
+                "source_type": source_type,
             }
         )
     return out

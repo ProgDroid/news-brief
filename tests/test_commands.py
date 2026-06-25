@@ -261,6 +261,42 @@ def test_load_temp_sources_drops_invalid_entries(monkeypatch, tmp_path):
     assert out[1]["kind"] == "regional"  # invalid kind coerced to default
 
 
+def test_load_temp_sources_defaults_source_type_to_feed(monkeypatch, tmp_path):
+    _isolate_sources(monkeypatch, tmp_path)
+    (tmp_path / "sources.json").write_text(
+        json.dumps([{"name": "NoType", "url": "https://x/feed", "category": "iran"}]),
+        encoding="utf-8",
+    )
+    out = brief.load_temp_sources()
+    assert out[0]["source_type"] == "feed"  # absent → default
+
+
+def test_load_temp_sources_accepts_and_normalizes_source_type(monkeypatch, tmp_path):
+    _isolate_sources(monkeypatch, tmp_path)
+    (tmp_path / "sources.json").write_text(
+        json.dumps(
+            [
+                {
+                    "name": "Page",
+                    "url": "https://x/dash",
+                    "category": "us",
+                    "source_type": "page",
+                },
+                {
+                    "name": "Bad",
+                    "url": "https://y/dash",
+                    "category": "us",
+                    "source_type": "weird",
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+    out = brief.load_temp_sources()
+    assert out[0]["source_type"] == "page"  # valid kept
+    assert out[1]["source_type"] == "feed"  # invalid coerced to default
+
+
 def test_add_temp_source_dedupes_by_url(monkeypatch, tmp_path):
     _isolate_sources(monkeypatch, tmp_path)
     e1 = {"name": "A", "url": "https://x/feed", "category": "iran", "kind": "regional"}
