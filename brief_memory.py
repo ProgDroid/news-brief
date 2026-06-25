@@ -122,7 +122,8 @@ _RECONCILE_SYSTEM = (
     "already told its reader, so tomorrow's brief stops re-explaining them."
 )
 
-_RECONCILE_TEMPLATE = """Below is the CURRENT memory (JSON) and TODAY'S BRIEF.
+_RECONCILE_TEMPLATE = """Below is the CURRENT memory (JSON), TODAY'S BRIEF, and
+TODAY'S SOURCE HEADLINES (the outlets that ran each story today, grouped by SOURCE).
 
 Return ONLY a JSON array of the durable facts the reader now knows after today's
 brief. Rules:
@@ -133,9 +134,13 @@ brief. Rules:
   ECHO its existing "id". You may reword its "claim" if today refined it.
 - For a genuinely NEW durable fact, include it with NO "id".
 - Omit facts that are no longer relevant.
+- For each fact, set "source_count" to the number of DISTINCT outlets in TODAY'S
+  SOURCE HEADLINES (the "SOURCE:" blocks) whose headline supports that fact. Count
+  outlets, not headlines. Use 0 when the fact is not covered in today's headlines,
+  when no source headlines are provided, or when you are unsure.
 - Return at most {max_claims} items — keep only the most important durable facts,
   and keep each "claim" to one terse sentence (no more than ~30 words).
-Each array item: {{"id": "<existing id, omit if new>", "claim": "<short fact>", "topic": "<short label>"}}.
+Each array item: {{"id": "<existing id, omit if new>", "claim": "<short fact>", "topic": "<short label>", "source_count": <integer>}}.
 Output the JSON array and nothing else.
 
 CURRENT memory:
@@ -143,6 +148,9 @@ CURRENT memory:
 
 TODAY'S BRIEF:
 {brief}
+
+TODAY'S SOURCE HEADLINES:
+{source_index}
 """
 
 
@@ -182,10 +190,15 @@ def render_established_block(ledger: dict) -> str:
     )
 
 
-def build_reconcile_prompt(ledger: dict, brief_text: str) -> str:
+def build_reconcile_prompt(
+    ledger: dict, brief_text: str, source_index: str = ""
+) -> str:
     current = json.dumps(ledger.get("claims", []), indent=2)
     return _RECONCILE_TEMPLATE.format(
-        current=current, brief=brief_text, max_claims=MAX_CLAIMS
+        current=current,
+        brief=brief_text,
+        max_claims=MAX_CLAIMS,
+        source_index=source_index.strip() or "(no source index available)",
     )
 
 
@@ -244,10 +257,15 @@ def _messages_call(system: str, user: str) -> str:
     return "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
 
 
-def reconcile_ledger(prior: dict, brief_text: str, today: str, *, call=None) -> dict:
+def reconcile_ledger(
+    prior: dict, brief_text: str, today: str, *, call=None, source_index: str = ""
+) -> dict:
     caller = call or _messages_call
     try:
-        text = caller(_RECONCILE_SYSTEM, build_reconcile_prompt(prior, brief_text))
+        text = caller(
+            _RECONCILE_SYSTEM,
+            build_reconcile_prompt(prior, brief_text, source_index),
+        )
         return merge_ledger(prior, parse_reconcile_response(text), today)
     except Exception as e:
         log.warning(f"Brief-memory reconcile failed; keeping prior ledger: {e}")

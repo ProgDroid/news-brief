@@ -504,3 +504,36 @@ def test_render_omits_cue_when_no_source_count():
     block = bm.render_established_block(ledger)
     assert "Legacy claim" in block
     assert "corroborated" not in block.split("Legacy claim")[0].split("\n")[-1]
+
+
+def test_build_reconcile_prompt_includes_source_index():
+    p = bm.build_reconcile_prompt(
+        {"version": 1, "claims": []},
+        "brief text",
+        "SOURCE: Reuters\n- OPEC extends cut\nSOURCE: AP\n- OPEC extends cut",
+    )
+    assert "SOURCE: Reuters" in p
+    assert "source_count" in p
+
+
+def test_build_reconcile_prompt_placeholder_when_no_index():
+    p = bm.build_reconcile_prompt({"version": 1, "claims": []}, "brief text")
+    assert "no source index" in p.lower()
+
+
+def test_reconcile_passes_index_and_records_count(monkeypatch):
+    captured = {}
+
+    def fake_call(system, user):
+        captured["user"] = user
+        return '[{"claim":"OPEC extends cut","topic":"oil","source_count":2}]'
+
+    out = bm.reconcile_ledger(
+        {"version": 1, "claims": []},
+        "OPEC extended cuts.",
+        "2026-06-24",
+        call=fake_call,
+        source_index="SOURCE: Reuters\n- OPEC extends cut",
+    )
+    assert "SOURCE: Reuters" in captured["user"]
+    assert out["claims"][0]["source_count"] == 2
