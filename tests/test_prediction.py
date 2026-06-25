@@ -164,10 +164,43 @@ def test_gather_candidates_dedups_and_caps(monkeypatch):
 
     monkeypatch.setattr(trading, "polygram_search", fake_search)
     cands = trading._gather_pg_candidates(
-        [{"topic": "a"}, {"topic": "b", "thesis_ref": "t"}]
+        [{"topic": "iran-nuclear"}, {"topic": "china-shock"}]
     )
     ids = [c["market_id"] for c in cands]
-    assert ids == ["2410562"]  # deduped across topics; closed market excluded
+    assert ids == ["2410562"]  # deduped across token queries; closed market excluded
+
+
+def test_signal_search_terms_tokenizes_topic_excludes_ticker_and_short():
+    terms = trading._signal_search_terms(
+        [
+            {"topic": "hormuz-fees-dispute", "ticker": "MU"},
+            {"topic": "china-shock-2-europe", "ticker": "SMSNl_EQ"},
+            {"topic": "hormuz-escalation"},  # 'hormuz' again -> deduped
+        ]
+    )
+    assert {"hormuz", "fees", "dispute", "china", "shock", "europe"} <= set(terms)
+    assert "mu" not in terms  # ticker never searched (substring-toxic: MU -> Musk)
+    assert "smsnl" not in terms and "smsnl_eq" not in terms
+    assert "2" not in terms  # tokens shorter than PG_MIN_TOKEN_LEN dropped
+    assert terms.count("hormuz") == 1  # deduped across signals
+
+
+def test_gather_caps_per_query_and_prefers_high_volume(monkeypatch):
+    # One token, one event, 10 open markets with ascending 24h volume.
+    def fake_search(q):
+        return [
+            {
+                "markets": [
+                    {**_raw_market(), "id": str(i), "volume24hr": i} for i in range(10)
+                ]
+            }
+        ]
+
+    monkeypatch.setattr(trading, "polygram_search", fake_search)
+    cands = trading._gather_pg_candidates([{"topic": "hormuz"}])
+    ids = {c["market_id"] for c in cands}
+    assert len(cands) == trading.PG_PER_QUERY_CAP  # bounded per query
+    assert ids == {"9", "8", "7", "6", "5"}  # top-5 by volume, not API order
 
 
 # ── run_prediction_matcher ────────────────────────────────────────────────────

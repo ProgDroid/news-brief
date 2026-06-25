@@ -5,6 +5,7 @@ Imports infra from common.py. (Later phases generalise this to a
 multi-asset subsystem.)"""
 
 import json
+import re
 import requests
 from datetime import datetime, timezone, timedelta
 from typing import NamedTuple
@@ -99,6 +100,10 @@ POLYGRAM_BASE = "https://polygram.ink/api"
 POLYGRAM_TOKEN_FILE = PAPER_DIR / "polygram_token.json"
 PG_CANDIDATE_CAP = 25  # max candidate markets fed to the matcher (prompt-size bound)
 PG_SIMILARITY_FLOOR = 0.60  # open only matches at/above this matcher similarity
+PG_PER_QUERY_CAP = (
+    5  # max NEW markets any one search token contributes (junk-recall bound)
+)
+PG_MIN_TOKEN_LEN = 4  # PolyGram /search is substring-based; short tokens over-match
 PG_MAX_HOLD_DAYS = 182  # ~26w backstop close for never-resolving resolution markets
 
 
@@ -640,38 +645,69 @@ def polygram_market(market_id: str) -> dict | None:
     return _polygram_get(f"/markets/{market_id}")
 
 
+def _pg_market_volume(m: dict) -> float:
+    """Best-effort 24h volume for ranking a raw PolyGram market (0.0 if absent)."""
+    for key in ("volume24hr", "volumeNum", "volume"):
+        v = m.get(key)
+        if v is not None:
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                continue
+    return 0.0
+
+
+def _signal_search_terms(signals: list) -> list[str]:
+    """Distinct lowercased entity tokens from signal topics, in first-seen order.
+
+    PolyGram's /search is a substring match, so we feed it short specific tokens
+    (e.g. 'hormuz', 'china', 'iran') rather than the kebab-case topic slug, which
+    never appears verbatim in a market title. Tokens shorter than PG_MIN_TOKEN_LEN
+    are dropped (a 2-char token substring-matches half the catalogue), and the
+    signal `ticker` is deliberately NOT searched ('MU' substring-matches 'Musk').
+    """
+    terms: list[str] = []
+    for s in signals:
+        for tok in re.split(r"[^a-z0-9]+", (s.get("topic") or "").lower()):
+            if len(tok) >= PG_MIN_TOKEN_LEN and tok not in terms:
+                terms.append(tok)
+    return terms
+
+
 def _gather_pg_candidates(signals: list) -> list:
     """Search PolyGram for markets related to the day's signals; dedup + cap.
 
-    Searches each distinct signal `topic` and `thesis_ref`, keeps OPEN binary
-    markets, dedups by market_id, and caps the total at PG_CANDIDATE_CAP to bound
-    the matcher prompt. Returns the parsed-candidate dicts (market_id/question/
+    Searches each distinct entity token derived from the signal topics (see
+    _signal_search_terms), keeps OPEN binary markets ranked by 24h volume, and
+    takes at most PG_PER_QUERY_CAP per token so no single token monopolises the
+    pool. Dedups by market_id and caps the total at PG_CANDIDATE_CAP to bound the
+    matcher prompt. Returns the parsed-candidate dicts (market_id/question/
     yes_price/end_date) the matcher is shown.
     """
-    queries = []
-    for s in signals:
-        for q in (s.get("topic"), s.get("thesis_ref")):
-            if q and q not in queries:
-                queries.append(q)
     seen: dict[str, dict] = {}
-    for q in queries:
-        events = polygram_search(q)
-        for ev in events or []:
-            for m in ev.get("markets", []):
-                parsed = _parse_pg_market(m)
-                if parsed is None or parsed["closed"]:
-                    continue
-                seen.setdefault(
-                    parsed["market_id"],
-                    {
-                        "market_id": parsed["market_id"],
-                        "question": parsed["question"],
-                        "yes_price": parsed["yes_price"],
-                        "end_date": parsed["end_date"],
-                    },
-                )
-                if len(seen) >= PG_CANDIDATE_CAP:
-                    return list(seen.values())
+    for q in _signal_search_terms(signals):
+        raw: list[dict] = []
+        for ev in polygram_search(q) or []:
+            if isinstance(ev, dict):
+                raw.extend(ev.get("markets", []))
+        raw.sort(key=_pg_market_volume, reverse=True)
+        taken = 0
+        for m in raw:
+            if taken >= PG_PER_QUERY_CAP:
+                break
+            parsed = _parse_pg_market(m)
+            if parsed is None or parsed["closed"]:
+                continue
+            if parsed["market_id"] not in seen:
+                seen[parsed["market_id"]] = {
+                    "market_id": parsed["market_id"],
+                    "question": parsed["question"],
+                    "yes_price": parsed["yes_price"],
+                    "end_date": parsed["end_date"],
+                }
+                taken += 1
+        if len(seen) >= PG_CANDIDATE_CAP:
+            break
     return list(seen.values())
 
 
