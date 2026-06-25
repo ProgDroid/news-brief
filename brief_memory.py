@@ -146,18 +146,39 @@ TODAY'S BRIEF:
 """
 
 
+def _corroboration_cue(source_count) -> str:
+    """Coarse, reader-facing confidence cue derived from the peak source_count.
+    Thresholds: 1 single-source / 2-3 corroborated / >=4 widely corroborated."""
+    try:
+        n = int(source_count)
+    except (TypeError, ValueError):
+        return ""
+    if n >= 4:
+        return "widely corroborated"
+    if n >= 2:
+        return "corroborated"
+    if n == 1:
+        return "single-source"
+    return ""
+
+
 def render_established_block(ledger: dict) -> str:
     claims = ledger.get("claims", [])
     if not claims:
         return ""
-    lines = "\n".join(
-        f"  • [{c.get('topic') or 'general'}] {c['claim']}" for c in claims
-    )
+    rows = []
+    for c in claims:
+        cue = _corroboration_cue(c.get("source_count"))
+        tag = f" ({cue})" if cue else ""
+        rows.append(f"  • [{c.get('topic') or 'general'}]{tag} {c['claim']}")
+    lines = "\n".join(rows)
     return (
         "## ESTABLISHED — THE READER ALREADY KNOWS THESE\n"
         "Reference each in at most one clause, and only if still relevant. Do NOT "
         "re-explain or restate them as news. Lead every section with what has "
-        "CHANGED since.\n\n" + lines + "\n"
+        "CHANGED since. The parenthetical is how broadly the fact was corroborated "
+        "across outlets: lean on 'widely corroborated' facts with confidence and "
+        "treat 'single-source' ones more tentatively.\n\n" + lines + "\n"
     )
 
 

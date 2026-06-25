@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 import brief_memory as bm
 
 
@@ -435,3 +437,70 @@ def test_parse_tolerates_bad_source_count():
     assert out[2] == {"claim": "c"}  # bool -> omitted
     assert out[3] == {"claim": "d", "source_count": 5}  # numeric string -> int
     assert out[4] == {"claim": "e", "source_count": 0}  # negative -> clamped
+
+
+@pytest.mark.parametrize(
+    "n,expected",
+    [
+        (0, ""),
+        (1, "single-source"),
+        (2, "corroborated"),
+        (3, "corroborated"),
+        (4, "widely corroborated"),
+        (12, "widely corroborated"),
+        (None, ""),
+        ("bad", ""),
+    ],
+)
+def test_corroboration_cue_buckets(n, expected):
+    assert bm._corroboration_cue(n) == expected
+
+
+def test_render_includes_corroboration_cue():
+    ledger = {
+        "version": 1,
+        "claims": [
+            {
+                "id": "c-1",
+                "claim": "Widely known fact",
+                "topic": "macro",
+                "first_seen": "2026-06-20",
+                "last_reaffirmed": "2026-06-24",
+                "restate_count": 3,
+                "source_count": 7,
+            },
+            {
+                "id": "c-2",
+                "claim": "Thin rumor",
+                "topic": "tech",
+                "first_seen": "2026-06-24",
+                "last_reaffirmed": "2026-06-24",
+                "restate_count": 1,
+                "source_count": 1,
+            },
+        ],
+    }
+    block = bm.render_established_block(ledger)
+    assert "(widely corroborated) Widely known fact" in block
+    assert "(single-source) Thin rumor" in block
+    # instruction teaches the model how to use the cue
+    assert "single-source" in block.lower()
+
+
+def test_render_omits_cue_when_no_source_count():
+    ledger = {
+        "version": 1,
+        "claims": [
+            {
+                "id": "c-1",
+                "claim": "Legacy claim",
+                "topic": "macro",
+                "first_seen": "2026-06-20",
+                "last_reaffirmed": "2026-06-24",
+                "restate_count": 3,
+            },  # no source_count
+        ],
+    }
+    block = bm.render_established_block(ledger)
+    assert "Legacy claim" in block
+    assert "corroborated" not in block.split("Legacy claim")[0].split("\n")[-1]
