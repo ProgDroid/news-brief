@@ -1361,6 +1361,46 @@ def fetch_web_source(source: dict) -> str:
         return ""
 
 
+def build_source_index(feed_content: str, web_content: str) -> str:
+    """Compact, titles-only, source-labelled index of today's headlines so the
+    brief-memory reconcile call can count how many distinct outlets carried each
+    durable claim. Parsed from the already-built feed/web blobs: each source is a
+    '### NAME [...] (CATEGORY)' header followed by '- title (pubdate)' items;
+    indented summary lines and web-source body text are dropped."""
+    out: list[str] = []
+    for raw in f"{feed_content}\n{web_content}".splitlines():
+        line = raw.strip()
+        if line.startswith("### "):
+            name = line[4:].split(" [")[0].split(" (")[0].strip()
+            if name:
+                out.append(f"SOURCE: {name}")
+        elif line.startswith("- "):
+            title = re.sub(r"\s*\([^()]*\)\s*$", "", line[2:].strip()).strip()
+            if title:
+                out.append(f"- {title}")
+    return "\n".join(out)
+
+
+def _source_index_path(day: str) -> Path:
+    return DATA_DIR / f"source_index-{day}.json"
+
+
+def save_source_index(index: str, day: str) -> None:
+    _write_json_atomic(_source_index_path(day), {"date": day, "index": index})
+
+
+def load_source_index(day: str) -> str:
+    try:
+        p = _source_index_path(day)
+        if p.exists():
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return str(data.get("index", ""))
+    except Exception as e:
+        log.warning(f"Source index unreadable for {day}; reconciling without it: {e}")
+    return ""
+
+
 # ── Chroma DB ─────────────────────────────────────────────────────────────────
 def _chroma_call(payload: dict, log_label: str) -> list[str]:
     """POST a JSON-RPC tools/call to the podcast Chroma MCP server and return the

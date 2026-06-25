@@ -537,3 +537,45 @@ def test_reconcile_passes_index_and_records_count(monkeypatch):
     )
     assert "SOURCE: Reuters" in captured["user"]
     assert out["claims"][0]["source_count"] == 2
+
+
+def test_build_source_index_extracts_sources_and_titles():
+    import brief
+
+    feed = (
+        "\n### Reuters [WIRE] (WORLD)\n"
+        "- OPEC+ extends production cut (Mon, 24 Jun)\n"
+        "  long summary body that must be dropped\n"
+        "- Fed holds rates (Mon)\n"
+        "\n### Al Jazeera [REGIONAL · ARAB · STATE-FUNDED] (MIDEAST)\n"
+        "- OPEC+ extends production cut (Tue)\n"
+    )
+    idx = brief.build_source_index(feed, "")
+    assert "SOURCE: Reuters" in idx
+    assert "SOURCE: Al Jazeera" in idx
+    assert "- OPEC+ extends production cut" in idx
+    assert "- Fed holds rates" in idx
+    # summaries and pub dates are stripped
+    assert "long summary body" not in idx
+    assert "(Mon, 24 Jun)" not in idx
+
+
+def test_build_source_index_handles_empty():
+    import brief
+
+    assert brief.build_source_index("(no RSS content)", "(no web content)") == ""
+
+
+def test_source_index_save_load_roundtrip(tmp_path, monkeypatch):
+    import brief
+
+    monkeypatch.setattr(brief, "DATA_DIR", tmp_path)
+    brief.save_source_index("SOURCE: Reuters\n- Big news", "2026-06-25")
+    assert "SOURCE: Reuters" in brief.load_source_index("2026-06-25")
+
+
+def test_load_source_index_missing_returns_empty(tmp_path, monkeypatch):
+    import brief
+
+    monkeypatch.setattr(brief, "DATA_DIR", tmp_path)
+    assert brief.load_source_index("2099-01-01") == ""
