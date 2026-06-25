@@ -1890,6 +1890,35 @@ def parse_signals_response(resp: dict) -> list:
     raise ValueError("no emit_signals tool_use block in response")
 
 
+def _post_messages(payload: dict) -> dict:
+    """Raw Anthropic Messages API call (not unit-tested; the seam in
+    extract_signals is the test boundary)."""
+    resp = requests.post(
+        "https://api.anthropic.com/v1/messages",
+        headers=ANTHROPIC_HEADERS,
+        json=payload,
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def extract_signals(brief_text: str, *, call=None) -> tuple[list, str]:
+    """Extract position signals from a finished brief via a forced-tool call.
+
+    Returns (raw_signals, status) where status is "ok" on success or
+    "extract_error" on any failure (HTTP, missing tool block, malformed input).
+    Fail-safe: never raises; the brief is already delivered and unaffected.
+    """
+    caller = call or _post_messages
+    try:
+        resp = caller(build_signals_request(brief_text))
+        return parse_signals_response(resp), "ok"
+    except Exception as e:
+        log.warning(f"Signals extraction failed; no signals this run: {e}")
+        return [], "extract_error"
+
+
 def save_signals(signals: list, date_str: str, status: str = "ok", dropped: int = 0):
     """Persist signals as a dated snapshot and append to the rolling log.
 

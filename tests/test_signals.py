@@ -264,3 +264,39 @@ def test_parse_signals_response_raises_when_no_tool_block():
         assert False, "expected ValueError"
     except ValueError:
         pass
+
+
+def test_extract_signals_ok_path_returns_signals_and_ok():
+    def fake_call(payload):
+        assert payload["tool_choice"]["name"] == "emit_signals"
+        return {
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "emit_signals",
+                    "input": {"signals": [{"topic": "oil", "direction": "bullish"}]},
+                }
+            ]
+        }
+
+    raw_signals, status = brief.extract_signals("BRIEF", call=fake_call)
+    assert status == "ok"
+    assert raw_signals == [{"topic": "oil", "direction": "bullish"}]
+
+
+def test_extract_signals_failsafe_on_call_exception():
+    def boom(payload):
+        raise RuntimeError("HTTP 529 overloaded")
+
+    raw_signals, status = brief.extract_signals("BRIEF", call=boom)
+    assert raw_signals == []
+    assert status == "extract_error"
+
+
+def test_extract_signals_failsafe_on_missing_tool_block():
+    def no_tool(payload):
+        return {"content": [{"type": "text", "text": "sorry"}]}
+
+    raw_signals, status = brief.extract_signals("BRIEF", call=no_tool)
+    assert raw_signals == []
+    assert status == "extract_error"
