@@ -453,7 +453,7 @@ def test_historical_closes_equity_resolves_yahoo_symbol(monkeypatch):
     monkeypatch.setattr(
         trading,
         "_yahoo_closes",
-        lambda sym, s, e: seen.setdefault("sym", sym) or {"2026-06-01": 10.0},
+        lambda sym, s, e: (seen.setdefault("sym", sym), {"2026-06-01": 10.0})[1],
     )
     out = trading.historical_closes("equity", "rr.uk", "2026-06-01", "2026-06-02")
     assert out == {"2026-06-01": 10.0}
@@ -463,7 +463,7 @@ def test_historical_closes_equity_resolves_yahoo_symbol(monkeypatch):
 def test_historical_closes_index_passes_raw_symbol(monkeypatch):
     seen = {}
     monkeypatch.setattr(
-        trading, "_yahoo_closes", lambda sym, s, e: seen.setdefault("sym", sym) or {}
+        trading, "_yahoo_closes", lambda sym, s, e: (seen.setdefault("sym", sym), {})[1]
     )
     trading.historical_closes("index", "^GSPC", "2026-06-01", "2026-06-02")
     assert seen["sym"] == "^GSPC"  # raw symbol, no resolver
@@ -474,7 +474,7 @@ def test_historical_closes_crypto_routes_kraken(monkeypatch):
     monkeypatch.setattr(
         trading,
         "_kraken_closes",
-        lambda pair, since: seen.setdefault("pair", pair) or {"2026-06-01": 60000.0},
+        lambda pair, since: (seen.setdefault("pair", pair), {"2026-06-01": 60000.0})[1],
     )
 
     def _no_yahoo(*a, **k):
