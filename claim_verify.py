@@ -8,7 +8,9 @@ import json
 import os
 from pathlib import Path
 
-from common import DATA_DIR, _write_json_atomic, log
+import requests
+
+from common import ANTHROPIC_HEADERS, DATA_DIR, _write_json_atomic, log
 
 VERIFY_MODEL = "claude-sonnet-4-6"
 VERIFY_TIMEOUT = (
@@ -222,3 +224,85 @@ def parse_verify_response(resp: dict) -> list[dict]:
                 out.append(entry)
             return out
     raise ValueError("no emit_claim_checks tool_use block in response")
+
+
+def _post_verify(payload: dict) -> dict:
+    """Anthropic Messages call with one retry. Generous timeout: verification runs
+    AFTER the brief is delivered, so a slow call never delays the reader (lesson
+    e255436, where a 30s timeout wiped a Sonnet post-gen call)."""
+    last_err = None
+    for attempt in range(1, VERIFY_MAX_ATTEMPTS + 1):
+        try:
+            resp = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers=ANTHROPIC_HEADERS,
+                json=payload,
+                timeout=VERIFY_TIMEOUT,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except requests.RequestException as e:
+            last_err = e
+            log.warning(f"Claim verify API attempt {attempt} failed: {e}")
+    raise last_err
+
+
+def _verification_record(
+    today: str, top_stories_present: bool, claims: list[dict]
+) -> dict:
+    counts = {v: 0 for v in _VALID_VERDICTS}
+    for c in claims:
+        counts[c["verdict"]] = counts.get(c["verdict"], 0) + 1
+    return {
+        "date": today,
+        "model": VERIFY_MODEL,
+        "top_stories_present": top_stories_present,
+        "n_claims": len(claims),
+        "counts_by_verdict": counts,
+        "claims": claims,
+    }
+
+
+def _verification_path(day: str) -> Path:
+    return DATA_DIR / f"verification-{day}.json"
+
+
+def save_verification(record: dict, day: str) -> None:
+    _write_json_atomic(_verification_path(day), record)
+
+
+def verify_claims(
+    brief_text: str, evidence: str, today: str, *, call=None
+) -> dict | None:
+    """Build the verification record for today, or None if the model call fails.
+    An absent TOP STORIES section is recorded (top_stories_present=False), not failed."""
+    caller = call or _post_verify
+    top = extract_top_stories(brief_text)
+    if not top.strip():
+        return _verification_record(today, False, [])
+    try:
+        resp = caller(build_verify_request(top, evidence))
+        claims = parse_verify_response(resp)
+        return _verification_record(today, True, claims)
+    except Exception as e:
+        log.warning(f"Claim verification call failed; no record this run: {e}")
+        return None
+
+
+def run_verification(brief_text: str, today: str, *, call=None) -> None:
+    """Fail-safe entry for mode_collect. Loads today's evidence, runs the check, and
+    writes verification-{day}.json. Never raises; the brief is already delivered."""
+    try:
+        evidence = load_evidence(today)
+        if not evidence.strip():
+            log.info(f"Claim verify: no evidence for {today}; skipping")
+            return
+        record = verify_claims(brief_text, evidence, today, call=call)
+        if record is not None:
+            save_verification(record, today)
+            log.info(
+                f"Claim verify {today}: {record['n_claims']} claims, "
+                f"{record['counts_by_verdict']}"
+            )
+    except Exception as e:
+        log.warning(f"Claim verification skipped (brief unaffected): {e}")

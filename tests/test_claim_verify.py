@@ -160,3 +160,95 @@ def test_parse_verify_response_no_tool_block_raises():
 
     with pytest.raises(ValueError):
         cv.parse_verify_response({"content": [{"type": "text", "text": "hi"}]})
+
+
+def test_verification_record_counts_verdicts():
+    claims = [
+        {"claim": "a", "verdict": "supported"},
+        {"claim": "b", "verdict": "unsupported"},
+        {"claim": "c", "verdict": "contradicted"},
+    ]
+    rec = cv._verification_record("2026-06-26", True, claims)
+    assert rec["date"] == "2026-06-26"
+    assert rec["model"] == cv.VERIFY_MODEL
+    assert rec["top_stories_present"] is True
+    assert rec["n_claims"] == 3
+    assert rec["counts_by_verdict"]["supported"] == 1
+    assert rec["counts_by_verdict"]["unsupported"] == 1
+    assert rec["counts_by_verdict"]["contradicted"] == 1
+    assert rec["counts_by_verdict"]["overstated"] == 0
+
+
+def test_verify_claims_absent_top_stories_records_empty():
+    rec = cv.verify_claims(
+        "<b>📈 MARKET PULSE</b>\n- x",
+        "SOURCE: R",
+        "2026-06-26",
+        call=lambda payload: (_ for _ in ()).throw(AssertionError("should not call")),
+    )
+    assert rec["top_stories_present"] is False
+    assert rec["n_claims"] == 0
+
+
+def test_verify_claims_happy_path_uses_injected_call():
+    def fake_call(payload):
+        return _tool_resp([{"claim": "Rates held", "verdict": "supported"}])
+
+    rec = cv.verify_claims(
+        "<b>🌍 TOP STORIES</b>\n- Rates held.",
+        "SOURCE: R\n- Rates held",
+        "2026-06-26",
+        call=fake_call,
+    )
+    assert rec["top_stories_present"] is True
+    assert rec["n_claims"] == 1
+    assert rec["claims"][0]["claim"] == "Rates held"
+
+
+def test_verify_claims_returns_none_on_call_failure():
+    def boom(payload):
+        raise RuntimeError("api down")
+
+    rec = cv.verify_claims(
+        "<b>🌍 TOP STORIES</b>\n- x", "SOURCE: R", "2026-06-26", call=boom
+    )
+    assert rec is None
+
+
+def test_run_verification_writes_record_when_evidence_present(tmp_path, monkeypatch):
+    import json
+
+    monkeypatch.setattr(cv, "DATA_DIR", tmp_path)
+    cv.save_evidence("SOURCE: R\n- Rates held", "2026-06-26")
+
+    def fake_call(payload):
+        return _tool_resp([{"claim": "Rates held", "verdict": "supported"}])
+
+    cv.run_verification(
+        "<b>🌍 TOP STORIES</b>\n- Rates held.", "2026-06-26", call=fake_call
+    )
+    rec = json.loads((tmp_path / "verification-2026-06-26.json").read_text())
+    assert rec["n_claims"] == 1
+
+
+def test_run_verification_skips_when_no_evidence(tmp_path, monkeypatch):
+    monkeypatch.setattr(cv, "DATA_DIR", tmp_path)
+    # no evidence file written
+    cv.run_verification(
+        "<b>🌍 TOP STORIES</b>\n- x",
+        "2026-06-26",
+        call=lambda p: (_ for _ in ()).throw(AssertionError("should not call")),
+    )
+    assert not (tmp_path / "verification-2026-06-26.json").exists()
+
+
+def test_run_verification_never_raises_on_bad_call(tmp_path, monkeypatch):
+    monkeypatch.setattr(cv, "DATA_DIR", tmp_path)
+    cv.save_evidence("SOURCE: R", "2026-06-26")
+    # must not raise, and must not write a record
+    cv.run_verification(
+        "<b>🌍 TOP STORIES</b>\n- x",
+        "2026-06-26",
+        call=lambda p: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    assert not (tmp_path / "verification-2026-06-26.json").exists()
