@@ -192,6 +192,15 @@ def test_prompt_has_fixed_spine_and_dynamic_instruction():
     assert "significan" in out.lower()  # dynamic-middle instruction present
 
 
+def test_top_stories_carry_why_it_matters_lens_and_watch_dedupes():
+    out = brief.build_daily_prompt(**_daily_kwargs()).lower()
+    # lens pointed at TOP STORIES (the "so what" in-line)
+    assert "so what" in out
+    assert "market channel" in out
+    # WATCH/FORWARD gains the anti-repetition guard
+    assert "not already covered in-line" in out
+
+
 def test_prompt_renders_market_block_when_supplied():
     out = brief.build_daily_prompt(
         market_block="### MARKET PULSE\n- S&P 500: +0.5%", **_daily_kwargs()

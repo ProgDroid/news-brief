@@ -1779,7 +1779,10 @@ Output only the HTML — no preamble, no sign-off, no code fences.
 Structure — a fixed spine with a dynamic middle:
 
 <b>🌍 TOP STORIES</b>
-- [3–5 bullets, only genuinely significant developments]
+- [3–5 bullets, only genuinely significant developments. For each, answer the "so what"
+  in tight prose: the non-obvious context the reader lacks, where it is heading and on
+  what timeframe, and the market channel it moves through. Only where warranted — never
+  a checklist, never padding.]
 
 <b>📈 MARKET PULSE — WHAT MOVED</b>
 [2–4 bullets: the notable moves above and the likely why. Flag any move NOT explained
@@ -1799,7 +1802,9 @@ by today's news as a potential early signal. Omit only if no market data was pro
   the signal direction. Omit the section entirely if nothing is materially relevant.]
 
 <b>👁 WATCH / FORWARD</b>
-- [2–4 forward-looking things to monitor in the next 24–72h that could move markets]
+- [2–4 forward-looking things to monitor in the next 24–72h that could move markets.
+  Surface catalysts not already covered in-line above; do not repeat a forward-look you
+  have already stated in a TOP STORIES bullet.]
 
 Keep the entire brief under 600 words."""
 
