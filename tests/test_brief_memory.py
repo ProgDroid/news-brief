@@ -566,6 +566,27 @@ def test_build_source_index_handles_empty():
     assert brief.build_source_index("(no RSS content)", "(no web content)") == ""
 
 
+def test_parse_extracts_severity():
+    text = '[{"claim":"x","topic":"a","severity":"high"}]'
+    assert bm.parse_reconcile_response(text) == [
+        {"claim": "x", "topic": "a", "severity": "high"}
+    ]
+
+
+def test_parse_tolerates_bad_severity():
+    text = (
+        '[{"claim":"a"},'
+        '{"claim":"b","severity":"medium"},'
+        '{"claim":"c","severity":5},'
+        '{"claim":"d","severity":"HIGH"}]'
+    )
+    out = bm.parse_reconcile_response(text)
+    assert out[0] == {"claim": "a"}  # absent -> omitted
+    assert out[1] == {"claim": "b"}  # invalid enum -> omitted
+    assert out[2] == {"claim": "c"}  # non-string -> omitted
+    assert out[3] == {"claim": "d", "severity": "high"}  # case-normalized
+
+
 def test_source_index_save_load_roundtrip(tmp_path, monkeypatch):
     import brief
 

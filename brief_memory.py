@@ -261,6 +261,9 @@ def parse_reconcile_response(text: str) -> list[dict]:
             sc = _coerce_source_count(item.get("source_count"))
             if sc is not None:
                 entry["source_count"] = sc
+            sev = _coerce_severity(item.get("severity"))
+            if sev is not None:
+                entry["severity"] = sev
             out.append(entry)
     return out
 
