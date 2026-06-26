@@ -1529,6 +1529,19 @@ def mode_paper():
         log.info(f"Opened {opened} paper position(s)")
 
 
+def _snap_close(closes: dict[str, float], target_date: str) -> float | None:
+    """Close on the last trading day on/before target_date (None if none <= target).
+
+    Lexical comparison is valid for ISO YYYY-MM-DD. Snaps a weekend/holiday
+    crossing date back to the prior available close; returns None when the map is
+    empty or every date is after target (target precedes available history).
+    """
+    candidates = [d for d in closes if d <= target_date]
+    if not candidates:
+        return None
+    return closes[max(candidates)]
+
+
 def _record_checkpoints(
     p: dict, today_str: str, price: float, ret: float, days_open: int
 ):
