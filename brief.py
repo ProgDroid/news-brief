@@ -251,6 +251,57 @@ RSS_FEEDS = [
         "kind": "regional",
         "perspective": "CHINESE",
     },
+    # ── Perspective-matrix completion (added 2026-06-26, borrow-backlog #4) ────
+    {
+        "name": "TASS",
+        # verified 100 entries 2026-06-26
+        "url": "https://tass.com/rss/v2.xml",
+        "category": "russia",
+        "kind": "regional",
+        "perspective": "RUSSIAN",
+        "state_funded": True,
+    },
+    {
+        "name": "Meduza",
+        # verified 30 entries 2026-06-26
+        "url": "https://meduza.io/rss/en/all",
+        "category": "russia",
+        "kind": "regional",
+        "perspective": "RUSSIAN",
+    },
+    {
+        "name": "Press TV",
+        # verified 107 entries 2026-06-26
+        "url": "https://www.presstv.ir/rss.xml",
+        "category": "mideast",
+        "kind": "regional",
+        "perspective": "IRANIAN",
+        "state_funded": True,
+    },
+    {
+        "name": "IranWire",
+        # verified 473 entries 2026-06-26
+        "url": "https://iranwire.com/en/feed/",
+        "category": "mideast",
+        "kind": "regional",
+        "perspective": "IRANIAN",
+    },
+    {
+        "name": "Times of Israel",
+        # verified 15 entries 2026-06-26
+        "url": "https://www.timesofisrael.com/feed/",
+        "category": "mideast",
+        "kind": "regional",
+        "perspective": "ISRAELI",
+    },
+    {
+        "name": "The Hindu",
+        # verified 60 entries 2026-06-26
+        "url": "https://www.thehindu.com/feeder/default.rss",
+        "category": "india",
+        "kind": "regional",
+        "perspective": "INDIAN",
+    },
 ]
 
 # Always-on direct-page sources baked into the image, fetched via
