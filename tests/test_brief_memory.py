@@ -579,3 +579,43 @@ def test_load_source_index_missing_returns_empty(tmp_path, monkeypatch):
 
     monkeypatch.setattr(brief, "DATA_DIR", tmp_path)
     assert brief.load_source_index("2099-01-01") == ""
+
+
+# ---------------------------------------------------------------------------
+# Task 1: severity constants and helpers
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("low", "low"),
+        ("normal", "normal"),
+        ("high", "high"),
+        ("HIGH", "high"),
+        ("  High ", "high"),
+        ("medium", None),
+        ("", None),
+        (None, None),
+        (2, None),
+        (True, None),
+    ],
+)
+def test_coerce_severity(raw, expected):
+    assert bm._coerce_severity(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "sev,expected",
+    [("high", 7), ("normal", 0), ("low", 0), (None, 0), ("bogus", 0)],
+)
+def test_ttl_bonus(sev, expected):
+    assert bm._ttl_bonus(sev) == expected
+
+
+@pytest.mark.parametrize(
+    "sev,expected",
+    [("high", 2), ("normal", 1), ("low", 0), (None, 1), ("bogus", 1)],
+)
+def test_severity_rank(sev, expected):
+    assert bm._severity_rank(sev) == expected

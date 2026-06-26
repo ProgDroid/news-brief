@@ -16,6 +16,10 @@ from common import ANTHROPIC_HEADERS, DATA_DIR, _write_json_atomic, log
 BRIEF_MEMORY_FILE = DATA_DIR / "brief_memory.json"
 MAX_CLAIMS = 25
 RETIRE_AFTER_DAYS = 7
+HIGH_SEVERITY_BONUS_DAYS = 7  # extra retention days a "high" claim earns (=> 14d TTL)
+_SEVERITY_RANK = {"low": 0, "normal": 1, "high": 2}  # cap-eviction ordering
+_VALID_SEVERITY = frozenset(_SEVERITY_RANK)
+_DEFAULT_SEVERITY = "normal"
 RECONCILE_MODEL = "claude-haiku-4-5-20251001"
 # A full MAX_CLAIMS ledger serialises to ~2400 output tokens, so the old 2048
 # budget truncated the JSON array before its closing "]" — the parser then
@@ -200,6 +204,26 @@ def build_reconcile_prompt(
         max_claims=MAX_CLAIMS,
         source_index=source_index.strip() or "(no source index available)",
     )
+
+
+def _coerce_severity(v) -> str | None:
+    """Canonical severity ('low'/'normal'/'high'), or None to omit/default to normal.
+    Case-insensitive; anything non-string or outside the enum returns None."""
+    if isinstance(v, str):
+        s = v.strip().lower()
+        if s in _VALID_SEVERITY:
+            return s
+    return None
+
+
+def _ttl_bonus(severity) -> int:
+    """Extra retention days a claim's severity buys. Only 'high' extends life."""
+    return HIGH_SEVERITY_BONUS_DAYS if severity == "high" else 0
+
+
+def _severity_rank(severity) -> int:
+    """Cap-eviction ordering: high > normal > low; unknown/missing -> normal."""
+    return _SEVERITY_RANK.get(severity, _SEVERITY_RANK[_DEFAULT_SEVERITY])
 
 
 def _coerce_source_count(v) -> int | None:
