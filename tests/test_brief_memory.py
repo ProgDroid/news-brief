@@ -302,6 +302,13 @@ def test_reconcile_prompt_bounds_output_size():
     assert f"at most {bm.MAX_CLAIMS}" in p
 
 
+def test_reconcile_prompt_teaches_severity():
+    p = bm.build_reconcile_prompt({"version": 1, "claims": []}, "brief")
+    assert "severity" in p
+    assert '"high"' in p
+    assert "when unsure" in p.lower()
+
+
 def test_part_a_feeds_back_beyond_2000_chars():
     import brief
 

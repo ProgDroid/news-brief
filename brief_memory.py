@@ -151,9 +151,14 @@ brief. Rules:
   SOURCE HEADLINES (the "SOURCE:" blocks) whose headline supports that fact. Count
   outlets, not headlines. Use 0 when the fact is not covered in today's headlines,
   when no source headlines are provided, or when you are unsure.
+- For each fact, set "severity" to one of "low", "normal", or "high". "high" =
+  a major standing development the reader must not have re-explained (wars,
+  leadership or regime changes, major policy-regime shifts, market-structural
+  events); "normal" = a typical durable fact (use this by default); "low" = a
+  true but minor, low-stakes detail. When unsure, use "normal".
 - Return at most {max_claims} items — keep only the most important durable facts,
   and keep each "claim" to one terse sentence (no more than ~30 words).
-Each array item: {{"id": "<existing id, omit if new>", "claim": "<short fact>", "topic": "<short label>", "source_count": <integer>}}.
+Each array item: {{"id": "<existing id, omit if new>", "claim": "<short fact>", "topic": "<short label>", "source_count": <integer>, "severity": "<low|normal|high>"}}.
 Output the JSON array and nothing else.
 
 CURRENT memory:
