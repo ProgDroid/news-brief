@@ -302,6 +302,21 @@ RSS_FEEDS = [
         "kind": "regional",
         "perspective": "INDIAN",
     },
+    # ── Energy / commodities starter (added 2026-06-26, borrow-backlog #4) ─────
+    {
+        "name": "OilPrice.com",
+        # verified 15 entries 2026-06-26
+        "url": "https://oilprice.com/rss/main",
+        "category": "energy",
+        "kind": "wire",
+    },
+    {
+        "name": "EIA Today in Energy",
+        # verified 22 entries 2026-06-26
+        "url": "https://www.eia.gov/rss/todayinenergy.xml",
+        "category": "energy",
+        "kind": "primary",
+    },
 ]
 
 # Always-on direct-page sources baked into the image, fetched via

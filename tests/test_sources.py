@@ -23,3 +23,11 @@ def test_rss_feeds_well_formed():
         assert isinstance(f.get("state_funded", False), bool), (
             f"bad state_funded: {f['name']}"
         )
+
+
+def test_energy_category_present():
+    energy = [f for f in brief.RSS_FEEDS if f["category"] == "energy"]
+    assert len(energy) >= 2, "energy starter not added"
+    assert all(f.get("perspective") is None for f in energy), (
+        "energy feeds carry no vantage"
+    )
