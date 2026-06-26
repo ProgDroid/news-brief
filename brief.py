@@ -321,10 +321,13 @@ RSS_FEEDS = [
         "kind": "primary",
     },
     {
-        "name": "Reuters Commodities",
-        # Narrow /markets/commodities path indexes poorly (1 entry); the broader
-        # keyword query is the workable proxy. verified 100 entries 2026-06-26
-        "url": "https://news.google.com/rss/search?q=when:2d+commodities+site%3Areuters.com&hl=en-US&gl=US&ceid=US%3Aen",
+        "name": "Mining.com",
+        # Native RSS — metals/mining, diversifies the oil-heavy pair above.
+        # Chosen over a Reuters Google-News proxy: the /markets/commodities path
+        # has ~no items dated in the last 2-7d (when:2d=1), so only a stale
+        # (no-when) or loose keyword query gave volume — both rejected.
+        # verified 36 entries 2026-06-26
+        "url": "https://www.mining.com/feed/",
         "category": "commodities",
         "kind": "wire",
     },
