@@ -695,3 +695,142 @@ def test_merge_reaffirm_keeps_severity_when_invalid():
         "2026-06-24",
     )
     assert out["claims"][0]["severity"] == "high"  # garbage must not demote
+
+
+# ---------------------------------------------------------------------------
+# Task 3: severity-aware retention (effective-age TTL filter + cap sort)
+# ---------------------------------------------------------------------------
+
+
+def test_high_severity_survives_to_14_days():
+    prior = {
+        "version": 1,
+        "claims": [
+            {
+                "id": "c-0001",
+                "claim": "war",
+                "topic": "geo",
+                "first_seen": "2026-06-01",
+                "last_reaffirmed": "2026-06-10",  # exactly 14 days before 06-24
+                "restate_count": 1,
+                "severity": "high",
+            }
+        ],
+    }
+    out = bm.merge_ledger(prior, [], "2026-06-24")
+    assert [c["id"] for c in out["claims"]] == ["c-0001"]
+
+
+def test_high_severity_retires_after_14_days():
+    prior = {
+        "version": 1,
+        "claims": [
+            {
+                "id": "c-0001",
+                "claim": "war",
+                "topic": "geo",
+                "first_seen": "2026-06-01",
+                "last_reaffirmed": "2026-06-09",  # 15 days before 06-24
+                "restate_count": 1,
+                "severity": "high",
+            }
+        ],
+    }
+    out = bm.merge_ledger(prior, [], "2026-06-24")
+    assert out["claims"] == []
+
+
+def test_normal_severity_still_retires_at_7_days():
+    prior = {
+        "version": 1,
+        "claims": [
+            {
+                "id": "c-0001",
+                "claim": "minor",
+                "topic": "x",
+                "first_seen": "2026-06-01",
+                "last_reaffirmed": "2026-06-16",  # 8 days before 06-24
+                "restate_count": 1,
+                "severity": "normal",
+            }
+        ],
+    }
+    out = bm.merge_ledger(prior, [], "2026-06-24")
+    assert out["claims"] == []
+
+
+def test_missing_severity_treated_as_normal_for_retention():
+    # legacy claim with no severity field retires at the normal 7-day TTL
+    prior = {
+        "version": 1,
+        "claims": [
+            {
+                "id": "c-0001",
+                "claim": "legacy",
+                "topic": "x",
+                "first_seen": "2026-06-01",
+                "last_reaffirmed": "2026-06-16",  # 8 days -> past normal TTL
+                "restate_count": 1,
+            }  # no severity field
+        ],
+    }
+    out = bm.merge_ledger(prior, [], "2026-06-24")
+    assert out["claims"] == []
+
+
+def test_cap_keeps_high_severity_over_fresher_normal():
+    prior = {
+        "version": 1,
+        "claims": [
+            {
+                "id": "c-0001",
+                "claim": "old major war",
+                "topic": "geo",
+                "first_seen": "2026-06-18",
+                "last_reaffirmed": "2026-06-20",  # older
+                "restate_count": 1,
+                "severity": "high",
+            },
+            {
+                "id": "c-0002",
+                "claim": "fresh trivia",
+                "topic": "x",
+                "first_seen": "2026-06-24",
+                "last_reaffirmed": "2026-06-24",  # fresher
+                "restate_count": 1,
+                "severity": "normal",
+            },
+        ],
+    }
+    out = bm.merge_ledger(prior, [], "2026-06-24", cap=1)
+    assert [c["id"] for c in out["claims"]] == ["c-0001"]
+
+
+def test_cap_orders_by_severity_then_recency():
+    def mk(cid, day, sev):
+        return {
+            "id": cid,
+            "claim": cid,
+            "topic": "x",
+            "first_seen": day,
+            "last_reaffirmed": day,
+            "restate_count": 1,
+            "severity": sev,
+        }
+
+    prior = {
+        "version": 1,
+        "claims": [
+            mk("c-low", "2026-06-24", "low"),  # freshest but lowest rank
+            mk("c-normA", "2026-06-22", "normal"),
+            mk("c-normB", "2026-06-23", "normal"),
+            mk("c-high", "2026-06-20", "high"),  # oldest but highest rank
+        ],
+    }
+    out = bm.merge_ledger(prior, [], "2026-06-24", retire_after_days=999)
+    assert [c["id"] for c in out["claims"]] == [
+        "c-high",
+        "c-normB",
+        "c-normA",
+        "c-low",
+    ]

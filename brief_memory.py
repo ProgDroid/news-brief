@@ -119,9 +119,14 @@ def merge_ledger(
     result = [
         c
         for c in result
-        if _days_between(c["last_reaffirmed"], today) <= retire_after_days
+        if _days_between(c["last_reaffirmed"], today) - _ttl_bonus(c.get("severity"))
+        <= retire_after_days
     ]
-    result.sort(key=lambda c: c["last_reaffirmed"], reverse=True)
+    # Cap eviction honors severity first (high > normal > low), then recency.
+    result.sort(
+        key=lambda c: (_severity_rank(c.get("severity")), c["last_reaffirmed"]),
+        reverse=True,
+    )
     return {"version": 1, "claims": result[:cap]}
 
 
