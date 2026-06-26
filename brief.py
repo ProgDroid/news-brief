@@ -97,6 +97,12 @@ from brief_memory import (
     render_established_block,
     save_ledger,
 )
+from claim_verify import (
+    build_source_evidence,
+    is_enabled as claim_verify_enabled,
+    run_verification,
+    save_evidence as save_claim_evidence,
+)
 
 
 # Chroma MCP HTTP endpoint
@@ -2469,6 +2475,11 @@ def mode_submit():
             save_source_index(build_source_index(feed_content, web_content), today)
         except Exception as e:
             log.warning(f"Source index persist skipped (brief unaffected): {e}")
+    if claim_verify_enabled():
+        try:
+            save_claim_evidence(build_source_evidence(feed_content, web_content), today)
+        except Exception as e:
+            log.warning(f"Claim evidence persist skipped (brief unaffected): {e}")
 
     fb = load_feedback()
     chroma_context = build_chroma_context(fb)
@@ -2581,6 +2592,11 @@ def mode_collect():
                 )
             except Exception as e:
                 log.error(f"Brief-memory reconcile skipped (brief unaffected): {e}")
+        if claim_verify_enabled():
+            try:
+                run_verification(brief, today)
+            except Exception as e:
+                log.error(f"Claim verification skipped (brief unaffected): {e}")
         clear_batch_state()
         # Trading stage runs AFTER clear_batch_state and is isolated: a matcher /
         # PolyGram / Claude failure must never re-collect and duplicate the brief.

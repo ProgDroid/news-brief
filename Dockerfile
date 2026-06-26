@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY common.py trading.py validation.py brief.py brief_memory.py .
+COPY common.py trading.py validation.py brief.py brief_memory.py claim_verify.py .
 COPY enrichment/ ./enrichment/
 
 # Logs and brief archive persist via volume mount. Run as a real non-root user
