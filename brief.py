@@ -2677,32 +2677,6 @@ def mode_weekly():
     log.info("Paper book marked to market")
 
 
-def mode_run():
-    """Synchronous submit + collect for testing."""
-    log.info("=== RUN (sync) ===")
-    mode_submit()
-    state = load_state() or {}
-    batch_id = state.get("batch_id")
-    if batch_id:
-        raw = poll_batch(batch_id, max_wait_secs=3600)
-        if raw:
-            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            brief = raw.strip()
-            deliver(
-                brief,
-                header=f"🌐 <b>Morning Brief — {datetime.now(timezone.utc).strftime('%d %b %Y')}</b>",
-                archive_path=BRIEFS_DIR / f"brief-{today}.md",
-            )
-            raw_signals, status = extract_signals(brief)
-            signals, dropped = normalize_signals(raw_signals)
-            if dropped or status != "ok":
-                log.warning(f"Signals: status={status}, dropped={dropped}")
-            signals = annotate_signal_sources(signals)
-            save_signals(signals, today, status=status, dropped=dropped)
-            mode_paper()
-            clear_batch_state()
-
-
 # Bot command menu (Telegram autocomplete). Registered automatically by the
 # daemon; keep in sync with the handlers in _handle_telegram_update and HELP_TEXT.
 BOT_COMMANDS = [
@@ -2808,12 +2782,11 @@ if __name__ == "__main__":
         print(f"Missing required environment variables: {', '.join(missing)}")
         sys.exit(1)
 
-    mode = sys.argv[1] if len(sys.argv) > 1 else "run"
+    mode = sys.argv[1] if len(sys.argv) > 1 else ""
     dispatch = {
         "submit": mode_submit,
         "collect": mode_collect,
         "weekly": mode_weekly,
-        "run": mode_run,
         "commands": mode_commands,
         "paper": mode_paper,
         "monitor": mode_monitor,
@@ -2829,5 +2802,5 @@ if __name__ == "__main__":
             telegram_alert(f"{mode} crashed: {type(e).__name__}: {e}")
             sys.exit(1)
     else:
-        print("Usage: brief.py [submit|collect|weekly|run|commands|monitor]")
+        print("Usage: brief.py [submit|collect|weekly|paper|commands|monitor]")
         sys.exit(1)

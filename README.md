@@ -46,7 +46,6 @@ The script is a single file (`brief.py`) with several modes, driven by cron:
 | `weekly` | Synthesise the last 7 briefs; mark the paper book to market + post the performance report | `0 21 * * 0` (Sun) |
 | `commands` | **Long-running bot daemon** — real-time Telegram commands + buttons (long polling). Run as a service, not cron. | `docker compose up -d` |
 | `monitor` | Hourly cross-asset volume-anomaly alerts | `0 * * * *` |
-| `run` | `submit` + `collect` synchronously — for testing | — |
 | `paper` | Open paper positions from today's signals snapshot (also run automatically inside `collect`) | — |
 
 The submit→collect split uses the Batch API's cheaper async processing; the ~10h window between
@@ -218,8 +217,6 @@ cp .env.example .env
 
 ```bash
 docker build -t newsbrief .
-# Synchronous end-to-end test (submit + poll + deliver), ~30s–2min:
-docker run --rm --env-file .env -v "$PWD/logs:/app/logs" newsbrief run
 ```
 
 ### 5. Schedule
