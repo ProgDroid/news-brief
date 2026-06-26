@@ -115,3 +115,18 @@ def trim_signals_log(today: str, days: int) -> int:
         tmp.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
         os.replace(tmp, path)
     return dropped
+
+
+def run_retention(today: str, *, days=None) -> dict:
+    """Fail-safe entry for mode_collect. Deletes old dated files and trims the
+    signals log. days<=0 disables. Never raises; returns a summary dict."""
+    summary = {"deleted": 0, "trimmed_lines": 0}
+    try:
+        resolved = _resolve_days(days)
+        if resolved <= 0:
+            return summary
+        summary["deleted"] = prune_dated_files(today, resolved)
+        summary["trimmed_lines"] = trim_signals_log(today, resolved)
+    except Exception as e:
+        log.warning(f"Retention sweep skipped (brief unaffected): {e}")
+    return summary

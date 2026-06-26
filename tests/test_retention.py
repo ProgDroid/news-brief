@@ -115,3 +115,33 @@ def test_trim_nothing_old_leaves_file_intact(tmp_path, monkeypatch):
     p.write_text(json.dumps({"date": "2026-06-25"}) + "\n")
     assert rt.trim_signals_log("2026-06-26", 90) == 0
     assert "2026-06-25" in p.read_text()
+
+
+def test_run_retention_disabled_when_days_zero(tmp_path, monkeypatch):
+    monkeypatch.setattr(rt, "DATA_DIR", tmp_path)
+    _touch(tmp_path / "source_index-2020-01-01.json")
+    out = rt.run_retention("2026-06-26", days=0)
+    assert out == {"deleted": 0, "trimmed_lines": 0}
+    assert (tmp_path / "source_index-2020-01-01.json").exists()  # nothing deleted
+
+
+def test_run_retention_happy_counts(tmp_path, monkeypatch):
+    monkeypatch.setattr(rt, "DATA_DIR", tmp_path)
+    _touch(tmp_path / "source_index-2020-01-01.json")  # very old -> delete
+    sig = tmp_path / "signals"
+    sig.mkdir(parents=True)
+    (sig / "signals-log.jsonl").write_text(json.dumps({"date": "2020-01-01"}) + "\n")
+    out = rt.run_retention("2026-06-26", days=90)
+    assert out["deleted"] == 1
+    assert out["trimmed_lines"] == 1
+
+
+def test_run_retention_fail_safe_never_raises(tmp_path, monkeypatch):
+    monkeypatch.setattr(rt, "DATA_DIR", tmp_path)
+
+    def boom(*a, **k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(rt, "prune_dated_files", boom)
+    out = rt.run_retention("2026-06-26", days=90)  # must not raise
+    assert out == {"deleted": 0, "trimmed_lines": 0}
