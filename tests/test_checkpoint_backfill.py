@@ -258,3 +258,60 @@ def test_has_new_crossing():
     p2 = _equity_pos(checkpoints={"1w": {}})
     assert trading._has_new_crossing(p2, 10) is False  # 1w recorded, 2w not yet (14)
     assert trading._has_new_crossing(p2, 14) is True
+
+
+def test_mtm_records_historical_1w_checkpoint(monkeypatch):
+    # Entered 2026-06-01, marking 2026-06-11 (10 days open -> 1w crossed).
+    monkeypatch.setattr(trading, "price_position", lambda p: 130.0)
+    monkeypatch.setattr(
+        trading,
+        "historical_closes",
+        lambda ac, inst, s, e: {"2026-06-08": 110.0},
+    )
+    book = {"positions": [_equity_pos()]}
+    out = trading.mark_to_market(book, "2026-06-11")
+    cp = out["positions"][0]["checkpoints"]["1w"]
+    assert cp["price"] == 110.0
+    assert cp["price_basis"] == "historical"
+    assert cp["return"] == pytest.approx(0.10)
+
+
+def test_mtm_fetch_miss_falls_back_to_current(monkeypatch):
+    monkeypatch.setattr(trading, "price_position", lambda p: 130.0)
+    monkeypatch.setattr(trading, "historical_closes", lambda ac, inst, s, e: {})
+    out = trading.mark_to_market({"positions": [_equity_pos()]}, "2026-06-11")
+    cp = out["positions"][0]["checkpoints"]["1w"]
+    assert cp["price"] == 130.0
+    assert cp["price_basis"] == "current"
+
+
+def test_mtm_4w_cross_closes_with_historical_realized_return(monkeypatch):
+    # Entered 2026-06-01, marking 2026-07-01 (30 days -> 1w/2w/4w all crossed).
+    monkeypatch.setattr(trading, "price_position", lambda p: 200.0)
+    monkeypatch.setattr(
+        trading,
+        "historical_closes",
+        lambda ac, inst, s, e: {
+            "2026-06-08": 110.0,  # 1w
+            "2026-06-15": 120.0,  # 2w
+            "2026-06-29": 150.0,  # 4w (crossing date 2026-06-29)
+        },
+    )
+    out = trading.mark_to_market({"positions": [_equity_pos()]}, "2026-07-01")
+    pos = out["positions"][0]
+    assert pos["status"] == "closed"
+    assert pos["close_reason"] == "horizon"
+    assert pos["realized_return"] == pytest.approx(0.50)  # historical 4w 100->150
+    assert pos["checkpoints"]["4w"]["price_basis"] == "historical"
+
+
+def test_mtm_no_crossing_skips_fetch(monkeypatch):
+    # Entered 2026-06-01, marking 2026-06-04 (3 days -> nothing crossed).
+    monkeypatch.setattr(trading, "price_position", lambda p: 105.0)
+
+    def _no_fetch(*a, **k):
+        raise AssertionError("must not fetch history when nothing crossed")
+
+    monkeypatch.setattr(trading, "historical_closes", _no_fetch)
+    out = trading.mark_to_market({"positions": [_equity_pos()]}, "2026-06-04")
+    assert out["positions"][0]["checkpoints"] == {}

@@ -1735,7 +1735,17 @@ def mark_to_market(book: dict, today_str: str) -> dict:
         ret = _signal_return(p["direction"], p["entry_price"], price)
         p["last_mark"] = {"date": today_str, "price": price, "return": ret}
         days_open = (today - datetime.strptime(p["entry_date"], "%Y-%m-%d").date()).days
-        _record_checkpoints(p, today_str, price, ret, days_open, {})
+        closes = (
+            historical_closes(
+                p.get("asset_class", "equity"),
+                p["instrument"],
+                p["entry_date"],
+                today_str,
+            )
+            if _has_new_crossing(p, days_open)
+            else {}
+        )
+        _record_checkpoints(p, today_str, price, ret, days_open, closes)
         if PAPER_CLOSE_HORIZON in p["checkpoints"]:
             p["status"] = "closed"
             p["close_reason"] = "horizon"
