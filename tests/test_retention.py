@@ -1,3 +1,4 @@
+import json
 
 import retention as rt
 
@@ -70,3 +71,47 @@ def test_prune_deletes_old_keeps_recent_undateable_and_boundary(tmp_path, monkey
 def test_prune_missing_dirs_no_error(tmp_path, monkeypatch):
     monkeypatch.setattr(rt, "DATA_DIR", tmp_path)  # no subdirs exist
     assert rt.prune_dated_files("2026-06-26", 90) == 0
+
+
+def test_trim_drops_old_keeps_recent_malformed_and_nodate(tmp_path, monkeypatch):
+    monkeypatch.setattr(rt, "DATA_DIR", tmp_path)
+    sig = tmp_path / "signals"
+    sig.mkdir(parents=True)
+    log_path = sig / "signals-log.jsonl"
+    log_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"ticker": "OLD", "date": "2026-01-01"}),  # old -> drop
+                json.dumps({"ticker": "NEW", "date": "2026-06-25"}),  # recent -> keep
+                json.dumps({"ticker": "NODATE"}),  # no date -> keep
+                "{not valid json",  # malformed -> keep
+            ]
+        )
+        + "\n"
+    )
+    dropped = rt.trim_signals_log("2026-06-26", 90)
+    assert dropped == 1
+    remaining = log_path.read_text()
+    assert "OLD" not in remaining
+    assert "NEW" in remaining
+    assert "NODATE" in remaining
+    assert "not valid json" in remaining
+    # file is still valid: every non-empty line that is JSON parses
+    for line in remaining.splitlines():
+        if line.strip() and not line.startswith("{not"):
+            json.loads(line)
+
+
+def test_trim_absent_file_no_op(tmp_path, monkeypatch):
+    monkeypatch.setattr(rt, "DATA_DIR", tmp_path)
+    assert rt.trim_signals_log("2026-06-26", 90) == 0
+
+
+def test_trim_nothing_old_leaves_file_intact(tmp_path, monkeypatch):
+    monkeypatch.setattr(rt, "DATA_DIR", tmp_path)
+    sig = tmp_path / "signals"
+    sig.mkdir(parents=True)
+    p = sig / "signals-log.jsonl"
+    p.write_text(json.dumps({"date": "2026-06-25"}) + "\n")
+    assert rt.trim_signals_log("2026-06-26", 90) == 0
+    assert "2026-06-25" in p.read_text()

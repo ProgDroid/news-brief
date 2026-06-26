@@ -6,6 +6,7 @@ the tail of mode_collect. Window via NEWSBRIEF_RETENTION_DAYS (default 90);
 days <= 0 disables. Targets ONLY date-bearing filenames, so bounded-state files
 (book.json, brief_memory.json, feedback.json, ...) are structurally untouched."""
 
+import json
 import os
 import re
 from datetime import datetime, timedelta
@@ -82,3 +83,35 @@ def prune_dated_files(today: str, days: int) -> int:
         except Exception as e:
             log.warning(f"Retention: family {directory}/{pattern} skipped: {e}")
     return deleted
+
+
+def trim_signals_log(today: str, days: int) -> int:
+    """Trim signals-log.jsonl to lines whose 'date' is within the window. Lines
+    with no parseable date are KEPT (keep-on-doubt). Atomic rewrite only when at
+    least one line is dropped. Returns the number of lines dropped."""
+    path = DATA_DIR / "signals" / "signals-log.jsonl"
+    if not path.exists():
+        return 0
+    cutoff = _cutoff(today, days)
+    kept: list[str] = []
+    dropped = 0
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        keep = True
+        try:
+            rec = json.loads(line)
+            d = _file_date(str(rec.get("date", "")))
+            if d is not None and d < cutoff:
+                keep = False
+        except Exception:
+            keep = True  # unparseable line -> keep
+        if keep:
+            kept.append(line)
+        else:
+            dropped += 1
+    if dropped:
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+        os.replace(tmp, path)
+    return dropped
