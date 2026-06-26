@@ -94,3 +94,69 @@ def test_extract_top_stories_ignores_inline_bold_in_bullets():
     out = cv.extract_top_stories(brief)
     assert "inline" in out
     assert "out" not in out
+
+
+def _tool_resp(claims):
+    return {
+        "content": [
+            {
+                "type": "tool_use",
+                "name": "emit_claim_checks",
+                "input": {"claims": claims},
+            }
+        ]
+    }
+
+
+def test_build_verify_request_forces_the_tool():
+    req = cv.build_verify_request("<b>🌍 TOP STORIES</b>\n- x", "SOURCE: R\n- x")
+    assert req["model"] == cv.VERIFY_MODEL
+    assert req["tool_choice"] == {"type": "tool", "name": "emit_claim_checks"}
+    assert req["tools"][0]["name"] == "emit_claim_checks"
+    body = req["messages"][0]["content"]
+    assert "TOP STORIES" in body and "SOURCE: R" in body
+
+
+def test_parse_verify_response_keeps_valid_claims():
+    resp = _tool_resp(
+        [
+            {
+                "claim": "Rates held at 4.5%",
+                "verdict": "supported",
+                "evidence": "- Central bank holds rates",
+                "reason": "matches headline",
+            },
+            {
+                "claim": "War declared",
+                "verdict": "unsupported",
+                "evidence": "",
+                "reason": "no source",
+            },
+        ]
+    )
+    out = cv.parse_verify_response(resp)
+    assert len(out) == 2
+    assert out[0]["verdict"] == "supported"
+    assert out[1]["verdict"] == "unsupported"
+    assert out[0]["evidence"] == "- Central bank holds rates"
+
+
+def test_parse_verify_response_drops_invalid_verdict_and_empty_claim():
+    resp = _tool_resp(
+        [
+            {"claim": "ok claim", "verdict": "made-up"},  # bad verdict -> drop
+            {"claim": "", "verdict": "supported"},  # empty claim -> drop
+            {"verdict": "supported"},  # no claim -> drop
+            {"claim": "good", "verdict": "CONTRADICTED"},  # case-insensitive -> keep
+        ]
+    )
+    out = cv.parse_verify_response(resp)
+    assert len(out) == 1
+    assert out[0] == {"claim": "good", "verdict": "contradicted"}
+
+
+def test_parse_verify_response_no_tool_block_raises():
+    import pytest
+
+    with pytest.raises(ValueError):
+        cv.parse_verify_response({"content": [{"type": "text", "text": "hi"}]})

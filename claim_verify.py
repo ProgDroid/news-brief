@@ -94,3 +94,131 @@ def extract_top_stories(brief_text: str) -> str:
             break
         out.append(line)
     return "\n".join(out).strip()
+
+
+_VERIFY_TOOL = {
+    "name": "emit_claim_checks",
+    "description": (
+        "Record every significant factual claim in the brief section, each with a "
+        "grounding verdict judged ONLY against the provided sources."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "claims": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "claim": {
+                            "type": "string",
+                            "description": "the factual assertion, quoted or closely "
+                            "paraphrased from the brief section",
+                        },
+                        "verdict": {
+                            "type": "string",
+                            "enum": [
+                                "supported",
+                                "unsupported",
+                                "contradicted",
+                                "overstated",
+                                "unverifiable",
+                            ],
+                            "description": "supported = a source line backs it; "
+                            "unsupported = no related source line at all; "
+                            "contradicted = a source says the opposite; "
+                            "overstated = a source backs the gist but not the "
+                            "specifics (magnitude/precision); unverifiable = "
+                            "analytical or forward-looking, not a hard factual claim",
+                        },
+                        "evidence": {
+                            "type": "string",
+                            "description": "the source line that supports or "
+                            "contradicts the claim; empty string if none",
+                        },
+                        "reason": {"type": "string", "description": "one terse clause"},
+                    },
+                    "required": ["claim", "verdict"],
+                },
+            }
+        },
+        "required": ["claims"],
+    },
+}
+
+_VERIFY_SYSTEM = (
+    "You verify whether each significant factual claim in a daily market brief's "
+    "lead section is supported by the source material the brief was written from. "
+    "You are NOT checking against the outside world or your own knowledge — only "
+    "against the provided sources. Judge conservatively and assign a verdict to "
+    "every claim."
+)
+
+_VERIFY_USER_TEMPLATE = """Below is the TOP STORIES section of today's brief and the \
+SOURCE MATERIAL it was written from (outlet-labelled headlines with summaries).
+
+Call emit_claim_checks with every significant factual claim in the TOP STORIES \
+section. For each claim, assign a verdict judged ONLY against the SOURCE MATERIAL \
+below — do not use outside knowledge. Mark analytical or forward-looking statements \
+(predictions, "may", "could", framing) as "unverifiable" rather than forcing a \
+supported/unsupported call.
+
+TOP STORIES:
+{top_stories}
+
+SOURCE MATERIAL:
+{evidence}
+"""
+
+
+def build_verify_request(top_stories: str, evidence: str) -> dict:
+    return {
+        "model": VERIFY_MODEL,
+        "max_tokens": VERIFY_MAX_TOKENS,
+        "system": _VERIFY_SYSTEM,
+        "tools": [_VERIFY_TOOL],
+        "tool_choice": {"type": "tool", "name": "emit_claim_checks"},
+        "messages": [
+            {
+                "role": "user",
+                "content": _VERIFY_USER_TEMPLATE.format(
+                    top_stories=top_stories, evidence=evidence
+                ),
+            }
+        ],
+    }
+
+
+def _coerce_verdict(v) -> str | None:
+    """Canonical verdict, or None if missing/unknown. Case-insensitive."""
+    if isinstance(v, str):
+        s = v.strip().lower()
+        if s in _VALID_VERDICTS:
+            return s
+    return None
+
+
+def parse_verify_response(resp: dict) -> list[dict]:
+    """Pull the claims list from the emit_claim_checks tool_use block. Drops items
+    with no claim text or an unknown verdict. Raises ValueError if the tool block is
+    absent (the fail-safe wrapper turns that into a skipped record)."""
+    for block in resp.get("content", []):
+        if block.get("type") == "tool_use" and block.get("name") == "emit_claim_checks":
+            claims = block.get("input", {}).get("claims")
+            if not isinstance(claims, list):
+                raise ValueError("emit_claim_checks input missing 'claims' list")
+            out = []
+            for item in claims:
+                if not isinstance(item, dict):
+                    continue
+                claim = item.get("claim")
+                verdict = _coerce_verdict(item.get("verdict"))
+                if not (isinstance(claim, str) and claim.strip()) or verdict is None:
+                    continue
+                entry = {"claim": claim.strip(), "verdict": verdict}
+                for k in ("evidence", "reason"):
+                    if isinstance(item.get(k), str) and item[k].strip():
+                        entry[k] = item[k].strip()
+                out.append(entry)
+            return out
+    raise ValueError("no emit_claim_checks tool_use block in response")
