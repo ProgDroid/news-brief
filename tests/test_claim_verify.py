@@ -252,3 +252,58 @@ def test_run_verification_never_raises_on_bad_call(tmp_path, monkeypatch):
         call=lambda p: (_ for _ in ()).throw(RuntimeError("boom")),
     )
     assert not (tmp_path / "verification-2026-06-26.json").exists()
+
+
+def test_summarize_verifications_aggregates(tmp_path, monkeypatch):
+    monkeypatch.setattr(cv, "DATA_DIR", tmp_path)
+    cv.save_verification(
+        cv._verification_record(
+            "2026-06-25",
+            True,
+            [
+                {"claim": "a", "verdict": "supported"},
+                {
+                    "claim": "b",
+                    "verdict": "contradicted",
+                    "evidence": "- src",
+                    "reason": "opp",
+                },
+            ],
+        ),
+        "2026-06-25",
+    )
+    cv.save_verification(
+        cv._verification_record(
+            "2026-06-26",
+            True,
+            [
+                {"claim": "c", "verdict": "unsupported"},
+                {"claim": "d", "verdict": "unverifiable"},
+            ],
+        ),
+        "2026-06-26",
+    )
+    # a malformed file must be ignored, not crash
+    (tmp_path / "verification-2026-06-27.json").write_text("{not json")
+
+    rep = cv.summarize_verifications(tmp_path)
+    assert rep["days"] == 2
+    assert rep["n_claims"] == 4
+    assert rep["totals_by_verdict"]["supported"] == 1
+    assert rep["totals_by_verdict"]["contradicted"] == 1
+    assert rep["totals_by_verdict"]["unsupported"] == 1
+    # flagged = unsupported + contradicted + overstated (NOT unverifiable/supported)
+    assert rep["flagged_total"] == 2
+    flagged_claims = {f["claim"] for f in rep["flagged"]}
+    assert flagged_claims == {"b", "c"}
+    assert any(
+        f["verdict"] == "contradicted" and f["date"] == "2026-06-25"
+        for f in rep["flagged"]
+    )
+
+
+def test_summarize_verifications_empty_dir(tmp_path):
+    rep = cv.summarize_verifications(tmp_path)
+    assert rep["days"] == 0
+    assert rep["n_claims"] == 0
+    assert rep["flag_rate"] == 0.0

@@ -306,3 +306,54 @@ def run_verification(brief_text: str, today: str, *, call=None) -> None:
             )
     except Exception as e:
         log.warning(f"Claim verification skipped (brief unaffected): {e}")
+
+
+def summarize_verifications(data_dir: Path = DATA_DIR) -> dict:
+    """Aggregate all verification-*.json into a decision-ready report for the pilot
+    gate. Headline metric is the flag breakdown (lead on `contradicted` — it is
+    confound-free; raw `unsupported` is confounded by the brief's own web search)."""
+    totals = {v: 0 for v in _VALID_VERDICTS}
+    n_claims = 0
+    days = 0
+    flagged: list[dict] = []
+    per_day: list[dict] = []
+    for p in sorted(data_dir.glob("verification-*.json")):
+        try:
+            rec = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(rec, dict):
+            continue
+        days += 1
+        counts = rec.get("counts_by_verdict", {}) or {}
+        for v in totals:
+            totals[v] += int(counts.get(v, 0) or 0)
+        n_claims += int(rec.get("n_claims", 0) or 0)
+        per_day.append(
+            {
+                "date": rec.get("date"),
+                "n_claims": rec.get("n_claims", 0),
+                "counts": counts,
+            }
+        )
+        for c in rec.get("claims", []) or []:
+            if isinstance(c, dict) and c.get("verdict") in _FLAG_VERDICTS:
+                flagged.append(
+                    {
+                        "date": rec.get("date"),
+                        "claim": c.get("claim"),
+                        "verdict": c.get("verdict"),
+                        "evidence": c.get("evidence", ""),
+                        "reason": c.get("reason", ""),
+                    }
+                )
+    flagged_total = sum(totals[v] for v in _FLAG_VERDICTS)
+    return {
+        "days": days,
+        "n_claims": n_claims,
+        "totals_by_verdict": totals,
+        "flagged_total": flagged_total,
+        "flag_rate": (flagged_total / n_claims) if n_claims else 0.0,
+        "flagged": flagged,
+        "per_day": per_day,
+    }
