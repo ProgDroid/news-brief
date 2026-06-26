@@ -102,3 +102,42 @@ def test_yahoo_closes_empty_result_returns_empty(monkeypatch):
         lambda *a, **k: _FakeJsonResp({"chart": {"result": None, "error": None}}),
     )
     assert trading._yahoo_closes("AAPL", "2026-06-01", "2026-06-03") == {}
+
+
+def _kraken_ohlc_payload(rows, pair_key="XXBTZUSD", error=None):
+    # rows: list of (date_str, close); Kraken row = [time,o,h,l,c,vwap,vol,count]
+    candles = [[_ts(d), "0", "0", "0", str(c), "0", "0", 0] for d, c in rows]
+    return {"error": error or [], "result": {pair_key: candles, "last": 0}}
+
+
+def test_kraken_closes_parses_series(monkeypatch):
+    rows = [("2026-06-01", 60000.0), ("2026-06-02", 61000.0)]
+    monkeypatch.setattr(
+        trading.requests,
+        "get",
+        lambda *a, **k: _FakeJsonResp(_kraken_ohlc_payload(rows)),
+    )
+    out = trading._kraken_closes("XBTUSD", "2026-06-01")
+    assert out == {"2026-06-01": 60000.0, "2026-06-02": 61000.0}
+
+
+def test_kraken_closes_error_array_returns_empty(monkeypatch):
+    payload = _kraken_ohlc_payload([], error=["EGeneral:Invalid"])
+    monkeypatch.setattr(trading.requests, "get", lambda *a, **k: _FakeJsonResp(payload))
+    assert trading._kraken_closes("XBTUSD", "2026-06-01") == {}
+
+
+def test_kraken_closes_empty_result_returns_empty(monkeypatch):
+    monkeypatch.setattr(
+        trading.requests,
+        "get",
+        lambda *a, **k: _FakeJsonResp({"error": [], "result": {"last": 0}}),
+    )
+    assert trading._kraken_closes("XBTUSD", "2026-06-01") == {}
+
+
+def test_kraken_closes_http_error_returns_empty(monkeypatch):
+    monkeypatch.setattr(
+        trading.requests, "get", lambda *a, **k: _FakeJsonResp({}, status=500)
+    )
+    assert trading._kraken_closes("XBTUSD", "2026-06-01") == {}

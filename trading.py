@@ -185,6 +185,51 @@ def fetch_kraken_price(pair: str) -> float | None:
     return price
 
 
+def _kraken_closes(pair: str, since: str) -> dict[str, float]:
+    """Daily closes for a Kraken pair from `since` onward, via /0/public/OHLC.
+
+    interval=1440 = daily candles; OHLC close is field index 4. Kraken keys the
+    result by canonical pair name plus a 'last' int, so take the single list-valued
+    entry. Returns {date: close}, or {} on error array / empty / parse failure —
+    callers fall back to the current mark price.
+    """
+    try:
+        since_ts = int(
+            datetime.strptime(since, "%Y-%m-%d")
+            .replace(tzinfo=timezone.utc)
+            .timestamp()
+        )
+    except ValueError:
+        return {}
+    url = f"https://api.kraken.com/0/public/OHLC?pair={pair}&interval=1440&since={since_ts}"
+    try:
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        log.warning(f"Kraken history failed for {pair}: {e}")
+        return {}
+    if data.get("error"):
+        log.warning(f"Kraken history error for {pair}: {data['error']}")
+        return {}
+    result = data.get("result") or {}
+    candles = next(
+        (v for k, v in result.items() if k != "last" and isinstance(v, list)), None
+    )
+    if not candles:
+        return {}
+    out: dict[str, float] = {}
+    for row in candles:
+        try:
+            date = datetime.fromtimestamp(int(row[0]), tz=timezone.utc).strftime(
+                "%Y-%m-%d"
+            )
+            out[date] = float(row[4])
+        except (IndexError, TypeError, ValueError):
+            continue
+    return out
+
+
 def fetch_daily_move(asset_class: str, instrument: str) -> float | None:
     """Intraday percent move (open → last) for one instrument, single fetch.
 
