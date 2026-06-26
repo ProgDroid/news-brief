@@ -296,26 +296,37 @@ RSS_FEEDS = [
     },
     {
         "name": "The Hindu",
-        # verified 60 entries 2026-06-26
-        "url": "https://www.thehindu.com/feeder/default.rss",
+        # International section (India's read on world events), not site-wide —
+        # the site-wide feed skewed India-domestic. verified 60 entries 2026-06-26
+        "url": "https://www.thehindu.com/news/international/feeder/default.rss",
         "category": "india",
         "kind": "regional",
         "perspective": "INDIAN",
     },
-    # ── Energy / commodities starter (added 2026-06-26, borrow-backlog #4) ─────
+    # ── Commodities starter (added 2026-06-26, borrow-backlog #4) ──────────────
+    # "commodities" is the accurate thematic bucket (energy + broad + future
+    # metals); these carry no perspective (thematic, not a national vantage).
     {
         "name": "OilPrice.com",
         # verified 15 entries 2026-06-26
         "url": "https://oilprice.com/rss/main",
-        "category": "energy",
+        "category": "commodities",
         "kind": "wire",
     },
     {
         "name": "EIA Today in Energy",
         # verified 22 entries 2026-06-26
         "url": "https://www.eia.gov/rss/todayinenergy.xml",
-        "category": "energy",
+        "category": "commodities",
         "kind": "primary",
+    },
+    {
+        "name": "Reuters Commodities",
+        # Narrow /markets/commodities path indexes poorly (1 entry); the broader
+        # keyword query is the workable proxy. verified 100 entries 2026-06-26
+        "url": "https://news.google.com/rss/search?q=when:2d+commodities+site%3Areuters.com&hl=en-US&gl=US&ceid=US%3Aen",
+        "category": "commodities",
+        "kind": "wire",
     },
 ]
 

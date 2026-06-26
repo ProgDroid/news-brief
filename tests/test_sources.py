@@ -25,9 +25,9 @@ def test_rss_feeds_well_formed():
         )
 
 
-def test_energy_category_present():
-    energy = [f for f in brief.RSS_FEEDS if f["category"] == "energy"]
-    assert len(energy) >= 2, "energy starter not added"
-    assert all(f.get("perspective") is None for f in energy), (
-        "energy feeds carry no vantage"
+def test_commodities_category_present():
+    commodities = [f for f in brief.RSS_FEEDS if f["category"] == "commodities"]
+    assert len(commodities) >= 3, "commodities starter not added"
+    assert all(f.get("perspective") is None for f in commodities), (
+        "commodities feeds carry no vantage"
     )
