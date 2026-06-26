@@ -212,6 +212,16 @@ def test_system_prompt_is_forward_tilted():
     assert "forward" in sp or "anticipat" in sp  # explicit forward tilt
 
 
+def test_system_prompt_teaches_why_it_matters_lens():
+    sp = brief.SYSTEM_PROMPT.lower()
+    # the three beats are taught...
+    assert "non-obvious" in sp  # Context beat
+    assert "timeframe" in sp  # Stakes beat (next move + when)
+    assert "transmission" in sp  # Connection beat re-pointed to markets
+    # ...but NOT as visible output labels
+    assert "context / stakes / connection" not in sp
+
+
 # ── Signals extraction (separate post-gen call) ───────────────────────────────
 def test_build_signals_request_forces_emit_signals_tool():
     req = brief.build_signals_request("PROSE BRIEF TEXT")

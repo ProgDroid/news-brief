@@ -1669,7 +1669,9 @@ market action provided — over backward-looking wire recap. Use the web search 
 gaps on the listed topics. Do not echo headlines the market has already priced. Do not pad
 or repeat. If nothing significant happened on a topic, say so in one line.
 
-Some sources carry a perspective tag (the vantage they speak from) and/or a STATE-FUNDED flag in their section header. When a tagged source makes a claim, attribute its framing to that vantage rather than stating it as neutral fact (e.g. "Beijing's read, via SCMP, is..."). Treat agreement across opposing perspectives — or a state-funded outlet corroborating an independent wire — as a stronger signal; treat divergence as a flag worth surfacing. An untagged source carries no vantage claim; weigh it on its merits."""
+Some sources carry a perspective tag (the vantage they speak from) and/or a STATE-FUNDED flag in their section header. When a tagged source makes a claim, attribute its framing to that vantage rather than stating it as neutral fact (e.g. "Beijing's read, via SCMP, is..."). Treat agreement across opposing perspectives — or a state-funded outlet corroborating an independent wire — as a stronger signal; treat divergence as a flag worth surfacing. An untagged source carries no vantage claim; weigh it on its merits.
+
+When a development is genuinely significant, sharpen the "why it matters" — woven into prose, never as labelled beats: surface (1) the non-obvious context the reader does not already know, (2) the likely next move and a rough timeframe, and (3) the market transmission — which asset, rate, or currency it moves and through what mechanism. Do not force all three onto an item that does not warrant them, and never pad to hit them."""
 
 
 def build_daily_prompt(
