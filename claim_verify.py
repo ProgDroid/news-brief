@@ -69,3 +69,28 @@ def load_evidence(day: str) -> str:
     except Exception as e:
         log.warning(f"Claim evidence unreadable for {day}; skipping verify: {e}")
     return ""
+
+
+def _is_heading(line: str) -> bool:
+    """A section heading is a line that is exactly a single bold span, e.g.
+    '<b>📈 MARKET PULSE — WHAT MOVED</b>'. Distinguishes headings from bullets
+    that merely contain inline <b>…</b>."""
+    s = line.strip()
+    return s.startswith("<b>") and s.endswith("</b>")
+
+
+def extract_top_stories(brief_text: str) -> str:
+    lines = brief_text.splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        if _is_heading(line) and "TOP STORIES" in line.upper():
+            start = i
+            break
+    if start is None:
+        return ""
+    out = [lines[start]]
+    for line in lines[start + 1 :]:
+        if _is_heading(line):
+            break
+        out.append(line)
+    return "\n".join(out).strip()
