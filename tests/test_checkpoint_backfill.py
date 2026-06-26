@@ -141,3 +141,58 @@ def test_kraken_closes_http_error_returns_empty(monkeypatch):
         trading.requests, "get", lambda *a, **k: _FakeJsonResp({}, status=500)
     )
     assert trading._kraken_closes("XBTUSD", "2026-06-01") == {}
+
+
+def test_historical_closes_equity_resolves_yahoo_symbol(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(
+        trading,
+        "_yahoo_closes",
+        lambda sym, s, e: (seen.setdefault("sym", sym), {"2026-06-01": 10.0})[1],
+    )
+    out = trading.historical_closes("equity", "rr.uk", "2026-06-01", "2026-06-02")
+    assert out == {"2026-06-01": 10.0}
+    assert seen["sym"] == "RR.L"  # base.market resolved to the Yahoo symbol
+
+
+def test_historical_closes_index_passes_raw_symbol(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(
+        trading, "_yahoo_closes", lambda sym, s, e: (seen.setdefault("sym", sym), {})[1]
+    )
+    trading.historical_closes("index", "^GSPC", "2026-06-01", "2026-06-02")
+    assert seen["sym"] == "^GSPC"  # raw symbol, no resolver
+
+
+def test_historical_closes_crypto_routes_kraken(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(
+        trading,
+        "_kraken_closes",
+        lambda pair, since: (seen.setdefault("pair", pair), {"2026-06-01": 60000.0})[1],
+    )
+
+    def _no_yahoo(*a, **k):
+        raise AssertionError("crypto must not route through Yahoo")
+
+    monkeypatch.setattr(trading, "_yahoo_closes", _no_yahoo)
+    out = trading.historical_closes("crypto", "XBTUSD", "2026-06-01", "2026-06-02")
+    assert out == {"2026-06-01": 60000.0}
+    assert seen["pair"] == "XBTUSD"
+
+
+def test_historical_closes_prediction_returns_empty():
+    assert (
+        trading.historical_closes(
+            "prediction", "some-market", "2026-06-01", "2026-06-02"
+        )
+        == {}
+    )
+
+
+def test_historical_closes_unparseable_equity_returns_empty(monkeypatch):
+    monkeypatch.setattr(
+        trading, "_yahoo_closes", lambda *a, **k: (_ for _ in ()).throw(AssertionError)
+    )
+    # 'AAPL' has no .market suffix -> _parse_symbol returns None -> {} without fetch
+    assert trading.historical_closes("equity", "AAPL", "2026-06-01", "2026-06-02") == {}

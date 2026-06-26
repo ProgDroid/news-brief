@@ -924,6 +924,28 @@ def fetch_price(asset_class: str, instrument: str) -> float | None:
     return q.close if q else None
 
 
+def historical_closes(
+    asset_class: str, instrument: str, start: str, end: str
+) -> dict[str, float]:
+    """Daily close series for one position over [start, end], routed by asset class.
+
+    equity → Yahoo (base.market resolved); index → Yahoo (raw symbol);
+    crypto → Kraken OHLC. Prediction and anything unrecognised → {}. The map feeds
+    _snap_close to price a checkpoint at its true crossing date; {} → the caller
+    falls back to the current mark price.
+    """
+    if asset_class == "crypto":
+        return _kraken_closes(instrument, start)
+    if asset_class == "index":
+        return _yahoo_closes(instrument, start, end)
+    if asset_class == "equity":
+        parsed = _parse_symbol(instrument)
+        if parsed is None:
+            return {}
+        return _yahoo_closes(_yahoo_format_symbol(*parsed), start, end)
+    return {}
+
+
 def price_position(p: dict) -> float | None:
     """Mark a position to market by dispatching on its asset_class.
 
