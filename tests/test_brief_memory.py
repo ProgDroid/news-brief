@@ -619,3 +619,79 @@ def test_ttl_bonus(sev, expected):
 )
 def test_severity_rank(sev, expected):
     assert bm._severity_rank(sev) == expected
+
+
+# ---------------------------------------------------------------------------
+# Task 2: severity stored on new and reaffirmed claims in merge_ledger
+# ---------------------------------------------------------------------------
+
+
+def test_merge_new_claim_takes_observed_severity():
+    out = bm.merge_ledger(
+        {"version": 1, "claims": []},
+        [{"claim": "war broke out", "topic": "geo", "severity": "high"}],
+        "2026-06-24",
+    )
+    assert out["claims"][0]["severity"] == "high"
+
+
+def test_merge_new_claim_defaults_severity_normal():
+    out = bm.merge_ledger(
+        {"version": 1, "claims": []},
+        [{"claim": "minor fact", "topic": "x"}],
+        "2026-06-24",
+    )
+    assert out["claims"][0]["severity"] == "normal"
+
+
+def test_merge_new_claim_invalid_severity_defaults_normal():
+    out = bm.merge_ledger(
+        {"version": 1, "claims": []},
+        [{"claim": "fact", "topic": "x", "severity": "spicy"}],
+        "2026-06-24",
+    )
+    assert out["claims"][0]["severity"] == "normal"
+
+
+def _high_prior():
+    return {
+        "version": 1,
+        "claims": [
+            {
+                "id": "c-0001",
+                "claim": "fact",
+                "topic": "x",
+                "first_seen": "2026-06-18",
+                "last_reaffirmed": "2026-06-23",
+                "restate_count": 5,
+                "severity": "high",
+            }
+        ],
+    }
+
+
+def test_merge_reaffirm_updates_severity_downward():
+    out = bm.merge_ledger(
+        _high_prior(),
+        [{"id": "c-0001", "claim": "fact", "topic": "x", "severity": "normal"}],
+        "2026-06-24",
+    )
+    assert out["claims"][0]["severity"] == "normal"  # importance can fade
+
+
+def test_merge_reaffirm_keeps_severity_when_omitted():
+    out = bm.merge_ledger(
+        _high_prior(),
+        [{"id": "c-0001", "claim": "fact", "topic": "x"}],  # no severity
+        "2026-06-24",
+    )
+    assert out["claims"][0]["severity"] == "high"  # omission must not demote
+
+
+def test_merge_reaffirm_keeps_severity_when_invalid():
+    out = bm.merge_ledger(
+        _high_prior(),
+        [{"id": "c-0001", "claim": "fact", "topic": "x", "severity": "???"}],
+        "2026-06-24",
+    )
+    assert out["claims"][0]["severity"] == "high"  # garbage must not demote

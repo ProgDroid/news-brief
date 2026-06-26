@@ -94,6 +94,8 @@ def merge_ledger(
                 base.get("source_count", 0) or 0,
                 mc.get("source_count", 0) or 0,
             )
+            new_sev = _coerce_severity(mc.get("severity"))
+            base["severity"] = new_sev or base.get("severity", _DEFAULT_SEVERITY)
             result.append(base)
             returned.add(cid)
         elif mc.get("claim"):
@@ -106,6 +108,8 @@ def merge_ledger(
                     "last_reaffirmed": today,
                     "restate_count": 1,
                     "source_count": mc.get("source_count", 0) or 0,
+                    "severity": _coerce_severity(mc.get("severity"))
+                    or _DEFAULT_SEVERITY,
                 }
             )
             next_num += 1
