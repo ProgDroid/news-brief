@@ -325,6 +325,66 @@ def _yahoo_fetch(yahoo_symbol: str) -> Quote | None:
     return Quote(close=close, open_=open_, volume=volume)
 
 
+def _yahoo_closes(yahoo_symbol: str, start: str, end: str) -> dict[str, float]:
+    """Daily closes for an already-formatted Yahoo symbol over [start, end] inclusive.
+
+    Same v8/chart endpoint as _yahoo_fetch, but a date range (period1/period2).
+    Returns {date: close} with the GBp->GBP /100 conversion applied, or {} on any
+    network/parse failure — callers fall back to the current mark price.
+    """
+    try:
+        p1 = int(
+            datetime.strptime(start, "%Y-%m-%d")
+            .replace(tzinfo=timezone.utc)
+            .timestamp()
+        )
+        # +1 day so the end date itself falls inside Yahoo's half-open range.
+        p2 = int(
+            (datetime.strptime(end, "%Y-%m-%d") + timedelta(days=1))
+            .replace(tzinfo=timezone.utc)
+            .timestamp()
+        )
+    except ValueError:
+        return {}
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol}"
+    try:
+        resp = requests.get(
+            url,
+            params={"interval": "1d", "period1": p1, "period2": p2},
+            headers=_YAHOO_HEADERS,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        log.warning(f"Yahoo history failed for {yahoo_symbol}: {e}")
+        return {}
+    result = (data.get("chart") or {}).get("result")
+    if not result:
+        return {}
+    node = result[0]
+    meta = node.get("meta") or {}
+    timestamps = node.get("timestamp") or []
+    try:
+        closes = node["indicators"]["quote"][0]["close"]
+    except (KeyError, IndexError, TypeError):
+        return {}
+    pence = meta.get("currency") == "GBp"
+    out: dict[str, float] = {}
+    for ts, c in zip(timestamps, closes):
+        if c is None:
+            continue
+        try:
+            val = float(c)
+        except (TypeError, ValueError):
+            continue
+        if pence:
+            val /= 100.0
+        date = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
+        out[date] = val
+    return out
+
+
 def _yahoo_quote(base: str, market: str) -> Quote | None:
     """Daily Quote for a neutral (base, market) from Yahoo."""
     return _yahoo_fetch(_yahoo_format_symbol(base, market))
