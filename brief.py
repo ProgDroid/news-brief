@@ -103,6 +103,7 @@ from claim_verify import (
     run_verification,
     save_evidence as save_claim_evidence,
 )
+from retention import run_retention
 
 
 # Chroma MCP HTTP endpoint
@@ -2609,6 +2610,14 @@ def mode_collect():
         except Exception as e:
             log.error(f"Trading stage failed (brief already delivered): {e}")
             telegram_alert(f"trading stage failed after brief: {e}")
+        try:
+            summary = run_retention(today)
+            log.info(
+                f"Retention: deleted {summary['deleted']} files, "
+                f"trimmed {summary['trimmed_lines']} log lines"
+            )
+        except Exception as e:
+            log.error(f"Retention skipped (brief unaffected): {e}")
     else:
         log.error("Could not retrieve brief — will retry next collect run")
         telegram_alert(
