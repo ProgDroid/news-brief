@@ -1,4 +1,5 @@
 # tests/test_checkpoint_backfill.py
+import pytest
 import trading
 from datetime import datetime, timezone
 
@@ -196,3 +197,64 @@ def test_historical_closes_unparseable_equity_returns_empty(monkeypatch):
     )
     # 'AAPL' has no .market suffix -> _parse_symbol returns None -> {} without fetch
     assert trading.historical_closes("equity", "AAPL", "2026-06-01", "2026-06-02") == {}
+
+
+def _equity_pos(**over):
+    p = {
+        "asset_class": "equity",
+        "instrument": "aapl.us",
+        "ticker": "AAPL",
+        "direction": "bullish",
+        "entry_price": 100.0,
+        "entry_date": "2026-06-01",
+        "checkpoints": {},
+        "status": "open",
+    }
+    p.update(over)
+    return p
+
+
+def test_record_checkpoints_uses_historical_when_available():
+    p = _equity_pos()
+    # 1w crossing date = 2026-06-08; provide that close in the series.
+    closes = {"2026-06-08": 110.0}
+    trading._record_checkpoints(p, "2026-06-11", 130.0, 0.30, 10, closes)
+    cp = p["checkpoints"]["1w"]
+    assert cp["price"] == 110.0
+    assert cp["date"] == "2026-06-08"
+    assert cp["return"] == pytest.approx(0.10)  # bullish 100 -> 110
+    assert cp["price_basis"] == "historical"
+
+
+def test_record_checkpoints_falls_back_to_current_when_missing():
+    p = _equity_pos()
+    trading._record_checkpoints(p, "2026-06-11", 130.0, 0.30, 10, {})
+    cp = p["checkpoints"]["1w"]
+    assert cp["price"] == 130.0
+    assert cp["date"] == "2026-06-11"
+    assert cp["return"] == pytest.approx(0.30)
+    assert cp["price_basis"] == "current"
+
+
+def test_record_checkpoints_bearish_historical_return():
+    p = _equity_pos(direction="bearish")
+    closes = {"2026-06-08": 90.0}
+    trading._record_checkpoints(p, "2026-06-11", 130.0, 0.30, 10, closes)
+    cp = p["checkpoints"]["1w"]
+    assert cp["return"] == pytest.approx(0.10)  # bearish 100 -> 90 = +10%
+    assert cp["price_basis"] == "historical"
+
+
+def test_record_checkpoints_idempotent_skips_recorded():
+    p = _equity_pos(checkpoints={"1w": {"date": "x", "price": 1.0, "return": 0.0}})
+    trading._record_checkpoints(p, "2026-06-11", 130.0, 0.30, 10, {"2026-06-08": 110.0})
+    assert p["checkpoints"]["1w"]["price"] == 1.0  # untouched
+
+
+def test_has_new_crossing():
+    p = _equity_pos()
+    assert trading._has_new_crossing(p, 7) is True
+    assert trading._has_new_crossing(p, 6) is False
+    p2 = _equity_pos(checkpoints={"1w": {}})
+    assert trading._has_new_crossing(p2, 10) is False  # 1w recorded, 2w not yet (14)
+    assert trading._has_new_crossing(p2, 14) is True

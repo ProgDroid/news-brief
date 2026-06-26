@@ -1669,13 +1669,49 @@ def _snap_close(closes: dict[str, float], target_date: str) -> float | None:
     return closes[max(candidates)]
 
 
+def _has_new_crossing(p: dict, days_open: int) -> bool:
+    """True if any horizon has crossed but isn't recorded yet — gates the fetch."""
+    return any(
+        label not in p["checkpoints"] and days_open >= threshold
+        for label, threshold in PAPER_HORIZONS.items()
+    )
+
+
 def _record_checkpoints(
-    p: dict, today_str: str, price: float, ret: float, days_open: int
+    p: dict,
+    today_str: str,
+    price: float,
+    ret: float,
+    days_open: int,
+    closes: dict[str, float],
 ):
-    """Record any crossed-but-unrecorded horizon checkpoints (idempotent, one pass)."""
+    """Record any crossed-but-unrecorded horizon checkpoints (idempotent, one pass).
+
+    Each checkpoint is priced at the close on its true crossing date
+    (entry_date + threshold) when available in `closes` (price_basis="historical");
+    otherwise it falls back to the current mark price/return (price_basis="current").
+    `closes` is {} for prediction and for runs where nothing newly crossed.
+    """
+    entry = datetime.strptime(p["entry_date"], "%Y-%m-%d").date()
     for label, threshold in PAPER_HORIZONS.items():
-        if label not in p["checkpoints"] and days_open >= threshold:
-            p["checkpoints"][label] = {"date": today_str, "price": price, "return": ret}
+        if label in p["checkpoints"] or days_open < threshold:
+            continue
+        crossing = (entry + timedelta(days=threshold)).strftime("%Y-%m-%d")
+        hist = _snap_close(closes, crossing)
+        if hist is not None:
+            p["checkpoints"][label] = {
+                "date": crossing,
+                "price": hist,
+                "return": _signal_return(p["direction"], p["entry_price"], hist),
+                "price_basis": "historical",
+            }
+        else:
+            p["checkpoints"][label] = {
+                "date": today_str,
+                "price": price,
+                "return": ret,
+                "price_basis": "current",
+            }
 
 
 def mark_to_market(book: dict, today_str: str) -> dict:
@@ -1699,7 +1735,7 @@ def mark_to_market(book: dict, today_str: str) -> dict:
         ret = _signal_return(p["direction"], p["entry_price"], price)
         p["last_mark"] = {"date": today_str, "price": price, "return": ret}
         days_open = (today - datetime.strptime(p["entry_date"], "%Y-%m-%d").date()).days
-        _record_checkpoints(p, today_str, price, ret, days_open)
+        _record_checkpoints(p, today_str, price, ret, days_open, {})
         if PAPER_CLOSE_HORIZON in p["checkpoints"]:
             p["status"] = "closed"
             p["close_reason"] = "horizon"
@@ -1742,7 +1778,7 @@ def _mtm_prediction(p: dict, today, today_str: str):
     )  # always long the held side
     p["last_mark"] = {"date": today_str, "price": price, "return": ret}
     days_open = (today - datetime.strptime(p["entry_date"], "%Y-%m-%d").date()).days
-    _record_checkpoints(p, today_str, price, ret, days_open)
+    _record_checkpoints(p, today_str, price, ret, days_open, {})
 
     if p["play_type"] == "resolution":
         if parsed["closed"] and parsed["uma_status"] == "resolved":
