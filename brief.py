@@ -346,6 +346,12 @@ RSS_FEEDS = [
 # dropped without a redeploy. Parallel to RSS_FEEDS for feeds.
 WEB_SOURCES: list[dict] = []
 
+# Baked-in landing page for Jacob Shapiro's weekly "The World Isn't Ending"
+# column. Mauldin runs on Wix with no RSS feed, so fetch_mauldin_twie scrapes the
+# embedded wix-warmup-data JSON rather than a feed (see that function).
+MAULDIN_HOST = "https://www.mauldineconomics.com"
+MAULDIN_TWIE_URL = f"{MAULDIN_HOST}/the-world-isnt-ending"
+
 # ── Temporary sources (Telegram-managed, persisted on the volume) ─────────────
 # RSS_FEEDS above is the always-on baseline, baked into the image. Temporary
 # sources live in a JSON file on the persistent volume so they can be added or
@@ -1490,6 +1496,114 @@ def fetch_web_source(source: dict) -> str:
         return ""
 
 
+def _twie_iso_date(val) -> str | None:
+    """Normalize a Wix date field — either {"$date": "<iso>"} or a bare ISO
+    string — to "YYYY-MM-DD", or None if it isn't an ISO date."""
+    if isinstance(val, dict):
+        val = val.get("$date")
+    if isinstance(val, str) and re.match(r"\d{4}-\d{2}-\d{2}", val):
+        return val[:10]
+    return None
+
+
+def _parse_twie_warmup(html: str) -> list[dict]:
+    """Extract 'The World Isn't Ending' article records from a Mauldin article
+    page's embedded wix-warmup-data JSON. Wix client-renders the visible DOM (so
+    a plain GET sees an empty shell and og:description is blank) but ships the
+    full dynamic-collection dataset as JSON so the browser needn't refetch — that
+    blob carries clean titles, ISO publish dates and meta descriptions. Records
+    live under keys named "TheWorldIsntEnding"; schema/placeholder entries share
+    that key, so we keep only rows with a text title, an ISO date and a link.
+    Returns [{title, date, url, summary}] newest-first. Best-effort: malformed or
+    absent data yields []."""
+    m = re.search(r'<script[^>]*id="wix-warmup-data"[^>]*>(.*?)</script>', html, re.S)
+    if not m:
+        return []
+    try:
+        data = json.loads(m.group(1))
+    except Exception:
+        return []
+
+    blocks: list[dict] = []
+
+    def _walk(o):
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if k == "TheWorldIsntEnding" and isinstance(v, dict):
+                    blocks.append(v)
+                _walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                _walk(v)
+
+    _walk(data)
+
+    records: dict[str, dict] = {}
+    for block in blocks:
+        for rec in block.values():
+            if not isinstance(rec, dict):
+                continue
+            title = rec.get("title")
+            date = _twie_iso_date(rec.get("date"))
+            link = rec.get("link-the-world-isn-t-ending-title")
+            if not isinstance(title, str) or not date or not isinstance(link, str):
+                continue
+            url = link if link.startswith("http") else MAULDIN_HOST + link
+            summary = rec.get("metaDescription")
+            if not isinstance(summary, str) or not summary.strip():
+                summary = re.sub(r"<[^>]+>", "", str(rec.get("excerpt", "")))
+            records[url] = {
+                "title": title.strip(),
+                "date": date,
+                "url": url,
+                "summary": summary.strip()[:400],
+            }
+    return sorted(records.values(), key=lambda r: r["date"], reverse=True)
+
+
+def _first_twie_article_url(section_html: str) -> str | None:
+    """Return any current article URL from the section landing page. We only need
+    one valid article: its warmup JSON carries the full, date-sorted collection,
+    so even a non-newest link self-corrects. The bare section root can't match —
+    the pattern requires a slug segment."""
+    m = re.search(
+        r"(?:https://www\.mauldineconomics\.com)?(/the-world-isnt-ending/[A-Za-z0-9\-]+)",
+        section_html,
+    )
+    return MAULDIN_HOST + m.group(1) if m else None
+
+
+def fetch_mauldin_twie(max_items: int = 5) -> str:
+    """Baked-in source for Jacob Shapiro's weekly 'The World Isn't Ending' column.
+    Mauldin is a Wix SPA with no RSS feed, so we read the wix-warmup-data JSON the
+    site embeds for hydration: the section page carries only the collection
+    schema, but any article page ships the actual records. Emits the same block
+    shape as fetch_rss. Fail-safe: any error yields "" and never breaks submit."""
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; newsbrief/1.0)"}
+        section = requests.get(MAULDIN_TWIE_URL, timeout=20, headers=headers)
+        section.raise_for_status()
+        article_url = _first_twie_article_url(section.text)
+        if not article_url:
+            return ""
+        article = requests.get(article_url, timeout=20, headers=headers)
+        article.raise_for_status()
+        records = _parse_twie_warmup(article.text)[:max_items]
+        if not records:
+            return ""
+        lines = [
+            _source_header(
+                "Jacob Shapiro — The World Isn't Ending", "analyst", "geopolitics"
+            )
+        ]
+        for r in records:
+            lines.append(f"- {r['title']} ({r['date']})\n  {r['summary']}")
+        return "\n".join(lines)
+    except Exception as e:
+        log.warning(f"Mauldin TWIE fetch failed: {e}")
+        return ""
+
+
 def build_source_index(feed_content: str, web_content: str) -> str:
     """Compact, titles-only, source-labelled index of today's headlines so the
     brief-memory reconcile call can count how many distinct outlets carried each
@@ -2462,10 +2576,12 @@ def mode_submit():
             f"Temp sources: {len(temp_sources)} ({', '.join(s['name'] for s in temp_sources)})"
         )
     feed_temp, page_temp = _split_temp_sources(temp_sources)
-    feed_content = (
-        "\n".join(c for f in RSS_FEEDS + feed_temp if (c := fetch_rss(f)))
-        or "(no RSS content)"
-    )
+    feed_blocks = [c for f in RSS_FEEDS + feed_temp if (c := fetch_rss(f))]
+    # Jacob Shapiro's "The World Isn't Ending" column has no RSS feed; scrape it
+    # (fail-safe — a break just yields no block, never stalls the brief).
+    if twie := fetch_mauldin_twie():
+        feed_blocks.append(twie)
+    feed_content = "\n".join(feed_blocks) or "(no RSS content)"
     web_content = (
         "\n".join(c for s in WEB_SOURCES + page_temp if (c := fetch_web_source(s)))
         or "(no web content)"
