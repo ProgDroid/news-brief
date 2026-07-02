@@ -360,7 +360,8 @@ import brief  # noqa: E402
 
 def test_mode_monitor_sends_message_when_alerts(monkeypatch):
     sent = []
-    monkeypatch.setattr(brief, "telegram_send", lambda text: sent.append(text) or True)
+    # mode_monitor sends via telegram_send_long, which calls common.telegram_send.
+    monkeypatch.setattr(common, "telegram_send", lambda text: sent.append(text) or True)
     monkeypatch.setattr(
         brief,
         "run_volume_monitor",

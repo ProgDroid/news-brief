@@ -68,6 +68,40 @@ def test_sanitise_html_defangs_data_scheme():
     assert "href='#'" in out
 
 
+def test_telegram_send_long_splits_oversized_message(monkeypatch):
+    # A message longer than the Telegram cap must be split into several sends,
+    # not passed through as one 400-triggering payload.
+    sent = []
+    monkeypatch.setattr(
+        common, "telegram_send", lambda chunk: sent.append(chunk) or True
+    )
+    monkeypatch.setattr(common.time, "sleep", lambda _s: None)
+
+    para = "x" * 3000
+    text = f"{para}\n\n{para}\n\n{para}"  # ~9000 chars, no single para over the cap
+    assert common.telegram_send_long(text) is True
+    assert len(sent) >= 2
+    assert all(len(c) <= common.TELEGRAM_MAX_LEN for c in sent)
+
+
+def test_telegram_send_long_short_message_sends_once(monkeypatch):
+    sent = []
+    monkeypatch.setattr(
+        common, "telegram_send", lambda chunk: sent.append(chunk) or True
+    )
+    monkeypatch.setattr(common.time, "sleep", lambda _s: None)
+
+    assert common.telegram_send_long("hello") is True
+    assert sent == ["hello"]
+
+
+def test_telegram_send_long_reports_failure(monkeypatch):
+    # If any chunk fails to send, the overall result is False so callers can alert.
+    monkeypatch.setattr(common, "telegram_send", lambda chunk: False)
+    monkeypatch.setattr(common.time, "sleep", lambda _s: None)
+    assert common.telegram_send_long("hello") is False
+
+
 def test_log_handlers_include_rotating_file_handler():
     # newsbrief.log must rotate, not grow unbounded for the life of the container.
     from logging.handlers import RotatingFileHandler

@@ -253,6 +253,26 @@ def telegram_send(text: str) -> bool:
         return False
 
 
+def telegram_send_long(text: str) -> bool:
+    """Send an HTML message, splitting it across multiple messages when it exceeds
+    Telegram's length cap. Returns True only if every chunk sent.
+
+    Use this instead of the bare telegram_send for any content that grows with the
+    data (performance/positions reports, trade updates, alert lists) — a single
+    telegram_send on such content 400s with "message is too long" once the book or
+    watchlist gets big enough. Short messages send as one, unchanged.
+    """
+    chunks = split_html_message(text)
+    ok = True
+    for i, chunk in enumerate(chunks):
+        if not telegram_send(chunk):
+            log.error(f"telegram_send_long: chunk {i + 1}/{len(chunks)} failed")
+            ok = False
+        elif len(chunks) > 1:
+            time.sleep(0.4)  # stay under Telegram's per-chat send rate
+    return ok
+
+
 def telegram_alert(text: str) -> None:
     """Send an operational failure alert to the reader.
 

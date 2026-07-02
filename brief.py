@@ -51,6 +51,7 @@ from common import (
     _redact,
     file_lock,
     telegram_send,
+    telegram_send_long,
     telegram_alert,
     telegram_send_buttons,
     telegram_edit_text,
@@ -1227,9 +1228,7 @@ def _handle_telegram_update(update: dict, fb: dict) -> dict:
             since, query = m.group(1), m.group(2)
         telegram_send(f"🔎 Digging into: <i>{html.escape(query)}</i>…")
         answer = run_dig(query, since=since)
-        for chunk in split_html_message(sanitise_html(answer)):
-            telegram_send(chunk)
-            time.sleep(0.4)
+        telegram_send_long(sanitise_html(answer))
 
     elif text == "/close":
         _close_picker_render()
@@ -1336,12 +1335,10 @@ def _handle_telegram_update(update: dict, fb: dict) -> dict:
                 if by_class.get(ac):
                     lines.append(f"<b>{ac}</b>")
                     lines.extend(by_class[ac])
-            telegram_send("\n".join(lines))
+            telegram_send_long("\n".join(lines))
 
     elif text == "/performance":
-        for chunk in split_html_message(performance_report(load_book())):
-            telegram_send(chunk)
-            time.sleep(0.4)
+        telegram_send_long(performance_report(load_book()))
 
     else:
         telegram_send("Unknown command — send /help for options.")
@@ -2733,7 +2730,7 @@ def mode_collect():
             book = load_book()
             msg = daily_trade_message(book, today)
             if msg:
-                telegram_send(msg)
+                telegram_send_long(msg)
         except Exception as e:
             log.error(f"Trading stage failed (brief already delivered): {e}")
             telegram_alert(f"trading stage failed after brief: {e}")
@@ -2800,7 +2797,7 @@ def mode_weekly():
         )
         save_book(book)
     record_gate_history(book)
-    telegram_send(performance_report(book))
+    telegram_send_long(performance_report(book))
     log.info("Paper book marked to market")
 
 
@@ -2897,7 +2894,7 @@ def mode_monitor():
     log.info("=== MONITOR ===")
     alerts = run_volume_monitor()
     if alerts:
-        telegram_send("🔔 <b>Volume alerts</b>\n\n" + "\n".join(alerts))
+        telegram_send_long("🔔 <b>Volume alerts</b>\n\n" + "\n".join(alerts))
 
 
 # ── Entry ─────────────────────────────────────────────────────────────────────

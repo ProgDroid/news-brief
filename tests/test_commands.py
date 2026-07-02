@@ -3,6 +3,7 @@
 import json
 
 import brief
+import common
 import trading
 
 
@@ -15,8 +16,17 @@ def _update(text):
 
 
 def _capture(monkeypatch):
+    # Patch both namespaces: direct handler sends resolve to brief.telegram_send,
+    # while telegram_send_long (used by /positions, /performance, /dig) calls the
+    # common-namespace telegram_send.
     sent = []
-    monkeypatch.setattr(brief, "telegram_send", lambda text: sent.append(text) or True)
+
+    def _send(text):
+        sent.append(text)
+        return True
+
+    monkeypatch.setattr(brief, "telegram_send", _send)
+    monkeypatch.setattr(common, "telegram_send", _send)
     return sent
 
 
