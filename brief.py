@@ -2261,7 +2261,7 @@ def build_signals_request(brief_text: str, sources: list[dict] | None = None) ->
     source_names = "\n".join(f"- {s['name']}" for s in sources) or "(none)"
     return {
         "model": SIGNALS_MODEL,
-        "max_tokens": 2048,
+        "max_tokens": SIGNALS_MAX_TOKENS,
         # Forced-tool extraction against a closed source set — the schema does the
         # work. Disable thinking (default is adaptive on Sonnet 5) so it can't eat
         # the tight budget and truncate the tool call (lesson e255436 / #signals).
@@ -2297,6 +2297,11 @@ def parse_signals_response(resp: dict) -> list:
 
 SIGNALS_TIMEOUT = 90  # generous: extraction runs AFTER delivery, so latency is free
 SIGNALS_MAX_ATTEMPTS = 2
+# 2048 truncated the emit_signals tool call on signal-rich briefs once Sonnet 5's
+# tokenizer inflated the JSON (~30% more tokens), yielding an incomplete tool input
+# and a "missing 'signals' list" parse_error. Give the array room to finish (mirrors
+# the verify-call bump). Latency is free here — this runs after the brief ships.
+SIGNALS_MAX_TOKENS = 8192
 
 
 def _post_messages(payload: dict) -> dict:
@@ -2336,6 +2341,14 @@ def extract_signals(
     caller = call or _post_messages
     try:
         resp = caller(build_signals_request(brief_text, sources))
+        # Log stop_reason/usage BEFORE parsing: on a max_tokens-truncated tool call
+        # the parse raises and the fail-safe would otherwise swallow the one datum
+        # (stop_reason=max_tokens) that identifies truncation vs. a genuine failure.
+        usage = resp.get("usage") or {}
+        log.info(
+            f"Signals response: stop_reason={resp.get('stop_reason')} "
+            f"usage(in={usage.get('input_tokens')} out={usage.get('output_tokens')})"
+        )
         return parse_signals_response(resp), "ok"
     except Exception as e:
         log.warning(f"Signals extraction failed; no signals this run: {e}")

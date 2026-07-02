@@ -4,6 +4,8 @@ These functions absorb whatever the model actually emits (mangled delimiters,
 prose brackets, synonym enums), so each historical failure mode gets a case.
 """
 
+import logging
+
 import brief
 
 
@@ -312,6 +314,52 @@ def test_extract_signals_failsafe_on_missing_tool_block():
     raw_signals, status = brief.extract_signals("BRIEF", call=no_tool)
     assert raw_signals == []
     assert status == "extract_error"
+
+
+def test_build_signals_request_has_output_headroom():
+    # The 2048 ceiling truncated the emit_signals tool call on signal-rich briefs
+    # once Sonnet 5's tokenizer inflated the JSON (~30% more tokens). Give the tool
+    # call room to finish the array, matching the verify-call bump.
+    payload = brief.build_signals_request("BRIEF")
+    assert payload["max_tokens"] >= 8192
+
+
+def test_extract_signals_logs_stop_reason_and_usage(caplog):
+    def fake_call(payload):
+        return {
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 1234, "output_tokens": 567},
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "emit_signals",
+                    "input": {"signals": []},
+                }
+            ],
+        }
+
+    with caplog.at_level(logging.INFO, logger="newsbrief"):
+        _raw, status = brief.extract_signals("BRIEF", call=fake_call)
+    assert status == "ok"
+    assert "stop_reason=end_turn" in caplog.text
+    assert "out=567" in caplog.text
+
+
+def test_extract_signals_logs_stop_reason_on_truncation(caplog):
+    # A max_tokens-truncated tool call returns an emit_signals block with no valid
+    # signals list. We must still log stop_reason so truncation is observable rather
+    # than silently swallowed by the fail-safe.
+    def truncated(payload):
+        return {
+            "stop_reason": "max_tokens",
+            "usage": {"input_tokens": 5000, "output_tokens": 8192},
+            "content": [{"type": "tool_use", "name": "emit_signals", "input": {}}],
+        }
+
+    with caplog.at_level(logging.INFO, logger="newsbrief"):
+        _raw, status = brief.extract_signals("BRIEF", call=truncated)
+    assert status == "extract_error"
+    assert "stop_reason=max_tokens" in caplog.text
 
 
 def test_daily_prompt_drops_signals_json_but_keeps_prose_section():
