@@ -1365,6 +1365,9 @@ def run_dig(query: str, since: str | None = None) -> str:
     payload = {
         "model": MODEL,
         "max_tokens": 2048,
+        # Tight 2048 budget; disable thinking (adaptive is the Sonnet 5 default) so
+        # thinking blocks can't crowd out the answer and truncate it.
+        "thinking": {"type": "disabled"},
         "system": (
             "You are a geopolitical/macro analyst answering a focused follow-up "
             "question for an informed investor. Be specific and detailed — this is a "
@@ -2147,7 +2150,7 @@ def annotate_signal_sources(signals: list[dict]) -> list[dict]:
 # Sonnet call reads the finished brief and emits signals via a forced tool, so
 # the JSON is schema-guaranteed (no delimiter to mangle, no shared token budget
 # to truncate). Mirrors brief_memory.reconcile_ledger.
-SIGNALS_MODEL = "claude-sonnet-4-6"
+SIGNALS_MODEL = os.environ.get("NEWSBRIEF_MODEL", "claude-sonnet-5")
 
 _EMIT_SIGNALS_TOOL = {
     "name": "emit_signals",
@@ -2262,6 +2265,10 @@ def build_signals_request(brief_text: str, sources: list[dict] | None = None) ->
     return {
         "model": SIGNALS_MODEL,
         "max_tokens": 2048,
+        # Forced-tool extraction against a closed source set — the schema does the
+        # work. Disable thinking (default is adaptive on Sonnet 5) so it can't eat
+        # the tight budget and truncate the tool call (lesson e255436 / #signals).
+        "thinking": {"type": "disabled"},
         "system": _SIGNALS_SYSTEM,
         "tools": [_EMIT_SIGNALS_TOOL],
         "tool_choice": {"type": "tool", "name": "emit_signals"},
@@ -2379,6 +2386,10 @@ def submit_batch(
     params = {
         "model": MODEL,
         "max_tokens": MAX_TOKENS,
+        # Adaptive thinking helps the synthesis reason about what matters and how
+        # to structure the brief. Budget headroom is ample now that signals moved
+        # to a separate call, and the Batch API has no HTTP timeout to worry about.
+        "thinking": {"type": "adaptive"},
         "system": system,
         "messages": [{"role": "user", "content": prompt_user}],
     }

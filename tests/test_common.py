@@ -1,5 +1,7 @@
 """common.py: shared infra smoke + relocated behaviour."""
 
+import importlib
+
 import common
 
 
@@ -12,6 +14,23 @@ def test_common_imports_and_exposes_infra():
     assert callable(common.t212_auth_header)
     assert common.MODEL  # non-empty model id
     assert str(common.SIGNALS_DIR).endswith("signals")
+
+
+def test_model_defaults_to_sonnet_5():
+    assert common.MODEL == "claude-sonnet-5"
+
+
+def test_model_honours_newsbrief_model_override(monkeypatch):
+    # Constants are read at import time, so overriding requires a reload. Restore
+    # the default afterwards so a mutated global doesn't leak into other tests.
+    monkeypatch.setenv("NEWSBRIEF_MODEL", "claude-opus-4-8")
+    try:
+        importlib.reload(common)
+        assert common.MODEL == "claude-opus-4-8"
+    finally:
+        monkeypatch.delenv("NEWSBRIEF_MODEL", raising=False)
+        importlib.reload(common)
+    assert common.MODEL == "claude-sonnet-5"
 
 
 def test_load_json_or_roundtrip(tmp_path):

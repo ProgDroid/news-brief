@@ -873,6 +873,9 @@ def run_prediction_matcher(signals: list, candidates: list) -> list:
     payload = {
         "model": MODEL,
         "max_tokens": 2048,
+        # Raw-JSON extraction on a tight 2048 budget; disable thinking (adaptive is
+        # the Sonnet 5 default) so it can't crowd out the JSON array and truncate it.
+        "thinking": {"type": "disabled"},
         "system": (
             "You map daily investing signals to live prediction markets. Given today's "
             "signals and candidate markets, return ONLY a JSON array (no prose, no code "

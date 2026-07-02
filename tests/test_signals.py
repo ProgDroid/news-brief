@@ -234,7 +234,10 @@ def test_system_prompt_teaches_why_it_matters_lens():
 # ── Signals extraction (separate post-gen call) ───────────────────────────────
 def test_build_signals_request_forces_emit_signals_tool():
     req = brief.build_signals_request("PROSE BRIEF TEXT")
-    assert req["model"] == "claude-sonnet-4-6"
+    assert req["model"] == "claude-sonnet-5"
+    # Thinking disabled: tight forced-tool budget must not be eaten by adaptive
+    # thinking (the Sonnet 5 default when omitted).
+    assert req["thinking"] == {"type": "disabled"}
     assert req["tool_choice"] == {"type": "tool", "name": "emit_signals"}
     assert req["tools"][0]["name"] == "emit_signals"
     assert "PROSE BRIEF TEXT" in req["messages"][0]["content"]

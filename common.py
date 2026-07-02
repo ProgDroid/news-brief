@@ -60,7 +60,10 @@ ANTHROPIC_HEADERS = {
     "content-type": "application/json",
 }
 
-MODEL = "claude-sonnet-4-6"
+# Default Sonnet model for the brief/trading synthesis calls. Override on the
+# host with NEWSBRIEF_MODEL (single knob — also read by brief.SIGNALS_MODEL and
+# claim_verify.VERIFY_MODEL) to swap models without a code change or redeploy.
+MODEL = os.environ.get("NEWSBRIEF_MODEL", "claude-sonnet-5")
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 SIGNALS_DIR = DATA_DIR / "signals"

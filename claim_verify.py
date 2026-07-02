@@ -12,12 +12,15 @@ import requests
 
 from common import ANTHROPIC_HEADERS, DATA_DIR, _write_json_atomic, log
 
-VERIFY_MODEL = "claude-sonnet-4-6"
+VERIFY_MODEL = os.environ.get("NEWSBRIEF_MODEL", "claude-sonnet-5")
 VERIFY_TIMEOUT = (
     90  # generous: runs AFTER delivery, so latency is free (lesson e255436)
 )
 VERIFY_MAX_ATTEMPTS = 2
-VERIFY_MAX_TOKENS = 4096
+# Raised from 4096 to give adaptive thinking room to reason *and* still emit the
+# full claim-checks tool call without truncating. Latency is free here (runs after
+# delivery, VERIFY_TIMEOUT=90), so the extra headroom costs only tokens.
+VERIFY_MAX_TOKENS = 8192
 _DETAIL_CAP = 400  # per evidence detail line (fetch_rss already caps summaries at 400)
 
 _VALID_VERDICTS = frozenset(
@@ -177,6 +180,11 @@ def build_verify_request(top_stories: str, evidence: str) -> dict:
     return {
         "model": VERIFY_MODEL,
         "max_tokens": VERIFY_MAX_TOKENS,
+        # A grounding judge ("is each claim supported by the provided sources?") is
+        # the one call where step-by-step reasoning genuinely helps, so enable
+        # adaptive thinking. On the first-party API this coexists with a forced
+        # tool_choice; VERIFY_MAX_TOKENS was raised to leave room for both.
+        "thinking": {"type": "adaptive"},
         "system": _VERIFY_SYSTEM,
         "tools": [_VERIFY_TOOL],
         "tool_choice": {"type": "tool", "name": "emit_claim_checks"},

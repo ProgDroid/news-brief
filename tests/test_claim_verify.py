@@ -111,6 +111,10 @@ def _tool_resp(claims):
 def test_build_verify_request_forces_the_tool():
     req = cv.build_verify_request("<b>🌍 TOP STORIES</b>\n- x", "SOURCE: R\n- x")
     assert req["model"] == cv.VERIFY_MODEL
+    # Adaptive thinking enabled (grounding judge benefits from reasoning) with a
+    # raised budget so thinking + the forced tool call both fit.
+    assert req["thinking"] == {"type": "adaptive"}
+    assert req["max_tokens"] >= 8192
     assert req["tool_choice"] == {"type": "tool", "name": "emit_claim_checks"}
     assert req["tools"][0]["name"] == "emit_claim_checks"
     body = req["messages"][0]["content"]
