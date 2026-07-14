@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 import brief
 import common
 import trading
@@ -640,7 +642,8 @@ def test_foreign_chat_callback_is_ignored(monkeypatch, tmp_path):
         "data": f"rmsrc:{brief._source_id('https://x/feed')}",
         "message": {"message_id": 1, "chat": {"id": "999999"}},
     }
-    brief._handle_callback_query(foreign)
+    # via _handle_update: the gate lives in the router, not the handler
+    brief._handle_update({"update_id": 1, "callback_query": foreign}, _fb())
     assert len(brief.load_temp_sources()) == 1  # not removed
     assert cap["acks"] == []  # and not acked: no API call for a foreign tap
 
@@ -802,15 +805,16 @@ def test_split_temp_sources_partitions_by_type():
 
 
 # ── Single-user chat gate ────────────────────────────────────────────────────────
-# This bot is single-user: every update must come from TELEGRAM_CHAT_ID. The check
-# is duplicated at the top of the message and callback handlers (there is no
-# framework-level chokepoint), so it is easy to bypass by accident — these tests
-# pin both entry points, and the fail-closed behaviour on a malformed update.
+# This bot is single-user: every update must come from TELEGRAM_CHAT_ID. The gate
+# lives in _handle_update (the sole router), NOT in the individual handlers, so
+# these tests go through _handle_update — calling a handler directly bypasses the
+# gate by design and proves nothing. The other ~80 tests in this file do call the
+# handlers directly; that is fine, they exercise command logic, not authorization.
 FOREIGN_CHAT = 999_999_999
 
 
-def _foreign_update(text):
-    return {"message": {"text": text, "chat": {"id": FOREIGN_CHAT}}}
+def _msg_update(text, chat_id):
+    return {"update_id": 1, "message": {"text": text, "chat": {"id": chat_id}}}
 
 
 def test_message_from_foreign_chat_is_ignored(monkeypatch, tmp_path):
@@ -819,7 +823,7 @@ def test_message_from_foreign_chat_is_ignored(monkeypatch, tmp_path):
     monkeypatch.setattr(trading, "WATCHLIST_FILE", tmp_path / "wl.json")
 
     fb = _fb()
-    out = brief._handle_telegram_update(_foreign_update("/watch BTC"), fb)
+    out = brief._handle_update(_msg_update("/watch BTC", FOREIGN_CHAT), fb)
 
     assert out == fb  # feedback untouched
     assert trading.load_watchlist()["items"] == []  # command never ran
@@ -828,46 +832,76 @@ def test_message_from_foreign_chat_is_ignored(monkeypatch, tmp_path):
 
 def test_message_from_configured_chat_is_handled(monkeypatch, tmp_path):
     """Guards against the gate rejecting everything (a passing foreign-chat test
-    on its own would still pass if the handler were broken outright)."""
+    on its own would still pass if the router dropped every update)."""
     monkeypatch.setattr(brief, "TELEGRAM_CHAT_ID", "42")
     _capture(monkeypatch)
     monkeypatch.setattr(trading, "WATCHLIST_FILE", tmp_path / "wl.json")
 
-    brief._handle_telegram_update(
-        {"message": {"text": "/watch BTC", "chat": {"id": 42}}}, _fb()
-    )
+    brief._handle_update(_msg_update("/watch BTC", 42), _fb())
     assert trading.load_watchlist()["items"] != []
 
 
 def test_message_with_no_chat_is_ignored(monkeypatch, tmp_path):
-    """Fail closed: a malformed update yields chat_id "", which must not match."""
+    """Fail closed: a malformed update yields chat id "", which must not match."""
     monkeypatch.setattr(brief, "TELEGRAM_CHAT_ID", "42")
     sent = _capture(monkeypatch)
     monkeypatch.setattr(trading, "WATCHLIST_FILE", tmp_path / "wl.json")
 
-    brief._handle_telegram_update({"message": {"text": "/watch BTC"}}, _fb())
+    brief._handle_update({"update_id": 1, "message": {"text": "/watch BTC"}}, _fb())
     assert trading.load_watchlist()["items"] == []
     assert sent == []
 
 
 def test_callback_from_configured_chat_is_acked(monkeypatch, tmp_path):
-    """Positive counterpart to test_foreign_chat_callback_is_ignored: moving the
-    ack below the gate must not stop legitimate taps being answered."""
+    """Positive counterpart to test_foreign_chat_callback_is_ignored: the gate must
+    not stop legitimate taps reaching the handler and being answered."""
     monkeypatch.setattr(brief, "TELEGRAM_CHAT_ID", "42")
     _isolate_sources(monkeypatch, tmp_path)
     brief._WIZARD.clear()
     cap = _wire_telegram(monkeypatch)
 
-    brief._handle_telegram_update(
-        {"message": {"text": "/addsource", "chat": {"id": 42}}}, _fb()
-    )
-    brief._handle_callback_query(
+    brief._handle_update(_msg_update("/addsource", 42), _fb())
+    brief._handle_update(
         {
-            "id": "cbid",
-            "data": "as:cat:iran",
-            "message": {"message_id": 10, "chat": {"id": 42}},
+            "update_id": 2,
+            "callback_query": {
+                "id": "cbid",
+                "data": "as:cat:iran",
+                "message": {"message_id": 10, "chat": {"id": 42}},
+            },
         },
         _fb(),
     )
     assert cap["acks"] == ["cbid"]
     assert brief._WIZARD["42"]["category"] == "iran"
+
+
+@pytest.mark.parametrize(
+    "update",
+    [
+        {},  # no message, no callback_query
+        {"message": None},
+        {"message": {"text": "/watch BTC", "chat": None}},
+        {"message": {"text": "/watch BTC", "chat": {}}},  # chat with no id
+        {"callback_query": None},
+        {"callback_query": {"id": "x", "data": "rmsrc:y"}},  # inline-mode: no message
+        {"callback_query": {"id": "x", "data": "rmsrc:y", "message": {}}},
+    ],
+    ids=[
+        "empty",
+        "null-message",
+        "null-chat",
+        "chat-without-id",
+        "null-callback",
+        "callback-without-message",
+        "callback-with-empty-message",
+    ],
+)
+def test_malformed_updates_are_unauthorized(monkeypatch, update):
+    """Every shape that lacks a resolvable chat must fail closed, not raise.
+
+    _drain_update_batch catches exceptions per-update, so a raise here would be
+    survivable but would fire a "Command failed" alert on every junk update."""
+    monkeypatch.setattr(brief, "TELEGRAM_CHAT_ID", "42")
+    assert brief._update_chat_id(update) == ""
+    assert brief._is_authorized(update) is False

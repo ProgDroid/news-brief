@@ -996,16 +996,15 @@ def _pins_picker_render(fb: dict, message_id: int | None = None) -> None:
 def _handle_callback_query(cb: dict, fb: dict | None = None) -> dict | None:
     """Handle an inline-button tap and return the (possibly mutated) feedback dict.
     Covers /sources removals, the /addsource wizard, the /close /unwatch /unpin
-    pickers and /reset confirmation. Every callback from the configured chat is
-    answered (Telegram shows a spinner on the button until then); taps from any
-    other chat are dropped before that, so we never call the API on an
-    unauthorized caller's behalf. fb is threaded so button actions that change
-    overrides (unpin, reset) stay consistent with the daemon's in-memory copy."""
+    pickers and /reset confirmation. Every callback is answered (Telegram shows a
+    spinner on the button until then). fb is threaded so button actions that change
+    overrides (unpin, reset) stay consistent with the daemon's in-memory copy.
+
+    Authorization is NOT done here — `_handle_update` gates every update against
+    TELEGRAM_CHAT_ID before dispatch. Only call this from there."""
     cb_id = cb.get("id", "")
     chat_id = str(cb.get("message", {}).get("chat", {}).get("id", ""))
     data = cb.get("data", "")
-    if chat_id != str(TELEGRAM_CHAT_ID):
-        return fb
     telegram_answer_callback(cb_id)
     msg_id = cb.get("message", {}).get("message_id")
 
@@ -1133,13 +1132,13 @@ def _handle_telegram_update(update: dict, fb: dict) -> dict:
     """Apply one Telegram update to the feedback dict; returns the (possibly
     replaced) feedback dict. User-provided text is html.escape()d before being
     echoed back — Telegram 400s the whole message on malformed HTML, so a note
-    like 'watch JPY <155' would otherwise silently kill the confirmation."""
+    like 'watch JPY <155' would otherwise silently kill the confirmation.
+
+    Authorization is NOT done here — `_handle_update` gates every update against
+    TELEGRAM_CHAT_ID before dispatch. Only call this from there."""
     msg = update.get("message", {})
     text = msg.get("text", "").strip()
     chat_id = str(msg.get("chat", {}).get("id", ""))
-
-    if chat_id != str(TELEGRAM_CHAT_ID):
-        return fb
 
     # A free-text reply feeding an in-progress /addsource wizard (pasting a
     # domain/URL or typing a name/category). A new "/command" falls through and,
@@ -2853,10 +2852,48 @@ def register_bot_commands_if_changed() -> None:
         log.info(f"Registered {len(payload)} bot commands")
 
 
+def _update_chat_id(update: dict) -> str:
+    """The originating chat id for either update shape, as a string.
+
+    Returns "" for anything malformed or missing a chat, which is what makes the
+    gate below fail closed. A callback_query's chat lives on the message the button
+    is attached to; inline-mode callbacks carry `inline_message_id` and no message
+    at all, and so land here as ""."""
+    cq = update.get("callback_query")
+    src = cq if isinstance(cq, dict) else update
+    msg = src.get("message")
+    if not isinstance(msg, dict):
+        return ""
+    chat = msg.get("chat")
+    if not isinstance(chat, dict):
+        return ""
+    return str(chat.get("id", ""))
+
+
+def _is_authorized(update: dict) -> bool:
+    """This bot is single-user: only TELEGRAM_CHAT_ID may drive it.
+
+    The ONLY gate — `_handle_update` applies it to every update before dispatch, so
+    the individual handlers do not (and must not need to) re-check. Keep it that way:
+    this check used to be copy-pasted into each handler, and one copy drifted out of
+    order, answering callback queries for foreign chats before rejecting them."""
+    return _update_chat_id(update) == str(TELEGRAM_CHAT_ID)
+
+
 def _handle_update(update: dict, fb: dict) -> dict:
-    """Route one update to the message or callback handler. Returns the (possibly
-    replaced) feedback dict — only message commands touch it; callbacks drive the
-    separate wizard/temp-source state and leave fb unchanged."""
+    """Route one authorized update to the message or callback handler. Returns the
+    (possibly replaced) feedback dict — only message commands touch it; callbacks
+    drive the separate wizard/temp-source state and leave fb unchanged.
+
+    This is the single chokepoint for the single-user gate: nothing reaches a
+    handler, or any Telegram API call made on the sender's behalf, until
+    `_is_authorized` passes."""
+    if not _is_authorized(update):
+        log.warning(
+            f"ignoring update {update.get('update_id')} from unauthorized chat "
+            f"{_update_chat_id(update) or '<none>'}"
+        )
+        return fb
     if "callback_query" in update:
         return _handle_callback_query(update["callback_query"], fb)
     return _handle_telegram_update(update, fb)
