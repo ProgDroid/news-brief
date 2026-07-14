@@ -996,15 +996,17 @@ def _pins_picker_render(fb: dict, message_id: int | None = None) -> None:
 def _handle_callback_query(cb: dict, fb: dict | None = None) -> dict | None:
     """Handle an inline-button tap and return the (possibly mutated) feedback dict.
     Covers /sources removals, the /addsource wizard, the /close /unwatch /unpin
-    pickers and /reset confirmation. Every callback is answered (Telegram shows a
-    spinner on the button until then). fb is threaded so button actions that change
+    pickers and /reset confirmation. Every callback from the configured chat is
+    answered (Telegram shows a spinner on the button until then); taps from any
+    other chat are dropped before that, so we never call the API on an
+    unauthorized caller's behalf. fb is threaded so button actions that change
     overrides (unpin, reset) stay consistent with the daemon's in-memory copy."""
     cb_id = cb.get("id", "")
     chat_id = str(cb.get("message", {}).get("chat", {}).get("id", ""))
     data = cb.get("data", "")
-    telegram_answer_callback(cb_id)
     if chat_id != str(TELEGRAM_CHAT_ID):
         return fb
+    telegram_answer_callback(cb_id)
     msg_id = cb.get("message", {}).get("message_id")
 
     # ── Non-wizard pickers (must come before the wizard-state guard below) ──
