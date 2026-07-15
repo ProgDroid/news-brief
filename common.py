@@ -434,7 +434,11 @@ def split_html_message(text: str, max_len: int = TELEGRAM_MAX_LEN) -> list[str]:
             if current.strip():
                 chunks.append(current.strip())
                 current = ""
-            chunks.append(part[:max_len].strip())
+            # Do not .strip() the hard-sliced piece: if the boundary lands on
+            # whitespace, stripping the slice while advancing `part` by the raw
+            # max_len would silently drop that whitespace, merging the words on
+            # either side of the seam (e.g. "hello world" -> "helloworld").
+            chunks.append(part[:max_len])
             part = part[max_len:]
         if len(current) + len(part) > max_len:
             if current.strip():

@@ -63,6 +63,15 @@ def test_split_hard_wraps_oversized_paragraph():
     assert "".join(chunks) == text
 
 
+def test_split_hard_wrap_preserves_whitespace_at_the_slice_boundary():
+    # max_len=36 puts the slice boundary exactly on the space: the first slice
+    # is "A"*35 + " ", which .strip() would silently eat, merging the words.
+    text = "A" * 35 + " " + "B" * 30
+    chunks = brief.split_html_message(text, max_len=36)
+    assert "".join(chunks) == text
+    assert all(len(c) <= 36 for c in chunks)
+
+
 # ── feedback_summary escaping ─────────────────────────────────────────────────
 def test_feedback_summary_escapes_stored_user_text():
     fb = {"focus": [], "mute": [], "notes": ["watch JPY <155 & oil"]}
