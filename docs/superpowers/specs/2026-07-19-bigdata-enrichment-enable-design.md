@@ -82,8 +82,9 @@ class SentimentScore:
 - Header `X-API-KEY`. Keep `requests.Session`, `ENRICHMENT_HTTP_TIMEOUT`, per-run entity cache,
   degrade-never-crash try/except returning error-tagged bundles.
 - **Resolve:** `POST /v1/knowledge-graph/companies` `{"query": ticker}`; from `results`, pick the row
-  whose `ticker` matches (case-insensitive) AND `type == "PUBLIC"`; fall back to first exact-ticker
-  row, else first row, else `None` (→ `error="no entity match"`). Entity id = `id`.
+  whose `ticker` matches (case-insensitive) AND `type == "PUBLIC"`; fall back to the first
+  exact-ticker row; return `None` if no row's ticker matches (→ `error="no entity match"`). Entity
+  id = `id`.
 - **Sentiment:** `POST /v1/entity-sentiment/` with the nested identifier/timestamp body; window =
   trailing `SENTIMENT_LOOKBACK_DAYS` (module const, default 60) ending today (UTC). Parse
   `results[0].values`; sort by date; latest point → `daily_sentiment`/`sentiment_pressure`/

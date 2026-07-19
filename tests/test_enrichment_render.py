@@ -47,3 +47,32 @@ def test_annotate_leaves_unmatched_signals_untouched():
     )
     out = annotate_signals([{"ticker": "NVDA"}], b)
     assert "bigdata_sentiment" not in out[0]
+
+
+def test_render_empty_when_no_data():
+    assert (
+        render_prompt_block(EnrichmentBundles(as_of="2026-07-19T00:00:00+00:00")) == ""
+    )
+
+
+def test_annotate_signals_no_op_when_empty():
+    signals = [{"ticker": "AVAV", "direction": "bearish"}]
+    out = annotate_signals(
+        signals, EnrichmentBundles(as_of="2026-07-19T00:00:00+00:00")
+    )
+    assert out == signals
+    assert out is not signals
+    assert out[0] is not signals[0]
+
+
+def test_annotate_does_not_mutate_inputs():
+    b = EnrichmentBundles(
+        as_of="2026-07-19T00:00:00+00:00",
+        provider="bigdata",
+        symbols=[SymbolBundle("CVX", "D54E62", _score())],
+    )
+    signals = [{"ticker": "CVX", "direction": "long"}]
+    out = annotate_signals(signals, b)
+    assert "bigdata_sentiment" not in signals[0]
+    assert out is not signals
+    assert out[0] is not signals[0]
