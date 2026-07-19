@@ -2,15 +2,14 @@
   "ticker": "CVX",
   "rp_entity_id": "D54E62",
   "sentiment": {
-    "current": -0.068, "baseline": 0.0,
-    "zscore_1mo": -0.9, "zscore_1qt": -1.4,
-    "regime": "Neutral", "confidence": "reduced"
+    "as_of": "2026-06-19",
+    "daily_sentiment": -0.068,
+    "sentiment_pressure": -0.42,
+    "abnormal_media_attention": -0.31,
+    "trend_mean": -0.05,
+    "trend_delta": -0.018,
+    "n_points": 40
   },
-  "events": [
-    {"category": "earnings-call", "title": "Q2 earnings call", "date": "2026-07-25", "url": null}
-  ],
-  "evidence": [
-    {"headline": "Tengiz incident", "source": "Reuters", "date": "2026-06-18", "url": "https://example.com/a", "sentiment": -0.73}
-  ],
-  "error": null
+  "events": [{"category": "earnings-call", "title": "Q2 2026", "date": "2026-07-25", "url": null}],
+  "evidence": [{"headline": "Tengiz incident", "source": "Reuters", "date": "2026-06-18", "url": "u", "sentiment": -0.73}]
 }

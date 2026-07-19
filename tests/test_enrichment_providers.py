@@ -28,7 +28,8 @@ def test_fixture_provider_loads_symbol():
     p = FixtureProvider(FIX)
     sb = p.symbol_bundle("CVX")
     assert sb.rp_entity_id == "D54E62"
-    assert sb.sentiment.regime == "Neutral"
+    assert sb.sentiment.daily_sentiment == -0.068
+    assert sb.sentiment.trend_delta == -0.018
     assert sb.events[0].category == "earnings-call"
     assert sb.evidence[0].sentiment == -0.73
 
