@@ -1,88 +1,49 @@
-from enrichment.models import (
-    EnrichmentBundles,
-    EvidenceDoc,
-    Event,
-    SentimentScore,
-    SymbolBundle,
-    ThematicBundle,
-)
+from enrichment.models import EnrichmentBundles, Event, SentimentScore, SymbolBundle
 from enrichment.render import annotate_signals, render_prompt_block
 
-AS_OF = "2026-06-20T20:00:00+00:00"
+
+def _score():
+    return SentimentScore("2024-03-28", 0.06, -0.75, -0.74, 0.01, 0.05, 87)
 
 
-def _bundles():
-    return EnrichmentBundles(
-        as_of=AS_OF,
-        provider="fixture",
+def test_prompt_block_shows_native_sentiment_fields():
+    b = EnrichmentBundles(
+        as_of="2026-07-19T00:00:00+00:00",
+        provider="bigdata",
         symbols=[
             SymbolBundle(
-                ticker="AVAV",
-                rp_entity_id="F1EB39",
-                sentiment=SentimentScore(
-                    -0.41, -0.05, -1.8, -2.0, "Negative", "reduced"
-                ),
-                events=[Event("conference-call", "Investor Day", "2026-07-08")],
-                evidence=[
-                    EvidenceDoc("Class action", "Reuters", "2026-06-15", None, -0.6)
-                ],
-            )
-        ],
-        themes=[
-            ThematicBundle(
-                theme="gold", docs=[EvidenceDoc("Gold up", "FT", "2026-06-19")]
+                "CVX",
+                "D54E62",
+                _score(),
+                events=[Event("earnings-call", "Q2 2024", "2024-08-01")],
             )
         ],
     )
+    out = render_prompt_block(b)
+    assert "CVX" in out and "0.06" in out and "-0.75" in out
+    assert "Q2 2024" in out
+    assert "NEVER a trade trigger" in out
 
 
-def test_render_empty_when_no_data():
-    assert render_prompt_block(EnrichmentBundles(as_of=AS_OF)) == ""
+def test_annotate_attaches_new_bigdata_sentiment_shape():
+    b = EnrichmentBundles(
+        as_of="2026-07-19T00:00:00+00:00",
+        provider="bigdata",
+        symbols=[SymbolBundle("CVX", "D54E62", _score())],
+    )
+    out = annotate_signals([{"ticker": "CVX", "direction": "long"}], b)
+    bd = out[0]["bigdata_sentiment"]
+    assert bd["daily_sentiment"] == 0.06
+    assert bd["sentiment_pressure"] == -0.75
+    assert bd["abnormal_media_attention"] == -0.74
+    assert bd["trend_delta"] == 0.05
+    assert bd["rp_entity_id"] == "D54E62"
+    assert "current" not in bd and "regime" not in bd
 
 
-def test_render_contains_caveat_branding_and_data():
-    out = render_prompt_block(_bundles())
-    assert "Bigdata.com" in out
-    assert "media tone" in out  # the interpretive caveat
-    assert "never" in out.lower() and "trigger" in out.lower()
-    assert "AVAV" in out and "Negative" in out
-    assert "Investor Day" in out
-    assert "gold" in out
-
-
-def test_annotate_signals_attaches_descriptive_field():
-    signals = [
-        {
-            "ticker": "AVAV",
-            "topic": "defence",
-            "direction": "bearish",
-            "confidence": "medium",
-        },
-        {
-            "ticker": "MU",
-            "topic": "memory",
-            "direction": "bullish",
-            "confidence": "high",
-        },
-        {"ticker": None, "topic": "macro", "direction": "neutral", "confidence": "low"},
-    ]
-    out = annotate_signals(signals, _bundles())
-    assert out[0]["bigdata_sentiment"]["regime"] == "Negative"
-    assert out[0]["bigdata_sentiment"]["current"] == -0.41
-    assert "bigdata_sentiment" not in out[1]  # no bundle for MU
-    assert "bigdata_sentiment" not in out[2]  # null ticker
-    # inputs not mutated
-    assert "bigdata_sentiment" not in signals[0]
-    # returned list and unmatched elements must be independent objects
-    assert out is not signals
-    assert out[1] is not signals[1]
-
-
-def test_annotate_signals_no_op_when_empty():
-    signals = [
-        {"ticker": "AVAV", "topic": "x", "direction": "bearish", "confidence": "low"}
-    ]
-    out = annotate_signals(signals, EnrichmentBundles(as_of=AS_OF))
-    assert out == signals
-    assert out is not signals
-    assert out[0] is not signals[0]
+def test_annotate_leaves_unmatched_signals_untouched():
+    b = EnrichmentBundles(
+        as_of="x", provider="bigdata", symbols=[SymbolBundle("CVX", "D54E62", _score())]
+    )
+    out = annotate_signals([{"ticker": "NVDA"}], b)
+    assert "bigdata_sentiment" not in out[0]

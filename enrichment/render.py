@@ -15,10 +15,14 @@ _CAVEAT = (
 def _fmt_sentiment(s) -> str:
     if s is None:
         return "n/a"
-    conf = f", confidence={s.confidence}" if s.confidence else ""
+    trend = ""
+    if s.trend_delta is not None and s.trend_mean is not None:
+        trend = (
+            f" trend={s.trend_delta:+.3f} (mean {s.trend_mean:.3f} over {s.n_points}d)"
+        )
     return (
-        f"current={s.current} baseline={s.baseline} "
-        f"z1mo={s.zscore_1mo} z1qt={s.zscore_1qt} regime={s.regime}{conf}"
+        f"sentiment={s.daily_sentiment} pressure={s.sentiment_pressure} "
+        f"attention={s.abnormal_media_attention}{trend} as_of={s.as_of}"
     )
 
 
@@ -79,9 +83,10 @@ def annotate_signals(signals: list[dict], bundles: EnrichmentBundles) -> list[di
             {
                 **sig,
                 "bigdata_sentiment": {
-                    "current": s.current,
-                    "regime": s.regime,
-                    "zscore_1mo": s.zscore_1mo,
+                    "daily_sentiment": s.daily_sentiment,
+                    "sentiment_pressure": s.sentiment_pressure,
+                    "abnormal_media_attention": s.abnormal_media_attention,
+                    "trend_delta": s.trend_delta,
                     "rp_entity_id": bundle.rp_entity_id,
                 },
             }
