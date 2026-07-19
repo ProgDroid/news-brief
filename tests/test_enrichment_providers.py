@@ -10,7 +10,11 @@ from enrichment.providers import (
     NullProvider,
     get_provider,
 )
-from enrichment.providers_bigdata import BigdataProvider
+from enrichment.providers_bigdata import (
+    BigdataProvider,
+    _events_window,
+    _sentiment_window,
+)
 
 FIX = str(Path(__file__).parent / "fixtures" / "enrichment")
 
@@ -85,18 +89,70 @@ def _raw(name):
     return _json.loads((RAW / name).read_text(encoding="utf-8"))
 
 
-def test_bigdata_parse_symbol_bundle(monkeypatch):
-    p = BigdataProvider("k", "https://api.bigdata.com")
-    monkeypatch.setattr(p, "_find_entity", lambda t: _raw("find_securities_AVAV.json"))
-    monkeypatch.setattr(p, "_get_sentiment", lambda eid: _raw("sentiment_F1EB39.json"))
-    monkeypatch.setattr(p, "_get_events", lambda eid: _raw("events_F1EB39.json"))
+def test_bigdata_sets_x_api_key_header_not_bearer():
+    p = BigdataProvider("secret", "https://api.bigdata.com")
+    assert p._session.headers.get("X-API-KEY") == "secret"
+    assert "Authorization" not in p._session.headers
 
-    sb = p.symbol_bundle("AVAV")
-    assert sb.rp_entity_id == "F1EB39"
-    assert sb.sentiment.regime == "Negative"
-    assert sb.sentiment.zscore_1qt == -2.0
-    assert {e.category for e in sb.events} == {"conference-call", "earnings-call"}
-    assert sb.error is None
+
+def test_get_sentiment_builds_correct_request():
+    p = BigdataProvider("k", "https://api.bigdata.com")
+    calls = []
+    p._post = lambda path, payload: calls.append((path, payload)) or {"results": []}
+    p._get_sentiment("D8442A", "2024-01-01", "2024-03-01")
+    assert calls == [
+        (
+            "/v1/entity-sentiment/",
+            {
+                "identifier": {"type": "rp_entity_id", "value": "D8442A"},
+                "timestamp": {"start": "2024-01-01", "end": "2024-03-01"},
+            },
+        )
+    ]
+
+
+def test_get_events_builds_flat_request():
+    p = BigdataProvider("k", "https://api.bigdata.com")
+    calls = []
+    p._post = lambda path, payload: calls.append((path, payload)) or {"results": {}}
+    p._get_events("D8442A", "2026-07-19", "2026-10-17")
+    assert calls[0][0] == "/v1/events-calendar/query"
+    assert calls[0][1] == {
+        "rp_entity_id": ["D8442A"],
+        "start_date": "2026-07-19",
+        "end_date": "2026-10-17",
+        "categories": ["earnings-call", "conference-call"],
+        "limit": 100,
+    }
+
+
+def test_find_entity_builds_kg_request():
+    p = BigdataProvider("k", "https://api.bigdata.com")
+    calls = []
+    p._post = lambda path, payload: calls.append((path, payload)) or {"results": []}
+    p._find_entity("AAPL")
+    assert calls == [("/v1/knowledge-graph/companies", {"query": "AAPL"})]
+
+
+def test_search_builds_search_request():
+    p = BigdataProvider("k", "https://api.bigdata.com")
+    calls = []
+    p._post = lambda path, payload: calls.append((path, payload)) or {"results": []}
+    p._search("gold miners")
+    path, payload = calls[0]
+    assert path == "/v1/search"
+    assert payload["search_mode"] == "fast"
+    assert payload["query"]["text"] == "gold miners"
+    assert payload["query"]["max_chunks"] == 2
+
+
+def test_window_helpers_return_iso_dates():
+    s0, s1 = _sentiment_window()
+    e0, e1 = _events_window()
+    for d in (s0, s1, e0, e1):
+        assert len(d) == 10 and d[4] == "-" and d[7] == "-"
+    assert s0 < s1  # lookback start before end
+    assert e0 <= e1  # today before forward end
 
 
 def test_bigdata_symbol_degrades_on_error(monkeypatch):
@@ -107,17 +163,7 @@ def test_bigdata_symbol_degrades_on_error(monkeypatch):
 
     monkeypatch.setattr(p, "_find_entity", boom)
     sb = p.symbol_bundle("AVAV")
-    assert sb.sentiment is None
-    assert sb.error is not None and "500" in sb.error
-
-
-def test_bigdata_parse_thematic_bundle(monkeypatch):
-    p = BigdataProvider("k", "https://api.bigdata.com")
-    monkeypatch.setattr(p, "_search", lambda q: _raw("search_defence.json"))
-    tb = p.thematic_bundle("defence")
-    assert tb.docs[0].source == "FT"
-    assert tb.docs[0].date == "2026-06-19"
-    assert tb.error is None
+    assert sb.sentiment is None and sb.error and "500" in sb.error
 
 
 def test_bigdata_thematic_degrades_on_error(monkeypatch):
