@@ -8,14 +8,13 @@ from dataclasses import asdict, dataclass, field
 
 @dataclass(frozen=True)
 class SentimentScore:
-    current: float | None
-    baseline: float | None
-    zscore_1mo: float | None
-    zscore_1qt: float | None
-    regime: str  # "Positive" | "Neutral" | "Negative" | "Unknown"
-    confidence: str | None = (
-        None  # provider self-flag, e.g. "reduced" when source-concentrated
-    )
+    as_of: str | None  # latest series point's date, "YYYY-MM-DD"
+    daily_sentiment: float | None  # latest, -1..1 (media tone)
+    sentiment_pressure: float | None  # latest native abnormality signal
+    abnormal_media_attention: float | None  # latest native attention signal
+    trend_mean: float | None = None  # mean daily_sentiment over the window
+    trend_delta: float | None = None  # latest daily_sentiment - trend_mean
+    n_points: int = 0  # series length backing the stats
 
 
 @dataclass(frozen=True)
@@ -64,6 +63,23 @@ class EnrichmentBundles:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+    def to_persisted_dict(self) -> dict:
+        """Derived-only projection for on-disk persistence. Drops all vendor
+        Content (headlines, search text, thematic docs, event titles) to satisfy
+        the no-cache ToS; keeps only what collect-time annotate_signals needs."""
+        return {
+            "as_of": self.as_of,
+            "provider": self.provider,
+            "symbols": [
+                {
+                    "ticker": s.ticker,
+                    "rp_entity_id": s.rp_entity_id,
+                    "sentiment": asdict(s.sentiment) if s.sentiment else None,
+                }
+                for s in self.symbols
+            ],
+        }
 
 
 # --- deserialization (public; used by FixtureProvider and the collect reload) ---
