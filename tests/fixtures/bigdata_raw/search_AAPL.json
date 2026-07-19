@@ -1,0 +1,13 @@
+{
+  "results": [
+    {
+      "id": "EBB46EE7EE58FD178B55E4F90D308040",
+      "headline": "What's Going on With Apple Stock Friday?",
+      "timestamp": "2026-07-17T11:58:44",
+      "source": {"id": "5A5702", "name": "Benzinga", "rank": "RANK_1", "tier": "content-premium-news"},
+      "url": "https://www.benzinga.com/node/60519766",
+      "chunks": [{"cnum": 3, "text": "A key support level is around $287.50", "relevance": 0.806, "sentiment": -0.23}]
+    }
+  ],
+  "external_results": {}
+}

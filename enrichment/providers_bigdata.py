@@ -13,7 +13,7 @@ from common import log
 
 from . import config
 from .models import (
-    EvidenceDoc,  # noqa: F401 -- parsed into ThematicBundle.docs in Task 6
+    EvidenceDoc,
     Event,
     SentimentScore,
     SymbolBundle,
@@ -179,8 +179,18 @@ class BigdataProvider:
 
     def thematic_bundle(self, theme: str) -> ThematicBundle:
         try:
-            self._search(theme)
-            return ThematicBundle(theme=theme)  # full parse in Task 6
+            results = self._search(theme).get("results") or []
+            docs = [
+                EvidenceDoc(
+                    headline=r.get("headline", ""),
+                    source=(r.get("source") or {}).get("name", ""),
+                    date=_iso_date(r.get("timestamp")),
+                    url=r.get("url"),
+                    sentiment=(r.get("chunks") or [{}])[0].get("sentiment"),
+                )
+                for r in results
+            ]
+            return ThematicBundle(theme=theme, docs=docs)
         except Exception as e:
             log.warning("Bigdata thematic_bundle(%s) degraded: %s", theme, e)
             return ThematicBundle(theme=theme, error=str(e))

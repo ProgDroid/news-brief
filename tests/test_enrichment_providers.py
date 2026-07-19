@@ -167,6 +167,18 @@ def test_bigdata_symbol_degrades_on_error(monkeypatch):
     assert sb.sentiment is None and sb.error and "500" in sb.error
 
 
+def test_bigdata_parse_thematic_bundle(monkeypatch):
+    p = BigdataProvider("k", "https://api.bigdata.com")
+    monkeypatch.setattr(p, "_search", lambda q: _raw("search_AAPL.json"))
+    tb = p.thematic_bundle("apple")
+    assert tb.error is None
+    d = tb.docs[0]
+    assert d.source == "Benzinga"
+    assert d.date == "2026-07-17"
+    assert d.headline.startswith("What's Going on")
+    assert d.sentiment == -0.23
+
+
 def test_bigdata_thematic_degrades_on_error(monkeypatch):
     p = BigdataProvider("k", "https://api.bigdata.com")
 
