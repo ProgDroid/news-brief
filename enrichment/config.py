@@ -14,6 +14,9 @@ ENRICHMENT_ENABLED = os.environ.get("ENRICHMENT_ENABLED", "0") == "1"
 # key is present, else null). Only consulted when ENRICHMENT_ENABLED is true.
 ENRICHMENT_PROVIDER = os.environ.get("ENRICHMENT_PROVIDER", "").strip().lower()
 
+# Thematic search (the ~10x-cost search path) — toggle off if low-value.
+ENRICHMENT_THEMES_ENABLED = os.environ.get("ENRICHMENT_THEMES_ENABLED", "1") == "1"
+
 # Bigdata.com REST credentials/endpoint (business-email REST key; see design spec).
 BIGDATA_API_KEY = os.environ.get("BIGDATA_API_KEY", "").strip()
 BIGDATA_BASE_URL = os.environ.get("BIGDATA_BASE_URL", "https://api.bigdata.com").strip()

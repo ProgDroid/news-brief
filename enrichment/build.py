@@ -21,9 +21,15 @@ def build_enrichment(
     provider = provider or get_provider()
 
     tickers = universe.tickers[: config.ENRICHMENT_MAX_SYMBOLS]
-    themes = universe.themes[: config.ENRICHMENT_MAX_THEMES]
+    themes = (
+        universe.themes[: config.ENRICHMENT_MAX_THEMES]
+        if config.ENRICHMENT_THEMES_ENABLED
+        else []
+    )
     dropped_sym = len(universe.tickers) - len(tickers)
-    dropped_thm = len(universe.themes) - len(themes)
+    dropped_thm = (
+        (len(universe.themes) - len(themes)) if config.ENRICHMENT_THEMES_ENABLED else 0
+    )
     if dropped_sym or dropped_thm:
         log.warning(
             "Enrichment fan-out capped: dropped %d symbol(s), %d theme(s) over limit",
