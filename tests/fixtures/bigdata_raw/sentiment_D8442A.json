@@ -1,0 +1,10 @@
+{
+  "results": [
+    {"name": "Apple Inc.", "rp_entity_id": "D8442A", "values": [
+      {"date": "2024-01-02", "daily_sentiment": -0.100904, "sentiment_pressure": -0.159639, "abnormal_media_attention": -0.268143},
+      {"date": "2024-01-03", "daily_sentiment": 0.04873, "sentiment_pressure": -0.204247, "abnormal_media_attention": -0.299575},
+      {"date": "2024-03-28", "daily_sentiment": 0.060095, "sentiment_pressure": -0.756931, "abnormal_media_attention": -0.744677}
+    ]}
+  ],
+  "errors": []
+}

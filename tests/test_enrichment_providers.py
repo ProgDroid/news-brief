@@ -13,6 +13,7 @@ from enrichment.providers import (
 from enrichment.providers_bigdata import (
     BigdataProvider,
     _events_window,
+    _pick_entity,
     _sentiment_window,
 )
 
@@ -176,3 +177,51 @@ def test_bigdata_thematic_degrades_on_error(monkeypatch):
     tb = p.thematic_bundle("defence")
     assert tb.docs == []
     assert tb.error is not None and "500" in tb.error
+
+
+def test_pick_entity_prefers_exact_ticker_public():
+    rows = [
+        {"id": "WRONG1", "ticker": "AAPLX", "type": "PUBLIC"},
+        {"id": "T6QNVK", "ticker": None, "type": "PRIVATE"},
+        {"id": "D8442A", "ticker": "AAPL", "type": "PUBLIC"},
+    ]
+    assert _pick_entity(rows, "AAPL") == "D8442A"
+
+
+def test_pick_entity_none_when_no_ticker_match():
+    assert (
+        _pick_entity([{"id": "X", "ticker": "MSFT", "type": "PUBLIC"}], "AAPL") is None
+    )
+
+
+def test_bigdata_parse_symbol_bundle(monkeypatch):
+    p = BigdataProvider("k", "https://api.bigdata.com")
+    monkeypatch.setattr(p, "_find_entity", lambda t: _raw("find_AAPL.json"))
+    monkeypatch.setattr(
+        p, "_get_sentiment", lambda eid, s, e: _raw("sentiment_D8442A.json")
+    )
+    monkeypatch.setattr(p, "_get_events", lambda eid, s, e: _raw("events_D8442A.json"))
+    sb = p.symbol_bundle("AAPL")
+    assert sb.rp_entity_id == "D8442A"
+    assert sb.error is None
+    assert sb.sentiment.daily_sentiment == 0.060095  # latest point
+    assert sb.sentiment.as_of == "2024-03-28"
+    assert sb.sentiment.n_points == 3
+    assert abs(sb.sentiment.trend_mean - (-0.100904 + 0.04873 + 0.060095) / 3) < 1e-9
+    assert abs(sb.sentiment.trend_delta - (0.060095 - sb.sentiment.trend_mean)) < 1e-9
+    assert sb.events[0].category == "earnings-call"
+    assert sb.events[0].date == "2024-02-01"
+    assert sb.events[0].title == "Q1 2024"
+    assert sb.events[0].url is None
+
+
+def test_bigdata_symbol_empty_series_yields_none_sentiment(monkeypatch):
+    p = BigdataProvider("k", "https://api.bigdata.com")
+    monkeypatch.setattr(p, "_find_entity", lambda t: _raw("find_AAPL.json"))
+    monkeypatch.setattr(
+        p, "_get_sentiment", lambda eid, s, e: {"results": [], "errors": []}
+    )
+    monkeypatch.setattr(p, "_get_events", lambda eid, s, e: {"results": {}})
+    sb = p.symbol_bundle("AAPL")
+    assert sb.rp_entity_id == "D8442A"
+    assert sb.sentiment is None

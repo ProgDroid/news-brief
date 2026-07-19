@@ -1,0 +1,6 @@
+{
+  "results": [
+    {"id": "D8442A", "name": "Apple Inc.", "type": "PUBLIC", "ticker": "AAPL", "country": "US", "sector": "Technology"},
+    {"id": "T6QNVK", "name": "Abhishek Alloys Pvt Ltd.", "type": "PRIVATE", "ticker": null, "country": "IN", "sector": null}
+  ]
+}

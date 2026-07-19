@@ -1,0 +1,8 @@
+{
+  "results": {
+    "D8442A": [
+      {"category": "earnings-call", "event_datetime": "2024-02-01T22:00:00.000Z", "title": "Q1 2024", "fiscal_year": 2024, "fiscal_period": "Q1", "rp_collection_id": "abc123", "created_at": "2023-11-01T00:00:00.000Z", "updated_at": "2024-01-20T00:00:00.000Z"}
+    ]
+  },
+  "pagination": {"cursor": "1", "has_cursor": false}
+}

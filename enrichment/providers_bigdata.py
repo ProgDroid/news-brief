@@ -14,8 +14,8 @@ from common import log
 from . import config
 from .models import (
     EvidenceDoc,  # noqa: F401 -- parsed into ThematicBundle.docs in Task 6
-    Event,  # noqa: F401 -- parsed into SymbolBundle.events in Task 5
-    SentimentScore,  # noqa: F401 -- parsed into SymbolBundle.sentiment in Task 5
+    Event,
+    SentimentScore,
     SymbolBundle,
     ThematicBundle,
 )
@@ -44,6 +44,37 @@ def _events_window() -> tuple[str, str]:
     start = _today()
     end = start + timedelta(days=EVENTS_FORWARD_DAYS)
     return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
+
+
+def _pick_entity(rows: list[dict], ticker: str) -> str | None:
+    """Choose the entity id for an exact ticker match, preferring PUBLIC."""
+    tkr = ticker.upper()
+    matches = [r for r in rows if (r.get("ticker") or "").upper() == tkr]
+    if not matches:
+        return None
+    public = [r for r in matches if r.get("type") == "PUBLIC"]
+    chosen = public[0] if public else matches[0]
+    return chosen.get("id")
+
+
+def _score_from_values(values: list[dict]) -> SentimentScore | None:
+    if not values:
+        return None
+    pts = sorted(values, key=lambda v: v.get("date", ""))
+    latest = pts[-1]
+    daily = [v["daily_sentiment"] for v in pts if v.get("daily_sentiment") is not None]
+    mean = sum(daily) / len(daily) if daily else None
+    latest_ds = latest.get("daily_sentiment")
+    delta = (latest_ds - mean) if (mean is not None and latest_ds is not None) else None
+    return SentimentScore(
+        as_of=latest.get("date"),
+        daily_sentiment=latest_ds,
+        sentiment_pressure=latest.get("sentiment_pressure"),
+        abnormal_media_attention=latest.get("abnormal_media_attention"),
+        trend_mean=mean,
+        trend_delta=delta,
+        n_points=len(pts),
+    )
 
 
 class BigdataProvider:
@@ -113,7 +144,7 @@ class BigdataProvider:
         if ticker in self._entity_cache:
             return self._entity_cache[ticker]
         rows = self._find_entity(ticker).get("results") or []
-        eid = rows[0].get("id") if rows else None
+        eid = _pick_entity(rows, ticker)
         self._entity_cache[ticker] = eid
         return eid
 
@@ -123,7 +154,25 @@ class BigdataProvider:
             eid = self._resolve(ticker)
             if not eid:
                 return SymbolBundle(ticker, None, None, error="no entity match")
-            return SymbolBundle(ticker, eid, None)  # full parse in Task 5
+            sent_start, sent_end = _sentiment_window()
+            values = (
+                self._get_sentiment(eid, sent_start, sent_end).get("results") or [{}]
+            )[0].get("values") or []
+            sentiment = _score_from_values(values)
+            ev_start, ev_end = _events_window()
+            ev_rows = (
+                self._get_events(eid, ev_start, ev_end).get("results", {}).get(eid, [])
+            )
+            events = [
+                Event(
+                    category=e.get("category", ""),
+                    title=e.get("title", ""),
+                    date=_iso_date(e.get("event_datetime")),
+                    url=None,
+                )
+                for e in ev_rows
+            ]
+            return SymbolBundle(ticker, eid, sentiment, events=events)
         except Exception as e:  # degrade, never crash the brief
             log.warning("Bigdata symbol_bundle(%s) degraded: %s", ticker, e)
             return SymbolBundle(ticker, None, None, error=str(e))
