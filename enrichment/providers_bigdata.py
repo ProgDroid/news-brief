@@ -91,6 +91,7 @@ class BigdataProvider:
         self._entity_cache: dict[str, str | None] = {}
         self._session = requests.Session()
         self._session.headers.update({"X-API-KEY": api_key})
+        self._usage = 0
 
     # --- HTTP helpers (one network call each; named so tests can monkeypatch) ---
     def _post(self, path: str, payload: dict) -> dict:
@@ -100,7 +101,14 @@ class BigdataProvider:
             timeout=config.ENRICHMENT_HTTP_TIMEOUT,
         )
         resp.raise_for_status()
-        return resp.json()
+        data = resp.json()
+        usage = data.get("usage") or (data.get("metadata") or {}).get("usage") or {}
+        self._usage += sum(v for v in usage.values() if isinstance(v, (int, float)))
+        return data
+
+    @property
+    def usage_units(self) -> float:
+        return self._usage
 
     def _find_entity(self, ticker: str) -> dict:
         return self._post("/v1/knowledge-graph/companies", {"query": ticker})

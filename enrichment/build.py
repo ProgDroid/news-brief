@@ -47,6 +47,9 @@ def build_enrichment(
         len(theme_bundles),
         errs,
     )
+    units = getattr(provider, "usage_units", None)
+    if units is not None:
+        log.info("Enrichment usage: provider=%s units=%s", provider.name, units)
     return EnrichmentBundles(
         as_of=as_of, symbols=symbols, themes=theme_bundles, provider=provider.name
     )

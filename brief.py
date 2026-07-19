@@ -2653,7 +2653,8 @@ def mode_submit():
         )
         if not bundles.is_empty():
             _write_json_atomic(
-                DATA_DIR / "enrichment" / f"enrichment-{today}.json", bundles.to_dict()
+                DATA_DIR / "enrichment" / f"enrichment-{today}.json",
+                bundles.to_persisted_dict(),
             )
             enrichment_block = render_prompt_block(bundles)
         log.info(
