@@ -945,3 +945,157 @@ def test_close_ticker_routes_live_to_venue_sell(monkeypatch, tmp_path):
     assert live_called == [("L", "manual")]  # live routed to venue sell
     assert paper_called == []  # paper path NOT used for the live row
     assert live["status"] == "closed"
+
+
+def test_predict_wizard_thesis_to_market(monkeypatch):
+    monkeypatch.setattr(common, "PG_LIVE_ENABLED", True)
+    monkeypatch.setattr(common, "PG_B_ENABLED", True)
+    monkeypatch.setattr(brief, "telegram_send_buttons", lambda text, kb: 111)
+    edits = []
+    monkeypatch.setattr(
+        brief, "telegram_edit_text", lambda mid, text, kb: edits.append((text, kb))
+    )
+    monkeypatch.setattr(
+        trading,
+        "_gather_pg_candidates",
+        lambda s: [
+            {
+                "market_id": "2774056",
+                "question": "Hormuz normal by Aug 31?",
+                "yes_price": 0.13,
+                "end_date": "2026-08-31",
+                "event_id": "evt_h",
+            }
+        ],
+    )
+    brief._WIZARD.clear()
+    brief._predict_start("42")
+    assert (
+        brief._WIZARD["42"]["step"] == "pr_thesis"
+        and brief._WIZARD["42"]["msg_id"] == 111
+    )
+    # user replies with the thesis free-text -> search + show market buttons
+    brief._wizard_handle_text("42", "hormuz shipping stays disrupted")
+    w = brief._WIZARD["42"]
+    assert w["step"] == "pr_market" and w["thesis"] == "hormuz shipping stays disrupted"
+    assert w["candidates"][0]["event_id"] == "evt_h"
+    assert edits  # market buttons were rendered
+
+
+def test_predict_disabled_says_so(monkeypatch):
+    monkeypatch.setattr(common, "PG_LIVE_ENABLED", False)
+    monkeypatch.setattr(common, "PG_B_ENABLED", False)
+    sent = []
+    monkeypatch.setattr(brief, "telegram_send", lambda t: sent.append(t))
+    brief._WIZARD.clear()
+    brief._predict_start("42")
+    assert "42" not in brief._WIZARD and sent and "disabled" in sent[0].lower()
+
+
+def test_predict_commit_opens_and_logs(monkeypatch):
+    import polygram_live
+
+    monkeypatch.setattr(common, "PG_LIVE_ENABLED", True)
+    monkeypatch.setattr(common, "PG_B_ENABLED", True)
+    book = {"positions": []}
+    monkeypatch.setattr(brief, "load_book", lambda: book)
+    monkeypatch.setattr(brief, "save_book", lambda b: None)
+    monkeypatch.setattr(brief.trading, "BOOK_FILE", "x")
+    monkeypatch.setattr(
+        brief, "file_lock", lambda *a, **k: __import__("contextlib").nullcontext()
+    )
+    monkeypatch.setattr(trading, "_sleeve_b_open_ok", lambda b, m, o, a: (True, ""))
+    opened = {}
+
+    def fake_open(book, **kw):
+        opened.update(kw)
+        row = {
+            "id": "2026-09-01:prediction:m:YES:live",
+            "execution": "live",
+            "sleeve": "B",
+            "instrument": kw["market_id"],
+            "outcome": kw["outcome"],
+            "entry_price": 0.62,
+            "cost_basis": kw["amount"],
+            "status": "open",
+        }
+        book["positions"].append(row)
+        return row
+
+    monkeypatch.setattr(polygram_live, "open_live_position", fake_open)
+    logged = []
+    monkeypatch.setattr(common, "append_thesis", lambda r: logged.append(r))
+    monkeypatch.setattr(brief, "telegram_edit_text", lambda *a: None)
+    brief._WIZARD["42"] = {
+        "step": "pr_confirm",
+        "msg_id": 1,
+        "thesis": "oil stays bid",
+        "market_id": "m",
+        "event_id": "evt",
+        "question": "Q?",
+        "prices": [0.62, 0.38],
+        "token_ids": ["tYes", "tNo"],
+        "outcome": "Yes",
+        "side_index": 0,
+        "stake": 5.0,
+        "hold_mode": "settle",
+        "p_hat": 0.75,
+        "end_date": "2026-09-01",
+    }
+    brief._predict_commit("42")
+    assert opened["sleeve"] == "B" and opened["event_id"] == "evt"
+    assert (
+        opened["token_id"] == "tYes"
+        and opened["outcome"] == "Yes"
+        and opened["amount"] == 5.0
+    )
+    assert logged and logged[0]["p_hat"] == 0.75 and logged[0]["entry_price"] == 0.62
+    assert logged[0]["resolve_by"] == "2026-09-01" and logged[0]["traded"] is True
+    assert "42" not in brief._WIZARD
+
+
+def test_predict_commit_blocked_by_cap(monkeypatch):
+    import polygram_live
+
+    monkeypatch.setattr(common, "PG_LIVE_ENABLED", True)
+    monkeypatch.setattr(common, "PG_B_ENABLED", True)
+    monkeypatch.setattr(brief, "load_book", lambda: {"positions": []})
+    monkeypatch.setattr(
+        brief, "file_lock", lambda *a, **k: __import__("contextlib").nullcontext()
+    )
+    monkeypatch.setattr(brief.trading, "BOOK_FILE", "x")
+    monkeypatch.setattr(
+        trading,
+        "_sleeve_b_open_ok",
+        lambda b, m, o, a: (False, "over total Sleeve-B cap"),
+    )
+    calls = []
+    monkeypatch.setattr(
+        polygram_live, "open_live_position", lambda book, **k: calls.append(k)
+    )
+    logged = []
+    monkeypatch.setattr(common, "append_thesis", lambda r: logged.append(r))
+    edits = []
+    monkeypatch.setattr(
+        brief, "telegram_edit_text", lambda mid, text, kb: edits.append(text)
+    )
+    brief._WIZARD["42"] = {
+        "step": "pr_confirm",
+        "msg_id": 1,
+        "thesis": "t",
+        "market_id": "m",
+        "event_id": "e",
+        "question": "Q",
+        "prices": [0.6, 0.4],
+        "token_ids": ["a", "b"],
+        "outcome": "Yes",
+        "side_index": 0,
+        "stake": 99.0,
+        "hold_mode": "settle",
+        "p_hat": None,
+        "end_date": "2026-09-01",
+    }
+    brief._predict_commit("42")
+    assert calls == [] and logged == []  # blocked before any order/log
+    assert edits and "cap" in edits[-1].lower()
+    assert "42" not in brief._WIZARD

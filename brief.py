@@ -60,6 +60,7 @@ from common import (
     sanitise_html,
     split_html_message,
 )
+import common
 import trading
 import polygram_live
 from trading import (
@@ -833,6 +834,27 @@ def _wizard_handle_text(chat_id: str, text: str) -> None:
     if not w:
         return
     step = w.get("step")
+    if step == "pr_thesis":
+        _predict_search_and_show(chat_id, text)
+        return
+    if step == "pr_stake_text":
+        try:
+            w["stake"] = float(text)
+        except ValueError:
+            telegram_edit_text(
+                w["msg_id"], "Not a number — reply a USD amount (e.g. 7).", []
+            )
+            return
+        _predict_show_hold(chat_id)
+        return
+    if step == "pr_phat":
+        try:
+            v = float(text)
+            w["p_hat"] = v if 0.0 <= v <= 1.0 else None
+        except ValueError:
+            w["p_hat"] = None
+        _predict_confirm_prompt(chat_id)
+        return
     if step == "category_text":
         w["category"] = text.strip().lower()
         _wizard_kind_prompt(chat_id)
@@ -856,6 +878,216 @@ def _wizard_handle_text(chat_id: str, text: str) -> None:
                 "<code>timesofisrael.com</code> or "
                 "<code>https://site.com/feed.xml</code>."
             )
+
+
+# ── /predict conviction-bet wizard (Sleeve B) ──────────────────────────────────
+_PREDICT_STAKES = [2, 5, 10]  # preset USD buttons; "Other" → free-text
+
+
+def _predict_start(chat_id: str) -> None:
+    """Begin the /predict conviction-bet wizard, or refuse if live trading is disabled."""
+    if not (common.PG_LIVE_ENABLED and common.PG_B_ENABLED):
+        telegram_send(
+            "Live conviction trading is <b>disabled</b> "
+            "(set PG_LIVE_ENABLED + PG_B_ENABLED)."
+        )
+        return
+    msg_id = telegram_send_buttons(
+        "🎯 <b>Conviction bet</b>\n\nReply with your thesis (free text) — "
+        "I'll find matching markets.",
+        [[{"text": "❌ Cancel", "callback_data": "pr:cancel"}]],
+    )
+    _WIZARD[chat_id] = {"step": "pr_thesis", "msg_id": msg_id}
+
+
+def _predict_search_and_show(chat_id: str, thesis: str) -> None:
+    """After the thesis text: search PolyGram, stash candidates, render market buttons."""
+    w = _WIZARD[chat_id]
+    w["thesis"] = thesis
+    cands = trading._gather_pg_candidates([{"topic": thesis}])[:6]
+    if not cands:
+        telegram_edit_text(
+            w["msg_id"], "No matching markets found. Try /predict again.", []
+        )
+        _WIZARD.pop(chat_id, None)
+        return
+    w["candidates"] = cands
+    w["step"] = "pr_market"
+    rows = [
+        [
+            {
+                "text": f"{c['question'][:55]} · {c['yes_price']:.2f}",
+                "callback_data": f"pr:mkt:{i}",
+            }
+        ]
+        for i, c in enumerate(cands)
+    ]
+    rows.append([{"text": "❌ Cancel", "callback_data": "pr:cancel"}])
+    telegram_edit_text(w["msg_id"], "Pick the market:", rows)
+
+
+def _predict_show_sides(chat_id: str, idx: int) -> None:
+    """After market pick: fetch token ids/prices, stash, render YES/NO buttons."""
+    w = _WIZARD[chat_id]
+    c = w["candidates"][idx]
+    m = trading.polygram_market(c["market_id"])
+    parsed = trading._parse_pg_market(m) if m is not None else None
+    if parsed is None or not c.get("event_id"):
+        telegram_edit_text(
+            w["msg_id"], "That market can't be traded right now. /predict to retry.", []
+        )
+        _WIZARD.pop(chat_id, None)
+        return
+    w.update(
+        {
+            "market_id": c["market_id"],
+            "event_id": c["event_id"],
+            "end_date": c["end_date"],
+            "question": parsed["question"],
+            "prices": parsed["prices"],
+            "token_ids": parsed["token_ids"],
+            "step": "pr_side",
+        }
+    )
+    yes_p, no_p = parsed["prices"][0], parsed["prices"][1]
+    rows = [
+        [
+            {"text": f"YES · {yes_p:.2f}", "callback_data": "pr:side:YES"},
+            {"text": f"NO · {no_p:.2f}", "callback_data": "pr:side:NO"},
+        ],
+        [{"text": "❌ Cancel", "callback_data": "pr:cancel"}],
+    ]
+    telegram_edit_text(w["msg_id"], f"<b>{parsed['question']}</b>\n\nWhich side?", rows)
+
+
+def _predict_show_stake(chat_id: str, side: str) -> None:
+    w = _WIZARD[chat_id]
+    w["outcome"] = "Yes" if side == "YES" else "No"
+    w["side_index"] = 0 if side == "YES" else 1
+    w["step"] = "pr_stake"
+    row = [{"text": f"${s}", "callback_data": f"pr:stake:{s}"} for s in _PREDICT_STAKES]
+    rows = [
+        row,
+        [
+            {"text": "✏️ Other", "callback_data": "pr:stake:other"},
+            {"text": "❌ Cancel", "callback_data": "pr:cancel"},
+        ],
+    ]
+    telegram_edit_text(
+        w["msg_id"], "Stake (USD)? Money you can watch go to zero.", rows
+    )
+
+
+def _predict_show_hold(chat_id: str) -> None:
+    w = _WIZARD[chat_id]
+    w["step"] = "pr_hold"
+    rows = [
+        [{"text": "⏳ Hold to settlement", "callback_data": "pr:hold:settle"}],
+        [{"text": "✋ Until I /close", "callback_data": "pr:hold:manual"}],
+        [{"text": "❌ Cancel", "callback_data": "pr:cancel"}],
+    ]
+    telegram_edit_text(w["msg_id"], "Exit mode?", rows)
+
+
+def _predict_show_phat(chat_id: str) -> None:
+    w = _WIZARD[chat_id]
+    w["step"] = "pr_phat"
+    rows = [
+        [{"text": "⏭ Skip", "callback_data": "pr:phat:skip"}],
+        [{"text": "❌ Cancel", "callback_data": "pr:cancel"}],
+    ]
+    telegram_edit_text(
+        w["msg_id"],
+        "Your probability the bet resolves in your favour (0–1)? Reply a number, or Skip.",
+        rows,
+    )
+
+
+def _predict_confirm_prompt(chat_id: str) -> None:
+    w = _WIZARD[chat_id]
+    w["step"] = "pr_confirm"
+    ph = "—" if w.get("p_hat") is None else f"{w['p_hat']:.2f}"
+    entry = w["prices"][w["side_index"]]
+    summary = (
+        f"<b>{w['question']}</b>\n"
+        f"Side <b>{w['outcome']}</b> @ {entry:.2f} · ${w['stake']:g} · "
+        f"{w['hold_mode']} · p̂={ph}\n<i>{html.escape(w['thesis'])}</i>"
+    )
+    rows = [
+        [
+            {"text": "✅ Open bet", "callback_data": "pr:confirm"},
+            {"text": "❌ Cancel", "callback_data": "pr:cancel"},
+        ]
+    ]
+    telegram_edit_text(w["msg_id"], summary, rows)
+
+
+def _predict_commit(chat_id: str) -> None:
+    """Open the Sleeve-B live row under the cap/no-DCA guard and log the thesis. Fail-closed."""
+    w = _WIZARD.get(chat_id)
+    if not w:
+        return
+    with file_lock(trading.BOOK_FILE):
+        book = load_book()
+        ok, why = trading._sleeve_b_open_ok(
+            book, w["market_id"], w["outcome"], w["stake"]
+        )
+        if not ok:
+            telegram_edit_text(w["msg_id"], f"⚠️ Not opened — {why}.", [])
+            _WIZARD.pop(chat_id, None)
+            return
+        entry = w["prices"][w["side_index"]]
+        row = polygram_live.open_live_position(
+            book,
+            sleeve="B",
+            event_id=w["event_id"],
+            market_id=w["market_id"],
+            token_id=w["token_ids"][w["side_index"]],
+            outcome=w["outcome"],
+            side_index=w["side_index"],
+            amount=w["stake"],
+            topic=w["question"],
+            source_id="user",
+            source_kind="discretionary",
+            source_perspective=None,
+            live_exposure=0.0,  # cap already enforced by _sleeve_b_open_ok
+        )
+        if row is None:
+            telegram_edit_text(
+                w["msg_id"], "⚠️ Venue rejected the order — nothing opened.", []
+            )
+            _WIZARD.pop(chat_id, None)
+            return
+        if w.get("hold_mode") == "manual":
+            row["hold_mode"] = "manual"
+        save_book(book)
+    common.append_thesis(
+        {
+            "id": row["id"],
+            "created": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            "market_id": w["market_id"],
+            "event_id": w["event_id"],
+            "outcome": w["outcome"],
+            "side_index": w["side_index"],
+            "entry_price": entry,
+            "p_hat": w.get("p_hat"),
+            "resolve_by": w.get("end_date"),
+            "question": w["question"],
+            "thesis": w["thesis"],
+            "source_ids": ["user"],
+            "stake": w["stake"],
+            "hold_mode": w.get("hold_mode", "settle"),
+            "sleeve": "B",
+            "traded": True,
+            "scored": False,
+            "outcome_result": None,
+            "brier": None,
+        }
+    )
+    telegram_edit_text(
+        w["msg_id"], f"✅ Opened <b>{w['outcome']}</b> @ {entry:.2f}. Logged.", []
+    )
+    _WIZARD.pop(chat_id, None)
 
 
 def _sources_render(message_id: int | None = None) -> None:
@@ -1074,8 +1306,14 @@ def _handle_callback_query(cb: dict, fb: dict | None = None) -> dict | None:
         telegram_edit_text(msg_id, "Reset cancelled — nothing changed.", [])
         return fb
 
-    # ── /addsource wizard ──
+    # ── /addsource + /predict wizards (cancel works without a live wizard) ──
     if data == "as:cancel":
+        w = _WIZARD.pop(chat_id, None)
+        if w:
+            telegram_edit_text(w["msg_id"], "❌ Cancelled.", [])
+        return fb
+
+    if data == "pr:cancel":
         w = _WIZARD.pop(chat_id, None)
         if w:
             telegram_edit_text(w["msg_id"], "❌ Cancelled.", [])
@@ -1133,6 +1371,27 @@ def _handle_callback_query(cb: dict, fb: dict | None = None) -> dict | None:
             f"[{entry['kind']}] ({html.escape(entry['category'])}).",
             [],
         )
+    # ── /predict wizard actions (w guaranteed live past the guard above) ──
+    elif data.startswith("pr:mkt:"):
+        _predict_show_sides(chat_id, int(data.split(":")[2]))
+    elif data.startswith("pr:side:"):
+        _predict_show_stake(chat_id, data.split(":")[2])
+    elif data.startswith("pr:stake:"):
+        val = data.split(":")[2]
+        if val == "other":
+            w["step"] = "pr_stake_text"
+            telegram_edit_text(w["msg_id"], "Reply with the stake in USD (e.g. 7).", [])
+        else:
+            w["stake"] = float(val)
+            _predict_show_hold(chat_id)
+    elif data.startswith("pr:hold:"):
+        w["hold_mode"] = data.split(":")[2]
+        _predict_show_phat(chat_id)
+    elif data == "pr:phat:skip":
+        w["p_hat"] = None
+        _predict_confirm_prompt(chat_id)
+    elif data == "pr:confirm":
+        _predict_commit(chat_id)
     return fb
 
 
@@ -1193,6 +1452,9 @@ def _handle_telegram_update(update: dict, fb: dict) -> dict:
 
     elif text == "/addsource":
         _wizard_start(chat_id)
+
+    elif text == "/predict":
+        _predict_start(chat_id)
 
     elif text == "/sources":
         _sources_render()
@@ -2830,6 +3092,7 @@ BOT_COMMANDS = [
     ("help", "Show command help"),
     ("status", "Show current overrides"),
     ("addsource", "Add a temporary news source (guided)"),
+    ("predict", "Open a conviction prediction bet (guided)"),
     ("sources", "List / remove temporary sources"),
     ("removesource", "Remove a temp source by name"),
     ("pin", "Always show a topic"),
