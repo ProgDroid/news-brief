@@ -3231,10 +3231,12 @@ def mode_monitor():
             )
             n_rec = polygram_live.reconcile_live_book(book)
             n_fill = polygram_live.backfill_settled(book)
-            if n_exit or n_rec or n_fill:
+            n_score = trading.score_settled_theses()
+            if n_exit or n_rec or n_fill or n_score:
                 save_book(book)
                 log.info(
-                    f"Live sweep: {n_exit} exited, {n_rec} reconciled, {n_fill} backfilled"
+                    f"Live sweep: {n_exit} exited, {n_rec} reconciled, "
+                    f"{n_fill} backfilled, {n_score} theses scored"
                 )
     except Exception as e:  # never let the live sweep break the monitor cron
         log.warning(f"Live exit sweep failed: {e}")

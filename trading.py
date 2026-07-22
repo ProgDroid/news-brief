@@ -1555,6 +1555,38 @@ def _sleeve_b_open_ok(book, market_id, outcome, amount):
     return True, ""
 
 
+def score_settled_theses() -> int:
+    """Grade unscored theses whose live row has settled. Returns count scored.
+
+    outcome_result = 1 if the held side won (realized_return > 0) else 0.
+    brier = (p_hat - outcome_result)**2 when p_hat is known, else None."""
+    log_ = common.load_thesis_log()
+    if not log_:
+        return 0
+    ret_by_id = {
+        p["id"]: p.get("realized_return")
+        for p in load_book().get("positions", [])
+        if p.get("status") == "closed" and p.get("realized_return") is not None
+    }
+    n = 0
+    for rec in log_:
+        if rec.get("scored"):
+            continue
+        ret = ret_by_id.get(rec.get("id"))
+        if ret is None:
+            continue
+        outcome = 1 if ret > 0 else 0
+        rec["outcome_result"] = outcome
+        rec["brier"] = (
+            None if rec.get("p_hat") is None else (rec["p_hat"] - outcome) ** 2
+        )
+        rec["scored"] = True
+        n += 1
+    if n:
+        common.save_thesis_log(log_)
+    return n
+
+
 def open_sleeve_a_live(book, signals, today) -> int:
     """Open real-money Sleeve-A favorite-fade positions. Creds+flag gated; returns count.
 

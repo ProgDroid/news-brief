@@ -793,3 +793,54 @@ def test_sleeve_b_open_ok(monkeypatch):
     assert ok is False and "total" in why  # 20+9 > 25 total cap
     ok, why = trading._sleeve_b_open_ok(book, "m1", "No", 3.0)
     assert ok is False and "already" in why  # no-DCA on existing market
+
+
+def test_score_settled_theses(monkeypatch):
+    thesis_store = [
+        {
+            "id": "L1",
+            "p_hat": 0.8,
+            "scored": False,
+            "outcome_result": None,
+            "brier": None,
+        },
+        {
+            "id": "L2",
+            "p_hat": None,
+            "scored": False,
+            "outcome_result": None,
+            "brier": None,
+        },
+        {
+            "id": "L3",
+            "p_hat": 0.6,
+            "scored": False,
+            "outcome_result": None,
+            "brier": None,
+        },
+    ]
+    monkeypatch.setattr(common, "load_thesis_log", lambda: thesis_store)
+    saved = {}
+    monkeypatch.setattr(common, "save_thesis_log", lambda r: saved.setdefault("r", r))
+    monkeypatch.setattr(
+        trading,
+        "load_book",
+        lambda: {
+            "positions": [
+                {"id": "L1", "status": "closed", "realized_return": 0.12},  # won
+                {"id": "L2", "status": "closed", "realized_return": -1.0},  # lost
+                {"id": "L3", "status": "open", "realized_return": None},  # not settled
+            ]
+        },
+    )
+    n = trading.score_settled_theses()
+    assert n == 2
+    by_id = {r["id"]: r for r in saved["r"]}
+    assert (
+        by_id["L1"]["outcome_result"] == 1
+        and abs(by_id["L1"]["brier"] - (0.8 - 1) ** 2) < 1e-9
+    )
+    assert (
+        by_id["L2"]["outcome_result"] == 0 and by_id["L2"]["brier"] is None
+    )  # no p_hat
+    assert by_id["L3"]["scored"] is False  # still open
