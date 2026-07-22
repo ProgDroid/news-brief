@@ -1530,6 +1530,31 @@ def _open_prediction_positions(
     return opened
 
 
+def _sleeve_b_open_ok(book, market_id, outcome, amount):
+    """Sleeve-B guard: per-position cap, total-sleeve cap, and NO-DCA. Returns (ok, reason)."""
+    if amount <= 0 or amount > common.PG_B_POS_CAP:
+        return False, f"over per-position cap (${common.PG_B_POS_CAP:g})"
+    exposure = sum(
+        (p.get("cost_basis") or 0.0)
+        for p in book.get("positions", [])
+        if p.get("execution") == "live"
+        and p.get("sleeve") == "B"
+        and p.get("status") == "open"
+    )
+    if exposure + amount > common.PG_B_TOTAL_CAP:
+        return False, f"over total Sleeve-B cap (${common.PG_B_TOTAL_CAP:g})"
+    for p in book.get("positions", []):
+        if (
+            p.get("execution") == "live"
+            and p.get("sleeve") == "B"
+            and p.get("status") == "open"
+            and p.get("instrument") == market_id
+            and p.get("outcome") == outcome
+        ):
+            return False, "a Sleeve-B position already open on this market (no DCA)"
+    return True, ""
+
+
 def open_sleeve_a_live(book, signals, today) -> int:
     """Open real-money Sleeve-A favorite-fade positions. Creds+flag gated; returns count.
 

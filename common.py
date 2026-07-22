@@ -125,6 +125,14 @@ PG_A_NEAR_DAYS = int(
     _env_float("PG_A_NEAR_DAYS", 10)
 )  # ≤ this to settlement ⇒ hold, no time-stop
 
+# ── Sleeve B: discretionary conviction holds ──────────────────────────────────
+PG_B_ENABLED = _env_flag("PG_B_ENABLED")
+PG_B_POS_CAP = _env_float(
+    "PG_B_POS_CAP", 10.0
+)  # per conviction bet (money-you-can-zero)
+PG_B_TOTAL_CAP = _env_float("PG_B_TOTAL_CAP", 40.0)  # across all open Sleeve-B rows
+PG_THESIS_GRACE_DAYS = int(_env_float("PG_THESIS_GRACE_DAYS", 14))
+
 # ── Phase 4: validation / performance ─────────────────────────────────────────
 # Round-trip cost haircut (basis points) applied to gross return at close, by asset
 # class. Prediction uses the real orderbook half-spread when available (see trading

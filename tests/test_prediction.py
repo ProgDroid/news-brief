@@ -766,3 +766,30 @@ def test_mark_to_market_skips_live_rows(monkeypatch):
     }
     trading.mark_to_market(book, "2026-07-20")
     assert "live1" not in called  # weekly measurement path never touches live rows
+
+
+def test_sleeve_b_open_ok(monkeypatch):
+    monkeypatch.setattr(common, "PG_B_POS_CAP", 10.0)
+    monkeypatch.setattr(common, "PG_B_TOTAL_CAP", 25.0)
+    book = {
+        "positions": [
+            {
+                "execution": "live",
+                "sleeve": "B",
+                "status": "open",
+                "instrument": "m1",
+                "outcome": "No",
+                "cost_basis": 20.0,
+            },
+        ]
+    }
+    ok, _ = trading._sleeve_b_open_ok(book, "m2", "Yes", 5.0)
+    assert (
+        ok is True
+    )  # within both caps (20+5=25, total-cap boundary inclusive), new market
+    ok, why = trading._sleeve_b_open_ok(book, "m2", "Yes", 11.0)
+    assert ok is False and "per-position" in why  # over per-position cap
+    ok, why = trading._sleeve_b_open_ok(book, "m2", "Yes", 9.0)
+    assert ok is False and "total" in why  # 20+9 > 25 total cap
+    ok, why = trading._sleeve_b_open_ok(book, "m1", "No", 3.0)
+    assert ok is False and "already" in why  # no-DCA on existing market
