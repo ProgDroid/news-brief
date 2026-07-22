@@ -379,3 +379,17 @@ def test_mode_monitor_silent_when_quiet(monkeypatch):
     monkeypatch.setattr(brief, "run_volume_monitor", lambda: [])
     brief.mode_monitor()
     assert sent == []
+
+
+
+def test_mode_monitor_runs_live_exit_and_reconcile(monkeypatch):
+    import brief, trading, polygram_live
+    monkeypatch.setattr(brief, "run_volume_monitor", lambda: [])
+    swept, reconciled = [], []
+    monkeypatch.setattr(trading, "sweep_live_exits", lambda book, today: swept.append(True) or 0)
+    monkeypatch.setattr(polygram_live, "reconcile_live_book", lambda book: reconciled.append(True) or 0)
+    monkeypatch.setattr(brief, "load_book", lambda: {"positions": []})
+    saved = {}
+    monkeypatch.setattr(brief, "save_book", lambda b: saved.setdefault("b", b))
+    brief.mode_monitor()
+    assert swept == [True] and reconciled == [True]

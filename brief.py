@@ -61,6 +61,7 @@ from common import (
     split_html_message,
 )
 import trading
+import polygram_live
 from trading import (
     load_book,
     save_book,
@@ -2942,13 +2943,28 @@ def mode_commands():
 
 
 def mode_monitor():
-    """Hourly cross-asset volume-anomaly alerts. Decoupled from the brief: its own
-    cron mode, so a monitor failure can never delay or duplicate the morning brief."""
+    """Hourly cross-asset volume-anomaly alerts + live-position exit sweep/reconcile.
+
+    The volume monitor is decoupled from the brief (its own cron mode). The live
+    block (under the book lock) runs the Sleeve-A exit sweep, then makes the venue
+    authoritative (reconcile) — both fail-safe so a live error never breaks the cron.
+    """
     log.info("=== MONITOR ===")
     alerts = run_volume_monitor()
     if alerts:
         telegram_send_long("🔔 <b>Volume alerts</b>\n\n" + "\n".join(alerts))
-
+    try:
+        with file_lock(trading.BOOK_FILE, timeout=trading.BOOK_LOCK_TIMEOUT):
+            book = load_book()
+            n_exit = trading.sweep_live_exits(
+                book, datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            )
+            n_rec = polygram_live.reconcile_live_book(book)
+            if n_exit or n_rec:
+                save_book(book)
+                log.info(f"Live sweep: {n_exit} exited, {n_rec} reconciled")
+    except Exception as e:  # never let the live sweep break the monitor cron
+        log.warning(f"Live exit sweep failed: {e}")
 
 # ── Entry ─────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":

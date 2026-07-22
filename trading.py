@@ -1823,6 +1823,8 @@ def mark_to_market(book: dict, today_str: str) -> dict:
     for p in book["positions"]:
         if p["status"] != "open":
             continue
+        if p.get("execution") == "live":
+            continue  # live rows exit via the hourly sweep, never the weekly measurement path
         if p.get("asset_class") == "prediction":
             _mtm_prediction(p, today, today_str)
             continue

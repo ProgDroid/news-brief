@@ -638,3 +638,16 @@ def test_sweep_live_exits_skips_paper_rows(monkeypatch):
     monkeypatch.setattr(polygram_live, "close_live_position",
                         lambda r, reason: (_ for _ in ()).throw(AssertionError("paper touched")))
     assert trading.sweep_live_exits(book, "2026-07-20") == 0
+
+
+
+def test_mark_to_market_skips_live_rows(monkeypatch):
+    called = []
+    monkeypatch.setattr(trading, "_mtm_prediction", lambda p, td, ts: called.append(p["id"]))
+    monkeypatch.setattr(trading, "mark_to_market", trading.mark_to_market)  # ensure real fn under test
+    book = {"positions": [
+        {"id": "live1", "execution": "live", "sleeve": "A", "asset_class": "prediction",
+         "status": "open", "side_index": 1, "entry_price": 0.85, "entry_date": "2026-07-01"},
+    ]}
+    trading.mark_to_market(book, "2026-07-20")
+    assert "live1" not in called  # weekly measurement path never touches live rows
