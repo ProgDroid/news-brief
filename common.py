@@ -67,6 +67,7 @@ MODEL = os.environ.get("NEWSBRIEF_MODEL", "claude-sonnet-5")
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 SIGNALS_DIR = DATA_DIR / "signals"
+THESIS_LOG_FILE = DATA_DIR / "thesis_log.json"
 
 # ── Trading212 config + auth ──────────────────────────────────────────────────
 # Read-only API key. Base URL: live for real account, demo for practice.
@@ -251,6 +252,25 @@ def _load_json_or(path: Path, default):
         except OSError as qe:
             log.error(f"Corrupt JSON {path.name} (quarantine failed: {qe}): {e}")
         return default
+
+
+# ── Sleeve-B conviction-thesis log ──────────────────────────────────────────────
+def load_thesis_log() -> list:
+    """The Sleeve-B conviction-thesis calibration corpus (list of records)."""
+    data = _load_json_or(THESIS_LOG_FILE, [])
+    return data if isinstance(data, list) else []
+
+
+def save_thesis_log(records: list) -> None:
+    _write_json_atomic(THESIS_LOG_FILE, records)
+
+
+def append_thesis(record: dict) -> None:
+    """Append one thesis record under the file lock (daemon + retention both touch it)."""
+    with file_lock(THESIS_LOG_FILE):
+        log_ = load_thesis_log()
+        log_.append(record)
+        save_thesis_log(log_)
 
 
 # ── Telegram ──────────────────────────────────────────────────────────────────

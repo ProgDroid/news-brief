@@ -115,3 +115,16 @@ def test_log_handlers_include_rotating_file_handler():
     finally:
         for h in handlers:
             h.close()
+
+
+def test_append_thesis_persists(tmp_path, monkeypatch):
+    monkeypatch.setattr(common, "THESIS_LOG_FILE", tmp_path / "thesis_log.json")
+    common.append_thesis({"id": "t1", "market_id": "m", "p_hat": 0.8})
+    common.append_thesis({"id": "t2", "market_id": "n", "p_hat": None})
+    log = common.load_thesis_log()
+    assert [r["id"] for r in log] == ["t1", "t2"]
+
+
+def test_load_thesis_log_missing_is_empty(tmp_path, monkeypatch):
+    monkeypatch.setattr(common, "THESIS_LOG_FILE", tmp_path / "nope.json")
+    assert common.load_thesis_log() == []
