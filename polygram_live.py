@@ -4,6 +4,8 @@ Reuses trading.py's JWT/token-file auth. Every network helper returns None on
 any non-2xx / parse / network error; callers treat None as "did not happen".
 """
 
+from datetime import datetime, timezone
+
 import requests
 
 import common
@@ -156,3 +158,78 @@ def cap_ok(amount, live_exposure):
     if bal is None or amount > bal:
         return False
     return True
+
+
+def open_live_position(
+    book,
+    *,
+    sleeve,
+    event_id,
+    market_id,
+    token_id,
+    outcome,
+    side_index,
+    amount,
+    topic,
+    source_id,
+    source_kind,
+    source_perspective,
+    live_exposure,
+):
+    """Place a real market buy and append a truthful live row. None if not opened.
+
+    Order of guards (all fail-closed): kill-switch → cap_ok → place. No order is
+    placed unless the cap passes; no row is written unless the order fills.
+    Caller must hold the book lock.
+    """
+    if not common.PG_LIVE_ENABLED:
+        return None
+    if not cap_ok(amount, live_exposure):
+        log.warning(f"Live open rejected by cap: {market_id}/{outcome} ${amount}")
+        return None
+    fill = place_market_order(event_id, market_id, token_id, outcome, amount)
+    if fill is None:
+        return None
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    row = {
+        "id": f"{today}:prediction:{market_id}:{outcome.upper()}:live",
+        "opened": today,
+        "asset_class": "prediction",
+        "venue": "polygram",
+        "execution": "live",
+        "sleeve": sleeve,
+        "ticker": market_id,
+        "instrument": market_id,
+        "event_id": event_id,
+        "token_id": token_id,
+        "outcome": outcome,
+        "side_index": side_index,
+        "play_type": "resolution",
+        "direction": "bullish",  # always long the held side (long-sense return)
+        "topic": topic,
+        "rationale": f"live open (sleeve {sleeve})",
+        "source_id": source_id,
+        "source_kind": source_kind,
+        "source_perspective": source_perspective,
+        "order_id": fill["order_id"],
+        "entry_price": fill["fill_price"],
+        "shares": fill["shares"],
+        "cost_basis": amount,
+        "fees": {
+            "spread_fee": fill["spread_fee"],
+            "trade_fee": fill["trade_fee"],
+            "total_fee": fill["total_fee"],
+        },
+        "entry_date": today,
+        "status": "open",
+        "close_reason": None,
+        "closed_date": None,
+        "checkpoints": {},
+        "last_mark": None,
+        "realized_return": None,
+    }
+    book["positions"].append(row)
+    log.info(
+        f"LIVE OPEN {sleeve} {market_id}/{outcome} ${amount} @ {fill['fill_price']}"
+    )
+    return row

@@ -151,3 +151,100 @@ def test_cap_ok_allows_within_all_limits(monkeypatch):
     monkeypatch.setattr(common, "PG_LIVE_TOTAL_CAP", 50.0)
     monkeypatch.setattr(polygram_live, "wallet_balance", lambda: 100.0)
     assert polygram_live.cap_ok(5.0, live_exposure=10.0) is True
+
+
+def _fill():
+    return {
+        "order_id": "ord_1",
+        "fill_price": 0.62,
+        "shares": 8.06,
+        "spread_fee": 0.07,
+        "trade_fee": 0.03,
+        "total_fee": 0.10,
+        "status": "filled",
+    }
+
+
+def test_open_live_position_writes_truthful_row(monkeypatch):
+    monkeypatch.setattr(common, "PG_LIVE_ENABLED", True)
+    monkeypatch.setattr(polygram_live, "cap_ok", lambda *a, **k: True)
+    monkeypatch.setattr(polygram_live, "place_market_order", lambda *a, **k: _fill())
+    book = {"positions": []}
+    row = polygram_live.open_live_position(
+        book,
+        sleeve="A",
+        event_id="evt_a",
+        market_id="mkt_b",
+        token_id="0xabc",
+        outcome="No",
+        side_index=1,
+        amount=5.0,
+        topic="Hormuz normal by Aug 31?",
+        source_id="OilPrice.com",
+        source_kind="wire",
+        source_perspective=None,
+        live_exposure=0.0,
+    )
+    assert row is not None
+    assert row["execution"] == "live" and row["sleeve"] == "A"
+    assert row["asset_class"] == "prediction" and row["venue"] == "polygram"
+    assert row["instrument"] == "mkt_b" and row["event_id"] == "evt_a"
+    assert row["outcome"] == "No" and row["side_index"] == 1
+    assert row["entry_price"] == 0.62 and row["shares"] == 8.06
+    assert row["cost_basis"] == 5.0 and row["fees"]["total_fee"] == 0.10
+    assert row["status"] == "open" and row["source_kind"] == "wire"
+    assert book["positions"][-1] is row
+
+
+def test_open_live_position_noop_when_killswitch_off(monkeypatch):
+    monkeypatch.setattr(common, "PG_LIVE_ENABLED", False)
+    book = {"positions": []}
+    assert (
+        polygram_live.open_live_position(
+            book,
+            sleeve="A",
+            event_id="e",
+            market_id="m",
+            token_id="t",
+            outcome="Yes",
+            side_index=0,
+            amount=5.0,
+            topic="x",
+            source_id=None,
+            source_kind="unknown",
+            source_perspective=None,
+            live_exposure=0.0,
+        )
+        is None
+    )
+    assert book["positions"] == []
+
+
+def test_open_live_position_noop_on_cap_fail(monkeypatch):
+    monkeypatch.setattr(common, "PG_LIVE_ENABLED", True)
+    monkeypatch.setattr(polygram_live, "cap_ok", lambda *a, **k: False)
+    placed = []
+    monkeypatch.setattr(
+        polygram_live, "place_market_order", lambda *a, **k: placed.append(1)
+    )
+    book = {"positions": []}
+    assert (
+        polygram_live.open_live_position(
+            book,
+            sleeve="A",
+            event_id="e",
+            market_id="m",
+            token_id="t",
+            outcome="Yes",
+            side_index=0,
+            amount=99.0,
+            topic="x",
+            source_id=None,
+            source_kind="unknown",
+            source_perspective=None,
+            live_exposure=0.0,
+        )
+        is None
+    )
+    assert placed == []  # cap checked BEFORE any order is placed
+    assert book["positions"] == []
