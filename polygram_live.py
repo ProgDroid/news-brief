@@ -295,3 +295,48 @@ def reconcile_live_book(book):
             n += 1
             log.info(f"LIVE RECONCILE settled {row['id']} (gone from venue)")
     return n
+
+
+
+def trade_history():
+    """Trade execution history via GET /trade/history. Returns the list, or None on failed read."""
+    data = _pg_request("GET", "/trade/history")
+    if isinstance(data, dict):
+        items = data.get("history") or data.get("trades")
+        return items if isinstance(items, list) else None
+    return data if isinstance(data, list) else None
+
+
+def backfill_settled(book):
+    """Fill realized_return on settled live rows from /trade/history. None history ⇒ no-op.
+
+    realized_return = proceeds / cost_basis - 1, matched by (marketId, outcome)."""
+    pending = [
+        p
+        for p in book.get("positions", [])
+        if p.get("execution") == "live"
+        and p.get("close_reason") == "settled"
+        and p.get("realized_return") is None
+    ]
+    if not pending:
+        return 0
+    hist = trade_history()
+    if hist is None:
+        return 0
+    by_key = {}
+    for h in hist:
+        if isinstance(h, dict):
+            by_key.setdefault((h.get("marketId"), h.get("outcome")), h)
+    n = 0
+    for p in pending:
+        h = by_key.get((p.get("instrument"), p.get("outcome")))
+        if not h:
+            continue
+        try:
+            proceeds = float(h.get("proceeds"))
+        except (TypeError, ValueError):
+            continue
+        cost = p.get("cost_basis") or 0.0
+        p["realized_return"] = (proceeds / cost - 1.0) if cost else 0.0
+        n += 1
+    return n

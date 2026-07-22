@@ -323,3 +323,23 @@ def test_reconcile_skips_on_failed_read(monkeypatch):
     book = {"positions": [row]}
     assert polygram_live.reconcile_live_book(book) == 0
     assert row["status"] == "open"  # NEVER mass-settle on a failed read
+
+
+
+def test_backfill_settled_fills_realized(monkeypatch):
+    monkeypatch.setattr(polygram_live, "trade_history", lambda: [
+        {"marketId": "m", "outcome": "No", "type": "settlement", "proceeds": 2.5}])
+    row = {"execution": "live", "status": "closed", "close_reason": "settled",
+           "instrument": "m", "outcome": "No", "cost_basis": 2.0, "realized_return": None}
+    book = {"positions": [row]}
+    assert polygram_live.backfill_settled(book) == 1
+    assert abs(row["realized_return"] - 0.25) < 1e-9  # 2.5/2.0 - 1
+
+
+def test_backfill_settled_skips_when_history_unreadable(monkeypatch):
+    monkeypatch.setattr(polygram_live, "trade_history", lambda: None)
+    row = {"execution": "live", "status": "closed", "close_reason": "settled",
+           "instrument": "m", "outcome": "No", "cost_basis": 2.0, "realized_return": None}
+    book = {"positions": [row]}
+    assert polygram_live.backfill_settled(book) == 0
+    assert row["realized_return"] is None

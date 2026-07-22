@@ -2960,9 +2960,12 @@ def mode_monitor():
                 book, datetime.now(timezone.utc).strftime("%Y-%m-%d")
             )
             n_rec = polygram_live.reconcile_live_book(book)
-            if n_exit or n_rec:
+            n_fill = polygram_live.backfill_settled(book)
+            if n_exit or n_rec or n_fill:
                 save_book(book)
-                log.info(f"Live sweep: {n_exit} exited, {n_rec} reconciled")
+                log.info(
+                    f"Live sweep: {n_exit} exited, {n_rec} reconciled, {n_fill} backfilled"
+                )
     except Exception as e:  # never let the live sweep break the monitor cron
         log.warning(f"Live exit sweep failed: {e}")
 
