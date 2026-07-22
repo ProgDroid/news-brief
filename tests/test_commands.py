@@ -1099,3 +1099,59 @@ def test_predict_commit_blocked_by_cap(monkeypatch):
     assert calls == [] and logged == []  # blocked before any order/log
     assert edits and "cap" in edits[-1].lower()
     assert "42" not in brief._WIZARD
+
+
+def test_predict_commit_passes_real_live_exposure(monkeypatch):
+    """Sleeve-B opens must feed the true cross-sleeve live exposure into the global
+    cap check (PG_LIVE_TOTAL_CAP), not 0.0 — otherwise Sleeve B escapes the ceiling."""
+    import polygram_live
+
+    monkeypatch.setattr(common, "PG_LIVE_ENABLED", True)
+    monkeypatch.setattr(common, "PG_B_ENABLED", True)
+    # A pre-existing open live row (Sleeve A) already consuming $12 of the global cap.
+    book = {
+        "positions": [
+            {
+                "execution": "live",
+                "sleeve": "A",
+                "status": "open",
+                "cost_basis": 12.0,
+            }
+        ]
+    }
+    monkeypatch.setattr(brief, "load_book", lambda: book)
+    monkeypatch.setattr(brief, "save_book", lambda b: None)
+    monkeypatch.setattr(brief.trading, "BOOK_FILE", "x")
+    monkeypatch.setattr(
+        brief, "file_lock", lambda *a, **k: __import__("contextlib").nullcontext()
+    )
+    monkeypatch.setattr(trading, "_sleeve_b_open_ok", lambda b, m, o, a: (True, ""))
+    opened = {}
+
+    def fake_open(book, **kw):
+        opened.update(kw)
+        row = {"id": "L", "status": "open", **kw}
+        book["positions"].append(row)
+        return row
+
+    monkeypatch.setattr(polygram_live, "open_live_position", fake_open)
+    monkeypatch.setattr(common, "append_thesis", lambda r: None)
+    monkeypatch.setattr(brief, "telegram_edit_text", lambda *a: None)
+    brief._WIZARD["42"] = {
+        "step": "pr_confirm",
+        "msg_id": 1,
+        "thesis": "t",
+        "market_id": "m",
+        "event_id": "e",
+        "question": "Q",
+        "prices": [0.6, 0.4],
+        "token_ids": ["a", "b"],
+        "outcome": "Yes",
+        "side_index": 0,
+        "stake": 3.0,
+        "hold_mode": "settle",
+        "p_hat": None,
+        "end_date": "2026-09-01",
+    }
+    brief._predict_commit("42")
+    assert opened["live_exposure"] == 12.0  # real cross-sleeve exposure, not 0.0

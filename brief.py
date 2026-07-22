@@ -1037,6 +1037,14 @@ def _predict_commit(chat_id: str) -> None:
             _WIZARD.pop(chat_id, None)
             return
         entry = w["prices"][w["side_index"]]
+        # Real cross-sleeve exposure so the global PG_LIVE_TOTAL_CAP (enforced in
+        # open_live_position) bounds total real money across BOTH sleeves — the
+        # Sleeve-B caps in _sleeve_b_open_ok only bound Sleeve-B rows.
+        live_exposure = sum(
+            (p.get("cost_basis") or 0.0)
+            for p in book.get("positions", [])
+            if p.get("execution") == "live" and p.get("status") == "open"
+        )
         row = polygram_live.open_live_position(
             book,
             sleeve="B",
@@ -1050,7 +1058,7 @@ def _predict_commit(chat_id: str) -> None:
             source_id="user",
             source_kind="discretionary",
             source_perspective=None,
-            live_exposure=0.0,  # cap already enforced by _sleeve_b_open_ok
+            live_exposure=live_exposure,
         )
         if row is None:
             telegram_edit_text(
