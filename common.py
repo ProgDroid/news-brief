@@ -88,6 +88,25 @@ ALPACA_DATA_URL = os.environ.get("APCA_DATA_URL", "https://data.alpaca.markets")
 POLYGRAM_EMAIL = os.environ.get("POLYGRAM_EMAIL")
 POLYGRAM_PASSWORD = os.environ.get("POLYGRAM_PASSWORD")
 
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
+
+
+# Live prediction trading (real money). Default OFF; funded/enabled per host.
+PG_LIVE_ENABLED = _env_flag("PG_LIVE_ENABLED")
+PG_LIVE_TOTAL_CAP = _env_float(
+    "PG_LIVE_TOTAL_CAP", 50.0
+)  # max USD across all live rows
+PG_LIVE_PER_TRADE_CAP = _env_float("PG_LIVE_PER_TRADE_CAP", 5.0)  # max USD per order
+
 # ── Phase 4: validation / performance ─────────────────────────────────────────
 # Round-trip cost haircut (basis points) applied to gross return at close, by asset
 # class. Prediction uses the real orderbook half-spread when available (see trading
