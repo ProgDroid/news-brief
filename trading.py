@@ -788,14 +788,19 @@ def _gather_pg_candidates(signals: list) -> list:
     takes at most PG_PER_QUERY_CAP per token so no single token monopolises the
     pool. Dedups by market_id and caps the total at PG_CANDIDATE_CAP to bound the
     matcher prompt. Returns the parsed-candidate dicts (market_id/question/
-    yes_price/end_date) the matcher is shown.
+    yes_price/end_date/event_id) the matcher is shown; event_id is the /search
+    event wrapper's id, carried through for the live (Sleeve A) open path.
     """
     seen: dict[str, dict] = {}
     for q in _signal_search_terms(signals):
         raw: list[dict] = []
         for ev in polygram_search(q) or []:
             if isinstance(ev, dict):
-                raw.extend(ev.get("markets", []))
+                ev_id = ev.get("id") or ev.get("eventId")  # live-verify key name
+                for m in ev.get("markets", []):
+                    if isinstance(m, dict):
+                        m["_event_id"] = ev_id  # stash for parse/open
+                        raw.append(m)
         raw.sort(key=_pg_market_volume, reverse=True)
         taken = 0
         for m in raw:
@@ -810,6 +815,7 @@ def _gather_pg_candidates(signals: list) -> list:
                     "question": parsed["question"],
                     "yes_price": parsed["yes_price"],
                     "end_date": parsed["end_date"],
+                    "event_id": m.get("_event_id"),
                 }
                 taken += 1
         if len(seen) >= PG_CANDIDATE_CAP:

@@ -484,3 +484,26 @@ def test_collect_trading_failure_does_not_duplicate_brief(monkeypatch):
     assert (
         calls["cleared"] == 1
     )  # batch cleared despite the trading failure -> no re-collect
+
+
+
+# ── Sleeve A: eventId capture ─────────────────────────────────────────────────
+def test_gather_candidates_captures_event_id(monkeypatch):
+    ev = {
+        "id": "evt_hormuz",
+        "markets": [{
+            "id": "2774056",
+            "question": "Strait of Hormuz normal by Aug 31?",
+            "outcomePrices": '["0.13", "0.87"]',
+            "clobTokenIds": '["tokA", "tokB"]',
+            "closed": False,
+            "endDate": "2026-08-31",
+            "umaResolutionStatus": "",
+        }],
+    }
+    monkeypatch.setattr(trading, "polygram_search", lambda q: [ev])
+    monkeypatch.setattr(trading, "_signal_search_terms", lambda s: ["hormuz"])
+    cands = trading._gather_pg_candidates([{"topic": "hormuz"}])
+    assert len(cands) == 1
+    assert cands[0]["market_id"] == "2774056"
+    assert cands[0]["event_id"] == "evt_hormuz"
