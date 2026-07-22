@@ -81,11 +81,21 @@ CALIBRATION (starts day one; machine generation deferred)
 ## Component detail
 
 ### 1. `polygram_live.py` (new top-level module) — the write layer
-Mirrors the existing read client's **None-on-failure** posture. Functions (names indicative; final shapes from the verified contract, plan task #1):
-- `place_order(market_id, side, stake, limit_price) -> fill | None` — real order; **limit orders** (never market) so thin-book slippage is bounded; returns realized fill (price, size, cost/fee) or `None`.
-- `close_order(position) -> fill | None` — sell/settle the held token.
-- `reconcile(book) -> book` — align live rows against actual venue positions; real orders **partial-fill, slip, fail** — the book must reflect *fills*, not intents. Any drift logged loudly.
-- `account_balance() -> float | None` — for the total-exposure cap check pre-trade.
+
+**Verified contract** (polygram.ink, base `https://polygram.ink/api`, JWT Bearer — same token as the read client; USD custodial balance funded by Polygon USDC/USDT deposit; min order $1; 300 req/min authed, 429 → backoff-with-jitter; `403` = geo-blocked/frozen; errors `{error, message}`):
+
+| Need | Endpoint | Shape |
+|---|---|---|
+| Market buy | `POST /trade/place` | body `{eventId, marketId, tokenId, outcome:"Yes"\|"No", amount (USD)}`; **synchronous** resp `order:{id, fillPrice, shares, spreadFee, tradeFee, totalFee, status:"filled"}` |
+| Sell / exit | `POST /trade/sell` | body `{positionId, shares?}`; resp `sale:{sharesSold, salePrice, proceeds, profit, fee, status}` |
+| Positions (reconcile + get `positionId`) | `GET /trade/positions` | `positions:[{id:"pos_…", marketId, outcome, shares, avgPrice, currentPrice, costBasis, currentValue, unrealizedPnl}]` |
+| Cash balance (cap check) | `GET /wallet` | `{balance, currency:"USD", pending…}` |
+| Live spread/depth gate | `GET /orderbook/:tokenId` | `{bids, asks, spread, midpoint}` |
+
+- **Market orders at launch** (decided): `place_order(...)` calls `POST /trade/place` and returns the synchronous fill (`fillPrice`, `shares`, `spreadFee`, `tradeFee`) or `None`. The **hard spread/depth gate reads `/orderbook/:tokenId` pre-trade**, so a market order only ever crosses a small, bounded spread; at $1–5 stakes, slippage ≈ top-of-book. **Every fill's real fees are recorded** so the fee-drag can be measured — limit/marketable-limit orders are a *later, data-justified* optimization for Sleeve A only (not built in v0). Exits are **always market** (`/trade/sell`).
+- **Two plumbing facts:** (1) `place` needs `eventId` **and** `marketId` **and** `tokenId` — the book stores market_id + token_id but not `eventId`, so the open path captures `eventId` from event/market detail at entry. (2) Selling needs a `positionId` (`pos_…`) that appears only in `GET /trade/positions`, not in the place response (`ord_…`) — so `close_order` is always "`GET /trade/positions` → match by `tokenId`/`outcome` → `POST /trade/sell {positionId}`," which is also the reconcile read. **Settlement has no redeem call** — a resolved position simply leaves `/trade/positions` and lands in realized P&L; reconcile detects "gone + market resolved → settled."
+- `reconcile(book) -> book` — align live rows against `GET /trade/positions`; real orders **partial-fill, fail** — the book reflects *fills*, not intents; drift logged loudly, **venue wins**.
+- `account_balance() -> float | None` — `GET /wallet` balance for the pre-trade total-exposure cap.
 
 `dockerfile-copy-allowlist` chore: new top-level module ⇒ Dockerfile `COPY` + workflow path lists + workflow ruff file lists all need updating, or runtime `ModuleNotFound` that escapes CI lint.
 
@@ -176,7 +186,7 @@ CI has no pandas ⇒ guard any pandas-touching test with `importorskip`. Full ga
 
 ## Rollout
 
-1. Verify the polygram.ink order/funding contract (plan task #1) — the whole build is designed to it.
+1. Contract **verified** (2026-07-21, docs pasted into the design thread) — endpoints/shapes captured in Component §1. Remaining live-only checks (auth token works for `/trade/*`, account funded, not geo-blocked) fold into rollout step 4.
 2. Build foundation → Sleeve A → Sleeve B as separate plans; tests green locally; push to `main` (solo repo).
 3. Deploy (Docker). Keep `PG_LIVE_ENABLED` **off**; confirm paper path unaffected.
 4. Fund the account; set caps + minimal stake; flip `PG_LIVE_ENABLED=1` with `PG_A_ENABLED=1` first (systematic fade), Sleeve B once the wizard is validated.
