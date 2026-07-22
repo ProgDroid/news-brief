@@ -1155,3 +1155,31 @@ def test_predict_commit_passes_real_live_exposure(monkeypatch):
     }
     brief._predict_commit("42")
     assert opened["live_exposure"] == 12.0  # real cross-sleeve exposure, not 0.0
+
+
+def test_predict_stake_respects_effective_cap(monkeypatch):
+    """Stake presets + free-text are bounded by min(PG_B_POS_CAP, PG_LIVE_PER_TRADE_CAP)
+    so the wizard never offers/accepts a stake the foundation per-trade cap will reject."""
+    monkeypatch.setattr(common, "PG_B_POS_CAP", 10.0)
+    monkeypatch.setattr(
+        common, "PG_LIVE_PER_TRADE_CAP", 5.0
+    )  # tighter -> effective cap 5
+    edits = []
+    monkeypatch.setattr(
+        brief, "telegram_edit_text", lambda mid, text, kb: edits.append((text, kb))
+    )
+    brief._WIZARD["42"] = {"step": "pr_side", "msg_id": 1}
+    brief._predict_show_stake("42", "YES")
+    text, kb = edits[-1]
+    labels = [b["text"] for r in kb for b in r]
+    assert "$5" in labels and "$10" not in labels  # $10 preset dropped (> cap)
+    assert "max $5" in text.lower()
+    # free-text over the cap is rejected with a clear message; wizard does NOT advance
+    edits.clear()
+    brief._WIZARD["42"]["step"] = "pr_stake_text"
+    brief._wizard_handle_text("42", "8")
+    assert (
+        brief._WIZARD["42"]["step"] == "pr_stake_text"
+    )  # still awaiting a valid stake
+    assert "stake" not in brief._WIZARD["42"]
+    assert edits and "5" in edits[-1][0]

@@ -839,12 +839,21 @@ def _wizard_handle_text(chat_id: str, text: str) -> None:
         return
     if step == "pr_stake_text":
         try:
-            w["stake"] = float(text)
+            v = float(text)
         except ValueError:
             telegram_edit_text(
                 w["msg_id"], "Not a number — reply a USD amount (e.g. 7).", []
             )
             return
+        cap = _sleeve_b_stake_cap()
+        if v <= 0 or v > cap:
+            telegram_edit_text(
+                w["msg_id"],
+                f"Stake must be between $0 and ${cap:g}. Reply a smaller amount.",
+                [],
+            )
+            return
+        w["stake"] = v
         _predict_show_hold(chat_id)
         return
     if step == "pr_phat":
@@ -960,21 +969,35 @@ def _predict_show_sides(chat_id: str, idx: int) -> None:
     telegram_edit_text(w["msg_id"], f"<b>{parsed['question']}</b>\n\nWhich side?", rows)
 
 
+def _sleeve_b_stake_cap() -> float:
+    """Effective ceiling on a single Sleeve-B stake: the tighter of the Sleeve-B
+    per-position cap and the global per-trade cap (both bind when the order opens),
+    so the wizard never offers/accepts a stake open_live_position would reject."""
+    return min(common.PG_B_POS_CAP, common.PG_LIVE_PER_TRADE_CAP)
+
+
 def _predict_show_stake(chat_id: str, side: str) -> None:
     w = _WIZARD[chat_id]
     w["outcome"] = "Yes" if side == "YES" else "No"
     w["side_index"] = 0 if side == "YES" else 1
     w["step"] = "pr_stake"
-    row = [{"text": f"${s}", "callback_data": f"pr:stake:{s}"} for s in _PREDICT_STAKES]
-    rows = [
-        row,
+    cap = _sleeve_b_stake_cap()
+    presets = [
+        {"text": f"${s}", "callback_data": f"pr:stake:{s}"}
+        for s in _PREDICT_STAKES
+        if s <= cap
+    ]
+    rows = [presets] if presets else []
+    rows.append(
         [
             {"text": "✏️ Other", "callback_data": "pr:stake:other"},
             {"text": "❌ Cancel", "callback_data": "pr:cancel"},
-        ],
-    ]
+        ]
+    )
     telegram_edit_text(
-        w["msg_id"], "Stake (USD)? Money you can watch go to zero.", rows
+        w["msg_id"],
+        f"Stake (USD, max ${cap:g})? Money you can watch go to zero.",
+        rows,
     )
 
 
