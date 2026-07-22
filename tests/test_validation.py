@@ -301,3 +301,49 @@ def test_leakage_summary_respects_window(monkeypatch, tmp_path):
 def test_leakage_block_empty_when_no_log(monkeypatch, tmp_path):
     monkeypatch.setattr(validation, "LEAKAGE_LOG_FILE", tmp_path / "absent.json")
     assert validation._leakage_block() == []
+
+
+def test_aggregate_performance_excludes_live():
+    # net_return is the field _stats scores on; a live row carrying it would be
+    # counted but for the execution!="live" guard (paper gate stays paper-only).
+    book = {
+        "positions": [
+            {
+                "status": "closed",
+                "asset_class": "prediction",
+                "execution": "paper",
+                "net_return": 0.05,
+            },
+            {
+                "status": "closed",
+                "asset_class": "prediction",
+                "execution": "live",
+                "sleeve": "A",
+                "net_return": -0.9,
+            },
+        ]
+    }
+    agg = validation.aggregate_performance(book)
+    assert agg["overall"]["n"] == 1  # live row excluded from the paper gate
+
+
+def test_live_performance_reports_live_only():
+    book = {
+        "positions": [
+            {
+                "status": "closed",
+                "execution": "live",
+                "sleeve": "A",
+                "realized_return": 0.1,
+            },
+            {
+                "status": "closed",
+                "execution": "live",
+                "sleeve": "A",
+                "realized_return": -0.2,
+            },
+            {"status": "closed", "execution": "paper", "realized_return": 0.5},
+        ]
+    }
+    lp = validation.live_performance(book)
+    assert lp["n"] == 2 and abs(lp["mean_return"] - (-0.05)) < 1e-9

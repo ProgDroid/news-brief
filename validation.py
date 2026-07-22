@@ -55,7 +55,11 @@ def _stats(positions: list) -> dict | None:
 
 def aggregate_performance(book: dict) -> dict:
     """Overall + per-dimension net stats over the book's closed positions."""
-    closed = [p for p in book.get("positions", []) if p.get("status") == "closed"]
+    closed = [
+        p
+        for p in book.get("positions", [])
+        if p.get("status") == "closed" and p.get("execution", "paper") != "live"
+    ]
     dims = {}
     for dim in _DIMENSIONS:
         groups: dict = {}
@@ -66,6 +70,28 @@ def aggregate_performance(book: dict) -> dict:
             groups.setdefault(key, []).append(p)
         dims[dim] = {k: s for k, v in groups.items() if (s := _stats(v))}
     return {"overall": _stats(closed), "dimensions": dims}
+
+
+def live_performance(book: dict) -> dict:
+    """Realized stats over closed live rows (real money), separate from the paper gate."""
+    live = [
+        p
+        for p in book.get("positions", [])
+        if p.get("status") == "closed"
+        and p.get("execution") == "live"
+        and p.get("realized_return") is not None
+    ]
+    if not live:
+        return {"n": 0, "mean_return": 0.0, "by_sleeve": {}}
+    rets = [p["realized_return"] for p in live]
+    by_sleeve: dict = {}
+    for p in live:
+        by_sleeve.setdefault(p.get("sleeve", "?"), []).append(p["realized_return"])
+    return {
+        "n": len(live),
+        "mean_return": sum(rets) / len(rets),
+        "by_sleeve": {k: sum(v) / len(v) for k, v in by_sleeve.items()},
+    }
 
 
 def record_gate_history(book: dict) -> None:
@@ -247,6 +273,13 @@ def performance_report(book: dict) -> str:
         g = gate[ac]
         mark = "✅ READY" if g["ready"] else "⛔ not ready"
         lines.append(f"  – {ac}: {mark} — {g['reason']}")
+
+    lp = live_performance(book)
+    if lp["n"]:
+        lines.append(
+            f"<b>💵 LIVE (real money)</b>: {lp['n']} closed, "
+            f"mean net {lp['mean_return'] * 100:+.1f}%"
+        )
     return "\n".join(lines)
 
 
