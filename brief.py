@@ -2969,6 +2969,7 @@ def mode_monitor():
     except Exception as e:  # never let the live sweep break the monitor cron
         log.warning(f"Live exit sweep failed: {e}")
 
+
 # ── Entry ─────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import sys

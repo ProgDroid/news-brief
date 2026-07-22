@@ -297,7 +297,6 @@ def reconcile_live_book(book):
     return n
 
 
-
 def trade_history():
     """Trade execution history via GET /trade/history. Returns the list, or None on failed read."""
     data = _pg_request("GET", "/trade/history")

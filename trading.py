@@ -576,7 +576,6 @@ def _fetch_pg_half_spread(token_id: str) -> float | None:
     return (ask - bid) / 2 / mid
 
 
-
 def _sleeve_a_entry_ok(held_price: float, token_id: str) -> bool:
     """True iff the held-side price is in the favorite band AND the live half-spread
     is readable and within the gate. Unreadable orderbook ⇒ False (fail-closed)."""
@@ -1531,7 +1530,6 @@ def _open_prediction_positions(
     return opened
 
 
-
 def open_sleeve_a_live(book, signals, today) -> int:
     """Open real-money Sleeve-A favorite-fade positions. Creds+flag gated; returns count.
 
@@ -1577,7 +1575,10 @@ def open_sleeve_a_live(book, signals, today) -> int:
         if parsed is None or parsed["closed"]:
             continue
         side_index = 0 if side == "YES" else 1
-        if len(parsed["prices"]) <= side_index or len(parsed["token_ids"]) <= side_index:
+        if (
+            len(parsed["prices"]) <= side_index
+            or len(parsed["token_ids"]) <= side_index
+        ):
             continue
         held_price = parsed["prices"][side_index]
         token_id = parsed["token_ids"][side_index]
@@ -1903,7 +1904,6 @@ def _mtm_prediction(p: dict, today, today_str: str):
             _settle_prediction(p, today_str, ret, "horizon")
 
 
-
 def _sleeve_a_exit_reason(held_price, entry_price, days_open, days_to_end):
     """Decide a live favorite-fade exit. take > stop > time_stop; near-dated holds to settlement."""
     if held_price >= common.PG_A_TAKE:
@@ -1925,7 +1925,11 @@ def sweep_live_exits(book, today) -> int:
     today_d = datetime.strptime(today, "%Y-%m-%d").date()
     closed = 0
     for p in book.get("positions", []):
-        if p.get("execution") != "live" or p.get("sleeve") != "A" or p.get("status") != "open":
+        if (
+            p.get("execution") != "live"
+            or p.get("sleeve") != "A"
+            or p.get("status") != "open"
+        ):
             continue
         m = polygram_market(p["instrument"])
         parsed = _parse_pg_market(m) if m is not None else None
@@ -1936,12 +1940,16 @@ def sweep_live_exits(book, today) -> int:
         if len(parsed["prices"]) <= si or parsed["prices"][si] is None:
             continue
         held = parsed["prices"][si]
-        days_open = (today_d - datetime.strptime(p["entry_date"], "%Y-%m-%d").date()).days
+        days_open = (
+            today_d - datetime.strptime(p["entry_date"], "%Y-%m-%d").date()
+        ).days
         days_to_end = None
         end = parsed.get("end_date") or p.get("end_date")
         if end:
             try:
-                days_to_end = (datetime.strptime(str(end)[:10], "%Y-%m-%d").date() - today_d).days
+                days_to_end = (
+                    datetime.strptime(str(end)[:10], "%Y-%m-%d").date() - today_d
+                ).days
             except ValueError:
                 days_to_end = None
         reason = _sleeve_a_exit_reason(held, p["entry_price"], days_open, days_to_end)
