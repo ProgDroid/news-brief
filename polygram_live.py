@@ -233,3 +233,65 @@ def open_live_position(
         f"LIVE OPEN {sleeve} {market_id}/{outcome} ${amount} @ {fill['fill_price']}"
     )
     return row
+
+
+def _match_position_id(venue_positions, market_id, outcome):
+    """Find the venue positionId for a book row by (marketId, outcome)."""
+    for p in venue_positions or []:
+        if p.get("marketId") == market_id and p.get("outcome") == outcome:
+            return p.get("id")
+    return None
+
+
+def close_live_position(row, reason):
+    """Market-sell a live row and stamp realized_return. False (untouched) on failure.
+
+    realized_return is proceeds-relative: proceeds / cost_basis - 1 (net of fees,
+    which the venue already deducts from proceeds). Caller holds the book lock.
+    """
+    venue = list_positions()
+    if venue is None:
+        log.warning(f"Live close skipped (positions unreadable): {row['id']}")
+        return False
+    pos_id = _match_position_id(venue, row["instrument"], row["outcome"])
+    if pos_id is None:
+        log.warning(f"Live close: {row['id']} not on venue; leaving to reconcile")
+        return False
+    sale = sell_position(pos_id)
+    if sale is None:
+        return False
+    cost = row.get("cost_basis") or 0.0
+    row["realized_return"] = (sale["proceeds"] / cost - 1.0) if cost else 0.0
+    row["last_mark"] = {
+        "date": row.get("closed_date"),
+        "price": sale["sale_price"],
+        "proceeds": sale["proceeds"],
+    }
+    row["status"] = "closed"
+    row["close_reason"] = reason
+    row["closed_date"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    log.info(f"LIVE CLOSE {row['id']} reason={reason} proceeds={sale['proceeds']}")
+    return True
+
+
+def reconcile_live_book(book):
+    """Make the venue authoritative: settle open live rows the venue no longer holds.
+
+    Returns the count reconciled. If list_positions() FAILED (None), do nothing —
+    a failed read must never be read as 'all positions gone'.
+    """
+    venue = list_positions()
+    if venue is None:
+        return 0
+    live_keys = {(p.get("marketId"), p.get("outcome")) for p in venue}
+    n = 0
+    for row in book.get("positions", []):
+        if row.get("execution") != "live" or row.get("status") != "open":
+            continue
+        if (row["instrument"], row["outcome"]) not in live_keys:
+            row["status"] = "closed"
+            row["close_reason"] = "settled"
+            row["closed_date"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            n += 1
+            log.info(f"LIVE RECONCILE settled {row['id']} (gone from venue)")
+    return n

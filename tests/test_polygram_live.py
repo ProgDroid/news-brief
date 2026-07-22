@@ -248,3 +248,78 @@ def test_open_live_position_noop_on_cap_fail(monkeypatch):
     )
     assert placed == []  # cap checked BEFORE any order is placed
     assert book["positions"] == []
+
+
+def _live_row(market_id="mkt_b", outcome="No"):
+    return {
+        "id": "r1",
+        "execution": "live",
+        "sleeve": "A",
+        "asset_class": "prediction",
+        "instrument": market_id,
+        "outcome": outcome,
+        "side_index": 1,
+        "entry_price": 0.80,
+        "cost_basis": 5.0,
+        "status": "open",
+        "realized_return": None,
+        "closed_date": None,
+        "close_reason": None,
+    }
+
+
+def test_match_position_id():
+    venue = [
+        {"id": "pos_x", "marketId": "mkt_b", "outcome": "No"},
+        {"id": "pos_y", "marketId": "mkt_b", "outcome": "Yes"},
+    ]
+    assert polygram_live._match_position_id(venue, "mkt_b", "No") == "pos_x"
+    assert polygram_live._match_position_id(venue, "mkt_z", "No") is None
+
+
+def test_close_live_position_sells_and_stamps(monkeypatch):
+    monkeypatch.setattr(
+        polygram_live,
+        "list_positions",
+        lambda: [{"id": "pos_x", "marketId": "mkt_b", "outcome": "No"}],
+    )
+    monkeypatch.setattr(
+        polygram_live,
+        "sell_position",
+        lambda pid, shares=None: {
+            "proceeds": 6.0,
+            "sale_price": 0.96,
+            "profit": 1.0,
+            "fee": 0.05,
+            "shares_sold": 6.25,
+            "status": "completed",
+        },
+    )
+    row = _live_row()
+    assert polygram_live.close_live_position(row, "target") is True
+    assert row["status"] == "closed" and row["close_reason"] == "target"
+    # realized_return = proceeds/cost_basis - 1 = 6.0/5.0 - 1 = 0.20
+    assert abs(row["realized_return"] - 0.20) < 1e-9
+
+
+def test_close_live_position_false_when_unmatchable(monkeypatch):
+    monkeypatch.setattr(polygram_live, "list_positions", lambda: [])  # not on venue
+    row = _live_row()
+    assert polygram_live.close_live_position(row, "target") is False
+    assert row["status"] == "open"  # untouched
+
+
+def test_reconcile_settles_missing_positions(monkeypatch):
+    monkeypatch.setattr(polygram_live, "list_positions", lambda: [])  # venue empty
+    row = _live_row()
+    book = {"positions": [row]}
+    assert polygram_live.reconcile_live_book(book) == 1
+    assert row["status"] == "closed" and row["close_reason"] == "settled"
+
+
+def test_reconcile_skips_on_failed_read(monkeypatch):
+    monkeypatch.setattr(polygram_live, "list_positions", lambda: None)  # read failed
+    row = _live_row()
+    book = {"positions": [row]}
+    assert polygram_live.reconcile_live_book(book) == 0
+    assert row["status"] == "open"  # NEVER mass-settle on a failed read
