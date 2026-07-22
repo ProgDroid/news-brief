@@ -507,3 +507,21 @@ def test_gather_candidates_captures_event_id(monkeypatch):
     assert len(cands) == 1
     assert cands[0]["market_id"] == "2774056"
     assert cands[0]["event_id"] == "evt_hormuz"
+
+
+
+import common
+
+
+def test_sleeve_a_entry_ok_gates(monkeypatch):
+    monkeypatch.setattr(common, "PG_A_BAND_LO", 0.75)
+    monkeypatch.setattr(common, "PG_A_BAND_HI", 0.92)
+    monkeypatch.setattr(common, "PG_A_SPREAD_GATE", 0.03)
+    monkeypatch.setattr(trading, "_fetch_pg_half_spread", lambda t: 0.01)
+    assert trading._sleeve_a_entry_ok(0.85, "tok") is True     # in band, tight spread
+    assert trading._sleeve_a_entry_ok(0.60, "tok") is False    # below band (longshot)
+    assert trading._sleeve_a_entry_ok(0.99, "tok") is False    # above band (crumbs)
+    monkeypatch.setattr(trading, "_fetch_pg_half_spread", lambda t: 0.10)
+    assert trading._sleeve_a_entry_ok(0.85, "tok") is False    # spread too wide
+    monkeypatch.setattr(trading, "_fetch_pg_half_spread", lambda t: None)
+    assert trading._sleeve_a_entry_ok(0.85, "tok") is False    # unreadable book → fail-closed

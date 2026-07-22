@@ -576,6 +576,16 @@ def _fetch_pg_half_spread(token_id: str) -> float | None:
     return (ask - bid) / 2 / mid
 
 
+
+def _sleeve_a_entry_ok(held_price: float, token_id: str) -> bool:
+    """True iff the held-side price is in the favorite band AND the live half-spread
+    is readable and within the gate. Unreadable orderbook ⇒ False (fail-closed)."""
+    if not (common.PG_A_BAND_LO <= held_price <= common.PG_A_BAND_HI):
+        return False
+    half = _fetch_pg_half_spread(token_id)
+    return half is not None and half <= common.PG_A_SPREAD_GATE
+
+
 def _stamp_open_benchmark(p: dict) -> None:
     """Stamp benchmark_entry (+ prediction entry_spread) on a freshly opened position.
 

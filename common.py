@@ -107,6 +107,17 @@ PG_LIVE_TOTAL_CAP = _env_float(
 )  # max USD across all live rows
 PG_LIVE_PER_TRADE_CAP = _env_float("PG_LIVE_PER_TRADE_CAP", 5.0)  # max USD per order
 
+# Sleeve A — systematic favorite-fade (real money). Default OFF.
+PG_A_ENABLED = _env_flag("PG_A_ENABLED")
+PG_A_STAKE = _env_float("PG_A_STAKE", 2.0)  # USD per fade
+PG_A_BAND_LO = _env_float("PG_A_BAND_LO", 0.75)  # favorite-side entry band
+PG_A_BAND_HI = _env_float("PG_A_BAND_HI", 0.92)
+PG_A_SPREAD_GATE = _env_float("PG_A_SPREAD_GATE", 0.03)  # max half-spread (fraction of mid)
+PG_A_TAKE = _env_float("PG_A_TAKE", 0.97)  # take-profit: held price repriced to ceiling
+PG_A_STOP = _env_float("PG_A_STOP", 0.15)  # stop: absolute adverse drop from entry price
+PG_A_TIME_STOP_DAYS = int(_env_float("PG_A_TIME_STOP_DAYS", 21))
+PG_A_NEAR_DAYS = int(_env_float("PG_A_NEAR_DAYS", 10))  # ≤ this to settlement ⇒ hold, no time-stop
+
 # ── Phase 4: validation / performance ─────────────────────────────────────────
 # Round-trip cost haircut (basis points) applied to gross return at close, by asset
 # class. Prediction uses the real orderbook half-spread when available (see trading
