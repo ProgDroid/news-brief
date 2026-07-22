@@ -46,3 +46,80 @@ def test_orderbook_spread_passthrough(monkeypatch):
     )
     ob = polygram_live.orderbook("0xabc")
     assert ob["spread"] == 0.02 and ob["midpoint"] == 0.62
+
+
+def test_place_market_order_normalizes_fill(monkeypatch):
+    captured = {}
+
+    def fake(method, path, params=None, json_body=None):
+        captured["path"] = path
+        captured["body"] = json_body
+        return {
+            "success": True,
+            "order": {
+                "id": "ord_1",
+                "fillPrice": 0.62,
+                "shares": 161.29,
+                "spreadFee": 1.5,
+                "tradeFee": 0.5,
+                "totalFee": 2.0,
+                "status": "filled",
+            },
+        }
+
+    monkeypatch.setattr(polygram_live, "_pg_request", fake)
+    fill = polygram_live.place_market_order("evt_a", "mkt_b", "0xabc", "Yes", 100)
+    assert captured["path"] == "/trade/place"
+    assert captured["body"] == {
+        "eventId": "evt_a",
+        "marketId": "mkt_b",
+        "tokenId": "0xabc",
+        "outcome": "Yes",
+        "amount": 100,
+    }
+    assert fill == {
+        "order_id": "ord_1",
+        "fill_price": 0.62,
+        "shares": 161.29,
+        "spread_fee": 1.5,
+        "trade_fee": 0.5,
+        "total_fee": 2.0,
+        "status": "filled",
+    }
+
+
+def test_place_market_order_none_when_unfilled(monkeypatch):
+    monkeypatch.setattr(
+        polygram_live,
+        "_pg_request",
+        lambda *a, **k: {"success": True, "order": {"status": "rejected"}},
+    )
+    assert polygram_live.place_market_order("e", "m", "t", "Yes", 5) is None
+
+
+def test_sell_position_full(monkeypatch):
+    captured = {}
+
+    def fake(method, path, params=None, json_body=None):
+        captured["body"] = json_body
+        return {
+            "success": True,
+            "sale": {
+                "sharesSold": 161.29,
+                "salePrice": 0.72,
+                "proceeds": 116.13,
+                "profit": 14.13,
+                "fee": 1.16,
+                "status": "completed",
+            },
+        }
+
+    monkeypatch.setattr(polygram_live, "_pg_request", fake)
+    r = polygram_live.sell_position("pos_1")
+    assert captured["body"] == {"positionId": "pos_1"}
+    assert r["proceeds"] == 116.13 and r["status"] == "completed"
+
+
+def test_list_positions_empty_on_failure(monkeypatch):
+    monkeypatch.setattr(polygram_live, "_pg_request", lambda *a, **k: None)
+    assert polygram_live.list_positions() is None  # None = couldn't read (see note)
