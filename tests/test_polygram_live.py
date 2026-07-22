@@ -123,3 +123,31 @@ def test_sell_position_full(monkeypatch):
 def test_list_positions_empty_on_failure(monkeypatch):
     monkeypatch.setattr(polygram_live, "_pg_request", lambda *a, **k: None)
     assert polygram_live.list_positions() is None  # None = couldn't read (see note)
+
+
+def test_cap_ok_rejects_over_per_trade(monkeypatch):
+    monkeypatch.setattr(common, "PG_LIVE_PER_TRADE_CAP", 5.0)
+    monkeypatch.setattr(common, "PG_LIVE_TOTAL_CAP", 50.0)
+    monkeypatch.setattr(polygram_live, "wallet_balance", lambda: 100.0)
+    assert polygram_live.cap_ok(6.0, live_exposure=0.0) is False
+
+
+def test_cap_ok_rejects_over_total(monkeypatch):
+    monkeypatch.setattr(common, "PG_LIVE_PER_TRADE_CAP", 5.0)
+    monkeypatch.setattr(common, "PG_LIVE_TOTAL_CAP", 50.0)
+    monkeypatch.setattr(polygram_live, "wallet_balance", lambda: 100.0)
+    assert polygram_live.cap_ok(5.0, live_exposure=48.0) is False
+
+
+def test_cap_ok_rejects_when_balance_unreadable(monkeypatch):
+    monkeypatch.setattr(common, "PG_LIVE_PER_TRADE_CAP", 5.0)
+    monkeypatch.setattr(common, "PG_LIVE_TOTAL_CAP", 50.0)
+    monkeypatch.setattr(polygram_live, "wallet_balance", lambda: None)
+    assert polygram_live.cap_ok(5.0, live_exposure=0.0) is False
+
+
+def test_cap_ok_allows_within_all_limits(monkeypatch):
+    monkeypatch.setattr(common, "PG_LIVE_PER_TRADE_CAP", 5.0)
+    monkeypatch.setattr(common, "PG_LIVE_TOTAL_CAP", 50.0)
+    monkeypatch.setattr(polygram_live, "wallet_balance", lambda: 100.0)
+    assert polygram_live.cap_ok(5.0, live_exposure=10.0) is True

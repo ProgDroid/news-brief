@@ -6,6 +6,7 @@ any non-2xx / parse / network error; callers treat None as "did not happen".
 
 import requests
 
+import common
 from common import _load_json_or, log
 from trading import POLYGRAM_BASE, POLYGRAM_TOKEN_FILE, polygram_login
 
@@ -138,3 +139,20 @@ def list_positions():
         return None
     positions = data["positions"]
     return positions if isinstance(positions, list) else None
+
+
+def cap_ok(amount, live_exposure):
+    """True only if `amount` USD is within every guard. Fail-closed on unreadable cash.
+
+    - per-trade: amount <= PG_LIVE_PER_TRADE_CAP
+    - total:     live_exposure + amount <= PG_LIVE_TOTAL_CAP
+    - funded:    amount <= wallet_balance() (None balance ⇒ reject)
+    """
+    if amount <= 0 or amount > common.PG_LIVE_PER_TRADE_CAP:
+        return False
+    if live_exposure + amount > common.PG_LIVE_TOTAL_CAP:
+        return False
+    bal = wallet_balance()
+    if bal is None or amount > bal:
+        return False
+    return True
