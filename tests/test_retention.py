@@ -1,5 +1,6 @@
 import json
 
+import common
 import retention as rt
 
 
@@ -121,7 +122,7 @@ def test_run_retention_disabled_when_days_zero(tmp_path, monkeypatch):
     monkeypatch.setattr(rt, "DATA_DIR", tmp_path)
     _touch(tmp_path / "source_index-2020-01-01.json")
     out = rt.run_retention("2026-06-26", days=0)
-    assert out == {"deleted": 0, "trimmed_lines": 0}
+    assert out == {"deleted": 0, "trimmed_lines": 0, "theses_pruned": 0}
     assert (tmp_path / "source_index-2020-01-01.json").exists()  # nothing deleted
 
 
@@ -144,4 +145,55 @@ def test_run_retention_fail_safe_never_raises(tmp_path, monkeypatch):
 
     monkeypatch.setattr(rt, "prune_dated_files", boom)
     out = rt.run_retention("2026-06-26", days=90)  # must not raise
-    assert out == {"deleted": 0, "trimmed_lines": 0}
+    assert out == {"deleted": 0, "trimmed_lines": 0, "theses_pruned": 0}
+
+
+def test_prune_scored_theses(tmp_path, monkeypatch):
+    monkeypatch.setattr(common, "THESIS_LOG_FILE", tmp_path / "thesis_log.json")
+    common.save_thesis_log(
+        [
+            {
+                "id": "old",
+                "sleeve": "B",
+                "p_hat": 0.8,
+                "entry_price": 0.85,
+                "outcome_result": 1,
+                "brier": 0.04,
+                "resolve_by": "2026-06-01",
+                "scored": True,
+                "source_ids": ["user"],
+                "thesis": "verbose text",
+                "question": "Q?",
+            },
+            {
+                "id": "recent",
+                "resolve_by": "2026-07-30",
+                "scored": True,
+                "thesis": "keep",
+                "p_hat": 0.7,
+                "entry_price": 0.7,
+                "outcome_result": None,
+                "brier": None,
+                "sleeve": "B",
+                "source_ids": [],
+            },
+            {
+                "id": "unscored",
+                "resolve_by": "2026-05-01",
+                "scored": False,
+                "thesis": "keep",
+                "p_hat": None,
+                "entry_price": 0.9,
+                "sleeve": "B",
+                "source_ids": [],
+            },
+        ]
+    )
+    n = rt.prune_scored_theses("2026-07-21", grace_days=14)
+    assert n == 1  # only "old": past 2026-06-01+14 AND scored
+    out = {r["id"]: r for r in common.load_thesis_log()}
+    assert "thesis" not in out["old"] and out["old"]["brier"] == 0.04  # collapsed
+    assert out["recent"]["thesis"] == "keep"  # inside grace -> kept verbose
+    assert (
+        out["unscored"]["thesis"] == "keep"
+    )  # unscored past grace -> kept (keep-on-doubt)

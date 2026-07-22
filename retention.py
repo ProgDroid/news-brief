@@ -12,7 +12,8 @@ import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from common import DATA_DIR, log
+import common
+from common import DATA_DIR, load_thesis_log, log, save_thesis_log
 
 DEFAULT_RETENTION_DAYS = 90
 RETENTION_DAYS_ENV = "NEWSBRIEF_RETENTION_DAYS"
@@ -117,16 +118,61 @@ def trim_signals_log(today: str, days: int) -> int:
     return dropped
 
 
+_SUMMARY_KEYS = (
+    "id",
+    "sleeve",
+    "p_hat",
+    "entry_price",
+    "outcome_result",
+    "brier",
+    "resolve_by",
+    "scored",
+    "source_ids",
+)
+
+
+def prune_scored_theses(today: str, grace_days: int) -> int:
+    """Collapse scored, past-grace thesis records to a compact summary. Keep-on-doubt.
+
+    A record is collapsed only when its resolve_by parses, today > resolve_by + grace_days,
+    and scored is True. Unparseable/missing dates and unscored records are kept verbatim."""
+    log_ = load_thesis_log()
+    if not log_:
+        return 0
+    today_d = datetime.strptime(today, "%Y-%m-%d").date()
+    n = 0
+    for i, rec in enumerate(log_):
+        if not rec.get("scored"):
+            continue
+        rb = rec.get("resolve_by")
+        try:
+            rb_d = datetime.strptime(str(rb)[:10], "%Y-%m-%d").date()
+        except (TypeError, ValueError):
+            continue  # undateable → keep verbose
+        if today_d <= rb_d + timedelta(days=grace_days):
+            continue  # inside grace → keep verbose
+        if "thesis" not in rec and "question" not in rec:
+            continue  # already collapsed (idempotent)
+        log_[i] = {k: rec.get(k) for k in _SUMMARY_KEYS}
+        n += 1
+    if n:
+        save_thesis_log(log_)
+    return n
+
+
 def run_retention(today: str, *, days=None) -> dict:
     """Fail-safe entry for mode_collect. Deletes old dated files and trims the
     signals log. days<=0 disables. Never raises; returns a summary dict."""
-    summary = {"deleted": 0, "trimmed_lines": 0}
+    summary = {"deleted": 0, "trimmed_lines": 0, "theses_pruned": 0}
     try:
         resolved = _resolve_days(days)
         if resolved <= 0:
             return summary
         summary["deleted"] = prune_dated_files(today, resolved)
         summary["trimmed_lines"] = trim_signals_log(today, resolved)
+        summary["theses_pruned"] = prune_scored_theses(
+            today, common.PG_THESIS_GRACE_DAYS
+        )
     except Exception as e:
         log.warning(f"Retention sweep skipped (brief unaffected): {e}")
     return summary
