@@ -1531,6 +1531,80 @@ def _open_prediction_positions(
     return opened
 
 
+
+def open_sleeve_a_live(book, signals, today) -> int:
+    """Open real-money Sleeve-A favorite-fade positions. Creds+flag gated; returns count.
+
+    Runs its own matcher pass, then for each match: buy the held favorite side only when
+    it is in-band and tight-spread (via _sleeve_a_entry_ok) and an eventId is known, sized
+    at PG_A_STAKE, deduped against open live rows. All opens route through the fail-closed
+    polygram_live.open_live_position (kill-switch + cap enforced there)."""
+    import polygram_live
+
+    if not (common.PG_LIVE_ENABLED and common.PG_A_ENABLED):
+        return 0
+    if not (POLYGRAM_EMAIL and POLYGRAM_PASSWORD):
+        return 0
+    candidates = _gather_pg_candidates(signals)
+    if not candidates:
+        return 0
+    ev_by_mid = {c["market_id"]: c.get("event_id") for c in candidates}
+    matches = run_prediction_matcher(signals, candidates)
+    live_open = {
+        (p.get("instrument"), p.get("outcome"))
+        for p in book["positions"]
+        if p.get("execution") == "live" and p.get("status") == "open"
+    }
+    exposure = sum(
+        (p.get("cost_basis") or 0.0)
+        for p in book["positions"]
+        if p.get("execution") == "live" and p.get("status") == "open"
+    )
+    opened = 0
+    for mt in matches:
+        if mt["similarity"] < PG_SIMILARITY_FLOOR:
+            continue
+        mid, side = mt["market_id"], mt["side"]
+        event_id = ev_by_mid.get(mid)
+        if not event_id:
+            log.warning(f"Sleeve A skip: no eventId for {mid}")
+            continue
+        outcome = "Yes" if side == "YES" else "No"
+        if (mid, outcome) in live_open:
+            continue
+        m = polygram_market(mid)
+        parsed = _parse_pg_market(m) if m is not None else None
+        if parsed is None or parsed["closed"]:
+            continue
+        side_index = 0 if side == "YES" else 1
+        if len(parsed["prices"]) <= side_index or len(parsed["token_ids"]) <= side_index:
+            continue
+        held_price = parsed["prices"][side_index]
+        token_id = parsed["token_ids"][side_index]
+        if held_price is None or not _sleeve_a_entry_ok(held_price, token_id):
+            continue
+        row = polygram_live.open_live_position(
+            book,
+            sleeve="A",
+            event_id=event_id,
+            market_id=mid,
+            token_id=token_id,
+            outcome=outcome,
+            side_index=side_index,
+            amount=common.PG_A_STAKE,
+            topic=parsed.get("question"),
+            source_id=None,
+            source_kind="unknown",
+            source_perspective=None,
+            live_exposure=exposure,
+        )
+        if row is not None:
+            live_open.add((mid, outcome))
+            exposure += common.PG_A_STAKE
+            opened += 1
+    return opened
+
+
 def mode_paper():
     """Open paper positions from today's signals. Pure simulation — no money, no orders.
 
@@ -1669,6 +1743,11 @@ def mode_paper():
             log.info("No actionable equity/crypto signals today")
 
         opened += _open_prediction_positions(book, signals, today, open_keys)
+
+        try:
+            opened += open_sleeve_a_live(book, signals, today)
+        except Exception as e:  # live path is non-load-bearing for the paper run
+            log.warning(f"Sleeve A live open failed: {e}")
 
         save_book(book)
         _record_leakage(today, leakage)

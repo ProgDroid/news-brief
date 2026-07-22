@@ -525,3 +525,72 @@ def test_sleeve_a_entry_ok_gates(monkeypatch):
     assert trading._sleeve_a_entry_ok(0.85, "tok") is False    # spread too wide
     monkeypatch.setattr(trading, "_fetch_pg_half_spread", lambda t: None)
     assert trading._sleeve_a_entry_ok(0.85, "tok") is False    # unreadable book → fail-closed
+
+
+
+import polygram_live
+
+
+def test_open_sleeve_a_live_opens_gated_favorite(monkeypatch):
+    monkeypatch.setattr(common, "PG_LIVE_ENABLED", True)
+    monkeypatch.setattr(common, "PG_A_ENABLED", True)
+    monkeypatch.setattr(common, "PG_A_STAKE", 2.0)
+    monkeypatch.setattr(trading, "POLYGRAM_EMAIL", "e@x.com")
+    monkeypatch.setattr(trading, "POLYGRAM_PASSWORD", "pw")
+    monkeypatch.setattr(trading, "_gather_pg_candidates", lambda s: [
+        {"market_id": "2774056", "question": "Hormuz normal by Aug 31?",
+         "yes_price": 0.13, "end_date": "2026-08-31", "event_id": "evt_h"}])
+    monkeypatch.setattr(trading, "run_prediction_matcher", lambda s, c: [
+        {"market_id": "2774056", "side": "NO", "play_type": "resolution",
+         "similarity": 0.8, "target": None}])
+    monkeypatch.setattr(trading, "polygram_market", lambda mid: {"raw": mid})
+    monkeypatch.setattr(trading, "_parse_pg_market", lambda m: {
+        "market_id": "2774056", "prices": [0.13, 0.87], "yes_price": 0.13,
+        "token_ids": ["tokA", "tokB"], "closed": False, "uma_status": "", "end_date": "x"})
+    monkeypatch.setattr(trading, "_sleeve_a_entry_ok", lambda price, tok: True)
+    opened_calls = []
+
+    def fake_open(book, **kw):
+        opened_calls.append(kw)
+        row = {"execution": "live", "sleeve": "A", "cost_basis": kw["amount"],
+               "instrument": kw["market_id"], "outcome": kw["outcome"], "status": "open"}
+        book["positions"].append(row)
+        return row
+
+    monkeypatch.setattr(polygram_live, "open_live_position", fake_open)
+    book = {"positions": []}
+    n = trading.open_sleeve_a_live(book, [{"topic": "hormuz"}], "2026-07-21")
+    assert n == 1
+    kw = opened_calls[0]
+    assert kw["sleeve"] == "A" and kw["event_id"] == "evt_h"
+    assert kw["market_id"] == "2774056" and kw["token_id"] == "tokB"  # NO → side_index 1
+    assert kw["outcome"] == "No" and kw["amount"] == 2.0
+
+
+def test_open_sleeve_a_live_noop_when_disabled(monkeypatch):
+    monkeypatch.setattr(common, "PG_LIVE_ENABLED", True)
+    monkeypatch.setattr(common, "PG_A_ENABLED", False)
+    book = {"positions": []}
+    assert trading.open_sleeve_a_live(book, [{"topic": "x"}], "2026-07-21") == 0
+    assert book["positions"] == []
+
+
+def test_open_sleeve_a_live_skips_when_gate_fails(monkeypatch):
+    monkeypatch.setattr(common, "PG_LIVE_ENABLED", True)
+    monkeypatch.setattr(common, "PG_A_ENABLED", True)
+    monkeypatch.setattr(trading, "POLYGRAM_EMAIL", "e@x.com")
+    monkeypatch.setattr(trading, "POLYGRAM_PASSWORD", "pw")
+    monkeypatch.setattr(trading, "_gather_pg_candidates", lambda s: [
+        {"market_id": "m", "question": "q", "yes_price": 0.1, "end_date": "x", "event_id": "evt"}])
+    monkeypatch.setattr(trading, "run_prediction_matcher", lambda s, c: [
+        {"market_id": "m", "side": "NO", "play_type": "resolution", "similarity": 0.8, "target": None}])
+    monkeypatch.setattr(trading, "polygram_market", lambda mid: {"raw": mid})
+    monkeypatch.setattr(trading, "_parse_pg_market", lambda m: {
+        "market_id": "m", "prices": [0.1, 0.9], "yes_price": 0.1,
+        "token_ids": ["a", "b"], "closed": False, "uma_status": "", "end_date": "x"})
+    monkeypatch.setattr(trading, "_sleeve_a_entry_ok", lambda price, tok: False)  # gate fails
+    calls = []
+    monkeypatch.setattr(polygram_live, "open_live_position", lambda book, **k: calls.append(k))
+    book = {"positions": []}
+    assert trading.open_sleeve_a_live(book, [{"topic": "x"}], "2026-07-21") == 0
+    assert calls == []
