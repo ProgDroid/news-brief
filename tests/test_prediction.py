@@ -594,3 +594,47 @@ def test_open_sleeve_a_live_skips_when_gate_fails(monkeypatch):
     book = {"positions": []}
     assert trading.open_sleeve_a_live(book, [{"topic": "x"}], "2026-07-21") == 0
     assert calls == []
+
+
+
+def test_sleeve_a_exit_reason(monkeypatch):
+    monkeypatch.setattr(common, "PG_A_TAKE", 0.97)
+    monkeypatch.setattr(common, "PG_A_STOP", 0.15)
+    monkeypatch.setattr(common, "PG_A_TIME_STOP_DAYS", 21)
+    monkeypatch.setattr(common, "PG_A_NEAR_DAYS", 10)
+    R = trading._sleeve_a_exit_reason
+    assert R(0.98, 0.85, 3, 40) == "take"            # repriced to ceiling
+    assert R(0.68, 0.85, 3, 40) == "stop"            # 0.85-0.68=0.17 ≥ 0.15 adverse
+    assert R(0.86, 0.85, 25, 40) == "time_stop"      # stale, not near settlement
+    assert R(0.86, 0.85, 25, 5) is None              # near settlement ⇒ ride it
+    assert R(0.86, 0.85, 3, 40) is None              # healthy, hold
+
+
+def test_sweep_live_exits_closes_on_take(monkeypatch):
+    from datetime import date
+    row = {"execution": "live", "sleeve": "A", "status": "open", "instrument": "m",
+           "outcome": "No", "side_index": 1, "entry_price": 0.85, "cost_basis": 2.0,
+           "entry_date": "2026-07-01", "end_date": "2026-09-01"}
+    book = {"positions": [row]}
+    monkeypatch.setattr(trading, "polygram_market", lambda mid: {"raw": mid})
+    monkeypatch.setattr(trading, "_parse_pg_market", lambda m: {
+        "market_id": "m", "prices": [0.02, 0.98], "yes_price": 0.02,
+        "token_ids": ["a", "b"], "closed": False, "uma_status": "", "end_date": "2026-09-01"})
+    closed = []
+
+    def fake_close(r, reason):
+        r["status"] = "closed"; r["close_reason"] = reason; closed.append(reason); return True
+
+    import polygram_live
+    monkeypatch.setattr(polygram_live, "close_live_position", fake_close)
+    n = trading.sweep_live_exits(book, "2026-07-20")
+    assert n == 1 and closed == ["take"] and row["status"] == "closed"
+
+
+def test_sweep_live_exits_skips_paper_rows(monkeypatch):
+    book = {"positions": [{"execution": "paper", "status": "open", "instrument": "m",
+                           "asset_class": "prediction"}]}
+    import polygram_live
+    monkeypatch.setattr(polygram_live, "close_live_position",
+                        lambda r, reason: (_ for _ in ()).throw(AssertionError("paper touched")))
+    assert trading.sweep_live_exits(book, "2026-07-20") == 0

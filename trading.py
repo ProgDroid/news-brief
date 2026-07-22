@@ -1899,3 +1899,50 @@ def _mtm_prediction(p: dict, today, today_str: str):
             _settle_prediction(p, today_str, ret, "target")
         elif PAPER_CLOSE_HORIZON in p["checkpoints"]:
             _settle_prediction(p, today_str, ret, "horizon")
+
+
+
+def _sleeve_a_exit_reason(held_price, entry_price, days_open, days_to_end):
+    """Decide a live favorite-fade exit. take > stop > time_stop; near-dated holds to settlement."""
+    if held_price >= common.PG_A_TAKE:
+        return "take"
+    if entry_price - held_price >= common.PG_A_STOP:
+        return "stop"
+    if days_to_end is not None and days_to_end <= common.PG_A_NEAR_DAYS:
+        return None  # ride near-dated to settlement (reconcile handles it)
+    if days_open >= common.PG_A_TIME_STOP_DAYS:
+        return "time_stop"
+    return None
+
+
+def sweep_live_exits(book, today) -> int:
+    """Hourly exit sweep for open live Sleeve-A rows. Marks from the live market and closes
+    via polygram_live.close_live_position on take/stop/time-stop. Caller holds the book lock."""
+    import polygram_live
+
+    today_d = datetime.strptime(today, "%Y-%m-%d").date()
+    closed = 0
+    for p in book.get("positions", []):
+        if p.get("execution") != "live" or p.get("sleeve") != "A" or p.get("status") != "open":
+            continue
+        m = polygram_market(p["instrument"])
+        parsed = _parse_pg_market(m) if m is not None else None
+        if parsed is None:
+            log.warning(f"Sleeve A sweep: no price for {p.get('id')}; kept open")
+            continue
+        si = p["side_index"]
+        if len(parsed["prices"]) <= si or parsed["prices"][si] is None:
+            continue
+        held = parsed["prices"][si]
+        days_open = (today_d - datetime.strptime(p["entry_date"], "%Y-%m-%d").date()).days
+        days_to_end = None
+        end = parsed.get("end_date") or p.get("end_date")
+        if end:
+            try:
+                days_to_end = (datetime.strptime(str(end)[:10], "%Y-%m-%d").date() - today_d).days
+            except ValueError:
+                days_to_end = None
+        reason = _sleeve_a_exit_reason(held, p["entry_price"], days_open, days_to_end)
+        if reason and polygram_live.close_live_position(p, reason):
+            closed += 1
+    return closed
