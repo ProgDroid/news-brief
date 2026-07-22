@@ -919,8 +919,8 @@ def _pos_ticker(p: dict) -> str:
 
 
 def _close_ticker(tkr: str) -> None:
-    """Close all open paper positions for one ticker at the current mark. Shared by
-    the `/close TICKER` text command and the close-picker button."""
+    """Close all open positions for one ticker (paper at mark, live via venue sell).
+    Shared by the `/close TICKER` text command and the close-picker button."""
     # Hold the book lock across load->close->save so a concurrent mode_paper
     # (collect) write can't clobber this manual close.
     with file_lock(trading.BOOK_FILE):
@@ -934,15 +934,22 @@ def _close_ticker(tkr: str) -> None:
             telegram_send(f"No open paper position for <b>{html.escape(tkr)}</b>.")
             return
         day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        closed_n = sum(_close_position_at_market(p, day, "manual") for p in matches)
+        # Live rows hold real capital at the venue: sell there, never paper-mark.
+        closed_n = 0
+        for p in matches:
+            if p.get("execution") == "live":
+                if polygram_live.close_live_position(p, "manual"):
+                    closed_n += 1
+            elif _close_position_at_market(p, day, "manual"):
+                closed_n += 1
         if closed_n:
             save_book(book)
             telegram_send(
-                f"✅ Closed {closed_n} paper position(s) for "
+                f"✅ Closed {closed_n} position(s) for "
                 f"<b>{html.escape(tkr)}</b> (manual)."
             )
         else:
-            telegram_send(f"⚠️ Couldn't price {html.escape(tkr)} — left open.")
+            telegram_send(f"⚠️ Couldn't close {html.escape(tkr)} — left open.")
 
 
 def _close_picker_render(message_id: int | None = None) -> None:

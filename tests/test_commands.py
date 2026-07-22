@@ -905,3 +905,43 @@ def test_malformed_updates_are_unauthorized(monkeypatch, update):
     monkeypatch.setattr(brief, "TELEGRAM_CHAT_ID", "42")
     assert brief._update_chat_id(update) == ""
     assert brief._is_authorized(update) is False
+
+
+def test_close_ticker_routes_live_to_venue_sell(monkeypatch, tmp_path):
+    import polygram_live
+
+    live = {
+        "id": "L",
+        "status": "open",
+        "execution": "live",
+        "sleeve": "B",
+        "asset_class": "prediction",
+        "instrument": "m",
+        "ticker": "m",
+        "outcome": "No",
+    }
+    book = {"positions": [live]}
+    monkeypatch.setattr(brief, "load_book", lambda: book)
+    monkeypatch.setattr(brief, "save_book", lambda b: None)
+    monkeypatch.setattr(brief.trading, "BOOK_FILE", tmp_path / "book.json")
+    monkeypatch.setattr(brief, "_pos_ticker", lambda p: "m")
+    paper_called = []
+    monkeypatch.setattr(
+        brief,
+        "_close_position_at_market",
+        lambda p, day, r: paper_called.append(p["id"]),
+    )
+    live_called = []
+
+    def fake_live_close(p, reason):
+        live_called.append((p["id"], reason))
+        p["status"] = "closed"
+        return True
+
+    monkeypatch.setattr(polygram_live, "close_live_position", fake_live_close)
+    sent = []
+    monkeypatch.setattr(brief, "telegram_send", lambda t: sent.append(t))
+    brief._close_ticker("m")
+    assert live_called == [("L", "manual")]  # live routed to venue sell
+    assert paper_called == []  # paper path NOT used for the live row
+    assert live["status"] == "closed"
