@@ -1,0 +1,18 @@
+---
+name: batch-pipeline-timing
+description: "collect polls the batch up to 12h, so the submit→collect cron gap is not load-bearing; brief timing tolerates schedule changes and slow batches; collect only has the brief TEXT + state.json — submit-time feed data must be persisted across the gap to be usable at reconcile"
+metadata: 
+  node_type: memory
+  type: project
+  originSessionId: 1cd1f6f9-33e0-4195-ac7f-5611a851d9df
+---
+
+`mode_collect` calls `poll_batch(batch_id)` with the default `max_wait_secs=43200` (12h): it loops on `processing_status` with exponential backoff until `"ended"`, then fetches results. It does NOT assume the batch is already finished.
+
+**Why:** This makes the submit→collect schedule gap (currently midnight submit / 6am collect) non-load-bearing. The gap only needs to be long enough for submit to *create* the batch (seconds) before collect starts; the batch *processing* is then waited out by collect. Anthropic's Batches API: most batches finish within 1h, hard SLA 24h — the user observes "a few minutes." On timeout collect returns None → `telegram_alert` → retries next run (brief delivered late, never lost). Trading stage runs only AFTER `clear_batch_state`, isolated so a matcher/PolyGram failure can't re-collect and duplicate the brief.
+
+**DATA-AVAILABILITY GAP (distinct from timing):** submit and collect are two SEPARATE process invocations hours apart. `mode_submit` fetches the source-labelled raw feeds (`feed_content`/`web_content`) and fires the batch; `mode_collect` (hours later) has ONLY the finished brief text + `state.json` — the raw feeds were fetched in the other process and are NOT persisted. So any collect-stage feature needing submit-time inputs (raw feed text, per-source attribution, source counts) must **persist them to a file on the volume at submit and reload at collect**. Worked example: the corroboration confidence tag (item #3, [[external-geo-dashboards-backlog]]) persists a titles-only `source_index-{day}.json` at submit so the reconcile call can count corroborating outlets — the count could NOT be grounded from the synthesized brief text alone. The claim-verification pilot (#6) added a sibling `claim_evidence-{day}.json` the same way.
+
+**DATE-KEYING CAVEAT (added 2026-06-26 — qualifies the "no date-coupling" line below):** the batch *result* has no date-coupling (collect reads `state["batch_id"]`), but these per-day persisted artifacts ARE date-keyed: submit writes `…-{submit_day}.json`, collect loads `…-{collect_today}.json`. This works ONLY because submit + collect run the SAME UTC day (current cron: 00:00 submit / 06:00 collect — user-confirmed). If the schedule ever straddles UTC midnight (submit late evening → collect next-day), BOTH #3 corroboration AND #6 verification silently load a missing file and fall back to their no-data path (fail-safe, but the feature goes dark). Shared root cause. Fix if it ever matters: key the collect-side load by `state["date"]` (the submit-stamped day) instead of `collect_today`. Retention ([[newsbrief-deferred-findings]]) is immune — it computes its window from collect-today as "now", no cross-process date handoff.
+
+**How to apply:** Cron-timing questions ("safe to move submit later?") are safe by default — collect polls. No date-coupling: collect reads `state["batch_id"]` directly and never compares dates against submit (submit's `today` is only a same-UTC-day double-submit guard; collect's `today` is only archive filename + header). Moving submit *later* only shrinks slack against the academic 24h worst case (less of the 24h elapses before collect's 12h poll window). Relates to [[signals-parse-error-is-truncation]] (max_tokens truncation is the other batch-result failure mode).
