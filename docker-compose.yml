@@ -40,6 +40,27 @@ x-newsbrief: &newsbrief
     - APCA_DATA_URL=${APCA_DATA_URL:-https://data.alpaca.markets}
     - POLYGRAM_EMAIL=${POLYGRAM_EMAIL:-}
     - POLYGRAM_PASSWORD=${POLYGRAM_PASSWORD:-}
+    # Live prediction trading (REAL MONEY). All default to off/empty, and an empty
+    # value keeps common.py's built-in default — so omitting them from your .env is
+    # exactly as safe as not having these lines at all. Compose passes through ONLY
+    # what is declared here: setting PG_LIVE_ENABLED on the host or in .env without
+    # a line below leaves it unset INSIDE the container, and every sleeve no-ops.
+    - PG_LIVE_ENABLED=${PG_LIVE_ENABLED:-}
+    - PG_LIVE_TOTAL_CAP=${PG_LIVE_TOTAL_CAP:-}
+    - PG_LIVE_PER_TRADE_CAP=${PG_LIVE_PER_TRADE_CAP:-}
+    - PG_A_ENABLED=${PG_A_ENABLED:-}
+    - PG_A_STAKE=${PG_A_STAKE:-}
+    - PG_A_BAND_LO=${PG_A_BAND_LO:-}
+    - PG_A_BAND_HI=${PG_A_BAND_HI:-}
+    - PG_A_SPREAD_GATE=${PG_A_SPREAD_GATE:-}
+    - PG_A_TAKE=${PG_A_TAKE:-}
+    - PG_A_STOP=${PG_A_STOP:-}
+    - PG_A_TIME_STOP_DAYS=${PG_A_TIME_STOP_DAYS:-}
+    - PG_A_NEAR_DAYS=${PG_A_NEAR_DAYS:-}
+    - PG_B_ENABLED=${PG_B_ENABLED:-}
+    - PG_B_POS_CAP=${PG_B_POS_CAP:-}
+    - PG_B_TOTAL_CAP=${PG_B_TOTAL_CAP:-}
+    - PG_THESIS_GRACE_DAYS=${PG_THESIS_GRACE_DAYS:-}
     # Self-hosted Nitter on the shared network (Twitter/X feeds). Defaults to the
     # service named `nitter` on Nitter's internal port 8080; override if it differs.
     - NITTER_BASE_URL=${NITTER_BASE_URL:-http://nitter:8080}
