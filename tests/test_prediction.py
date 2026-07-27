@@ -361,6 +361,123 @@ def test_mode_paper_skips_prediction_when_uncredentialed(tmp_path, monkeypatch):
     assert trading.load_book() == {"positions": []}
 
 
+def test_mode_paper_shares_one_matcher_pass(tmp_path, monkeypatch):
+    """Paper and Sleeve A judge the SAME match set, produced by ONE search+matcher pass.
+
+    Before this, each path ran its own _gather_pg_candidates + run_prediction_matcher:
+    double the PolyGram traffic and double the Claude call, but worse — the matcher is
+    nondeterministic, so the two passes could disagree and a paper row was no evidence
+    of what the live sleeve actually saw.
+    """
+    from datetime import datetime, timezone
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    signals_dir = tmp_path / "signals"
+    signals_dir.mkdir()
+    monkeypatch.setattr(trading, "SIGNALS_DIR", signals_dir)
+    monkeypatch.setattr(trading, "BOOK_FILE", tmp_path / "book.json")
+    monkeypatch.setattr(trading, "LEGACY_PAPER_BOOK_FILE", tmp_path / "paper-book.json")
+    monkeypatch.setattr(trading, "POLYGRAM_EMAIL", "e@x.com")
+    monkeypatch.setattr(trading, "POLYGRAM_PASSWORD", "pw")
+    monkeypatch.setattr(common, "PG_LIVE_ENABLED", True)
+    monkeypatch.setattr(common, "PG_A_ENABLED", True)
+    (signals_dir / f"signals-{today}.json").write_text(
+        '{"signals": [{"ticker": null, "asset_class": "equity", "direction": "neutral", '
+        '"confidence": "low", "topic": "fed-cuts", "thesis_ref": null, '
+        '"rationale": "macro", "provenance": "web_search"}]}',
+        encoding="utf-8",
+    )
+    gathers, matcher_runs = [], []
+
+    def _gather(signals):
+        gathers.append(1)
+        return [
+            {
+                "market_id": "2410562",
+                "question": "Will the Fed cut in June?",
+                "yes_price": 0.3,
+                "end_date": None,
+                "event_id": "evt_fed",
+            }
+        ]
+
+    def _match(signals, cands):
+        matcher_runs.append(1)
+        return [
+            {
+                "market_id": "2410562",
+                "side": "YES",
+                "play_type": "momentum",
+                "similarity": 0.8,
+                "target": 0.6,
+            }
+        ]
+
+    monkeypatch.setattr(trading, "_gather_pg_candidates", _gather)
+    monkeypatch.setattr(trading, "run_prediction_matcher", _match)
+    monkeypatch.setattr(
+        trading, "polygram_market", lambda mid: _raw_market(yes="0.30", no="0.70")
+    )
+    # Sleeve A reaches its band gate and declines — no live order in a unit test.
+    monkeypatch.setattr(trading, "_sleeve_a_entry_ok", lambda price, tok: False)
+    monkeypatch.setattr(
+        polygram_live, "open_live_position", lambda book, **k: pytest.fail("no order")
+    )
+
+    trading.mode_paper()
+
+    assert gathers == [1], (
+        "PolyGram search must run once per collect, not once per path"
+    )
+    assert matcher_runs == [1], "the Claude matcher must run once per collect"
+    # The paper row still opens off the shared pass.
+    positions = trading.load_book()["positions"]
+    assert len(positions) == 1 and positions[0]["instrument"] == "2410562"
+
+
+def test_sleeve_a_live_accepts_precomputed_match_pass(monkeypatch):
+    """Given a match pass, Sleeve A must not run its own search or matcher."""
+    monkeypatch.setattr(common, "PG_LIVE_ENABLED", True)
+    monkeypatch.setattr(common, "PG_A_ENABLED", True)
+    monkeypatch.setattr(trading, "POLYGRAM_EMAIL", "e@x.com")
+    monkeypatch.setattr(trading, "POLYGRAM_PASSWORD", "pw")
+
+    def _boom(*a, **k):
+        raise AssertionError("must reuse the supplied pass")
+
+    monkeypatch.setattr(trading, "_gather_pg_candidates", _boom)
+    monkeypatch.setattr(trading, "run_prediction_matcher", _boom)
+    monkeypatch.setattr(trading, "polygram_market", lambda mid: {"raw": mid})
+    monkeypatch.setattr(
+        trading,
+        "_parse_pg_market",
+        lambda m: {
+            "market_id": "m",
+            "prices": [0.1, 0.9],
+            "yes_price": 0.1,
+            "token_ids": ["a", "b"],
+            "closed": False,
+            "uma_status": "",
+            "end_date": "x",
+        },
+    )
+    monkeypatch.setattr(trading, "_sleeve_a_entry_ok", lambda price, tok: False)
+    candidates = [{"market_id": "m", "question": "q", "event_id": "evt"}]
+    matches = [
+        {
+            "market_id": "m",
+            "side": "NO",
+            "play_type": "resolution",
+            "similarity": 0.8,
+            "target": None,
+        }
+    ]
+    n = trading.open_sleeve_a_live(
+        {"positions": []}, [{"topic": "x"}], "2026-07-27", (candidates, matches)
+    )
+    assert n == 0  # band gate declined, but no second matcher pass was run
+
+
 # ── prediction MtM close triggers ─────────────────────────────────────────────
 def _pred_position(play_type, side_index=0, entry=0.30, target=None, entry_days_ago=0):
     entry_date = (datetime.now(timezone.utc) - timedelta(days=entry_days_ago)).strftime(
@@ -665,6 +782,160 @@ def test_open_sleeve_a_live_skips_when_gate_fails(monkeypatch):
     book = {"positions": []}
     assert trading.open_sleeve_a_live(book, [{"topic": "x"}], "2026-07-21") == 0
     assert calls == []
+
+
+# ── Sleeve A live: observability of the silent gates ──────────────────────────
+# Every early return below used to be a bare `return 0`, making "no live trades"
+# indistinguishable from "flags off", "creds missing" and "nothing in band".
+
+
+def _gated_sleeve_a(monkeypatch, *, event_id="evt", entry_ok=False):
+    """Arrange a flag-on, creds-on Sleeve A run with exactly one match."""
+    monkeypatch.setattr(common, "PG_LIVE_ENABLED", True)
+    monkeypatch.setattr(common, "PG_A_ENABLED", True)
+    monkeypatch.setattr(trading, "POLYGRAM_EMAIL", "e@x.com")
+    monkeypatch.setattr(trading, "POLYGRAM_PASSWORD", "pw")
+    monkeypatch.setattr(
+        trading,
+        "_gather_pg_candidates",
+        lambda s: [
+            {
+                "market_id": "m",
+                "question": "q",
+                "yes_price": 0.1,
+                "end_date": "x",
+                "event_id": event_id,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        trading,
+        "run_prediction_matcher",
+        lambda s, c: [
+            {
+                "market_id": "m",
+                "side": "NO",
+                "play_type": "resolution",
+                "similarity": 0.8,
+                "target": None,
+            }
+        ],
+    )
+    monkeypatch.setattr(trading, "polygram_market", lambda mid: {"raw": mid})
+    monkeypatch.setattr(
+        trading,
+        "_parse_pg_market",
+        lambda m: {
+            "market_id": "m",
+            "prices": [0.1, 0.9],
+            "yes_price": 0.1,
+            "token_ids": ["a", "b"],
+            "closed": False,
+            "uma_status": "",
+            "end_date": "x",
+        },
+    )
+    monkeypatch.setattr(trading, "_sleeve_a_entry_ok", lambda price, tok: entry_ok)
+
+
+def test_open_sleeve_a_live_logs_flag_values_when_off(monkeypatch, caplog):
+    monkeypatch.setattr(common, "PG_LIVE_ENABLED", True)
+    monkeypatch.setattr(common, "PG_A_ENABLED", False)
+    with caplog.at_level("INFO", logger="newsbrief"):
+        n = trading.open_sleeve_a_live(
+            {"positions": []}, [{"topic": "x"}], "2026-07-21"
+        )
+    assert n == 0
+    # The exact flag values, so the log distinguishes "master off" from "sleeve off".
+    assert "PG_LIVE_ENABLED=True" in caplog.text
+    assert "PG_A_ENABLED=False" in caplog.text
+
+
+def test_open_sleeve_a_live_warns_when_creds_missing(monkeypatch, caplog):
+    monkeypatch.setattr(common, "PG_LIVE_ENABLED", True)
+    monkeypatch.setattr(common, "PG_A_ENABLED", True)
+    monkeypatch.setattr(trading, "POLYGRAM_EMAIL", None)
+    monkeypatch.setattr(trading, "POLYGRAM_PASSWORD", None)
+    with caplog.at_level("INFO", logger="newsbrief"):
+        n = trading.open_sleeve_a_live(
+            {"positions": []}, [{"topic": "x"}], "2026-07-21"
+        )
+    assert n == 0
+    assert "credentials" in caplog.text
+
+
+def test_open_sleeve_a_live_logs_when_no_candidates(monkeypatch, caplog):
+    monkeypatch.setattr(common, "PG_LIVE_ENABLED", True)
+    monkeypatch.setattr(common, "PG_A_ENABLED", True)
+    monkeypatch.setattr(trading, "POLYGRAM_EMAIL", "e@x.com")
+    monkeypatch.setattr(trading, "POLYGRAM_PASSWORD", "pw")
+    monkeypatch.setattr(trading, "_gather_pg_candidates", lambda s: [])
+    with caplog.at_level("INFO", logger="newsbrief"):
+        n = trading.open_sleeve_a_live(
+            {"positions": []}, [{"topic": "x"}], "2026-07-21"
+        )
+    assert n == 0
+    assert "no open PolyGram candidates" in caplog.text
+
+
+def test_open_sleeve_a_live_logs_skip_tally(monkeypatch, caplog):
+    _gated_sleeve_a(monkeypatch, entry_ok=False)
+    monkeypatch.setattr(
+        polygram_live, "open_live_position", lambda book, **k: pytest.fail("no open")
+    )
+    with caplog.at_level("INFO", logger="newsbrief"):
+        n = trading.open_sleeve_a_live(
+            {"positions": []}, [{"topic": "x"}], "2026-07-21"
+        )
+    assert n == 0
+    assert "entry_gate" in caplog.text  # the reason, tallied
+    assert "0 opened" in caplog.text  # the summary line always runs
+
+
+def test_open_sleeve_a_live_tallies_missing_event_id(monkeypatch, caplog):
+    _gated_sleeve_a(monkeypatch, event_id=None, entry_ok=True)
+    monkeypatch.setattr(
+        polygram_live, "open_live_position", lambda book, **k: pytest.fail("no open")
+    )
+    with caplog.at_level("INFO", logger="newsbrief"):
+        n = trading.open_sleeve_a_live(
+            {"positions": []}, [{"topic": "x"}], "2026-07-21"
+        )
+    assert n == 0
+    assert "no_event_id" in caplog.text
+
+
+def test_open_sleeve_a_live_tallies_rejected_open(monkeypatch, caplog):
+    # open_live_position returning None = cap/kill-switch/non-fill rejection.
+    _gated_sleeve_a(monkeypatch, entry_ok=True)
+    monkeypatch.setattr(polygram_live, "open_live_position", lambda book, **k: None)
+    with caplog.at_level("INFO", logger="newsbrief"):
+        n = trading.open_sleeve_a_live(
+            {"positions": []}, [{"topic": "x"}], "2026-07-21"
+        )
+    assert n == 0
+    assert "open_rejected" in caplog.text
+
+
+def test_sleeve_a_entry_ok_logs_rejection_inputs(monkeypatch, caplog):
+    monkeypatch.setattr(common, "PG_A_BAND_LO", 0.75)
+    monkeypatch.setattr(common, "PG_A_BAND_HI", 0.92)
+    monkeypatch.setattr(common, "PG_A_SPREAD_GATE", 0.03)
+    monkeypatch.setattr(trading, "_fetch_pg_half_spread", lambda t: 0.10)
+    with caplog.at_level("INFO", logger="newsbrief"):
+        assert trading._sleeve_a_entry_ok(0.85, "tok") is False
+    assert "half_spread=0.100" in caplog.text  # how far off the gate was
+
+    caplog.clear()
+    with caplog.at_level("INFO", logger="newsbrief"):
+        assert trading._sleeve_a_entry_ok(0.60, "tok") is False
+    assert "price=0.600" in caplog.text and "band=0.75-0.92" in caplog.text
+
+    caplog.clear()
+    monkeypatch.setattr(trading, "_fetch_pg_half_spread", lambda t: None)
+    with caplog.at_level("INFO", logger="newsbrief"):
+        assert trading._sleeve_a_entry_ok(0.85, "tok") is False
+    assert "orderbook unreadable" in caplog.text
 
 
 def test_sleeve_a_exit_reason(monkeypatch):

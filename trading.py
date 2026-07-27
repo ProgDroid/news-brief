@@ -578,11 +578,29 @@ def _fetch_pg_half_spread(token_id: str) -> float | None:
 
 def _sleeve_a_entry_ok(held_price: float, token_id: str) -> bool:
     """True iff the held-side price is in the favorite band AND the live half-spread
-    is readable and within the gate. Unreadable orderbook ⇒ False (fail-closed)."""
+    is readable and within the gate. Unreadable orderbook ⇒ False (fail-closed).
+
+    Rejections log their inputs. This is the narrowest gate on the live path, and
+    without the numbers "nothing traded today" is indistinguishable from "several
+    markets missed the band by a cent" — the log is how the caps get tuned.
+    """
     if not (common.PG_A_BAND_LO <= held_price <= common.PG_A_BAND_HI):
+        log.info(
+            f"Sleeve A gate: price={held_price:.3f} outside "
+            f"band={common.PG_A_BAND_LO}-{common.PG_A_BAND_HI}"
+        )
         return False
     half = _fetch_pg_half_spread(token_id)
-    return half is not None and half <= common.PG_A_SPREAD_GATE
+    if half is None:
+        log.info(f"Sleeve A gate: orderbook unreadable for {token_id} (fail-closed)")
+        return False
+    if half > common.PG_A_SPREAD_GATE:
+        log.info(
+            f"Sleeve A gate: half_spread={half:.3f} > gate={common.PG_A_SPREAD_GATE} "
+            f"(price={held_price:.3f})"
+        )
+        return False
+    return True
 
 
 def _stamp_open_benchmark(p: dict) -> None:
@@ -1454,23 +1472,46 @@ def _close_position_at_market(p: dict, day: str, reason: str) -> bool:
     return True
 
 
+def _pg_match_pass(signals: list) -> tuple[list, list]:
+    """Search PolyGram and matcher-rank the day's signals once: (candidates, matches).
+
+    This is the expensive step of the prediction seam — one PolyGram search per
+    entity token plus a single Claude matcher call — and it is deliberately run
+    ONCE per collect and shared by the paper and live open paths.
+
+    Sharing is a correctness requirement, not just a cost saving: the matcher is
+    nondeterministic, so two passes over the same signals can return different
+    match sets. When they diverge, a paper row for a market is no evidence that
+    Sleeve A ever considered it, and the paper book stops being a usable read on
+    what the live sleeve is doing.
+    """
+    candidates = _gather_pg_candidates(signals)
+    if not candidates:
+        return [], []
+    return candidates, run_prediction_matcher(signals, candidates)
+
+
 def _open_prediction_positions(
-    book: dict, signals: list, today: str, open_keys: set
+    book: dict, signals: list, today: str, open_keys: set, match_pass=None
 ) -> int:
     """Match the day's signals to live PolyGram markets and open paper positions.
 
     Creds-gated (no-op when PolyGram is unconfigured, so unit tests never hit the
     network). Opens one long-the-held-side position per match above the similarity
     floor, deduped by market, priced at the live held-side mark. Returns the count.
+
+    `match_pass` is the shared (candidates, matches) tuple from _pg_match_pass;
+    when omitted the function runs its own pass, which keeps it usable standalone.
     """
     if not (POLYGRAM_EMAIL and POLYGRAM_PASSWORD):
         log.info("PolyGram not configured — skipping prediction matching")
         return 0
-    candidates = _gather_pg_candidates(signals)
+    candidates, matches = (
+        match_pass if match_pass is not None else _pg_match_pass(signals)
+    )
     if not candidates:
         log.info("No PolyGram candidates today")
         return 0
-    matches = run_prediction_matcher(signals, candidates)
     opened = 0
     for mt in matches:
         if mt["similarity"] < PG_SIMILARITY_FLOOR:
@@ -1587,24 +1628,42 @@ def score_settled_theses() -> int:
     return n
 
 
-def open_sleeve_a_live(book, signals, today) -> int:
+def open_sleeve_a_live(book, signals, today, match_pass=None) -> int:
     """Open real-money Sleeve-A favorite-fade positions. Creds+flag gated; returns count.
 
-    Runs its own matcher pass, then for each match: buy the held favorite side only when
+    For each match in the shared pass: buy the held favorite side only when
     it is in-band and tight-spread (via _sleeve_a_entry_ok) and an eventId is known, sized
     at PG_A_STAKE, deduped against open live rows. All opens route through the fail-closed
-    polygram_live.open_live_position (kill-switch + cap enforced there)."""
+    polygram_live.open_live_position (kill-switch + cap enforced there).
+
+    Every exit path logs why. The sleeve is fail-closed by design, so the common
+    outcome is zero opens; a silent zero would be unattributable across the eight
+    independent gates, so per-match skips are tallied by reason and summarised once.
+
+    `match_pass` is the shared (candidates, matches) tuple from _pg_match_pass —
+    the SAME set the paper path judged, so the two books stay comparable.
+    """
     import polygram_live
 
     if not (common.PG_LIVE_ENABLED and common.PG_A_ENABLED):
+        log.info(
+            f"Sleeve A live: off (PG_LIVE_ENABLED={common.PG_LIVE_ENABLED}, "
+            f"PG_A_ENABLED={common.PG_A_ENABLED})"
+        )
         return 0
     if not (POLYGRAM_EMAIL and POLYGRAM_PASSWORD):
+        log.warning(
+            "Sleeve A live: enabled but PolyGram credentials are missing "
+            "(POLYGRAM_EMAIL/POLYGRAM_PASSWORD)"
+        )
         return 0
-    candidates = _gather_pg_candidates(signals)
+    candidates, matches = (
+        match_pass if match_pass is not None else _pg_match_pass(signals)
+    )
     if not candidates:
+        log.info("Sleeve A live: no open PolyGram candidates for today's signals")
         return 0
     ev_by_mid = {c["market_id"]: c.get("event_id") for c in candidates}
-    matches = run_prediction_matcher(signals, candidates)
     live_open = {
         (p.get("instrument"), p.get("outcome"))
         for p in book["positions"]
@@ -1616,30 +1675,41 @@ def open_sleeve_a_live(book, signals, today) -> int:
         if p.get("execution") == "live" and p.get("status") == "open"
     )
     opened = 0
+    skips: dict[str, int] = {}
+
+    def skip(reason: str) -> None:
+        skips[reason] = skips.get(reason, 0) + 1
+
     for mt in matches:
         if mt["similarity"] < PG_SIMILARITY_FLOOR:
+            skip("below_similarity")
             continue
         mid, side = mt["market_id"], mt["side"]
         event_id = ev_by_mid.get(mid)
         if not event_id:
             log.warning(f"Sleeve A skip: no eventId for {mid}")
+            skip("no_event_id")
             continue
         outcome = "Yes" if side == "YES" else "No"
         if (mid, outcome) in live_open:
+            skip("already_open")
             continue
         m = polygram_market(mid)
         parsed = _parse_pg_market(m) if m is not None else None
         if parsed is None or parsed["closed"]:
+            skip("unreadable_or_closed")
             continue
         side_index = 0 if side == "YES" else 1
         if (
             len(parsed["prices"]) <= side_index
             or len(parsed["token_ids"]) <= side_index
         ):
+            skip("side_missing")
             continue
         held_price = parsed["prices"][side_index]
         token_id = parsed["token_ids"][side_index]
         if held_price is None or not _sleeve_a_entry_ok(held_price, token_id):
+            skip("entry_gate")
             continue
         row = polygram_live.open_live_position(
             book,
@@ -1656,10 +1726,17 @@ def open_sleeve_a_live(book, signals, today) -> int:
             source_perspective=None,
             live_exposure=exposure,
         )
-        if row is not None:
-            live_open.add((mid, outcome))
-            exposure += common.PG_A_STAKE
-            opened += 1
+        if row is None:
+            # cap_ok / kill-switch / non-fill — those paths log their own detail.
+            skip("open_rejected")
+            continue
+        live_open.add((mid, outcome))
+        exposure += common.PG_A_STAKE
+        opened += 1
+    log.info(
+        f"Sleeve A live: {len(candidates)} candidate(s), {len(matches)} match(es), "
+        f"{opened} opened" + (f"; skipped {skips}" if skips else "")
+    )
     return opened
 
 
@@ -1800,10 +1877,19 @@ def mode_paper():
         else:
             log.info("No actionable equity/crypto signals today")
 
-        opened += _open_prediction_positions(book, signals, today, open_keys)
+        # One search + one matcher call, shared by both open paths (see _pg_match_pass).
+        # Creds-guarded here so an unconfigured host never touches the network.
+        match_pass = (
+            _pg_match_pass(signals)
+            if (POLYGRAM_EMAIL and POLYGRAM_PASSWORD)
+            else ([], [])
+        )
+        opened += _open_prediction_positions(
+            book, signals, today, open_keys, match_pass
+        )
 
         try:
-            opened += open_sleeve_a_live(book, signals, today)
+            opened += open_sleeve_a_live(book, signals, today, match_pass)
         except Exception as e:  # live path is non-load-bearing for the paper run
             log.warning(f"Sleeve A live open failed: {e}")
 
