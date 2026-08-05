@@ -687,6 +687,10 @@ def _parse_pg_market(m: dict) -> dict | None:
     PolyGram mirrors Polymarket: `outcomes`, `outcomePrices`, and `clobTokenIds`
     are JSON-ENCODED STRINGS of index-aligned arrays (YES=index 0, NO=index 1).
     Returns None if the required arrays are missing or unparseable — callers skip.
+
+    `outcomes` is parsed separately and never fatal: it is needed only to LABEL a
+    side (see _pg_outcome_label), so a market with readable prices and tokens must
+    stay tradeable-shaped even if its labels are junk.
     """
     try:
         prices = [float(x) for x in json.loads(m["outcomePrices"])]
@@ -695,16 +699,38 @@ def _parse_pg_market(m: dict) -> dict | None:
         return None
     if len(prices) < 2:
         return None
+    try:
+        outcomes = json.loads(m.get("outcomes") or "[]")
+    except (TypeError, ValueError):
+        outcomes = []
     return {
         "market_id": str(m.get("id", "")),
         "question": str(m.get("question", "")),
         "prices": prices,
         "yes_price": prices[0],
+        "outcomes": outcomes if isinstance(outcomes, list) else [],
         "end_date": m.get("endDate"),
         "closed": bool(m.get("closed")),
         "uma_status": m.get("umaResolutionStatus"),
         "token_ids": token_ids,
     }
+
+
+def _pg_outcome_label(parsed: dict, side_index: int) -> str:
+    """The venue's OWN label for a side, falling back to Yes/No.
+
+    `POST /trade/place` validates `outcome` against the market's `outcomes` array,
+    so a hardcoded "Yes"/"No" is a 400 on any binary that isn't labelled that way —
+    Up/Down, Above/Below, two candidate names. Polymarket-mirrored markets are
+    usually Yes/No, which is why nothing caught this until the first real order:
+    every read path keys off side_index and never needed the label.
+    """
+    outs = parsed.get("outcomes") or []
+    if side_index < len(outs):
+        label = outs[side_index]
+        if isinstance(label, str) and label.strip():
+            return label.strip()
+    return "Yes" if side_index == 0 else "No"
 
 
 def polygram_login() -> str | None:
@@ -1541,7 +1567,7 @@ def _open_prediction_positions(
                 "ticker": mid,
                 "instrument": mid,
                 "play_type": play_type,
-                "outcome": "Yes" if side == "YES" else "No",
+                "outcome": _pg_outcome_label(parsed, side_index),
                 "side_index": side_index,
                 "token_id": parsed["token_ids"][side_index]
                 if len(parsed["token_ids"]) > side_index
@@ -1725,10 +1751,6 @@ def open_sleeve_a_live(book, signals, today, match_pass=None) -> dict:
             log.warning(f"Sleeve A skip: no eventId for {mid}")
             skip("no_event_id")
             continue
-        outcome = "Yes" if side == "YES" else "No"
-        if (mid, outcome) in live_open:
-            skip("already_open")
-            continue
         m = polygram_market(mid)
         parsed = _parse_pg_market(m) if m is not None else None
         if parsed is None:
@@ -1743,6 +1765,13 @@ def open_sleeve_a_live(book, signals, today, match_pass=None) -> dict:
             or len(parsed["token_ids"]) <= side_index
         ):
             skip("side_missing")
+            continue
+        # The venue's own label, so the order body and the (market, outcome) keys the
+        # venue answers with agree. Costs one market fetch before the dedup check,
+        # which is the price of not inventing the label.
+        outcome = _pg_outcome_label(parsed, side_index)
+        if (mid, outcome) in live_open:
+            skip("already_open")
             continue
         held_price = parsed["prices"][side_index]
         token_id = parsed["token_ids"][side_index]

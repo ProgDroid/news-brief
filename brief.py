@@ -961,14 +961,20 @@ def _predict_show_sides(chat_id: str, idx: int) -> None:
             "question": parsed["question"],
             "prices": parsed["prices"],
             "token_ids": parsed["token_ids"],
+            "outcomes": parsed["outcomes"],
             "step": "pr_side",
         }
     )
     yes_p, no_p = parsed["prices"][0], parsed["prices"][1]
+    # Label the buttons with the market's real outcomes: on an Up/Down or
+    # candidate-name binary, "YES/NO" asks the operator to bet on a side the venue
+    # has never heard of (and would reject at /trade/place).
+    yes_l = trading._pg_outcome_label(parsed, 0)
+    no_l = trading._pg_outcome_label(parsed, 1)
     rows = [
         [
-            {"text": f"YES · {yes_p:.2f}", "callback_data": "pr:side:YES"},
-            {"text": f"NO · {no_p:.2f}", "callback_data": "pr:side:NO"},
+            {"text": f"{yes_l} · {yes_p:.2f}", "callback_data": "pr:side:YES"},
+            {"text": f"{no_l} · {no_p:.2f}", "callback_data": "pr:side:NO"},
         ],
         [{"text": "❌ Cancel", "callback_data": "pr:cancel"}],
     ]
@@ -984,8 +990,11 @@ def _sleeve_b_stake_cap() -> float:
 
 def _predict_show_stake(chat_id: str, side: str) -> None:
     w = _WIZARD[chat_id]
-    w["outcome"] = "Yes" if side == "YES" else "No"
     w["side_index"] = 0 if side == "YES" else 1
+    # The venue validates `outcome` against the market's outcomes array.
+    w["outcome"] = trading._pg_outcome_label(
+        {"outcomes": w.get("outcomes") or []}, w["side_index"]
+    )
     w["step"] = "pr_stake"
     cap = _sleeve_b_stake_cap()
     presets = [

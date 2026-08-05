@@ -1401,3 +1401,102 @@ def test_pgdiag_counts_unreadable_orderbooks_in_the_survey(monkeypatch):
     monkeypatch.setattr(trading, "_fetch_pg_half_spread", lambda t: None)
     brief.mode_pgdiag()
     assert "1 unreadable" in sent[0]
+
+
+# ── The venue's own outcome label, not a hardcoded Yes/No ─────────────────────
+# POST /trade/place validates `outcome` against the market's outcomes array, and
+# every read path keys off side_index, so a wrong label surfaced only as a 400 on
+# the first real order.
+
+
+def test_outcome_label_uses_the_market_outcomes():
+    parsed = {"outcomes": ["Up", "Down"]}
+    assert trading._pg_outcome_label(parsed, 0) == "Up"
+    assert trading._pg_outcome_label(parsed, 1) == "Down"
+
+
+def test_outcome_label_falls_back_to_yes_no():
+    for parsed in ({}, {"outcomes": []}, {"outcomes": ["", "  "]}, {"outcomes": None}):
+        assert trading._pg_outcome_label(parsed, 0) == "Yes"
+        assert trading._pg_outcome_label(parsed, 1) == "No"
+    # A short array must not IndexError into a wrong-side label.
+    assert trading._pg_outcome_label({"outcomes": ["Only"]}, 1) == "No"
+
+
+def test_parse_pg_market_exposes_outcomes_without_making_them_fatal():
+    base = {
+        "id": 7,
+        "question": "q",
+        "outcomePrices": '["0.4","0.6"]',
+        "clobTokenIds": '["a","b"]',
+    }
+    assert trading._parse_pg_market({**base, "outcomes": '["Up","Down"]'})[
+        "outcomes"
+    ] == ["Up", "Down"]
+    # Junk labels must not reject a market whose prices and tokens are readable.
+    assert trading._parse_pg_market({**base, "outcomes": "not json"})["outcomes"] == []
+    assert trading._parse_pg_market(base)["outcomes"] == []
+
+
+def test_sleeve_a_sends_the_venue_label_not_yes_no(monkeypatch):
+    _gated_sleeve_a(monkeypatch, entry_ok=True)
+    monkeypatch.setattr(
+        trading,
+        "_parse_pg_market",
+        lambda m: {
+            "market_id": "m",
+            "question": "q",
+            "prices": [0.1, 0.9],
+            "yes_price": 0.1,
+            "outcomes": ["Above", "Below"],
+            "token_ids": ["a", "b"],
+            "closed": False,
+            "uma_status": "",
+            "end_date": "x",
+        },
+    )
+    kws = []
+    monkeypatch.setattr(
+        polygram_live,
+        "open_live_position",
+        lambda book, **k: kws.append(k) or {"cost_basis": k["amount"]},
+    )
+    trading.open_sleeve_a_live({"positions": []}, [{"topic": "x"}], "2026-08-05")
+    assert kws[0]["outcome"] == "Below"  # side NO → index 1 → the venue's own label
+
+
+def test_paper_prediction_row_records_the_venue_label(monkeypatch):
+    monkeypatch.setattr(trading, "POLYGRAM_EMAIL", "e@x.com")
+    monkeypatch.setattr(trading, "POLYGRAM_PASSWORD", "pw")
+    monkeypatch.setattr(trading, "polygram_market", lambda mid: {"raw": mid})
+    monkeypatch.setattr(
+        trading,
+        "_parse_pg_market",
+        lambda m: {
+            "market_id": "m",
+            "question": "q",
+            "prices": [0.4, 0.6],
+            "yes_price": 0.4,
+            "outcomes": ["Up", "Down"],
+            "token_ids": ["a", "b"],
+            "closed": False,
+            "uma_status": "",
+            "end_date": "x",
+        },
+    )
+    monkeypatch.setattr(trading, "_stamp_open_benchmark", lambda p: None)
+    book = {"positions": []}
+    cands = [{"market_id": "m", "question": "q", "event_id": "e"}]
+    matches = [
+        {
+            "market_id": "m",
+            "side": "YES",
+            "play_type": "resolution",
+            "similarity": 0.8,
+            "target": None,
+        }
+    ]
+    n = trading._open_prediction_positions(
+        book, [{"topic": "x"}], "2026-08-05", set(), (cands, matches)
+    )
+    assert n == 1 and book["positions"][0]["outcome"] == "Up"
