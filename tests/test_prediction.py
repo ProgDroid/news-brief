@@ -1265,6 +1265,11 @@ def _pgdiag_env(monkeypatch, *, event_id="evt"):
     monkeypatch.setattr(trading, "polygram_search", lambda q: [event])
     monkeypatch.setattr(trading, "polygram_market", lambda mid: market)
     monkeypatch.setattr(trading, "_fetch_pg_half_spread", lambda t: 0.01)
+    # Must be stubbed or the venue-vs-book check reaches the real API: polygram_live
+    # holds a frozen `from trading import polygram_login` copy, so patching
+    # trading.polygram_login does NOT divert _pg_request (see the module-attr rule).
+    monkeypatch.setattr(polygram_live, "list_positions", lambda: [])
+    monkeypatch.setattr(brief, "load_book", lambda: {"positions": []})
     sent = []
     monkeypatch.setattr(brief, "telegram_send_long", lambda t: sent.append(t))
     # Any write would be a bug: the whole point is that this probe is read-only.
@@ -1287,7 +1292,8 @@ def test_pgdiag_reports_a_healthy_seam(monkeypatch):
     assert "wallet $12.40" in msg
     assert "with a resolvable eventId=1" in msg
     assert "half_spread=0.010" in msg
-    assert "in band" in msg  # 0.83 sits inside the default 0.75–0.92
+    # 0.83 sits inside the default 0.75–0.92, so it enters the spread survey.
+    assert "1 would pass, 0 too wide, 0 unreadable" in msg
 
 
 def test_pgdiag_names_a_missing_event_id(monkeypatch):
@@ -1337,3 +1343,61 @@ def test_mode_paper_reports_a_sleeve_a_crash(tmp_path, monkeypatch):
     summary = trading.mode_paper()
     assert summary["sleeve_a"]["state"] == "crashed"
     assert "TypeError: exploded" in summary["sleeve_a"]["error"]
+
+
+def test_pgdiag_flags_venue_positions_missing_from_the_book(monkeypatch):
+    """Orphaned real capital: the fill parse discarded an order that actually filled."""
+    brief, sent = _pgdiag_env(monkeypatch)
+    monkeypatch.setattr(
+        polygram_live,
+        "list_positions",
+        lambda: [{"marketId": "2774056", "outcome": "Yes"}],
+    )
+    monkeypatch.setattr(brief, "load_book", lambda: {"positions": []})
+    brief.mode_pgdiag()
+    assert "NO book row" in sent[0] and "🚨" in sent[0]
+
+
+def test_pgdiag_reports_a_clean_venue_reconciliation(monkeypatch):
+    brief, sent = _pgdiag_env(monkeypatch)
+    monkeypatch.setattr(
+        polygram_live,
+        "list_positions",
+        lambda: [{"marketId": "2774056", "outcome": "Yes"}],
+    )
+    monkeypatch.setattr(
+        brief,
+        "load_book",
+        lambda: {
+            "positions": [
+                {
+                    "execution": "live",
+                    "status": "open",
+                    "instrument": "2774056",
+                    "outcome": "Yes",
+                }
+            ]
+        },
+    )
+    brief.mode_pgdiag()
+    assert "every venue position is recorded" in sent[0]
+
+
+def test_pgdiag_surveys_the_spread_gate_across_in_band_candidates(monkeypatch):
+    """One passing measurement says the shape parses; the survey says it's reachable."""
+    brief, sent = _pgdiag_env(monkeypatch)
+    monkeypatch.setattr(polygram_live, "list_positions", lambda: [])
+    monkeypatch.setattr(brief, "load_book", lambda: {"positions": []})
+    monkeypatch.setattr(trading, "_fetch_pg_half_spread", lambda t: 0.09)  # too wide
+    brief.mode_pgdiag()
+    assert "0 would pass, 1 too wide" in sent[0]
+    assert "> 0.03" in sent[0]  # the actual number, so the gate can be retuned
+
+
+def test_pgdiag_counts_unreadable_orderbooks_in_the_survey(monkeypatch):
+    brief, sent = _pgdiag_env(monkeypatch)
+    monkeypatch.setattr(polygram_live, "list_positions", lambda: [])
+    monkeypatch.setattr(brief, "load_book", lambda: {"positions": []})
+    monkeypatch.setattr(trading, "_fetch_pg_half_spread", lambda t: None)
+    brief.mode_pgdiag()
+    assert "1 unreadable" in sent[0]

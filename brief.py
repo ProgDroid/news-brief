@@ -3290,7 +3290,11 @@ def mode_pgdiag():
       4. /search shape: whether an eventId actually resolves. Sleeve A cannot place an
          order without one, and the paper path never needs it, so a missing key here
          yields exactly "paper fills daily, live never opens"
-      5. orderbook readability + half-spread vs the gate, on a real token
+      5. venue positions vs the book — an order that filled under an unexpected
+         status string would leave real capital at the venue with no row here, and
+         nothing in the codebase ever adopts an unknown venue position
+      6. half-spread vs the gate across EVERY in-band candidate, not one token: one
+         passing measurement proves the shape parses, not that the gate is reachable
     """
     log.info("=== PGDIAG (read-only) ===")
     out = [
@@ -3343,24 +3347,81 @@ def mode_pgdiag():
         telegram_send_long("\n".join(out))
         return
 
-    # Orderbook + band, on the first candidate that exposes a token.
-    probed = 0
-    for c in cands[:3]:
+    # ── Venue vs book: is real capital already out there, unrecorded? ─────────
+    # place_market_order discards any fill whose status string isn't exactly
+    # "filled", and reconcile_live_book only CLOSES rows the venue dropped — it never
+    # adopts a venue position the book doesn't know about. So an order that really
+    # filled under an unexpected status would leave money at the venue and no row
+    # here, permanently invisible. This is the one write-path contract that a
+    # read-only probe cannot verify directly, so check its footprint instead.
+    venue = polygram_live.list_positions()
+    if venue is None:
+        out.append("❌ /trade/positions UNREADABLE — reconcile and close both no-op")
+    else:
+        book_keys = {
+            (p.get("instrument"), p.get("outcome"))
+            for p in load_book().get("positions", [])
+            if p.get("execution") == "live" and p.get("status") == "open"
+        }
+        venue_keys = {(p.get("marketId"), p.get("outcome")) for p in venue}
+        orphans = venue_keys - book_keys
+        ghosts = book_keys - venue_keys
+        out.append(
+            f"venue positions={len(venue)}, open live rows in book={len(book_keys)}"
+        )
+        if orphans:
+            out.append(
+                f"🚨 {len(orphans)} venue position(s) with NO book row — orders ARE "
+                f"filling and the fill parse is discarding them: {sorted(orphans)[:3]}"
+            )
+        if ghosts:
+            out.append(
+                f"⚠️ {len(ghosts)} book row(s) not on the venue: {sorted(ghosts)[:3]}"
+            )
+        if venue and not orphans:
+            out.append("✅ every venue position is recorded in the book")
+
+    # ── Spread survey: is the gate, not the band, the binding constraint? ─────
+    # Sample the in-band side of every candidate rather than one token. A single
+    # passing measurement (as taken on 2026-07-27) says the shape parses; it says
+    # nothing about whether 3% of mid is achievable on this venue's favorites.
+    tight = wide = unreadable = 0
+    for c in cands[:12]:
         m = trading.polygram_market(c["market_id"])
         parsed = trading._parse_pg_market(m) if m is not None else None
-        if not parsed or not parsed["token_ids"]:
+        if not parsed or parsed["closed"] or not parsed["token_ids"]:
             continue
-        probed += 1
-        price, token_id = parsed["prices"][0], parsed["token_ids"][0]
-        half = trading._fetch_pg_half_spread(token_id)
-        in_band = common.PG_A_BAND_LO <= price <= common.PG_A_BAND_HI
-        out.append(
-            f"  ◦ {html.escape(parsed['question'][:48])} yes={price:.2f} "
-            f"{'in' if in_band else 'out of'} band · half_spread="
-            + (f"{half:.3f}" if half is not None else "UNREADABLE ❌")
+        side = next(
+            (
+                i
+                for i, pr in enumerate(parsed["prices"][:2])
+                if common.PG_A_BAND_LO <= pr <= common.PG_A_BAND_HI
+            ),
+            None,
         )
-    if not probed:
-        out.append("❌ no candidate exposed a token id — orderbook never readable")
+        if side is None or len(parsed["token_ids"]) <= side:
+            continue
+        half = trading._fetch_pg_half_spread(parsed["token_ids"][side])
+        if half is None:
+            unreadable += 1
+            verdict = "orderbook UNREADABLE ❌"
+        elif half <= common.PG_A_SPREAD_GATE:
+            tight += 1
+            verdict = f"half_spread={half:.3f} PASSES ✅"
+        else:
+            wide += 1
+            verdict = f"half_spread={half:.3f} > {common.PG_A_SPREAD_GATE} ✗"
+        out.append(
+            f"  ◦ {html.escape(parsed['question'][:44])} "
+            f"@ {parsed['prices'][side]:.2f} — {verdict}"
+        )
+    if tight or wide or unreadable:
+        out.append(
+            f"in-band sample: {tight} would pass, {wide} too wide, "
+            f"{unreadable} unreadable"
+        )
+    else:
+        out.append("no candidate had a side inside the band right now")
     out.append("(read-only: no orders placed, book untouched)")
     telegram_send_long("\n".join(out))
 
