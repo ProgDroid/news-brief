@@ -415,6 +415,13 @@ def _sleeve_a_block(status: dict) -> list[str]:
             "<b>💵 Sleeve A (live)</b>",
             "  armed, but PolyGram credentials are missing",
         ]
+    if state == "crashed":
+        # mode_paper swallows live-path exceptions so the paper run still completes;
+        # unreported, that is indistinguishable from the sleeve declining every market.
+        return [
+            "<b>💵 Sleeve A (live)</b>",
+            f"  ❌ CRASHED — {html.escape(str(status.get('error') or 'unknown'))}",
+        ]
 
     if state == "no_candidates":
         # The wallet is only read once a run has candidates, so don't imply it failed.

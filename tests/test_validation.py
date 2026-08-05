@@ -461,3 +461,13 @@ def test_sleeve_a_block_marks_unreadable_wallet():
 
 def test_daily_trade_message_still_empty_without_status_or_positions():
     assert validation.daily_trade_message({"positions": []}, "2026-08-05") == ""
+
+
+def test_sleeve_a_block_reports_a_crash():
+    """A swallowed exception must not read as "the sleeve declined every market"."""
+    out = validation.daily_trade_message(
+        {"positions": []},
+        "2026-08-05",
+        {"state": "crashed", "error": "TypeError: bad <thing>"},
+    )
+    assert "CRASHED" in out and "TypeError: bad &lt;thing&gt;" in out

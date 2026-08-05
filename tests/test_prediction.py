@@ -1313,3 +1313,27 @@ def test_pgdiag_flags_unreadable_wallet(monkeypatch):
     monkeypatch.setattr(polygram_live, "wallet_balance", lambda: None)
     brief.mode_pgdiag()
     assert "wallet UNREADABLE" in sent[0]
+
+
+def test_mode_paper_reports_a_sleeve_a_crash(tmp_path, monkeypatch):
+    """The live path is wrapped so it can't break the paper run — but it must SAY so."""
+    monkeypatch.setattr(trading, "SIGNALS_DIR", tmp_path)
+    (
+        tmp_path / f"signals-{trading.datetime.now(trading.timezone.utc):%Y-%m-%d}.json"
+    ).write_text('{"signals": [{"topic": "x", "direction": "neutral"}]}')
+    monkeypatch.setattr(trading, "BOOK_FILE", tmp_path / "book.json")
+    monkeypatch.setattr(trading, "load_book", lambda: {"positions": []})
+    monkeypatch.setattr(trading, "save_book", lambda b: None)
+    monkeypatch.setattr(trading, "_record_leakage", lambda d, ll: None)
+    monkeypatch.setattr(trading, "_pg_match_pass", lambda s: ([], []))
+    monkeypatch.setattr(trading, "_open_prediction_positions", lambda *a, **k: 0)
+    monkeypatch.setattr(trading, "POLYGRAM_EMAIL", "e@x.com")
+    monkeypatch.setattr(trading, "POLYGRAM_PASSWORD", "pw")
+
+    def _boom(*a, **k):
+        raise TypeError("exploded")
+
+    monkeypatch.setattr(trading, "open_sleeve_a_live", _boom)
+    summary = trading.mode_paper()
+    assert summary["sleeve_a"]["state"] == "crashed"
+    assert "TypeError: exploded" in summary["sleeve_a"]["error"]

@@ -1952,7 +1952,12 @@ def mode_paper():
             sleeve_a = open_sleeve_a_live(book, signals, today, match_pass)
             opened += sleeve_a["opened"]
         except Exception as e:  # live path is non-load-bearing for the paper run
-            log.warning(f"Sleeve A live open failed: {e}")
+            # Report the crash as a state rather than leaving sleeve_a None: a
+            # swallowed exception and a correctly-declining sleeve both produce zero
+            # live rows, and without this the message simply omits the sleeve — the
+            # exact ambiguity the status dict exists to remove.
+            log.exception("Sleeve A live open failed")
+            sleeve_a = {"state": "crashed", "error": f"{type(e).__name__}: {e}"}
 
         save_book(book)
         _record_leakage(today, leakage)
