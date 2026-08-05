@@ -1,5 +1,7 @@
 import importlib
 
+import requests
+
 import common
 import polygram_live
 
@@ -361,3 +363,75 @@ def test_backfill_settled_skips_when_history_unreadable(monkeypatch):
     book = {"positions": [row]}
     assert polygram_live.backfill_settled(book) == 0
     assert row["realized_return"] is None
+
+
+# ── A rejection must carry the venue's own explanation ─────────────────────────
+# requests' HTTPError stringifies to status + URL only, so logging the exception
+# alone turned a documented {error, message} 400 into an unactionable line.
+
+
+class _Resp:
+    def __init__(self, status, body, payload=None):
+        self.status_code = status
+        self.text = body
+        self._payload = payload
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise requests.HTTPError(f"{self.status_code} Client Error")
+
+    def json(self):
+        return self._payload
+
+
+def test_pg_request_logs_response_and_request_bodies_on_400(monkeypatch, caplog):
+    monkeypatch.setattr(
+        polygram_live,
+        "_load_json_or",
+        lambda p, d: {"token": "tok"},
+    )
+    monkeypatch.setattr(
+        polygram_live.requests,
+        "request",
+        lambda *a, **k: _Resp(
+            400, '{"error":"BadRequest","message":"marketId must be an integer"}'
+        ),
+    )
+    with caplog.at_level("WARNING", logger="newsbrief"):
+        out = polygram_live._pg_request(
+            "POST", "/trade/place", json_body={"marketId": "682705", "amount": 2.0}
+        )
+    assert out is None
+    assert "marketId must be an integer" in caplog.text  # the venue names the field
+    assert "status=400" in caplog.text
+    assert "sent=" in caplog.text and "682705" in caplog.text  # compare against it
+
+
+def test_pg_request_truncates_a_huge_error_body(monkeypatch, caplog):
+    monkeypatch.setattr(polygram_live, "_load_json_or", lambda p, d: {"token": "tok"})
+    monkeypatch.setattr(
+        polygram_live.requests,
+        "request",
+        lambda *a, **k: _Resp(500, "x" * 5000),
+    )
+    with caplog.at_level("WARNING", logger="newsbrief"):
+        polygram_live._pg_request("GET", "/wallet")
+    assert len(caplog.text) < 2000  # an HTML error page can't flood the log
+
+
+def test_place_rejection_and_unrecognised_fill_log_differently(monkeypatch, caplog):
+    """One is a payload bug; the other means capital may be at the venue unrecorded."""
+    monkeypatch.setattr(polygram_live, "_pg_request", lambda *a, **k: None)
+    with caplog.at_level("WARNING", logger="newsbrief"):
+        assert polygram_live.place_market_order("e", "m", "t", "No", 2.0) is None
+    assert "REJECTED" in caplog.text and "capital is at the venue" not in caplog.text
+
+    caplog.clear()
+    monkeypatch.setattr(
+        polygram_live,
+        "_pg_request",
+        lambda *a, **k: {"order": {"id": "o1", "status": "FILLED"}},
+    )
+    with caplog.at_level("WARNING", logger="newsbrief"):
+        assert polygram_live.place_market_order("e", "m", "t", "No", 2.0) is None
+    assert "UNRECOGNISED" in caplog.text and "capital is at the venue" in caplog.text

@@ -13,6 +13,7 @@ from common import _load_json_or, log
 from trading import POLYGRAM_BASE, POLYGRAM_TOKEN_FILE, polygram_login
 
 _TIMEOUT = 30
+_ERROR_BODY_CHARS = 400  # enough for a venue {error, message}, short of a dumped page
 
 
 def _pg_request(method, path, params=None, json_body=None):
@@ -20,6 +21,14 @@ def _pg_request(method, path, params=None, json_body=None):
 
     Returns parsed JSON dict on 2xx, else None (network error, non-2xx after a
     refresh attempt, or unparseable body). Mirrors trading._polygram_get.
+
+    A rejection logs the venue's own RESPONSE BODY, and for writes the request body
+    that earned it. requests' HTTPError stringifies to only status + URL, so logging
+    the exception alone reduced "400 Bad Request" — an error the venue documents as
+    {error, message}, i.e. it names the offending field — to an unactionable line.
+    That mattered: a fail-closed write layer whose rejections are unattributable
+    cannot be debugged from the outside at all. No credentials pass through here
+    (login lives in trading.polygram_login), so bodies are safe to log.
     """
     token = (_load_json_or(POLYGRAM_TOKEN_FILE, {}) or {}).get(
         "token"
@@ -49,7 +58,12 @@ def _pg_request(method, path, params=None, json_body=None):
             resp.raise_for_status()
             return resp.json()
         except Exception as e:
-            log.warning(f"PolyGram {method} {path} failed: {e}")
+            detail = (resp.text or "")[:_ERROR_BODY_CHARS].replace("\n", " ")
+            sent = f" sent={json_body}" if json_body is not None else ""
+            log.warning(
+                f"PolyGram {method} {path} failed: {e} "
+                f"[status={resp.status_code} body={detail!r}{sent}]"
+            )
             return None
     return None
 
@@ -89,7 +103,21 @@ def place_market_order(event_id, market_id, token_id, outcome, amount):
     )
     order = (data or {}).get("order") if isinstance(data, dict) else None
     if not isinstance(order, dict) or order.get("status") != "filled":
-        log.warning(f"PolyGram place not filled for {market_id}/{outcome}: {data}")
+        # Separate "the venue refused the request" from "it accepted it and we didn't
+        # recognise the fill". The first is a payload bug (see _pg_request's logged
+        # body); the second means real money moved and this row is about to be
+        # discarded, so it must never read as the same event.
+        if data is None:
+            log.warning(
+                f"PolyGram place REJECTED for {market_id}/{outcome} — request never "
+                f"succeeded; see the preceding response body"
+            )
+        else:
+            log.error(
+                f"PolyGram place returned an UNRECOGNISED fill for "
+                f"{market_id}/{outcome}: {data} — if this filled, capital is at the "
+                f"venue with no book row (run pgdiag)"
+            )
         return None
     try:
         return {

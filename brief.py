@@ -3336,6 +3336,27 @@ def mode_pgdiag():
     out.append(
         f"✅ /search returned {len(events)} event(s); keys: {', '.join(ev_keys)}"
     )
+    # Every identifier the market actually carries. /trade/place takes eventId +
+    # marketId + tokenId, and we send the numeric gamma-style `id`; a 400 from that
+    # endpoint is most cheaply explained by it wanting a different one of these
+    # (a conditionId/slug, or an int where we send a str), so show the real keys and
+    # their types rather than guessing at the payload.
+    markets = ev.get("markets") if isinstance(ev, dict) else None
+    if isinstance(markets, list) and markets and isinstance(markets[0], dict):
+        m0 = markets[0]
+        ids = {
+            k: v
+            for k, v in m0.items()
+            if "id" in k.lower() or k.lower() in {"slug", "question"}
+        }
+        out.append(
+            "market id fields: "
+            + ", ".join(
+                f"{k}={str(v)[:24]}({type(v).__name__})" for k, v in sorted(ids.items())
+            )
+        )
+        out.append(f"event id fields: id={ev.get('id')}({type(ev.get('id')).__name__})")
+
     cands = trading._gather_pg_candidates([{"topic": term, "ticker": None}])
     with_ev = [c for c in cands if c.get("event_id")]
     out.append(
