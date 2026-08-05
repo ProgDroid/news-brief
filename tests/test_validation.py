@@ -347,3 +347,117 @@ def test_live_performance_reports_live_only():
     }
     lp = validation.live_performance(book)
     assert lp["n"] == 2 and abs(lp["mean_return"] - (-0.05)) < 1e-9
+
+
+# ── Prediction rows read as questions, not market ids ─────────────────────────
+# A prediction row has no ticker: trading.py stores the market id in `ticker` and
+# the question in `topic`, so the old message showed only "2774056".
+
+
+def _pred_row(**kw):
+    row = {
+        "status": "open",
+        "opened": "2026-08-05",
+        "asset_class": "prediction",
+        "execution": "paper",
+        "ticker": "2774056",
+        "instrument": "2774056",
+        "direction": "bullish",
+        "play_type": "momentum",
+        "outcome": "Yes",
+        "topic": "Will Iran & Israel agree a ceasefire before October?",
+        "entry_price": 0.41,
+        "last_mark": None,
+    }
+    row.update(kw)
+    return row
+
+
+def test_daily_trade_message_names_prediction_markets():
+    out = validation.daily_trade_message({"positions": [_pred_row()]}, "2026-08-05")
+    assert "Will Iran &amp; Israel agree a ceasefire" in out  # the question, escaped
+    assert "<code>2774056</code>" in out  # id kept as the /close handle
+    assert "&amp;" in out and " & " not in out  # bare & would 400 the whole message
+
+
+def test_daily_trade_message_truncates_long_questions():
+    long_q = "Will " + "x" * 300 + "?"
+    out = validation.daily_trade_message(
+        {"positions": [_pred_row(topic=long_q)]}, "2026-08-05"
+    )
+    assert "…" in out
+    assert max(len(ln) for ln in out.splitlines()) < 120
+
+
+def test_daily_trade_message_falls_back_to_id_without_question():
+    out = validation.daily_trade_message(
+        {"positions": [_pred_row(topic=None)]}, "2026-08-05"
+    )
+    assert "2774056" in out  # renderable even when the market fetch lost the question
+
+
+def test_daily_trade_message_separates_live_from_paper():
+    book = {
+        "positions": [
+            _pred_row(),
+            _pred_row(
+                execution="live",
+                sleeve="A",
+                topic="Fed cuts rates in September?",
+                ticker="991",
+                instrument="991",
+                cost_basis=2.0,
+                entry_price=0.83,
+                play_type="resolution",
+            ),
+        ]
+    }
+    out = validation.daily_trade_message(book, "2026-08-05")
+    assert "Prediction suggestions (paper)" in out
+    assert "real money" in out  # live rows get their own, unmistakable section
+    assert "$2 @ 0.83" in out
+    # The two are otherwise identical on the wire; the tag is the only signal.
+    assert "💵 live" in out and "[paper]" in out
+
+
+# ── Sleeve A status block: why the live sleeve did nothing ────────────────────
+
+
+def test_sleeve_a_block_reports_flags_when_off():
+    out = validation.daily_trade_message(
+        {"positions": []},
+        "2026-08-05",
+        {"state": "off", "live_enabled": True, "a_enabled": False},
+    )
+    # A message is emitted even with an empty book — "are the flags actually set in
+    # the container" is the first question a zero-trade day raises.
+    assert "PG_LIVE_ENABLED=1" in out and "PG_A_ENABLED=0" in out
+
+
+def test_sleeve_a_block_flags_faults_but_not_design_declines():
+    status = {
+        "state": "ran",
+        "candidates": 9,
+        "matches": 4,
+        "opened": 0,
+        "wallet": 12.4,
+        "skips": {"out_of_band": 3, "spread_or_book": 1},
+        "blocked": [{"question": "Fed cuts?", "price": 0.97, "why": "out_of_band"}],
+    }
+    out = validation.daily_trade_message({"positions": []}, "2026-08-05", status)
+    assert "4 match(es) → 0 opened" in out and "wallet $12.40" in out
+    assert "price outside band ×3" in out
+    assert "spread too wide / orderbook unreadable ×1 ⚠️" in out  # a fault, marked
+    assert "price outside band ×3 ⚠️" not in out  # design working, not marked
+    assert "Fed cuts? @ 0.97" in out  # the number, so "missed by a cent" is visible
+
+
+def test_sleeve_a_block_marks_unreadable_wallet():
+    status = {"state": "ran", "matches": 1, "opened": 0, "wallet": None, "skips": {}}
+    out = validation.daily_trade_message({"positions": []}, "2026-08-05", status)
+    # cap_ok fail-closes on an unreadable balance, so this alone explains zero orders.
+    assert "wallet UNREADABLE ⚠️" in out
+
+
+def test_daily_trade_message_still_empty_without_status_or_positions():
+    assert validation.daily_trade_message({"positions": []}, "2026-08-05") == ""

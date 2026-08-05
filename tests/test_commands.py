@@ -1183,3 +1183,43 @@ def test_predict_stake_respects_effective_cap(monkeypatch):
     )  # still awaiting a valid stake
     assert "stake" not in brief._WIZARD["42"]
     assert edits and "5" in edits[-1][0]
+
+
+# ── Pickers label predictions by question, not market id ──────────────────────
+
+
+def test_close_picker_labels_prediction_by_question(monkeypatch):
+    book = {
+        "positions": [
+            {
+                "status": "open",
+                "asset_class": "prediction",
+                "execution": "live",
+                "ticker": "2774056",
+                "instrument": "2774056",
+                "topic": "Will Iran & Israel agree a ceasefire before October 2026?",
+            },
+            {
+                "status": "open",
+                "asset_class": "equity",
+                "ticker": "SHEL_US_EQ",
+                "instrument": "SHEL_US_EQ",
+            },
+        ]
+    }
+    monkeypatch.setattr(brief, "load_book", lambda: book)
+    captured = {}
+    monkeypatch.setattr(
+        brief,
+        "_picker_send",
+        lambda text, rows, mid: captured.update(rows=rows),
+    )
+    brief._close_picker_render()
+    pred, equity = captured["rows"][0][0], captured["rows"][1][0]
+    assert "Will Iran & Israel" in pred["text"]  # button labels are NOT HTML-parsed
+    assert "2774056" not in pred["text"]
+    assert "💵" in pred["text"]  # real money is unmistakable before you tap
+    assert len(pred["text"]) <= brief._BUTTON_NAME_CAP + 4  # ❌ + 💵 + ellipsis
+    # The tap still resolves by the hashed TICKER, so relabelling changed nothing.
+    assert pred["callback_data"] == f"close:{brief._short_id('2774056')}"
+    assert equity["text"] == "❌ SHEL_US_EQ"  # non-predictions unchanged

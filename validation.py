@@ -7,6 +7,7 @@ No network, no mutation. Builds the weekly performance report, the go-live readi
 gate, the daily prompt-feedback block, and the unified daily trade message.
 """
 
+import html
 import statistics
 
 from common import (
@@ -317,19 +318,154 @@ def performance_prompt_block(book: dict) -> str:
     )
 
 
-def daily_trade_message(book: dict, today: str) -> str:
+_PRED_NAME_CAP = 72  # a market question can run 200+ chars; Telegram lines wrap badly
+
+# Human labels for trading.open_sleeve_a_live's skip tally. Reasons in
+# _SLEEVE_A_FAULTS mean something is BROKEN (unreadable venue data, a rejected
+# order) as opposed to the sleeve correctly declining a market; they are flagged so
+# a failing orderbook read cannot hide behind "nothing was in band".
+_SKIP_LABELS = {
+    "below_similarity": "weak match",
+    "no_event_id": "no eventId on the market",
+    "already_open": "already held",
+    "unreadable": "market data unreadable",
+    "market_closed": "market closed",
+    "side_missing": "side data missing",
+    "no_price": "no price",
+    "out_of_band": "price outside band",
+    "spread_or_book": "spread too wide / orderbook unreadable",
+    "open_rejected": "order rejected (cap, kill-switch or non-fill)",
+}
+_SLEEVE_A_FAULTS = frozenset(
+    {"no_event_id", "unreadable", "spread_or_book", "open_rejected", "side_missing"}
+)
+
+
+def pred_title(p: dict, cap: int = _PRED_NAME_CAP) -> str:
+    """A prediction row's PLAIN display title: the market question, collapsed+truncated.
+
+    Prediction rows carry no ticker — trading.py stores the market id in `ticker`
+    and the question in `topic`. Falling back to the id keeps rows opened before a
+    question was available (or whose market fetch failed) renderable.
+
+    Unescaped on purpose: inline-keyboard button labels are NOT HTML-parsed, so an
+    escaped "&amp;" would show up literally on the button. HTML callers use
+    pred_name; button callers use this with a tighter cap.
+    """
+    q = " ".join((p.get("topic") or "").split())
+    if not q:
+        return str(p.get("ticker") or p.get("instrument") or "?")
+    return q if len(q) <= cap else q[: cap - 1].rstrip() + "…"
+
+
+def pred_name(p: dict) -> str:
+    """pred_title escaped for Telegram-HTML message bodies.
+
+    Escaping is mandatory, not cosmetic: questions are venue-supplied free text and
+    a bare "&" or "<" makes Telegram reject the whole message as a parse error.
+    """
+    return html.escape(pred_title(p))
+
+
+def _pred_handle(p: dict) -> str:
+    """The market id, as copy-pasteable <code> — the handle /close and /watch take.
+
+    Kept alongside the question because the name is not a key: two markets in one
+    event can share almost identical wording, and the command layer resolves by id.
+    """
+    return (
+        f"<code>{html.escape(str(p.get('ticker') or p.get('instrument') or ''))}</code>"
+    )
+
+
+def _pred_lines(p: dict, *, live: bool) -> list[str]:
+    """Two lines for one prediction row: name — outcome, then the metadata tail."""
+    tail = ["live" if live else "paper"]
+    if live and p.get("cost_basis") is not None:
+        tail.append(f"${p['cost_basis']:g} @ {p.get('entry_price', 0):.2f}")
+    elif p.get("play_type"):
+        tail.append(str(p["play_type"]))
+    tail.append(_pred_handle(p))
+    return [
+        f"  • {pred_name(p)} — {html.escape(str(p.get('outcome') or ''))}",
+        f"    {' · '.join(tail)}",
+    ]
+
+
+def _sleeve_a_block(status: dict) -> list[str]:
+    """Render why the real-money sleeve did or did not trade today. [] if no status.
+
+    This exists because Sleeve A is fail-closed across eight independent gates, so
+    "no live positions" is its ordinary output and was previously visible only in a
+    container log. Rendered even when the sleeve is OFF: "are the flags actually set
+    in the running container" is the first question a zero-trade day raises, and the
+    deploy passes those flags through docker-compose, where they are easy to lose.
+    """
+    if not status:
+        return []
+    state = status.get("state")
+    if state == "off":
+        return [
+            "<b>💵 Sleeve A (live)</b>",
+            f"  OFF — PG_LIVE_ENABLED={int(bool(status.get('live_enabled')))}, "
+            f"PG_A_ENABLED={int(bool(status.get('a_enabled')))}",
+        ]
+    if state == "no_creds":
+        return [
+            "<b>💵 Sleeve A (live)</b>",
+            "  armed, but PolyGram credentials are missing",
+        ]
+
+    if state == "no_candidates":
+        # The wallet is only read once a run has candidates, so don't imply it failed.
+        return ["<b>💵 Sleeve A (live)</b>", "  armed · no candidate markets today"]
+
+    wallet = status.get("wallet")
+    wstr = f"wallet ${wallet:.2f}" if wallet is not None else "wallet UNREADABLE ⚠️"
+    lines = [
+        "<b>💵 Sleeve A (live)</b>",
+        f"  {status.get('matches', 0)} match(es) → "
+        f"{status.get('opened', 0)} opened · {wstr}",
+    ]
+    skips = status.get("skips") or {}
+    if skips:
+        parts = [
+            f"{_SKIP_LABELS.get(r, r)} ×{n}" + (" ⚠️" if r in _SLEEVE_A_FAULTS else "")
+            for r, n in sorted(skips.items(), key=lambda kv: -kv[1])
+        ]
+        lines.append(f"  skipped: {', '.join(parts)}")
+    for b in status.get("blocked") or []:
+        lines.append(
+            f"  ◦ {html.escape(str(b.get('question') or '?'))[:_PRED_NAME_CAP]} "
+            f"@ {b.get('price'):.2f} — {_SKIP_LABELS.get(b.get('why'), b.get('why'))}"
+        )
+    return lines
+
+
+def daily_trade_message(book: dict, today: str, sleeve_a: dict | None = None) -> str:
     """Unified daily trade message (Telegram-HTML). Pure — uses last-known marks.
 
-    Three sections, each omitted when empty; returns "" when there is nothing to
-    say. Marks are last-known (refreshed by the weekly mark-to-market), not re-priced
+    Sections, each omitted when empty; returns "" when there is nothing to say.
+    Marks are last-known (refreshed by the weekly mark-to-market), not re-priced
     here, to keep the collect path light.
+
+    Paper and live prediction rows are rendered SEPARATELY. They are otherwise
+    near-identical on the wire (same asset_class, same market id, both `bullish`),
+    so a merged list makes it impossible to tell whether real money moved — which
+    is exactly the question the live sleeve raises.
+
+    `sleeve_a` is trading.open_sleeve_a_live's status dict; when supplied, the
+    sleeve's reason for trading or not is rendered even if it opened nothing.
     """
     positions = book.get("positions", [])
     opened = [p for p in positions if p.get("opened") == today]
     open_now = [p for p in positions if p.get("status") == "open"]
     opened_dir = [p for p in opened if p.get("asset_class") != "prediction"]
     opened_pred = [p for p in opened if p.get("asset_class") == "prediction"]
-    if not (opened or open_now):
+    opened_paper = [p for p in opened_pred if p.get("execution") != "live"]
+    opened_live = [p for p in opened_pred if p.get("execution") == "live"]
+    sleeve_block = _sleeve_a_block(sleeve_a or {})
+    if not (opened or open_now or sleeve_block):
         return ""
 
     lines = ["<b>📈 TRADE UPDATE</b>"]
@@ -340,19 +476,31 @@ def daily_trade_message(book: dict, today: str) -> str:
                 f"  • {p['ticker']} ({p['asset_class']}) {p['direction']} "
                 f"@ {p['entry_price']:g}"
             )
-    if opened_pred:
-        lines.append("<b>Prediction suggestions</b>")
-        for p in opened_pred:
-            lines.append(
-                f"  • {p['ticker']} {p.get('outcome', '')} · {p.get('play_type', '')} "
-                f"· {p.get('rationale', '')}"
-            )
+    if opened_paper:
+        lines.append("<b>Prediction suggestions (paper)</b>")
+        for p in opened_paper:
+            lines.extend(_pred_lines(p, live=False))
+    if opened_live:
+        lines.append("<b>💵 Opened LIVE today (real money)</b>")
+        for p in opened_live:
+            lines.extend(_pred_lines(p, live=True))
+    # Always rendered when a status is supplied — the counts and skip tally say
+    # something the row list cannot (how many markets were considered, and why the
+    # rest were declined), so it is not redundant with an "Opened LIVE" section.
+    lines.extend(sleeve_block)
     if open_now:
         lines.append(f"<b>Open positions ({len(open_now)})</b>")
         for p in open_now:
             mark = p.get("last_mark")
             mstr = f"{100 * mark['return']:+.1f}%" if mark else "—"
-            lines.append(
-                f"  • {p['ticker']} ({p['asset_class']}) {p['direction']}: {mstr}"
-            )
+            if p.get("asset_class") == "prediction":
+                tag = "💵 live" if p.get("execution") == "live" else "paper"
+                lines.append(
+                    f"  • {pred_name(p)} — "
+                    f"{html.escape(str(p.get('outcome') or ''))} [{tag}]: {mstr}"
+                )
+            else:
+                lines.append(
+                    f"  • {p['ticker']} ({p['asset_class']}) {p['direction']}: {mstr}"
+                )
     return "\n".join(lines)

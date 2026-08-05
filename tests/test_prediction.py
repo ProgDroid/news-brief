@@ -462,6 +462,7 @@ def test_sleeve_a_live_accepts_precomputed_match_pass(monkeypatch):
         },
     )
     monkeypatch.setattr(trading, "_sleeve_a_entry_ok", lambda price, tok: False)
+    monkeypatch.setattr(polygram_live, "wallet_balance", lambda: 25.0)
     candidates = [{"market_id": "m", "question": "q", "event_id": "evt"}]
     matches = [
         {
@@ -472,10 +473,10 @@ def test_sleeve_a_live_accepts_precomputed_match_pass(monkeypatch):
             "target": None,
         }
     ]
-    n = trading.open_sleeve_a_live(
+    st = trading.open_sleeve_a_live(
         {"positions": []}, [{"topic": "x"}], "2026-07-27", (candidates, matches)
     )
-    assert n == 0  # band gate declined, but no second matcher pass was run
+    assert st["opened"] == 0  # band gate declined, no second matcher pass was run
 
 
 # ── prediction MtM close triggers ─────────────────────────────────────────────
@@ -692,6 +693,7 @@ def test_open_sleeve_a_live_opens_gated_favorite(monkeypatch):
         },
     )
     monkeypatch.setattr(trading, "_sleeve_a_entry_ok", lambda price, tok: True)
+    monkeypatch.setattr(polygram_live, "wallet_balance", lambda: 25.0)
     opened_calls = []
 
     def fake_open(book, **kw):
@@ -709,8 +711,8 @@ def test_open_sleeve_a_live_opens_gated_favorite(monkeypatch):
 
     monkeypatch.setattr(polygram_live, "open_live_position", fake_open)
     book = {"positions": []}
-    n = trading.open_sleeve_a_live(book, [{"topic": "hormuz"}], "2026-07-21")
-    assert n == 1
+    st = trading.open_sleeve_a_live(book, [{"topic": "hormuz"}], "2026-07-21")
+    assert st["opened"] == 1
     kw = opened_calls[0]
     assert kw["sleeve"] == "A" and kw["event_id"] == "evt_h"
     assert (
@@ -723,7 +725,8 @@ def test_open_sleeve_a_live_noop_when_disabled(monkeypatch):
     monkeypatch.setattr(common, "PG_LIVE_ENABLED", True)
     monkeypatch.setattr(common, "PG_A_ENABLED", False)
     book = {"positions": []}
-    assert trading.open_sleeve_a_live(book, [{"topic": "x"}], "2026-07-21") == 0
+    st = trading.open_sleeve_a_live(book, [{"topic": "x"}], "2026-07-21")
+    assert st["opened"] == 0 and st["state"] == "off"
     assert book["positions"] == []
 
 
@@ -775,12 +778,15 @@ def test_open_sleeve_a_live_skips_when_gate_fails(monkeypatch):
     monkeypatch.setattr(
         trading, "_sleeve_a_entry_ok", lambda price, tok: False
     )  # gate fails
+    monkeypatch.setattr(polygram_live, "wallet_balance", lambda: 25.0)
     calls = []
     monkeypatch.setattr(
         polygram_live, "open_live_position", lambda book, **k: calls.append(k)
     )
     book = {"positions": []}
-    assert trading.open_sleeve_a_live(book, [{"topic": "x"}], "2026-07-21") == 0
+    assert (
+        trading.open_sleeve_a_live(book, [{"topic": "x"}], "2026-07-21")["opened"] == 0
+    )
     assert calls == []
 
 
@@ -836,16 +842,19 @@ def _gated_sleeve_a(monkeypatch, *, event_id="evt", entry_ok=False):
         },
     )
     monkeypatch.setattr(trading, "_sleeve_a_entry_ok", lambda price, tok: entry_ok)
+    # The status dict reports the balance the bot can read; stub it so no test hits
+    # the network (an armed sleeve reads the wallet once per run).
+    monkeypatch.setattr(polygram_live, "wallet_balance", lambda: 25.0)
 
 
 def test_open_sleeve_a_live_logs_flag_values_when_off(monkeypatch, caplog):
     monkeypatch.setattr(common, "PG_LIVE_ENABLED", True)
     monkeypatch.setattr(common, "PG_A_ENABLED", False)
     with caplog.at_level("INFO", logger="newsbrief"):
-        n = trading.open_sleeve_a_live(
+        st = trading.open_sleeve_a_live(
             {"positions": []}, [{"topic": "x"}], "2026-07-21"
         )
-    assert n == 0
+    assert st["opened"] == 0
     # The exact flag values, so the log distinguishes "master off" from "sleeve off".
     assert "PG_LIVE_ENABLED=True" in caplog.text
     assert "PG_A_ENABLED=False" in caplog.text
@@ -857,10 +866,10 @@ def test_open_sleeve_a_live_warns_when_creds_missing(monkeypatch, caplog):
     monkeypatch.setattr(trading, "POLYGRAM_EMAIL", None)
     monkeypatch.setattr(trading, "POLYGRAM_PASSWORD", None)
     with caplog.at_level("INFO", logger="newsbrief"):
-        n = trading.open_sleeve_a_live(
+        st = trading.open_sleeve_a_live(
             {"positions": []}, [{"topic": "x"}], "2026-07-21"
         )
-    assert n == 0
+    assert st["opened"] == 0
     assert "credentials" in caplog.text
 
 
@@ -871,10 +880,10 @@ def test_open_sleeve_a_live_logs_when_no_candidates(monkeypatch, caplog):
     monkeypatch.setattr(trading, "POLYGRAM_PASSWORD", "pw")
     monkeypatch.setattr(trading, "_gather_pg_candidates", lambda s: [])
     with caplog.at_level("INFO", logger="newsbrief"):
-        n = trading.open_sleeve_a_live(
+        st = trading.open_sleeve_a_live(
             {"positions": []}, [{"topic": "x"}], "2026-07-21"
         )
-    assert n == 0
+    assert st["opened"] == 0
     assert "no open PolyGram candidates" in caplog.text
 
 
@@ -884,11 +893,13 @@ def test_open_sleeve_a_live_logs_skip_tally(monkeypatch, caplog):
         polygram_live, "open_live_position", lambda book, **k: pytest.fail("no open")
     )
     with caplog.at_level("INFO", logger="newsbrief"):
-        n = trading.open_sleeve_a_live(
+        st = trading.open_sleeve_a_live(
             {"positions": []}, [{"topic": "x"}], "2026-07-21"
         )
-    assert n == 0
-    assert "entry_gate" in caplog.text  # the reason, tallied
+    assert st["opened"] == 0
+    # In-band price + a failing gate can only be the spread or an unreadable book —
+    # the tally must say WHICH, since one is by design and the other is a fault.
+    assert "spread_or_book" in caplog.text
     assert "0 opened" in caplog.text  # the summary line always runs
 
 
@@ -898,10 +909,10 @@ def test_open_sleeve_a_live_tallies_missing_event_id(monkeypatch, caplog):
         polygram_live, "open_live_position", lambda book, **k: pytest.fail("no open")
     )
     with caplog.at_level("INFO", logger="newsbrief"):
-        n = trading.open_sleeve_a_live(
+        st = trading.open_sleeve_a_live(
             {"positions": []}, [{"topic": "x"}], "2026-07-21"
         )
-    assert n == 0
+    assert st["opened"] == 0
     assert "no_event_id" in caplog.text
 
 
@@ -910,10 +921,10 @@ def test_open_sleeve_a_live_tallies_rejected_open(monkeypatch, caplog):
     _gated_sleeve_a(monkeypatch, entry_ok=True)
     monkeypatch.setattr(polygram_live, "open_live_position", lambda book, **k: None)
     with caplog.at_level("INFO", logger="newsbrief"):
-        n = trading.open_sleeve_a_live(
+        st = trading.open_sleeve_a_live(
             {"positions": []}, [{"topic": "x"}], "2026-07-21"
         )
-    assert n == 0
+    assert st["opened"] == 0
     assert "open_rejected" in caplog.text
 
 
@@ -1115,3 +1126,190 @@ def test_score_settled_theses(monkeypatch):
         by_id["L2"]["outcome_result"] == 0 and by_id["L2"]["brier"] is None
     )  # no p_hat
     assert by_id["L3"]["scored"] is False  # still open
+
+
+# ── Sleeve A status dict: the reason reaches Telegram, not just the log ────────
+# open_sleeve_a_live returns a status dict precisely because a count cannot tell
+# "nothing was in band" (by design) from "the orderbook read failed" (a fault).
+
+
+def test_sleeve_a_status_splits_band_from_spread(monkeypatch):
+    """In-band price + failing gate ⇒ spread/orderbook; out-of-band ⇒ the band."""
+    _gated_sleeve_a(monkeypatch, entry_ok=False)  # held NO side is priced 0.9
+    monkeypatch.setattr(common, "PG_A_BAND_LO", 0.75)
+    monkeypatch.setattr(common, "PG_A_BAND_HI", 0.92)
+    st = trading.open_sleeve_a_live({"positions": []}, [{"topic": "x"}], "2026-08-05")
+    assert st["skips"] == {"spread_or_book": 1}  # 0.9 IS in band → not the band's fault
+
+    monkeypatch.setattr(common, "PG_A_BAND_LO", 0.40)
+    monkeypatch.setattr(common, "PG_A_BAND_HI", 0.60)
+    st = trading.open_sleeve_a_live({"positions": []}, [{"topic": "x"}], "2026-08-05")
+    assert st["skips"] == {"out_of_band": 1}
+
+
+def test_sleeve_a_status_carries_blocked_detail_and_wallet(monkeypatch):
+    _gated_sleeve_a(monkeypatch, entry_ok=False)
+    monkeypatch.setattr(polygram_live, "wallet_balance", lambda: 12.4)
+    st = trading.open_sleeve_a_live({"positions": []}, [{"topic": "x"}], "2026-08-05")
+    assert st["state"] == "ran" and st["wallet"] == 12.4
+    assert st["candidates"] == 1 and st["matches"] == 1 and st["opened"] == 0
+    # The numbers, so "missed the band by a cent" is distinguishable from "miles off".
+    assert st["blocked"][0]["price"] == 0.9
+    assert st["blocked"][0]["why"] in ("out_of_band", "spread_or_book")
+
+
+def test_sleeve_a_status_blocked_list_is_capped(monkeypatch):
+    _gated_sleeve_a(monkeypatch, entry_ok=False)
+    many = [
+        {
+            "market_id": "m",
+            "side": "NO",
+            "play_type": "resolution",
+            "similarity": 0.8,
+            "target": None,
+        }
+    ] * 8
+    cands = [{"market_id": "m", "question": "q", "event_id": "evt"}]
+    st = trading.open_sleeve_a_live(
+        {"positions": []}, [{"topic": "x"}], "2026-08-05", (cands, many)
+    )
+    assert len(st["blocked"]) == trading._SLEEVE_A_BLOCKED_CAP  # message stays small
+    assert sum(st["skips"].values()) == 8  # but the tally still counts every one
+
+
+def test_sleeve_a_status_unreadable_wallet_is_none(monkeypatch):
+    _gated_sleeve_a(monkeypatch, entry_ok=False)
+    monkeypatch.setattr(polygram_live, "wallet_balance", lambda: None)
+    st = trading.open_sleeve_a_live({"positions": []}, [{"topic": "x"}], "2026-08-05")
+    # cap_ok reads an unreadable balance as unfunded and rejects every order, so this
+    # must survive into the status rather than being silently absent.
+    assert st["wallet"] is None
+
+
+def test_sleeve_a_wallet_read_failure_does_not_break_opens(monkeypatch):
+    """The wallet read is a diagnostic; it must never cost a trade."""
+    _gated_sleeve_a(monkeypatch, entry_ok=True)
+
+    def _boom():
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(polygram_live, "wallet_balance", _boom)
+    monkeypatch.setattr(
+        polygram_live,
+        "open_live_position",
+        lambda book, **k: {
+            "execution": "live",
+            "status": "open",
+            "cost_basis": k["amount"],
+            "instrument": k["market_id"],
+            "outcome": k["outcome"],
+        },
+    )
+    st = trading.open_sleeve_a_live({"positions": []}, [{"topic": "x"}], "2026-08-05")
+    assert st["opened"] == 1 and st["wallet"] is None
+
+
+def test_sleeve_a_status_reports_market_closed_apart_from_unreadable(monkeypatch):
+    """`closed` is ordinary; an unparseable market is a fault — don't lump them."""
+    _gated_sleeve_a(monkeypatch, entry_ok=True)
+    monkeypatch.setattr(trading, "_parse_pg_market", lambda m: None)
+    st = trading.open_sleeve_a_live({"positions": []}, [{"topic": "x"}], "2026-08-05")
+    assert st["skips"] == {"unreadable": 1}
+
+    monkeypatch.setattr(
+        trading,
+        "_parse_pg_market",
+        lambda m: {
+            "market_id": "m",
+            "prices": [0.1, 0.9],
+            "yes_price": 0.1,
+            "token_ids": ["a", "b"],
+            "closed": True,
+            "uma_status": "",
+            "end_date": "x",
+        },
+    )
+    st = trading.open_sleeve_a_live({"positions": []}, [{"topic": "x"}], "2026-08-05")
+    assert st["skips"] == {"market_closed": 1}
+
+
+def test_mode_paper_returns_summary_when_nothing_to_do(tmp_path, monkeypatch):
+    """The collect path needs a dict back even on a no-signal day."""
+    monkeypatch.setattr(trading, "SIGNALS_DIR", tmp_path)
+    assert trading.mode_paper() == {"opened": 0, "sleeve_a": None}
+
+
+# ── pgdiag: answers the four suspects without placing an order ────────────────
+
+
+def _pgdiag_env(monkeypatch, *, event_id="evt"):
+    import brief
+
+    monkeypatch.setattr(common, "PG_LIVE_ENABLED", True)
+    monkeypatch.setattr(common, "PG_A_ENABLED", True)
+    monkeypatch.setattr(trading, "POLYGRAM_EMAIL", "e@x.com")
+    monkeypatch.setattr(trading, "POLYGRAM_PASSWORD", "pw")
+    monkeypatch.setattr(trading, "polygram_login", lambda: "tok")
+    monkeypatch.setattr(polygram_live, "wallet_balance", lambda: 12.4)
+    market = {
+        "id": "2774056",
+        "question": "Will X happen?",
+        "outcomePrices": '["0.83", "0.17"]',
+        "clobTokenIds": '["tokA", "tokB"]',
+        "closed": False,
+        "volume24hr": 100,
+    }
+    event = {"markets": [market]}
+    if event_id is not None:
+        event["id"] = event_id
+    monkeypatch.setattr(trading, "polygram_search", lambda q: [event])
+    monkeypatch.setattr(trading, "polygram_market", lambda mid: market)
+    monkeypatch.setattr(trading, "_fetch_pg_half_spread", lambda t: 0.01)
+    sent = []
+    monkeypatch.setattr(brief, "telegram_send_long", lambda t: sent.append(t))
+    # Any write would be a bug: the whole point is that this probe is read-only.
+    monkeypatch.setattr(
+        polygram_live,
+        "place_market_order",
+        lambda *a, **k: pytest.fail("pgdiag must place no orders"),
+    )
+    monkeypatch.setattr(
+        brief, "save_book", lambda b: pytest.fail("pgdiag must not write the book")
+    )
+    return brief, sent
+
+
+def test_pgdiag_reports_a_healthy_seam(monkeypatch):
+    brief, sent = _pgdiag_env(monkeypatch)
+    brief.mode_pgdiag()
+    msg = sent[0]
+    assert "PG_LIVE_ENABLED=1" in msg and "PG_A_ENABLED=1" in msg
+    assert "wallet $12.40" in msg
+    assert "with a resolvable eventId=1" in msg
+    assert "half_spread=0.010" in msg
+    assert "in band" in msg  # 0.83 sits inside the default 0.75–0.92
+
+
+def test_pgdiag_names_a_missing_event_id(monkeypatch):
+    """The one field the live path needs and the paper path does not."""
+    brief, sent = _pgdiag_env(monkeypatch, event_id=None)
+    brief.mode_pgdiag()
+    assert "with a resolvable eventId=0" in sent[0]
+    assert "CANNOT open" in sent[0]
+
+
+def test_pgdiag_stops_early_without_credentials(monkeypatch):
+    brief, sent = _pgdiag_env(monkeypatch)
+    monkeypatch.setattr(trading, "POLYGRAM_EMAIL", None)
+    monkeypatch.setattr(
+        trading, "polygram_login", lambda: pytest.fail("no login without creds")
+    )
+    brief.mode_pgdiag()
+    assert "credentials MISSING" in sent[0]
+
+
+def test_pgdiag_flags_unreadable_wallet(monkeypatch):
+    brief, sent = _pgdiag_env(monkeypatch)
+    monkeypatch.setattr(polygram_live, "wallet_balance", lambda: None)
+    brief.mode_pgdiag()
+    assert "wallet UNREADABLE" in sent[0]

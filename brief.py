@@ -9,6 +9,10 @@ Modes:
   commands — long-running bot daemon: real-time Telegram commands + buttons (long polling)
   run      — submit + collect synchronously (for testing)
   paper    — open paper positions from today's signals (also run inside collect)
+  monitor  — hourly volume alerts + live-position exit sweep/reconcile
+  pgdiag   — READ-ONLY probe of the live PolyGram seam (flags, wallet, eventId,
+             orderbook); places no orders, run it on demand when the live sleeve
+             is silent
 
 The image entrypoint is `python brief.py`, so the MODE is the command argument. The
 committed docker-compose.yml defines one service per mode from a single shared anchor.
@@ -83,6 +87,8 @@ from validation import (
     record_gate_history,
     performance_prompt_block,
     daily_trade_message,
+    pred_name,
+    pred_title,
 )
 from enrichment import (
     annotate_signals,
@@ -1161,6 +1167,9 @@ def _sources_render(message_id: int | None = None) -> None:
 # current list as tappable buttons; the text form (e.g. `/close AAPL_US_EQ`) still
 # works. Buttons are keyed by _short_id over a stable field and re-resolved against
 # the live list on tap, so a list that shifted between render and tap stays correct.
+_BUTTON_NAME_CAP = 40  # button labels are one short line; message bodies fit more
+
+
 def _picker_send(text: str, rows: list, message_id: int | None) -> None:
     if message_id:
         telegram_edit_text(message_id, text, rows)
@@ -1225,7 +1234,18 @@ def _close_picker_render(message_id: int | None = None) -> None:
         if tkr in seen:
             continue  # one button per ticker; _close_ticker closes all its lots
         seen.add(tkr)
-        rows.append([{"text": f"❌ {tkr}", "callback_data": f"close:{_short_id(tkr)}"}])
+        # Label a prediction by its question — a bare market id on a button gives the
+        # operator nothing to choose between. callback_data still hashes the ticker, so
+        # the tap resolves exactly as before regardless of the label.
+        if p.get("asset_class") == "prediction":
+            label = pred_title(p, _BUTTON_NAME_CAP)
+            if p.get("execution") == "live":
+                label = f"💵 {label}"
+        else:
+            label = tkr
+        rows.append(
+            [{"text": f"❌ {label}", "callback_data": f"close:{_short_id(tkr)}"}]
+        )
     if not rows:
         _picker_empty("No open positions to close.", message_id)
         return
@@ -1620,17 +1640,27 @@ def _handle_telegram_update(update: dict, fb: dict) -> dict:
         else:
             by_class: dict[str, list[str]] = {}
             for p in opens:
-                mark = price_position(p)
-                if mark is None:
-                    line = (
-                        f"  – {html.escape(p.get('ticker', p['instrument']))}: mark —"
+                # Prediction rows carry the market id in `ticker` and the question in
+                # `topic`; show the question (escaped by pred_name) and flag the rows
+                # holding real money, with the id kept as the /close-able handle.
+                is_pred = p.get("asset_class") == "prediction"
+                if is_pred:
+                    label = pred_name(p) + (
+                        " 💵" if p.get("execution") == "live" else ""
                     )
                 else:
+                    label = html.escape(p.get("ticker") or p.get("instrument", ""))
+                mark = price_position(p)
+                if mark is None:
+                    line = f"  – {label}: mark —"
+                else:
                     ret = _signal_return(p["direction"], p["entry_price"], mark)
-                    line = (
-                        f"  – {html.escape(p.get('ticker', p['instrument']))}: "
-                        f"{100 * ret:+.1f}%"
+                    line = f"  – {label}: {100 * ret:+.1f}%"
+                if is_pred:
+                    handle = html.escape(
+                        str(p.get("ticker") or p.get("instrument", ""))
                     )
+                    line += f"\n    <code>{handle}</code>"
                 by_class.setdefault(p.get("asset_class", "equity"), []).append(line)
             lines = ["<b>📂 Open positions</b>"]
             for ac in ("equity", "crypto", "prediction"):
@@ -3042,9 +3072,9 @@ def mode_collect():
         # Trading stage runs AFTER clear_batch_state and is isolated: a matcher /
         # PolyGram / Claude failure must never re-collect and duplicate the brief.
         try:
-            mode_paper()
+            summary = mode_paper() or {}
             book = load_book()
-            msg = daily_trade_message(book, today)
+            msg = daily_trade_message(book, today, summary.get("sleeve_a"))
             if msg:
                 telegram_send_long(msg)
         except Exception as e:
@@ -3243,6 +3273,98 @@ def mode_commands():
         fb, offset = _drain_update_batch(updates, fb, offset)
 
 
+def mode_pgdiag():
+    """READ-ONLY probe of the live PolyGram seam. Places no orders, writes no book.
+
+    Exists because Sleeve A's eight gates are fail-closed and indistinguishable from
+    outside: "no live positions" is the same observable whether the flags are unset in
+    the container, the wallet is unreadable, the orderbook read fails, or no market was
+    in band. Waiting a day for the collect run's tally answers that too, but only after
+    a day; this answers it now, and safely, because every call below is a GET.
+
+    Checks, in the order the live path depends on them:
+      1. flags as the RUNNING PROCESS sees them (docker-compose passthrough is easy to
+         lose — a host export alone delivers nothing to the container)
+      2. credentials + login
+      3. wallet balance — cap_ok reads an unreadable balance as unfunded
+      4. /search shape: whether an eventId actually resolves. Sleeve A cannot place an
+         order without one, and the paper path never needs it, so a missing key here
+         yields exactly "paper fills daily, live never opens"
+      5. orderbook readability + half-spread vs the gate, on a real token
+    """
+    log.info("=== PGDIAG (read-only) ===")
+    out = [
+        "<b>🔎 PolyGram live diagnostic</b>",
+        f"PG_LIVE_ENABLED={int(bool(common.PG_LIVE_ENABLED))} "
+        f"PG_A_ENABLED={int(bool(common.PG_A_ENABLED))} "
+        f"PG_B_ENABLED={int(bool(common.PG_B_ENABLED))}",
+        f"stake=${common.PG_A_STAKE:g} band={common.PG_A_BAND_LO}–{common.PG_A_BAND_HI} "
+        f"spread_gate={common.PG_A_SPREAD_GATE} per_trade=${common.PG_LIVE_PER_TRADE_CAP:g}",
+    ]
+    if not (trading.POLYGRAM_EMAIL and trading.POLYGRAM_PASSWORD):
+        out.append("❌ credentials MISSING — nothing below can run")
+        telegram_send_long("\n".join(out))
+        return
+    token = trading.polygram_login()
+    out.append("✅ login ok" if token else "❌ login FAILED")
+    if not token:
+        telegram_send_long("\n".join(out))
+        return
+
+    bal = polygram_live.wallet_balance()
+    out.append(
+        f"✅ wallet ${bal:.2f}"
+        if bal is not None
+        else "❌ wallet UNREADABLE — cap_ok then rejects every order"
+    )
+
+    # Use a real, current search term so the shapes are the ones the matcher sees.
+    term = "trump"
+    events = trading.polygram_search(term) or []
+    if not isinstance(events, list) or not events:
+        out.append(
+            f"❌ /search '{term}' returned nothing usable: {type(events).__name__}"
+        )
+        telegram_send_long("\n".join(out))
+        return
+    ev = events[0]
+    ev_keys = sorted(ev.keys())[:12] if isinstance(ev, dict) else []
+    out.append(
+        f"✅ /search returned {len(events)} event(s); keys: {', '.join(ev_keys)}"
+    )
+    cands = trading._gather_pg_candidates([{"topic": term, "ticker": None}])
+    with_ev = [c for c in cands if c.get("event_id")]
+    out.append(
+        f"{'✅' if with_ev else '❌'} candidates={len(cands)}, "
+        f"with a resolvable eventId={len(with_ev)}"
+        + ("" if with_ev else " — Sleeve A CANNOT open without one")
+    )
+    if not cands:
+        telegram_send_long("\n".join(out))
+        return
+
+    # Orderbook + band, on the first candidate that exposes a token.
+    probed = 0
+    for c in cands[:3]:
+        m = trading.polygram_market(c["market_id"])
+        parsed = trading._parse_pg_market(m) if m is not None else None
+        if not parsed or not parsed["token_ids"]:
+            continue
+        probed += 1
+        price, token_id = parsed["prices"][0], parsed["token_ids"][0]
+        half = trading._fetch_pg_half_spread(token_id)
+        in_band = common.PG_A_BAND_LO <= price <= common.PG_A_BAND_HI
+        out.append(
+            f"  ◦ {html.escape(parsed['question'][:48])} yes={price:.2f} "
+            f"{'in' if in_band else 'out of'} band · half_spread="
+            + (f"{half:.3f}" if half is not None else "UNREADABLE ❌")
+        )
+    if not probed:
+        out.append("❌ no candidate exposed a token id — orderbook never readable")
+    out.append("(read-only: no orders placed, book untouched)")
+    telegram_send_long("\n".join(out))
+
+
 def mode_monitor():
     """Hourly cross-asset volume-anomaly alerts + live-position exit sweep/reconcile.
 
@@ -3290,6 +3412,7 @@ if __name__ == "__main__":
         "commands": mode_commands,
         "paper": mode_paper,
         "monitor": mode_monitor,
+        "pgdiag": mode_pgdiag,
     }
     fn = dispatch.get(mode)
     if fn:
@@ -3302,5 +3425,5 @@ if __name__ == "__main__":
             telegram_alert(f"{mode} crashed: {type(e).__name__}: {e}")
             sys.exit(1)
     else:
-        print("Usage: brief.py [submit|collect|weekly|paper|commands|monitor]")
+        print("Usage: brief.py [submit|collect|weekly|paper|commands|monitor|pgdiag]")
         sys.exit(1)

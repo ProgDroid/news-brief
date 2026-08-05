@@ -1628,41 +1628,75 @@ def score_settled_theses() -> int:
     return n
 
 
-def open_sleeve_a_live(book, signals, today, match_pass=None) -> int:
-    """Open real-money Sleeve-A favorite-fade positions. Creds+flag gated; returns count.
+_SLEEVE_A_BLOCKED_CAP = 3  # near-miss markets carried into the daily message
+
+
+def open_sleeve_a_live(book, signals, today, match_pass=None) -> dict:
+    """Open real-money Sleeve-A favorite-fade positions. Creds+flag gated.
 
     For each match in the shared pass: buy the held favorite side only when
     it is in-band and tight-spread (via _sleeve_a_entry_ok) and an eventId is known, sized
     at PG_A_STAKE, deduped against open live rows. All opens route through the fail-closed
     polygram_live.open_live_position (kill-switch + cap enforced there).
 
-    Every exit path logs why. The sleeve is fail-closed by design, so the common
-    outcome is zero opens; a silent zero would be unattributable across the eight
-    independent gates, so per-match skips are tallied by reason and summarised once.
+    Returns a STATUS DICT rather than a bare count. The sleeve is fail-closed by
+    design, so zero opens is its ordinary output, and a count cannot separate
+    "nothing was in band" (working as intended) from "the orderbook read failed"
+    (a fault) — the gates are only distinguishable at the moment they fire. The dict
+    is rendered into the daily Telegram message by validation.daily_trade_message so
+    the reason reaches the operator instead of only a container log.
+
+    Keys: state ("off" | "no_creds" | "no_candidates" | "ran"), live_enabled,
+    a_enabled, candidates, matches, opened, skips {reason: count}, wallet (the
+    balance the bot can actually READ — None means unreadable, itself the fault,
+    since cap_ok then rejects every order), blocked (near-miss markets with their
+    numbers, capped at _SLEEVE_A_BLOCKED_CAP).
 
     `match_pass` is the shared (candidates, matches) tuple from _pg_match_pass —
     the SAME set the paper path judged, so the two books stay comparable.
     """
     import polygram_live
 
+    status = {
+        "state": "off",
+        "live_enabled": bool(common.PG_LIVE_ENABLED),
+        "a_enabled": bool(common.PG_A_ENABLED),
+        "candidates": 0,
+        "matches": 0,
+        "opened": 0,
+        "skips": {},
+        "wallet": None,
+        "blocked": [],
+    }
     if not (common.PG_LIVE_ENABLED and common.PG_A_ENABLED):
         log.info(
             f"Sleeve A live: off (PG_LIVE_ENABLED={common.PG_LIVE_ENABLED}, "
             f"PG_A_ENABLED={common.PG_A_ENABLED})"
         )
-        return 0
+        return status
     if not (POLYGRAM_EMAIL and POLYGRAM_PASSWORD):
         log.warning(
             "Sleeve A live: enabled but PolyGram credentials are missing "
             "(POLYGRAM_EMAIL/POLYGRAM_PASSWORD)"
         )
-        return 0
+        status["state"] = "no_creds"
+        return status
     candidates, matches = (
         match_pass if match_pass is not None else _pg_match_pass(signals)
     )
+    status["candidates"], status["matches"] = len(candidates), len(matches)
     if not candidates:
+        status["state"] = "no_candidates"
         log.info("Sleeve A live: no open PolyGram candidates for today's signals")
-        return 0
+        return status
+    status["state"] = "ran"
+    # Report the balance the bot can READ, not the one on the site. cap_ok treats an
+    # unreadable wallet as "unfunded" and rejects silently, so a None here is the
+    # whole explanation for a day with no orders.
+    try:
+        status["wallet"] = polygram_live.wallet_balance()
+    except Exception as e:  # a diagnostic read must never break the open path
+        log.warning(f"Sleeve A live: wallet read failed: {e}")
     ev_by_mid = {c["market_id"]: c.get("event_id") for c in candidates}
     live_open = {
         (p.get("instrument"), p.get("outcome"))
@@ -1675,7 +1709,8 @@ def open_sleeve_a_live(book, signals, today, match_pass=None) -> int:
         if p.get("execution") == "live" and p.get("status") == "open"
     )
     opened = 0
-    skips: dict[str, int] = {}
+    skips: dict[str, int] = status["skips"]
+    blocked: list[dict] = status["blocked"]
 
     def skip(reason: str) -> None:
         skips[reason] = skips.get(reason, 0) + 1
@@ -1696,8 +1731,11 @@ def open_sleeve_a_live(book, signals, today, match_pass=None) -> int:
             continue
         m = polygram_market(mid)
         parsed = _parse_pg_market(m) if m is not None else None
-        if parsed is None or parsed["closed"]:
-            skip("unreadable_or_closed")
+        if parsed is None:
+            skip("unreadable")  # a fault: the market fetch or its shape failed
+            continue
+        if parsed["closed"]:
+            skip("market_closed")  # ordinary: the market settled since the search
             continue
         side_index = 0 if side == "YES" else 1
         if (
@@ -1708,8 +1746,24 @@ def open_sleeve_a_live(book, signals, today, match_pass=None) -> int:
             continue
         held_price = parsed["prices"][side_index]
         token_id = parsed["token_ids"][side_index]
-        if held_price is None or not _sleeve_a_entry_ok(held_price, token_id):
-            skip("entry_gate")
+        if held_price is None:
+            skip("no_price")
+            continue
+        if not _sleeve_a_entry_ok(held_price, token_id):
+            # Split the gate's verdict without a second orderbook fetch: the band is
+            # pure arithmetic, so in-band-but-rejected can only be the spread or an
+            # unreadable book. That distinction is design-working vs something broken.
+            in_band = common.PG_A_BAND_LO <= held_price <= common.PG_A_BAND_HI
+            why = "spread_or_book" if in_band else "out_of_band"
+            skip(why)
+            if len(blocked) < _SLEEVE_A_BLOCKED_CAP:
+                blocked.append(
+                    {
+                        "question": parsed.get("question") or mid,
+                        "price": held_price,
+                        "why": why,
+                    }
+                )
             continue
         row = polygram_live.open_live_position(
             book,
@@ -1733,11 +1787,12 @@ def open_sleeve_a_live(book, signals, today, match_pass=None) -> int:
         live_open.add((mid, outcome))
         exposure += common.PG_A_STAKE
         opened += 1
+    status["opened"] = opened
     log.info(
         f"Sleeve A live: {len(candidates)} candidate(s), {len(matches)} match(es), "
         f"{opened} opened" + (f"; skipped {skips}" if skips else "")
     )
-    return opened
+    return status
 
 
 def mode_paper():
@@ -1751,18 +1806,22 @@ def mode_paper():
 
     The whole load->open->save span runs under the book lock so a concurrent /close
     (commands mode) can't clobber this collect run's writes (see BOOK_LOCK_TIMEOUT).
+
+    Returns {"opened": int, "sleeve_a": status|None} — the caller renders the Sleeve-A
+    status into the daily Telegram message, since the live sleeve's reasons for not
+    trading are invisible in the book by construction.
     """
     log.info("=== PAPER ===")
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     snap_path = SIGNALS_DIR / f"signals-{today}.json"
     if not snap_path.exists():
         log.info("No signals snapshot for today — nothing to paper-trade")
-        return
+        return {"opened": 0, "sleeve_a": None}
 
     signals = json.loads(snap_path.read_text()).get("signals", [])
     if not signals:
         log.info("No signals today — nothing to paper-trade")
-        return
+        return {"opened": 0, "sleeve_a": None}
 
     leakage = {
         "traded": 0,
@@ -1888,14 +1947,17 @@ def mode_paper():
             book, signals, today, open_keys, match_pass
         )
 
+        sleeve_a = None
         try:
-            opened += open_sleeve_a_live(book, signals, today, match_pass)
+            sleeve_a = open_sleeve_a_live(book, signals, today, match_pass)
+            opened += sleeve_a["opened"]
         except Exception as e:  # live path is non-load-bearing for the paper run
             log.warning(f"Sleeve A live open failed: {e}")
 
         save_book(book)
         _record_leakage(today, leakage)
         log.info(f"Opened {opened} paper position(s)")
+        return {"opened": opened, "sleeve_a": sleeve_a}
 
 
 def _snap_close(closes: dict[str, float], target_date: str) -> float | None:
