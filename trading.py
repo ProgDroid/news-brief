@@ -96,6 +96,36 @@ PIN_INSTRUMENTS = {
     "china": [("Hang Seng", "index", "^HSI")],
 }
 
+# Signal tickers that name a commodity/macro instrument rather than a listed equity.
+#
+# The signal schema only offers the model "equity" or "crypto", so a commodity call
+# arrives tagged equity, and resolve_symbol then hunts it in the T212 EQUITY universe
+# and finds nothing — "Paper skip: no instrument for BRENT (equity)". The instrument
+# is not missing, it is in a different asset class: the pricing layer has routed
+# "index" to raw Yahoo symbols all along (fetch_price, _closes_for), and MARKET_SPINE
+# above already prices Brent as BZ=F. Only the OPENING path lacked the branch.
+#
+# Keys are matched case-insensitively against the signal ticker. Deliberately narrow:
+# an unlisted ticker still skips and logs, which is the right failure for a guess.
+INDEX_TICKER_SYMBOLS = {
+    "BRENT": "BZ=F",
+    "WTI": "CL=F",
+    "CRUDE": "CL=F",
+    "OIL": "BZ=F",
+    "NATGAS": "NG=F",
+    "GOLD": "GC=F",
+    "SILVER": "SI=F",
+    "COPPER": "HG=F",
+    "WHEAT": "ZW=F",
+    "DXY": "DX-Y.NYB",
+}
+
+
+def resolve_index_symbol(ticker: str) -> str | None:
+    """Yahoo symbol for a commodity/macro signal ticker, or None if it isn't one."""
+    return INDEX_TICKER_SYMBOLS.get(str(ticker or "").strip().upper())
+
+
 # ── PolyGram (prediction markets) ─────────────────────────────────────────────
 POLYGRAM_BASE = "https://polygram.ink/api"
 POLYGRAM_TOKEN_FILE = PAPER_DIR / "polygram_token.json"
@@ -527,7 +557,9 @@ def fetch_volume(asset_class: str, instrument: str) -> float | None:
         return fetch_kraken_volume(instrument)
     if asset_class == "prediction":
         return fetch_pg_volume(instrument)
-    q = fetch_quote(instrument)
+    # index instruments are raw Yahoo symbols ("BZ=F"), which fetch_quote's
+    # base.market parsing cannot read — go straight to Yahoo, as fetch_price does.
+    q = _yahoo_fetch(instrument) if asset_class == "index" else fetch_quote(instrument)
     return q.volume if q else None
 
 
@@ -1935,6 +1967,10 @@ def mode_paper():
                     continue  # dedup: a position for this call is already open
                 if ac == "crypto":
                     symbol = resolve_kraken_pair(ticker, crypto_overrides)
+                elif ac == "index":
+                    # Raw Yahoo symbol, the same form MARKET_SPINE uses; fetch_price
+                    # and _closes_for already route "index" straight to Yahoo.
+                    symbol = resolve_index_symbol(ticker)
                 else:
                     symbol = resolve_symbol(ticker, cache, overrides)
                 if not symbol:

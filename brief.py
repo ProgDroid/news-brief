@@ -286,9 +286,18 @@ RSS_FEEDS = [
         "perspective": "RUSSIAN",
     },
     {
-        "name": "Press TV",
-        # verified 107 entries 2026-06-26
-        "url": "https://www.presstv.ir/rss.xml",
+        "name": "IRNA",
+        # Replaced Press TV 2026-08-09: presstv.ir's TLS is broken in two independent
+        # ways — Windows' store reports the certificate REVOKED (CRYPT_E_REVOKED) and
+        # OpenSSL/certifi (what the container uses) fails it with "unable to get local
+        # issuer certificate". Neither is worked around by disabling verification, and
+        # a revoked cert is a reason to distrust the host, not a nuisance. Google News
+        # proxying was measured and rejected: site:presstv.ir yields 1 item even with
+        # no freshness filter, well under the 3-entry bar.
+        # IRNA is the official state news agency, so the STATE-FUNDED Iranian vantage
+        # this slot exists for is preserved (IranWire below is the independent one).
+        # verified 30 entries 2026-08-09
+        "url": "https://en.irna.ir/rss",
         "category": "mideast",
         "kind": "regional",
         "perspective": "IRANIAN",
@@ -1765,6 +1774,16 @@ def _source_header(
     return f"\n### {name} [{' · '.join(parts)}] ({category.upper()})"
 
 
+# One User-Agent for every outbound source fetch (RSS, web sources, the Mauldin
+# scrape). A browser string rather than a self-identifying bot string because
+# publishers increasingly refuse the latter outright: mining.com/feed returns 403
+# to "Mozilla/5.0 (compatible; newsbrief/1.0)" and 200 with 36 items to this,
+# measured 2026-08-09. Same URL, same second — the UA is the whole difference.
+SOURCE_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+)
+
 # Statuses worth a second attempt: the source is telling us "later", not "no".
 # 403/404 are policy/permanent — retrying them only lengthens the submit run.
 RSS_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
@@ -1805,7 +1824,7 @@ def fetch_rss(feed: dict, max_items: int = 5) -> str:
             resp = requests.get(
                 feed["url"],
                 timeout=20,
-                headers={"User-Agent": "Mozilla/5.0 (compatible; newsbrief/1.0)"},
+                headers={"User-Agent": SOURCE_USER_AGENT},
             )
             if resp.status_code not in RSS_RETRY_STATUSES:
                 break
@@ -1857,7 +1876,7 @@ def fetch_web_source(source: dict) -> str:
         resp = requests.get(
             source["url"],
             timeout=15,
-            headers={"User-Agent": "Mozilla/5.0 (compatible; newsbrief/1.0)"},
+            headers={"User-Agent": SOURCE_USER_AGENT},
         )
         resp.raise_for_status()
         meta = re.search(
@@ -1967,7 +1986,7 @@ def fetch_mauldin_twie(max_items: int = 5) -> str:
     schema, but any article page ships the actual records. Emits the same block
     shape as fetch_rss. Fail-safe: any error yields "" and never breaks submit."""
     try:
-        headers = {"User-Agent": "Mozilla/5.0 (compatible; newsbrief/1.0)"}
+        headers = {"User-Agent": SOURCE_USER_AGENT}
         section = requests.get(MAULDIN_TWIE_URL, timeout=20, headers=headers)
         section.raise_for_status()
         article_url = _first_twie_article_url(section.text)
@@ -2462,7 +2481,30 @@ _CONFIDENCE_MAP = {
     "hi": "high",
 }
 _NULLISH = {"", "null", "none", "n/a", "na"}
-_ASSET_CLASSES = {"equity", "crypto"}
+# "index" is not offered to the model (the extraction schema enum is equity/crypto)
+# — it is assigned here for commodity/macro tickers, which the model can only tag as
+# equity. Accepted as an input value too, so a re-normalized signal round-trips.
+_ASSET_CLASSES = {"equity", "crypto", "index"}
+
+
+def _classify_asset(ticker, declared) -> str:
+    """Asset class for a signal, correcting commodities the schema cannot express.
+
+    The model may only answer "equity" or "crypto", so a Brent or gold call arrives
+    as equity and dies in resolve_symbol against the T212 equity universe. Reclassify
+    by ticker BEFORE the signal is saved, so the dedup key, the opening path and the
+    pricer all agree — routing at open time instead would let the position's stored
+    class disagree with the key it was deduped under.
+
+    Crypto is never overridden: the model distinguishes it reliably and the crypto
+    path has its own Kraken resolver.
+    """
+    ac = str(declared or "").strip().lower()
+    if ac not in _ASSET_CLASSES:
+        ac = "equity"
+    if ac == "equity" and trading.resolve_index_symbol(ticker):
+        return "index"
+    return ac
 
 
 def _nullish(value) -> str | None:
@@ -2502,11 +2544,8 @@ def normalize_signals(raw_signals: list) -> tuple[list, int]:
                 "thesis_ref": _nullish(item.get("thesis_ref")),
                 "rationale": str(item.get("rationale", "")).strip(),
                 "provenance": str(item.get("provenance", "")).strip(),
-                "asset_class": (
-                    ac
-                    if (ac := str(item.get("asset_class", "")).strip().lower())
-                    in _ASSET_CLASSES
-                    else "equity"
+                "asset_class": _classify_asset(
+                    item.get("ticker"), item.get("asset_class")
                 ),
                 "source_id": _nullish(item.get("source_id")),
             }

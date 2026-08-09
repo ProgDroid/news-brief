@@ -225,6 +225,28 @@ def test_fetch_rss_does_not_retry_a_403(monkeypatch):
     assert len(calls) == 1
 
 
+def test_normalize_reclassifies_commodity_tickers_as_index():
+    # The extraction schema only offers equity/crypto, so a Brent call can ONLY
+    # arrive tagged equity — and then dies in the T212 equity universe with
+    # "Paper skip: no instrument for BRENT (equity)". The instrument isn't missing,
+    # the class is wrong.
+    raw = [dict(SIGNAL, ticker="BRENT", asset_class="equity")]
+    clean, _ = brief.normalize_signals(raw)
+    assert clean[0]["asset_class"] == "index"
+
+
+def test_normalize_leaves_real_equities_and_crypto_alone():
+    equity = [dict(SIGNAL, ticker="SHEL", asset_class="equity")]
+    crypto = [dict(SIGNAL, ticker="BTC", asset_class="crypto")]
+    assert brief.normalize_signals(equity)[0][0]["asset_class"] == "equity"
+    assert brief.normalize_signals(crypto)[0][0]["asset_class"] == "crypto"
+
+
+def test_normalize_reclassifies_case_insensitively():
+    raw = [dict(SIGNAL, ticker="gold", asset_class="equity")]
+    assert brief.normalize_signals(raw)[0][0]["asset_class"] == "index"
+
+
 def test_fetch_web_source_header_includes_kind(monkeypatch):
     html_page = (
         b"<html><head>"

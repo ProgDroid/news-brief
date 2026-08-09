@@ -1,5 +1,7 @@
 """trading.py: smoke + that the equity paper layer relocated intact."""
 
+import pytest
+
 import trading
 
 
@@ -311,6 +313,47 @@ def test_paper_position_carries_source_tags(monkeypatch, tmp_path):
     assert pos["source_kind"] == "regional"
     assert pos["source_perspective"] == "ARAB"
     assert pos["source_id"] == "Al Jazeera"
+
+
+def test_paper_opens_a_commodity_signal_as_index(monkeypatch, tmp_path):
+    """A BRENT call opens against the raw Yahoo symbol instead of being skipped.
+
+    Regression for "Paper skip: no instrument for BRENT (equity)" (2026-08-09): the
+    pricing layer had routed "index" to Yahoo all along and MARKET_SPINE already
+    priced Brent as BZ=F, but mode_paper had no branch, so every commodity signal
+    was dropped on the floor.
+    """
+    from datetime import datetime, timezone
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    signals_dir = tmp_path / "signals"
+    signals_dir.mkdir()
+    monkeypatch.setattr(trading, "SIGNALS_DIR", signals_dir)
+    monkeypatch.setattr(trading, "BOOK_FILE", tmp_path / "book.json")
+    monkeypatch.setattr(trading, "LEGACY_PAPER_BOOK_FILE", tmp_path / "paper-book.json")
+    monkeypatch.setattr(trading, "LEAKAGE_LOG_FILE", tmp_path / "leak.json")
+    monkeypatch.setattr(trading, "refresh_instruments_cache", lambda *a, **k: {})
+    # The equity resolver must never be consulted for a commodity — that lookup
+    # against the T212 equity universe is exactly what used to fail.
+    monkeypatch.setattr(
+        trading, "resolve_symbol", lambda *a, **k: pytest.fail("equity path used")
+    )
+    priced = []
+    monkeypatch.setattr(
+        trading, "fetch_price", lambda ac, sym: priced.append((ac, sym)) or 82.5
+    )
+    (signals_dir / f"signals-{today}.json").write_text(
+        '{"signals": [{"ticker": "BRENT", "asset_class": "index", '
+        '"direction": "bullish", "confidence": "high", "topic": "hormuz", '
+        '"thesis_ref": null, "rationale": "x", "provenance": "Reuters"}]}',
+        encoding="utf-8",
+    )
+    trading.mode_paper()
+    pos = trading.load_book()["positions"][-1]
+    assert pos["asset_class"] == "index"
+    assert pos["instrument"] == "BZ=F"  # raw Yahoo, as MARKET_SPINE uses
+    assert pos["entry_price"] == 82.5
+    assert ("index", "BZ=F") in priced  # routed to the Yahoo pricer, not fetch_quote
 
 
 def test_record_leakage_merges_by_date(monkeypatch, tmp_path):
