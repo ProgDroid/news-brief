@@ -576,9 +576,19 @@ def _fetch_pg_half_spread(token_id: str) -> float | None:
     return (ask - bid) / 2 / mid
 
 
-def _sleeve_a_entry_ok(held_price: float, token_id: str) -> bool:
-    """True iff the held-side price is in the favorite band AND the live half-spread
-    is readable and within the gate. Unreadable orderbook ⇒ False (fail-closed).
+def _sleeve_a_entry_reason(held_price: float, token_id: str) -> str | None:
+    """None iff the entry is allowed; otherwise the name of the gate that refused.
+
+    One of "out_of_band" (price outside the favorite band), "spread_too_wide" (the
+    book is readable and genuinely illiquid) or "book_unreadable" (the venue read
+    failed ⇒ fail-closed).
+
+    Returning the reason rather than a bool is deliberate. The caller renders these
+    to the operator, and two of the three mean the sleeve is WORKING while
+    "book_unreadable" means the venue seam is broken. When this returned a bare
+    bool the caller could only re-derive "spread or book" from the price, so an
+    illiquid market and a failing orderbook read were reported identically — and a
+    healthy 2026-08-09 run carried a ⚠️ it had not earned.
 
     Rejections log their inputs. This is the narrowest gate on the live path, and
     without the numbers "nothing traded today" is indistinguishable from "several
@@ -589,18 +599,18 @@ def _sleeve_a_entry_ok(held_price: float, token_id: str) -> bool:
             f"Sleeve A gate: price={held_price:.3f} outside "
             f"band={common.PG_A_BAND_LO}-{common.PG_A_BAND_HI}"
         )
-        return False
+        return "out_of_band"
     half = _fetch_pg_half_spread(token_id)
     if half is None:
         log.info(f"Sleeve A gate: orderbook unreadable for {token_id} (fail-closed)")
-        return False
+        return "book_unreadable"
     if half > common.PG_A_SPREAD_GATE:
         log.info(
             f"Sleeve A gate: half_spread={half:.3f} > gate={common.PG_A_SPREAD_GATE} "
             f"(price={held_price:.3f})"
         )
-        return False
-    return True
+        return "spread_too_wide"
+    return None
 
 
 def _stamp_open_benchmark(p: dict) -> None:
@@ -1661,7 +1671,7 @@ def open_sleeve_a_live(book, signals, today, match_pass=None) -> dict:
     """Open real-money Sleeve-A favorite-fade positions. Creds+flag gated.
 
     For each match in the shared pass: buy the held favorite side only when
-    it is in-band and tight-spread (via _sleeve_a_entry_ok) and an eventId is known, sized
+    it is in-band and tight-spread (via _sleeve_a_entry_reason) and an eventId is known, sized
     at PG_A_STAKE, deduped against open live rows. All opens route through the fail-closed
     polygram_live.open_live_position (kill-switch + cap enforced there).
 
@@ -1743,6 +1753,13 @@ def open_sleeve_a_live(book, signals, today, match_pass=None) -> dict:
 
     for mt in matches:
         if mt["similarity"] < PG_SIMILARITY_FLOOR:
+            # Log the number, like every gate below does. This is routinely the
+            # biggest bucket, and the counter alone cannot distinguish a near-miss
+            # worth re-tuning the floor for from a junk pairing the floor caught.
+            log.info(
+                f"Sleeve A skip: {mt['market_id']} similarity={mt['similarity']} "
+                f"< floor={PG_SIMILARITY_FLOOR}"
+            )
             skip("below_similarity")
             continue
         mid, side = mt["market_id"], mt["side"]
@@ -1778,12 +1795,11 @@ def open_sleeve_a_live(book, signals, today, match_pass=None) -> dict:
         if held_price is None:
             skip("no_price")
             continue
-        if not _sleeve_a_entry_ok(held_price, token_id):
-            # Split the gate's verdict without a second orderbook fetch: the band is
-            # pure arithmetic, so in-band-but-rejected can only be the spread or an
-            # unreadable book. That distinction is design-working vs something broken.
-            in_band = common.PG_A_BAND_LO <= held_price <= common.PG_A_BAND_HI
-            why = "spread_or_book" if in_band else "out_of_band"
+        why = _sleeve_a_entry_reason(held_price, token_id)
+        if why is not None:
+            # The gate names which of its three checks refused; only "book_unreadable"
+            # means something is broken. The caller must not re-derive this — doing so
+            # from the price alone collapsed "illiquid" into "venue read failed".
             skip(why)
             if len(blocked) < _SLEEVE_A_BLOCKED_CAP:
                 blocked.append(

@@ -333,11 +333,14 @@ _SKIP_LABELS = {
     "side_missing": "side data missing",
     "no_price": "no price",
     "out_of_band": "price outside band",
-    "spread_or_book": "spread too wide / orderbook unreadable",
+    "spread_too_wide": "spread too wide",
+    "book_unreadable": "orderbook unreadable",
     "open_rejected": "order rejected (cap, kill-switch or non-fill)",
 }
+# "spread_too_wide" is NOT here: an illiquid market is the gate doing its job, and
+# marking it alongside a failing venue read is what made a healthy run look broken.
 _SLEEVE_A_FAULTS = frozenset(
-    {"no_event_id", "unreadable", "spread_or_book", "open_rejected", "side_missing"}
+    {"no_event_id", "unreadable", "book_unreadable", "open_rejected", "side_missing"}
 )
 
 

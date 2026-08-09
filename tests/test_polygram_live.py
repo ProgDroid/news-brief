@@ -72,11 +72,15 @@ def test_place_market_order_normalizes_fill(monkeypatch):
     monkeypatch.setattr(polygram_live, "_pg_request", fake)
     fill = polygram_live.place_market_order("evt_a", "mkt_b", "0xabc", "Yes", 100)
     assert captured["path"] == "/trade/place"
+    # Exact-equality on purpose: the venue rejects the whole order when a required
+    # field is absent, and "marketId, outcome, side, and amount are required" is the
+    # only feedback it gives. A subset assertion would have let `side` go missing.
     assert captured["body"] == {
         "eventId": "evt_a",
         "marketId": "mkt_b",
         "tokenId": "0xabc",
         "outcome": "Yes",
+        "side": "buy",
         "amount": 100,
     }
     assert fill == {
@@ -277,6 +281,30 @@ def test_match_position_id():
     ]
     assert polygram_live._match_position_id(venue, "mkt_b", "No") == "pos_x"
     assert polygram_live._match_position_id(venue, "mkt_z", "No") is None
+
+
+def test_match_position_id_tolerates_venue_type_and_case_drift():
+    # We store market_id as the STRING the search returned ('2774057'); nothing has
+    # ever verified what type /trade/positions echoes back, because no live position
+    # has ever existed. An int here (or "NO" for "No") silently breaks the join.
+    venue = [{"id": "pos_x", "marketId": 2774057, "outcome": "NO"}]
+    assert polygram_live._match_position_id(venue, "2774057", "No") == "pos_x"
+
+
+def test_reconcile_keeps_a_position_the_venue_still_holds_under_type_drift(monkeypatch):
+    # The dangerous direction: a failed join makes reconcile read "not on venue" as
+    # SETTLED, closing the book row while the money is still at the venue.
+    monkeypatch.setattr(
+        polygram_live,
+        "list_positions",
+        lambda: [{"id": "pos_x", "marketId": 2774057, "outcome": "NO"}],
+    )
+    row = _live_row()
+    row["instrument"] = "2774057"
+    row["outcome"] = "No"
+    book = {"positions": [row]}
+    assert polygram_live.reconcile_live_book(book) == 0
+    assert row["status"] == "open"
 
 
 def test_close_live_position_sells_and_stamps(monkeypatch):

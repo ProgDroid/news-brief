@@ -419,7 +419,9 @@ def test_mode_paper_shares_one_matcher_pass(tmp_path, monkeypatch):
         trading, "polygram_market", lambda mid: _raw_market(yes="0.30", no="0.70")
     )
     # Sleeve A reaches its band gate and declines — no live order in a unit test.
-    monkeypatch.setattr(trading, "_sleeve_a_entry_ok", lambda price, tok: False)
+    monkeypatch.setattr(
+        trading, "_sleeve_a_entry_reason", lambda price, tok: "out_of_band"
+    )
     monkeypatch.setattr(
         polygram_live, "open_live_position", lambda book, **k: pytest.fail("no order")
     )
@@ -461,7 +463,9 @@ def test_sleeve_a_live_accepts_precomputed_match_pass(monkeypatch):
             "end_date": "x",
         },
     )
-    monkeypatch.setattr(trading, "_sleeve_a_entry_ok", lambda price, tok: False)
+    monkeypatch.setattr(
+        trading, "_sleeve_a_entry_reason", lambda price, tok: "out_of_band"
+    )
     monkeypatch.setattr(polygram_live, "wallet_balance", lambda: 25.0)
     candidates = [{"market_id": "m", "question": "q", "event_id": "evt"}]
     matches = [
@@ -630,20 +634,19 @@ def test_gather_candidates_captures_event_id(monkeypatch):
     assert cands[0]["event_id"] == "evt_hormuz"
 
 
-def test_sleeve_a_entry_ok_gates(monkeypatch):
+def test_sleeve_a_entry_reason_gates(monkeypatch):
     monkeypatch.setattr(common, "PG_A_BAND_LO", 0.75)
     monkeypatch.setattr(common, "PG_A_BAND_HI", 0.92)
     monkeypatch.setattr(common, "PG_A_SPREAD_GATE", 0.03)
     monkeypatch.setattr(trading, "_fetch_pg_half_spread", lambda t: 0.01)
-    assert trading._sleeve_a_entry_ok(0.85, "tok") is True  # in band, tight spread
-    assert trading._sleeve_a_entry_ok(0.60, "tok") is False  # below band (longshot)
-    assert trading._sleeve_a_entry_ok(0.99, "tok") is False  # above band (crumbs)
+    R = trading._sleeve_a_entry_reason
+    assert R(0.85, "tok") is None  # in band, tight spread → open
+    assert R(0.60, "tok") == "out_of_band"  # below band (longshot)
+    assert R(0.99, "tok") == "out_of_band"  # above band (crumbs)
     monkeypatch.setattr(trading, "_fetch_pg_half_spread", lambda t: 0.10)
-    assert trading._sleeve_a_entry_ok(0.85, "tok") is False  # spread too wide
+    assert R(0.85, "tok") == "spread_too_wide"
     monkeypatch.setattr(trading, "_fetch_pg_half_spread", lambda t: None)
-    assert (
-        trading._sleeve_a_entry_ok(0.85, "tok") is False
-    )  # unreadable book → fail-closed
+    assert R(0.85, "tok") == "book_unreadable"  # fail-closed
 
 
 def test_open_sleeve_a_live_opens_gated_favorite(monkeypatch):
@@ -692,7 +695,7 @@ def test_open_sleeve_a_live_opens_gated_favorite(monkeypatch):
             "end_date": "x",
         },
     )
-    monkeypatch.setattr(trading, "_sleeve_a_entry_ok", lambda price, tok: True)
+    monkeypatch.setattr(trading, "_sleeve_a_entry_reason", lambda price, tok: None)
     monkeypatch.setattr(polygram_live, "wallet_balance", lambda: 25.0)
     opened_calls = []
 
@@ -776,7 +779,7 @@ def test_open_sleeve_a_live_skips_when_gate_fails(monkeypatch):
         },
     )
     monkeypatch.setattr(
-        trading, "_sleeve_a_entry_ok", lambda price, tok: False
+        trading, "_sleeve_a_entry_reason", lambda price, tok: "out_of_band"
     )  # gate fails
     monkeypatch.setattr(polygram_live, "wallet_balance", lambda: 25.0)
     calls = []
@@ -795,7 +798,7 @@ def test_open_sleeve_a_live_skips_when_gate_fails(monkeypatch):
 # indistinguishable from "flags off", "creds missing" and "nothing in band".
 
 
-def _gated_sleeve_a(monkeypatch, *, event_id="evt", entry_ok=False):
+def _gated_sleeve_a(monkeypatch, *, event_id="evt", entry_ok=False, patch_gate=True):
     """Arrange a flag-on, creds-on Sleeve A run with exactly one match."""
     monkeypatch.setattr(common, "PG_LIVE_ENABLED", True)
     monkeypatch.setattr(common, "PG_A_ENABLED", True)
@@ -841,7 +844,15 @@ def _gated_sleeve_a(monkeypatch, *, event_id="evt", entry_ok=False):
             "end_date": "x",
         },
     )
-    monkeypatch.setattr(trading, "_sleeve_a_entry_ok", lambda price, tok: entry_ok)
+    # The stub's held price (0.9) is inside the default band, so a refusal here is
+    # the spread gate — the same reason the real path would report. patch_gate=False
+    # leaves the REAL gate in place for tests that assert on which gate fired.
+    if patch_gate:
+        monkeypatch.setattr(
+            trading,
+            "_sleeve_a_entry_reason",
+            lambda price, tok: None if entry_ok else "spread_too_wide",
+        )
     # The status dict reports the balance the bot can read; stub it so no test hits
     # the network (an armed sleeve reads the wallet once per run).
     monkeypatch.setattr(polygram_live, "wallet_balance", lambda: 25.0)
@@ -899,8 +910,40 @@ def test_open_sleeve_a_live_logs_skip_tally(monkeypatch, caplog):
     assert st["opened"] == 0
     # In-band price + a failing gate can only be the spread or an unreadable book —
     # the tally must say WHICH, since one is by design and the other is a fault.
-    assert "spread_or_book" in caplog.text
+    assert "spread_too_wide" in caplog.text
     assert "0 opened" in caplog.text  # the summary line always runs
+
+
+def test_open_sleeve_a_live_logs_the_similarity_it_rejected(monkeypatch, caplog):
+    # Weak match is routinely the LARGEST skip bucket, and it used to log nothing at
+    # all — leaving no way to tell a 0.59 near-miss (tune the floor) from a 0.2 junk
+    # pairing (floor is right). Every other gate logs its inputs; this one must too.
+    _gated_sleeve_a(monkeypatch, entry_ok=True)
+    monkeypatch.setattr(trading, "PG_SIMILARITY_FLOOR", 0.60)
+    monkeypatch.setattr(
+        trading,
+        "run_prediction_matcher",
+        lambda s, c: [
+            {
+                "market_id": "m",
+                "side": "NO",
+                "play_type": "resolution",
+                "similarity": 0.59,
+                "target": None,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        polygram_live, "open_live_position", lambda book, **k: pytest.fail("no open")
+    )
+    with caplog.at_level("INFO", logger="newsbrief"):
+        st = trading.open_sleeve_a_live(
+            {"positions": []}, [{"topic": "x"}], "2026-07-21"
+        )
+    assert st["skips"] == {"below_similarity": 1}
+    assert "similarity=0.59" in caplog.text  # how far off it was
+    assert "floor=0.6" in caplog.text  # ...and what it needed to clear
+    assert "m" in caplog.text  # which market, so it can be looked up
 
 
 def test_open_sleeve_a_live_tallies_missing_event_id(monkeypatch, caplog):
@@ -928,25 +971,33 @@ def test_open_sleeve_a_live_tallies_rejected_open(monkeypatch, caplog):
     assert "open_rejected" in caplog.text
 
 
-def test_sleeve_a_entry_ok_logs_rejection_inputs(monkeypatch, caplog):
+def test_sleeve_a_entry_reason_names_the_failing_gate(monkeypatch, caplog):
+    # The gate returns WHICH gate refused, not a bare bool. The caller used to
+    # re-derive this from the price alone and could only say "spread or book" —
+    # which conflated an illiquid market (by design) with a failing venue read
+    # (a fault) and flagged both as ⚠️.
     monkeypatch.setattr(common, "PG_A_BAND_LO", 0.75)
     monkeypatch.setattr(common, "PG_A_BAND_HI", 0.92)
     monkeypatch.setattr(common, "PG_A_SPREAD_GATE", 0.03)
     monkeypatch.setattr(trading, "_fetch_pg_half_spread", lambda t: 0.10)
     with caplog.at_level("INFO", logger="newsbrief"):
-        assert trading._sleeve_a_entry_ok(0.85, "tok") is False
+        assert trading._sleeve_a_entry_reason(0.85, "tok") == "spread_too_wide"
     assert "half_spread=0.100" in caplog.text  # how far off the gate was
 
     caplog.clear()
     with caplog.at_level("INFO", logger="newsbrief"):
-        assert trading._sleeve_a_entry_ok(0.60, "tok") is False
+        assert trading._sleeve_a_entry_reason(0.60, "tok") == "out_of_band"
     assert "price=0.600" in caplog.text and "band=0.75-0.92" in caplog.text
 
     caplog.clear()
     monkeypatch.setattr(trading, "_fetch_pg_half_spread", lambda t: None)
     with caplog.at_level("INFO", logger="newsbrief"):
-        assert trading._sleeve_a_entry_ok(0.85, "tok") is False
+        assert trading._sleeve_a_entry_reason(0.85, "tok") == "book_unreadable"
     assert "orderbook unreadable" in caplog.text
+
+    # None — and only None — means "open it".
+    monkeypatch.setattr(trading, "_fetch_pg_half_spread", lambda t: 0.01)
+    assert trading._sleeve_a_entry_reason(0.85, "tok") is None
 
 
 def test_sleeve_a_exit_reason(monkeypatch):
@@ -1133,18 +1184,31 @@ def test_score_settled_theses(monkeypatch):
 # "nothing was in band" (by design) from "the orderbook read failed" (a fault).
 
 
-def test_sleeve_a_status_splits_band_from_spread(monkeypatch):
-    """In-band price + failing gate ⇒ spread/orderbook; out-of-band ⇒ the band."""
-    _gated_sleeve_a(monkeypatch, entry_ok=False)  # held NO side is priced 0.9
+def test_sleeve_a_status_splits_band_from_spread_and_book(monkeypatch):
+    """Each of the three entry gates reaches the status dict under its own name.
+
+    Runs the REAL gate (patch_gate=False) rather than a stub: the whole point of the
+    split is that the gate itself reports which check refused, so stubbing it would
+    test nothing. An illiquid book and an unreadable one must not collapse together —
+    only the second is a fault.
+    """
+    _gated_sleeve_a(monkeypatch, patch_gate=False)  # held NO side is priced 0.9
     monkeypatch.setattr(common, "PG_A_BAND_LO", 0.75)
     monkeypatch.setattr(common, "PG_A_BAND_HI", 0.92)
+    monkeypatch.setattr(common, "PG_A_SPREAD_GATE", 0.03)
+
+    monkeypatch.setattr(trading, "_fetch_pg_half_spread", lambda t: 0.10)
     st = trading.open_sleeve_a_live({"positions": []}, [{"topic": "x"}], "2026-08-05")
-    assert st["skips"] == {"spread_or_book": 1}  # 0.9 IS in band → not the band's fault
+    assert st["skips"] == {"spread_too_wide": 1}  # 0.9 IS in band → not the band
+
+    monkeypatch.setattr(trading, "_fetch_pg_half_spread", lambda t: None)
+    st = trading.open_sleeve_a_live({"positions": []}, [{"topic": "x"}], "2026-08-05")
+    assert st["skips"] == {"book_unreadable": 1}  # the fault case, kept distinct
 
     monkeypatch.setattr(common, "PG_A_BAND_LO", 0.40)
     monkeypatch.setattr(common, "PG_A_BAND_HI", 0.60)
     st = trading.open_sleeve_a_live({"positions": []}, [{"topic": "x"}], "2026-08-05")
-    assert st["skips"] == {"out_of_band": 1}
+    assert st["skips"] == {"out_of_band": 1}  # band checked before the book is read
 
 
 def test_sleeve_a_status_carries_blocked_detail_and_wallet(monkeypatch):
@@ -1155,7 +1219,7 @@ def test_sleeve_a_status_carries_blocked_detail_and_wallet(monkeypatch):
     assert st["candidates"] == 1 and st["matches"] == 1 and st["opened"] == 0
     # The numbers, so "missed the band by a cent" is distinguishable from "miles off".
     assert st["blocked"][0]["price"] == 0.9
-    assert st["blocked"][0]["why"] in ("out_of_band", "spread_or_book")
+    assert st["blocked"][0]["why"] in ("out_of_band", "spread_too_wide")
 
 
 def test_sleeve_a_status_blocked_list_is_capped(monkeypatch):

@@ -6,6 +6,8 @@ prose brackets, synonym enums), so each historical failure mode gets a case.
 
 import logging
 
+import pytest
+
 import brief
 
 
@@ -126,18 +128,101 @@ def test_fetch_rss_header_includes_kind(monkeypatch):
         b"<pubDate>Mon, 01 Jan 2026</pubDate></item></channel></rss>"
     )
 
-    class _Resp:
-        content = sample
-        ok = True
-
-        def raise_for_status(self):
-            pass
-
-    monkeypatch.setattr(brief.requests, "get", lambda *a, **k: _Resp())
+    # _FakeResp, not a bespoke stub: fetch_rss now inspects status_code to decide
+    # whether a failure is retryable, so a stub without one no longer stands in
+    # for a Response.
+    monkeypatch.setattr(brief.requests, "get", lambda *a, **k: _FakeResp(200, sample))
     feed = {"name": "Test Wire", "url": "http://x", "category": "geo", "kind": "wire"}
     out = brief.fetch_rss(feed)
     assert "WIRE" in out
     assert "Test Wire" in out
+
+
+_RSS_SAMPLE = (
+    b'<?xml version="1.0"?><rss><channel>'
+    b"<item><title>Hello</title><description>Body</description>"
+    b"<pubDate>Mon, 01 Jan 2026</pubDate></item></channel></rss>"
+)
+
+
+class _FakeResp:
+    """Minimal requests.Response stand-in; raise_for_status mirrors requests'."""
+
+    def __init__(self, status, content=b"", headers=None):
+        self.status_code = status
+        self.content = content
+        self.headers = headers or {}
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise brief.requests.HTTPError(f"{self.status_code} Client Error")
+
+
+def test_fetch_rss_retries_a_429_and_succeeds(monkeypatch):
+    # Nitter rate-limits back-to-back requests, so one of the two X feeds was
+    # dropped from the brief most days. A 429 is "come back later", not "gone".
+    calls, slept = [], []
+    responses = [
+        _FakeResp(429, headers={"Retry-After": "2"}),
+        _FakeResp(200, _RSS_SAMPLE),
+    ]
+
+    def fake_get(*a, **k):
+        calls.append(a)
+        return responses[len(calls) - 1]
+
+    monkeypatch.setattr(brief.requests, "get", fake_get)
+    monkeypatch.setattr(brief.time, "sleep", lambda s: slept.append(s))
+    feed = {
+        "name": "Papic",
+        "url": "http://nitter:8080/x/rss",
+        "category": "geo",
+        "kind": "analyst",
+    }
+    out = brief.fetch_rss(feed)
+    assert "Hello" in out  # the feed made it into the brief after all
+    assert len(calls) == 2
+    assert slept == [2.0]  # honoured Retry-After rather than guessing
+
+
+def test_fetch_rss_gives_up_after_the_retry_budget(monkeypatch):
+    calls, slept = [], []
+
+    def fake_get(*a, **k):
+        calls.append(a)
+        return _FakeResp(429)
+
+    monkeypatch.setattr(brief.requests, "get", fake_get)
+    monkeypatch.setattr(brief.time, "sleep", lambda s: slept.append(s))
+    feed = {
+        "name": "Papic",
+        "url": "http://n/x/rss",
+        "category": "geo",
+        "kind": "analyst",
+    }
+    assert brief.fetch_rss(feed) == ""  # fail-safe: never blocks the brief
+    assert len(calls) == brief.RSS_MAX_ATTEMPTS
+    assert slept  # backed off between attempts even with no Retry-After
+
+
+def test_fetch_rss_does_not_retry_a_403(monkeypatch):
+    # A 403 (Mining.com) is a policy refusal — retrying just burns the submit run.
+    calls = []
+
+    def fake_get(*a, **k):
+        calls.append(a)
+        return _FakeResp(403)
+
+    monkeypatch.setattr(brief.requests, "get", fake_get)
+    monkeypatch.setattr(brief.time, "sleep", lambda s: pytest.fail("no backoff"))
+    feed = {
+        "name": "Mining",
+        "url": "http://m/feed",
+        "category": "macro",
+        "kind": "wire",
+    }
+    assert brief.fetch_rss(feed) == ""
+    assert len(calls) == 1
 
 
 def test_fetch_web_source_header_includes_kind(monkeypatch):

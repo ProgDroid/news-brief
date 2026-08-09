@@ -1765,17 +1765,63 @@ def _source_header(
     return f"\n### {name} [{' · '.join(parts)}] ({category.upper()})"
 
 
+# Statuses worth a second attempt: the source is telling us "later", not "no".
+# 403/404 are policy/permanent — retrying them only lengthens the submit run.
+RSS_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+RSS_MAX_ATTEMPTS = 3
+RSS_BACKOFF_SECONDS = (3.0, 9.0)  # used when the server sends no Retry-After
+RSS_MAX_BACKOFF = 20.0  # a feed must never hold the whole submit run hostage
+
+
+def _rss_retry_wait(resp, attempt: int) -> float:
+    """Seconds to wait before retrying, preferring the server's own Retry-After.
+
+    Returned rather than slept here so the caller logs it: Nitter's real
+    rate-limit window is unknown, and the header is the only place it's stated.
+    Falls back to a fixed backoff when the header is absent or non-numeric
+    (Retry-After may also be an HTTP-date, which we don't parse — the fallback
+    covers it).
+    """
+    raw = (resp.headers or {}).get("Retry-After")
+    try:
+        wait = float(raw)
+    except (TypeError, ValueError):
+        wait = RSS_BACKOFF_SECONDS[min(attempt - 1, len(RSS_BACKOFF_SECONDS) - 1)]
+    return max(0.0, min(wait, RSS_MAX_BACKOFF))
+
+
 def fetch_rss(feed: dict, max_items: int = 5) -> str:
     try:
         # Fetch with requests rather than letting feedparser fetch: feedparser
         # uses no socket timeout, so one hung feed (a wedged Nitter, not a dead
         # one) would block the whole submit run indefinitely. This also gives
         # real HTTP status handling instead of spelunking bozo_exception.
-        resp = requests.get(
-            feed["url"],
-            timeout=20,
-            headers={"User-Agent": "Mozilla/5.0 (compatible; newsbrief/1.0)"},
-        )
+        #
+        # Retried on 429/5xx because the self-hosted Nitter rate-limits requests
+        # that arrive close together: the two X feeds sit next to each other in
+        # RSS_FEEDS, so one of them 429'd on most runs and silently never reached
+        # the brief. A dropped feed looks identical to a quiet one downstream.
+        for attempt in range(1, RSS_MAX_ATTEMPTS + 1):
+            resp = requests.get(
+                feed["url"],
+                timeout=20,
+                headers={"User-Agent": "Mozilla/5.0 (compatible; newsbrief/1.0)"},
+            )
+            if resp.status_code not in RSS_RETRY_STATUSES:
+                break
+            if attempt == RSS_MAX_ATTEMPTS:
+                log.warning(
+                    f"RSS gave up on {feed['name']}: {resp.status_code} after "
+                    f"{attempt} attempts"
+                )
+                return ""
+            wait = _rss_retry_wait(resp, attempt)
+            log.info(
+                f"RSS retry {attempt}/{RSS_MAX_ATTEMPTS - 1} for {feed['name']}: "
+                f"{resp.status_code}, waiting {wait}s "
+                f"(Retry-After={(resp.headers or {}).get('Retry-After')})"
+            )
+            time.sleep(wait)
         resp.raise_for_status()
         parsed = feedparser.parse(resp.content)
         if not parsed.entries:
@@ -3388,12 +3434,33 @@ def mode_pgdiag():
     if venue is None:
         out.append("❌ /trade/positions UNREADABLE — reconcile and close both no-op")
     else:
+        # The raw shape, because this endpoint's field TYPES have never been seen:
+        # no live position has ever existed, so the book↔venue join below (and the
+        # one close_live_position/reconcile_live_book depend on) is unverified
+        # against real data. An int marketId where we store a str would make every
+        # row look like an orphan here and, worse, look SETTLED to reconcile.
+        if venue and isinstance(venue[0], dict):
+            v0 = venue[0]
+            shown = {
+                k: v
+                for k, v in v0.items()
+                if "id" in k.lower() or k.lower() in {"outcome", "shares", "status"}
+            }
+            out.append(
+                "venue position fields: "
+                + ", ".join(
+                    f"{k}={str(v)[:24]}({type(v).__name__})"
+                    for k, v in sorted(shown.items())
+                )
+            )
         book_keys = {
-            (p.get("instrument"), p.get("outcome"))
+            polygram_live.venue_key(p.get("instrument"), p.get("outcome"))
             for p in load_book().get("positions", [])
             if p.get("execution") == "live" and p.get("status") == "open"
         }
-        venue_keys = {(p.get("marketId"), p.get("outcome")) for p in venue}
+        venue_keys = {
+            polygram_live.venue_key(p.get("marketId"), p.get("outcome")) for p in venue
+        }
         orphans = venue_keys - book_keys
         ghosts = book_keys - venue_keys
         out.append(

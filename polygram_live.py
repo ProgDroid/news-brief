@@ -98,6 +98,11 @@ def place_market_order(event_id, market_id, token_id, outcome, amount):
             "marketId": market_id,
             "tokenId": token_id,
             "outcome": outcome,
+            # DIRECTION of the trade, not which outcome — `outcome` already names
+            # that ("Yes"/"No"). Sleeve A is always a buy; it never shorts, it exits
+            # via /trade/sell. Required by the venue and returned by no read path, so
+            # its absence was invisible until a live order 400'd (2026-08-09).
+            "side": "buy",
             "amount": amount,
         },
     )
@@ -135,7 +140,14 @@ def place_market_order(event_id, market_id, token_id, outcome, amount):
 
 
 def sell_position(position_id, shares=None):
-    """Sell a live position via POST /trade/sell. Returns normalized sale or None."""
+    """Sell a live position via POST /trade/sell. Returns normalized sale or None.
+
+    `positionId` is the ONLY required field (venue docs, confirmed 2026-08-09);
+    omitting `shares` sells the whole position. Deliberately no `side` here — that
+    is a /trade/place requirement, and this endpoint identifies the position by its
+    venue id instead. Recorded because the two write endpoints take different
+    payloads and the symmetry is tempting to assume.
+    """
     body = {"positionId": position_id}
     if shares is not None:
         body["shares"] = shares
@@ -263,10 +275,25 @@ def open_live_position(
     return row
 
 
+def venue_key(market_id, outcome):
+    """Normalized (marketId, outcome) join key for book-row ↔ venue-position matching.
+
+    Normalized because the two sides come from different places and have never been
+    compared against real data: the book stores whatever `/search` returned (a str),
+    while `/trade/positions` is unverified — no live position has ever existed. A
+    plain `==` join fails silently on an int-vs-str id or a "NO"/"No" case
+    difference, and the failure is not symmetric: close_live_position merely refuses
+    to sell, but reconcile_live_book reads an unmatched row as SETTLED and closes it
+    in the book while the capital is still at the venue.
+    """
+    return (str(market_id), str(outcome).casefold())
+
+
 def _match_position_id(venue_positions, market_id, outcome):
     """Find the venue positionId for a book row by (marketId, outcome)."""
+    want = venue_key(market_id, outcome)
     for p in venue_positions or []:
-        if p.get("marketId") == market_id and p.get("outcome") == outcome:
+        if venue_key(p.get("marketId"), p.get("outcome")) == want:
             return p.get("id")
     return None
 
@@ -311,12 +338,12 @@ def reconcile_live_book(book):
     venue = list_positions()
     if venue is None:
         return 0
-    live_keys = {(p.get("marketId"), p.get("outcome")) for p in venue}
+    live_keys = {venue_key(p.get("marketId"), p.get("outcome")) for p in venue}
     n = 0
     for row in book.get("positions", []):
         if row.get("execution") != "live" or row.get("status") != "open":
             continue
-        if (row["instrument"], row["outcome"]) not in live_keys:
+        if venue_key(row["instrument"], row["outcome"]) not in live_keys:
             row["status"] = "closed"
             row["close_reason"] = "settled"
             row["closed_date"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")

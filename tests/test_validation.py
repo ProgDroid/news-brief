@@ -441,13 +441,17 @@ def test_sleeve_a_block_flags_faults_but_not_design_declines():
         "matches": 4,
         "opened": 0,
         "wallet": 12.4,
-        "skips": {"out_of_band": 3, "spread_or_book": 1},
+        "skips": {"out_of_band": 3, "spread_too_wide": 1, "book_unreadable": 2},
         "blocked": [{"question": "Fed cuts?", "price": 0.97, "why": "out_of_band"}],
     }
     out = validation.daily_trade_message({"positions": []}, "2026-08-05", status)
     assert "4 match(es) → 0 opened" in out and "wallet $12.40" in out
     assert "price outside band ×3" in out
-    assert "spread too wide / orderbook unreadable ×1 ⚠️" in out  # a fault, marked
+    assert "orderbook unreadable ×2 ⚠️" in out  # a fault, marked
+    # An illiquid book is the gate WORKING. Marking it ⚠️ alongside a failing venue
+    # read is what made a healthy 2026-08-09 run look broken.
+    assert "spread too wide ×1" in out
+    assert "spread too wide ×1 ⚠️" not in out
     assert "price outside band ×3 ⚠️" not in out  # design working, not marked
     assert "Fed cuts? @ 0.97" in out  # the number, so "missed by a cent" is visible
 
