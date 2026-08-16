@@ -143,7 +143,13 @@ _VERIFY_TOOL = {
                         },
                         "reason": {"type": "string", "description": "one terse clause"},
                     },
-                    "required": ["claim", "verdict"],
+                    # `reason` is REQUIRED: an unreasoned flag cannot be adjudicated,
+                    # and Gate 0 of the pilot is precisely "is the judge right?". With
+                    # it optional, 41% of the first 45 briefs' flags arrived bare —
+                    # worst on `overstated` (63%) and `contradicted` (50%), the two
+                    # verdicts the gate leads on. The model was compliant; the schema
+                    # was wrong. See docs/2026-08-16-claim-verification-pilot-verdict.md.
+                    "required": ["claim", "verdict", "reason"],
                 },
             }
         },
@@ -356,12 +362,18 @@ def summarize_verifications(data_dir: Path = DATA_DIR) -> dict:
                     }
                 )
     flagged_total = sum(totals[v] for v in _FLAG_VERDICTS)
+    # Instrument health, surfaced rather than left to be rediscovered: a flag with no
+    # reason cannot be hand-adjudicated, so a high rate here invalidates the gate
+    # before any verdict count is worth reading.
+    unreasoned = sum(1 for f in flagged if not str(f.get("reason") or "").strip())
     return {
         "days": days,
         "n_claims": n_claims,
         "totals_by_verdict": totals,
         "flagged_total": flagged_total,
         "flag_rate": (flagged_total / n_claims) if n_claims else 0.0,
+        "unreasoned_flags": unreasoned,
+        "unreasoned_rate": (unreasoned / len(flagged)) if flagged else 0.0,
         "flagged": flagged,
         "per_day": per_day,
     }

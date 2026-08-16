@@ -311,3 +311,59 @@ def test_summarize_verifications_empty_dir(tmp_path):
     assert rep["days"] == 0
     assert rep["n_claims"] == 0
     assert rep["flag_rate"] == 0.0
+
+
+# --- instrument health (2026-08-16 pilot read) --------------------------------
+
+
+def test_verify_tool_requires_a_reason_on_every_claim():
+    """An unreasoned flag cannot be adjudicated, which defeats the pilot's Gate 0.
+
+    Over the 45-brief pilot 41% of flags carried no reason at all — 63% of
+    `overstated` and 50% of `contradicted`, the two verdicts the gate leads on —
+    because `reason` was absent from the schema's required list, so omitting it was
+    compliant. See docs/2026-08-16-claim-verification-pilot-verdict.md.
+    """
+    req = cv.build_verify_request("<b>🌍 TOP STORIES</b>\n- x", "SOURCE: R\n- x")
+    item_schema = req["tools"][0]["input_schema"]["properties"]["claims"]["items"]
+    assert "reason" in item_schema["required"]
+    assert "claim" in item_schema["required"]
+    assert "verdict" in item_schema["required"]
+
+
+def test_summarize_reports_how_many_flags_are_unadjudicable(tmp_path, monkeypatch):
+    """Instrument health must be visible in the report, not rediscovered by hand.
+
+    The 41% unreasoned rate took a manual pass over 382 flags to find. A reader of
+    the next pilot summary should see it immediately.
+    """
+    monkeypatch.setattr(cv, "DATA_DIR", tmp_path)
+    cv.save_verification(
+        cv._verification_record(
+            "2026-06-25",
+            True,
+            [
+                {
+                    "claim": "a",
+                    "verdict": "contradicted",
+                    "reason": "src says opposite",
+                },
+                {"claim": "b", "verdict": "overstated", "reason": ""},
+                {"claim": "c", "verdict": "unsupported"},
+                {"claim": "d", "verdict": "supported"},
+            ],
+        ),
+        "2026-06-25",
+    )
+    rep = cv.summarize_verifications(tmp_path)
+    assert rep["flagged_total"] == 3
+    # b (empty string) and c (absent) are both unadjudicable; a is not
+    assert rep["unreasoned_flags"] == 2
+    assert abs(rep["unreasoned_rate"] - 2 / 3) < 1e-9
+
+
+def test_unreasoned_rate_is_zero_when_no_flags(tmp_path):
+    """No flags must not read as a broken instrument."""
+    rep = cv.summarize_verifications(tmp_path)
+    assert rep["unreasoned_flags"] == 0
+    assert rep["unreasoned_rate"] == 0.0
