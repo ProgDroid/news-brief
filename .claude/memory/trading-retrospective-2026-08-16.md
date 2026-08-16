@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: 951b41de-741d-4e04-a8b4-945ab0025650
-  modified: 2026-08-16T11:02:55.110Z
+  modified: 2026-08-16T11:10:22.926Z
 ---
 
 **2026-08-16, first retrospective on the trading half. Full write-up is in the repo
@@ -13,11 +13,13 @@ at `docs/2026-08-16-trading-retrospective.md` — read that, not this.** Commits
 `9d766e1` (data bugs) and `a60ef2c` (reversal removed), 702 tests. This entry holds
 what the doc cannot: the open action, and what to distrust.
 
-**STILL-OPEN ACTION:** run the repair on the **host** book —
-`python scripts/repair_unit_bug_rows.py <path>/paper/book.json --apply --strict`.
-Dry-run by default, idempotent, self-backing-up. The snapshot analysed
-(`from-server/`, gitignored) is from 2026-08-14 and the host has moved on:
-**never restore that snapshot over the live file.**
+**Host repair: RUN by the user on 2026-08-16** (`scripts/repair_unit_bug_rows.py`).
+Not independently verified — confirm on the next book pull that the five corrupt
+rows are gone and mean edge reads ≈−1.6% rather than −9.3%. The script is idempotent,
+so re-running is safe and prints "Nothing to repair" if it already applied. Note it
+is **dry-run unless `--apply`** is passed. If it ever needs re-running, never restore
+the `from-server/` snapshot (2026-08-14, gitignored) over the live file — run the
+script against the live book instead.
 
 **Distrust every performance number produced before this date.** Three bugs fed
 `performance_report`, `evaluate_gate` *and* `performance_prompt_block` — so the
