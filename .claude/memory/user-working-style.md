@@ -6,6 +6,7 @@ metadata:
   type: user
   promoted_to: global
   originSessionId: 0dcbbd13-5be1-4f55-92f5-0638d2a112d1
+  modified: 2026-08-09T14:44:29.411Z
 ---
 
 The user is a hands-on decision-maker who does NOT rubber-stamp recommendations.
@@ -45,6 +46,22 @@ proxy. **How to apply:** show the raw numbers/URLs behind a data-derived choice 
 (don't ask him to trust a count); when a solution feels hacky/loose, say so and prefer the clean
 option even at a quality/volume cost — he'll take clean-and-smaller over clever-and-loose. Matches
 the global API-validation-discipline (treat unexpected results as suspicious, investigate, be honest).
+
+**Naming the missing evidence beats guessing — he will go get it (2026-08-09,
+PolyGram 400 session).** Told plainly *"I don't know what `side` should contain, here
+are the two readings, and here is exactly what would settle it — the venue docs or the
+request payload from DevTools"*, he came back with the answer next message. The same
+turn he **redirected mid-work to the higher-risk direction**: *"let's make sure that
+closing positions also includes side: sell, we should make sure selling works as that's
+important to get right"* — unprompted, correctly identifying that a broken exit strands
+real capital while a broken entry only costs an opportunity. **How to apply:** when a
+contract/API detail is genuinely unknown, do NOT ship an inferred value and do NOT
+stall the whole task — deliver everything that does not depend on it, then state the
+uncertainty concretely with the specific artefact that would resolve it. He supplies
+it. And when triaging a batch of fixes, rank by blast radius rather than by what broke
+today; he already thinks that way and will reorder you if you don't. Matches the global
+"ask to 95% confidence" rule and [[http-error-body-is-the-diagnosis]] (the venue's own
+error body named the field — logging it is what ended a three-week hunt).
 
 **Cadence for multi-item work (2026-06-25):** when research/evaluation surfaces several
 candidate items, he wants them RECORDED AS A PERSISTENT BACKLOG first, then worked
