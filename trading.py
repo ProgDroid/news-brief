@@ -1935,7 +1935,7 @@ def mode_paper():
         "neutral": 0,
         "no_instrument": 0,
         "no_price": 0,
-        "unpriced_reversal": 0,
+        "contrary_held": 0,
     }
     actionable = []
     for s in signals:
@@ -1971,25 +1971,22 @@ def mode_paper():
                 ticker, direction = s["ticker"], s["direction"]
                 opposite = "bearish" if direction == "bullish" else "bullish"
 
-                # Reversal: a fresh opposite-direction call closes the standing position first.
+                # A contrary call is declined, not acted on. Reversing on every
+                # opposite signal was the single biggest source of loss in the book:
+                # holding the first thesis instead beat it on 17 of 21 chains
+                # (mean +5.74%, p=0.0072) over identical names and windows, while
+                # the signals themselves are 50/50 directionally (28 single-leg
+                # episodes, hit 50.0%, p=1.000). Reversal closes were 105 of 130
+                # with a median hold of 5 days — the book was thrashing on news
+                # flow, converting a harmless zero-edge into ~-6% per chain.
+                # See docs/2026-08-16-trading-retrospective.md.
                 if (ac, ticker, opposite) in open_keys:
-                    for p in book["positions"]:
-                        if (
-                            p["status"] == "open"
-                            and p.get("asset_class", "equity") == ac
-                            and p["ticker"] == ticker
-                            and p["direction"] == opposite
-                            and _close_position_at_market(p, today, "reversal")
-                        ):
-                            log.info(f"Paper reversal: closed {ac} {ticker} {opposite}")
-                    open_keys = _open_keys()
-                    if (ac, ticker, opposite) in open_keys:
-                        # Reversal close couldn't be priced — don't open the opposite yet.
-                        log.warning(
-                            f"Paper skip: unpriced reversal for {ticker}; not opening {direction}"
-                        )
-                        leakage["unpriced_reversal"] += 1
-                        continue
+                    log.info(
+                        f"Paper skip: {direction} {ticker} ({ac}) declined — "
+                        f"{opposite} position still open"
+                    )
+                    leakage["contrary_held"] += 1
+                    continue
 
                 if (ac, ticker, direction) in open_keys:
                     continue  # dedup: a position for this call is already open

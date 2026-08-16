@@ -524,3 +524,110 @@ def test_mtm_accepts_a_large_but_plausible_move(monkeypatch):
     p = _equity_open(entry_price=100.0)
     out = trading.mark_to_market({"positions": [p]}, "2026-06-11")["positions"][0]
     assert out["last_mark"]["price"] == 400.0
+
+
+# --- no-reversal policy (2026-08-16 retrospective, step 2/3) ------------------
+
+
+def _paper_env(monkeypatch, tmp_path, price=100.0):
+    """Wire mode_paper at a tmp book + signals dir. Returns the signals dir."""
+    signals_dir = tmp_path / "signals"
+    signals_dir.mkdir(exist_ok=True)
+    monkeypatch.setattr(trading, "SIGNALS_DIR", signals_dir)
+    monkeypatch.setattr(trading, "BOOK_FILE", tmp_path / "book.json")
+    monkeypatch.setattr(trading, "LEGACY_PAPER_BOOK_FILE", tmp_path / "paper-book.json")
+    monkeypatch.setattr(trading, "LEAKAGE_LOG_FILE", tmp_path / "leak.json")
+    monkeypatch.setattr(trading, "refresh_instruments_cache", lambda *a, **k: {})
+    monkeypatch.setattr(trading, "resolve_symbol", lambda *a, **k: "shel.us")
+    monkeypatch.setattr(trading, "fetch_price", lambda ac, sym: price)
+    monkeypatch.setattr(trading, "_stamp_open_benchmark", lambda p: None)
+    return signals_dir
+
+
+def _write_signal(signals_dir, direction):
+    import json
+    from datetime import datetime, timezone
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    (signals_dir / f"signals-{today}.json").write_text(
+        json.dumps(
+            {
+                "signals": [
+                    {
+                        "ticker": "SHEL",
+                        "asset_class": "equity",
+                        "direction": direction,
+                        "confidence": "high",
+                        "topic": "t",
+                        "rationale": "r",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_contrary_signal_does_not_close_the_standing_position(monkeypatch, tmp_path):
+    """The reversal rule was the single biggest source of loss in the book.
+
+    Same names, same windows, holding the first thesis beat reversing on 17 of 21
+    chains (mean +5.74%, p=0.0072) while the signals themselves are 50/50
+    directionally. A contrary call is now declined, not acted on.
+    """
+    sd = _paper_env(monkeypatch, tmp_path)
+    _write_signal(sd, "bullish")
+    trading.mode_paper()
+    _write_signal(sd, "bearish")
+    trading.mode_paper()
+
+    positions = trading.load_book()["positions"]
+    assert len(positions) == 1
+    held = positions[0]
+    assert held["status"] == "open"
+    assert held["direction"] == "bullish"
+    assert held["close_reason"] is None
+
+
+def test_declined_contrary_signal_is_counted_as_leakage(monkeypatch, tmp_path):
+    """Declining silently would make the sleeve look idle rather than disciplined."""
+    sd = _paper_env(monkeypatch, tmp_path)
+    _write_signal(sd, "bullish")
+    trading.mode_paper()
+    _write_signal(sd, "bearish")
+    trading.mode_paper()
+
+    data = trading._load_json_or(tmp_path / "leak.json", {})
+    day = next(iter(data))
+    assert data[day]["contrary_held"] == 1
+    assert data[day]["traded"] == 0
+
+
+def test_same_direction_signal_is_still_deduped(monkeypatch, tmp_path):
+    """Dedup is a separate rule and must survive the reversal removal."""
+    sd = _paper_env(monkeypatch, tmp_path)
+    _write_signal(sd, "bullish")
+    trading.mode_paper()
+    trading.mode_paper()
+
+    positions = trading.load_book()["positions"]
+    assert len(positions) == 1
+    data = trading._load_json_or(tmp_path / "leak.json", {})
+    assert data[next(iter(data))]["contrary_held"] == 0
+
+
+def test_contrary_signal_opens_once_the_position_has_closed(monkeypatch, tmp_path):
+    """Declining is about the OPEN position, not a permanent ban on the ticker."""
+    sd = _paper_env(monkeypatch, tmp_path)
+    _write_signal(sd, "bullish")
+    trading.mode_paper()
+    book = trading.load_book()
+    book["positions"][0]["status"] = "closed"
+    trading.save_book(book)
+
+    _write_signal(sd, "bearish")
+    trading.mode_paper()
+    positions = trading.load_book()["positions"]
+    assert len(positions) == 2
+    assert positions[-1]["direction"] == "bearish"
+    assert positions[-1]["status"] == "open"
