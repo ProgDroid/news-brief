@@ -80,6 +80,17 @@ _KRAKEN_BASE = {
 PAPER_HORIZONS = {"1w": 7, "2w": 14, "4w": 28}  # days from entry_date
 PAPER_CLOSE_HORIZON = "4w"  # close the position once this checkpoint is recorded
 
+# Data-integrity bounds (see docs/2026-08-16-trading-retrospective.md).
+# A mark this far from the entry price is a unit/provider mismatch, not a move:
+# four UK rows were opened in pence and marked in pounds, booking ~-99% each and
+# turning the run's best equity call (+16.7%) into a near-total loss. Deliberately
+# loose — a real 10-bagger inside one 4-week horizon is rarer than a broken feed.
+PRICE_SANITY_RATIO = 10.0
+# An index cannot move this far over a holding period. One 10x-bad benchmark_entry
+# (733.33 where every other row was ~7350) produced edge=-903.9% and on its own
+# dragged the book's mean edge from -1.5% to -9.3%.
+BENCHMARK_SANITY_RETURN = 3.0
+
 # Market-pulse instruments. Each entry: (label, asset_class, instrument).
 # Tier 1 — macro spine, always fetched (universal risk-on/off pulse).
 MARKET_SPINE = [
@@ -701,11 +712,17 @@ def _stamp_close_metrics(p: dict, day: str) -> None:
     gross = p.get("realized_return")
     if gross is None:
         return
+    ac = p.get("asset_class", "equity")
     haircut = _haircut_fraction(p)
     p["haircut"] = haircut
     net = gross - haircut
+    if ac == "prediction":
+        # A long-only stake cannot lose more than itself, and the venue's
+        # half-spread is already inside the price paid — subtracting it from a
+        # total loss double-counts. Equity/crypto keep no floor: a bearish row is
+        # a short, whose loss really is unbounded.
+        net = max(net, -1.0)
     p["net_return"] = net
-    ac = p.get("asset_class", "equity")
     bench = None
     if ac == "prediction":
         bench = 0.0  # naive coin-flip baseline
@@ -718,7 +735,18 @@ def _stamp_close_metrics(p: dict, day: str) -> None:
                 log.warning(f"Benchmark fetch failed for {p.get('ticker')}: {e}")
                 level = None
             if level is not None:
-                bench = _signal_return("bullish", entry, level)
+                candidate = _signal_return("bullish", entry, level)
+                if abs(candidate) > BENCHMARK_SANITY_RETURN:
+                    # Corrupt level on one side. Leaving edge unset costs one row
+                    # of attribution; stamping it poisons every mean downstream,
+                    # including the model's own performance_prompt_block.
+                    log.warning(
+                        f"Implausible benchmark return {candidate:.2%} for "
+                        f"{p.get('ticker')} (entry={entry}, level={level}) — "
+                        "edge left unset"
+                    )
+                else:
+                    bench = candidate
     p["benchmark_return"] = bench
     p["edge"] = (net - bench) if bench is not None else None
 
@@ -2059,6 +2087,19 @@ def _snap_close(closes: dict[str, float], target_date: str) -> float | None:
     return closes[max(candidates)]
 
 
+def _mark_is_plausible(entry_price: float, mark: float) -> bool:
+    """False when entry and mark differ by more than PRICE_SANITY_RATIO.
+
+    A ratio that large is a currency/unit or provider mismatch, not a price move
+    (see B1 in docs/2026-08-16-trading-retrospective.md). Non-positive inputs are
+    unusable and also return False.
+    """
+    if entry_price <= 0 or mark <= 0:
+        return False
+    ratio = mark / entry_price
+    return 1 / PRICE_SANITY_RATIO <= ratio <= PRICE_SANITY_RATIO
+
+
 def _has_new_crossing(p: dict, days_open: int) -> bool:
     """True if any horizon has crossed but isn't recorded yet — gates the fetch."""
     return any(
@@ -2123,6 +2164,16 @@ def mark_to_market(book: dict, today_str: str) -> dict:
         price = price_position(p)
         if price is None:
             log.warning(f"MtM kept open (no price): {p['ticker']} ({p['instrument']})")
+            continue
+        if not _mark_is_plausible(p["entry_price"], price):
+            # Treat a unit/provider mismatch exactly like an unfetchable price:
+            # leave the row open and retry next run. Booking it would write a
+            # ~-99% "return" that no later report can distinguish from a real one.
+            log.warning(
+                f"MtM kept open (implausible mark): {p['ticker']} "
+                f"({p['instrument']}) entry={p['entry_price']} mark={price} — "
+                "suspect a currency/unit mismatch between the open and mark paths"
+            )
             continue
         ret = _signal_return(p["direction"], p["entry_price"], price)
         p["last_mark"] = {"date": today_str, "price": price, "return": ret}

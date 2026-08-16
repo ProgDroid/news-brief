@@ -411,3 +411,116 @@ def test_paper_tallies_leakage(monkeypatch, tmp_path):
     assert data[day]["neutral"] == 1
     assert data[day]["low_confidence"] == 1
     assert data[day]["no_ticker"] == 1
+
+
+# --- data-integrity guards (2026-08-16 retrospective: B1/B2/B3) ---------------
+
+
+def _equity_open(**over):
+    p = {
+        "asset_class": "equity",
+        "instrument": "aapl.us",
+        "ticker": "AAPL",
+        "direction": "bullish",
+        "entry_price": 100.0,
+        "entry_date": "2026-06-01",
+        "checkpoints": {},
+        "status": "open",
+    }
+    p.update(over)
+    return p
+
+
+def test_prediction_total_loss_cannot_exceed_minus_100pct():
+    """B3: a long-only stake can lose the stake and no more.
+
+    The venue's half-spread is already inside the price paid, so subtracting it
+    again pushed 11 of 56 closed predictions below -100% (worst: -116.29%).
+    """
+    import trading
+
+    p = {
+        "ticker": "mkt1",
+        "asset_class": "prediction",
+        "play_type": "momentum",
+        "realized_return": -1.0,  # settled worthless
+        "entry_spread": 0.14285714285714288,  # a real 10c-wide book
+        "benchmark_entry": None,
+    }
+    trading._stamp_close_metrics(p, "2026-08-16")
+    assert p["net_return"] == -1.0
+
+
+def test_equity_short_may_still_lose_more_than_100pct():
+    """The B3 floor is for long-only instruments; a short has unbounded loss."""
+    import trading
+
+    p = _closed_equity(direction="bearish", realized_return=-1.4)
+    trading._stamp_close_metrics(p, "2026-08-16")
+    assert p["net_return"] < -1.0
+
+
+def test_implausible_benchmark_return_is_rejected(monkeypatch):
+    """B2: one 10x-bad benchmark_entry produced edge=-903.9%.
+
+    An index cannot move +900% over a holding period, so the level is corrupt.
+    Leave benchmark_return/edge unset rather than stamping fiction into the
+    reports; net_return is unaffected.
+    """
+    import trading
+
+    monkeypatch.setattr(trading, "fetch_benchmark_level", lambda ac: 7350.0)
+    p = _closed_equity(benchmark_entry=733.33)  # real EXV1 row from the book
+    trading._stamp_close_metrics(p, "2026-08-16")
+    assert p["net_return"] is not None
+    assert p["benchmark_return"] is None
+    assert p["edge"] is None
+
+
+def test_plausible_benchmark_return_still_stamped(monkeypatch):
+    """The B2 guard must not swallow ordinary benchmark moves."""
+    import trading
+
+    monkeypatch.setattr(trading, "fetch_benchmark_level", lambda ac: 130.0)
+    p = _closed_equity(benchmark_entry=100.0)
+    trading._stamp_close_metrics(p, "2026-08-16")
+    assert p["benchmark_return"] == pytest.approx(0.30)
+    assert p["edge"] is not None
+
+
+def test_mtm_rejects_mark_100x_off_the_entry_price(monkeypatch):
+    """B1: a unit mismatch between the open and mark paths must not be booked.
+
+    Rolls-Royce was entered at 1264 (pence) and marked at 14.75 (pounds), booking
+    -98.96% on a trade that actually made +16.71%. Treat an implausible ratio as
+    an unusable price: leave the position open and retry next run.
+    """
+    import trading
+
+    monkeypatch.setattr(trading, "price_position", lambda p: 14.75)
+    monkeypatch.setattr(trading, "historical_closes", lambda ac, inst, s, e: {})
+    p = {
+        "asset_class": "equity",
+        "instrument": "rr.uk",
+        "ticker": "RRl_EQ",
+        "direction": "bullish",
+        "entry_price": 1264.0,
+        "entry_date": "2026-06-02",
+        "checkpoints": {},
+        "status": "open",
+    }
+    out = trading.mark_to_market({"positions": [p]}, "2026-07-02")["positions"][0]
+    assert out["status"] == "open"
+    assert out["checkpoints"] == {}
+    assert out.get("last_mark") is None
+
+
+def test_mtm_accepts_a_large_but_plausible_move(monkeypatch):
+    """The B1 guard must not reject genuine multi-baggers."""
+    import trading
+
+    monkeypatch.setattr(trading, "price_position", lambda p: 400.0)
+    monkeypatch.setattr(trading, "historical_closes", lambda ac, inst, s, e: {})
+    p = _equity_open(entry_price=100.0)
+    out = trading.mark_to_market({"positions": [p]}, "2026-06-11")["positions"][0]
+    assert out["last_mark"]["price"] == 400.0

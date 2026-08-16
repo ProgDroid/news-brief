@@ -10,6 +10,9 @@ __pycache__/
 .ruff_cache/
 .playwright-mcp/
 
+# Live state pulled off the deploy host for offline analysis — never commit
+from-server/
+
 # AV backtest pulled data (raw AV JSON + manifest + results) — never commit
 av_data/
 scratch_av/
