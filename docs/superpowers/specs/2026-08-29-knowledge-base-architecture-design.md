@@ -609,7 +609,7 @@ transition, 2 days. Control passes.
 | Resolutions across 90 briefs | **70** — 24 `broken`, 46 `challenged` |
 | Rate | 0.78 resolutions/brief; 0.27 breaks/brief |
 | Days to resolution (broken) | median 5, mean 8.2, max 35 |
-| Hand-audited precision on the 24 breaks | **~61%** (≈11 of 18 clearly classifiable) |
+| Hand-audited precision on the 24 breaks | ~~**~61%**~~ **SUPERSEDED: 33.3%** (7 of 21) — see `docs/2026-08-29-gold-set-first-run.md`. The 61% was read off `audit.py`, which prints `claim[:105]` of a field `replay.py` had already truncated to 150 chars. |
 | Topics | Iran–US 19, Energy 11, **Semiconductors 8**, Iran nuclear 5, Japan 6, Ukraine 4 |
 
 Genuine catches include the exact failure classes that motivated this spec: a brief asserting
@@ -674,7 +674,7 @@ Required, and cheap only if done before the first migration:
 - A documented decay policy for claims that are never reviewed.
 
 **Seed the gold set from the replay.** The 2026-08-29 run produced 24 `broken` detections against
-a known corpus, hand-audited at ~61% precision with a single identifiable failure mode. Those 24,
+a known corpus. (The "~61% precision" here is superseded: relabelling the untruncated text gives **33.3%**, and the false-positive class is broader than one mode. See `docs/2026-08-29-gold-set-first-run.md`.) Those 24,
 labelled, are the first gold-set entries and a ready-made regression test for fix #4 in §12.3:
 the restatement guard must convert the known false positives without losing the known true ones.
 
@@ -757,10 +757,18 @@ is, and duplication is filling it. #11 remains correct and cheap, but it is not 
 Two of these now have measured baselines from the 2026-08-29 replay, so they are testable rather
 than aspirational:
 
-- **Criterion 1 — break-detection precision ≥ 85%**, measured against the 24 hand-audited
-  detections in the replay's event log. **Baseline: ~61%.** The restatement guard (§12.3 #4) is
-  the intervention; the audited set is the regression test. A run that improves recall while
-  dropping precision below baseline is a regression, not progress.
+- **Criterion 1 — break-detection precision ≥ 85%**, measured against the hand-labelled
+  detections now frozen as `tests/fixtures/gold_set_breaks.json`. **Baseline: 33.3%**, not the
+  ~61% first recorded. The restatement guard (§12.3 #4) is the intervention; the labelled set is
+  the regression test. A run that improves recall while dropping precision below baseline is a
+  regression, not progress.
+
+  **Amended 2026-08-29 after the first run** (`docs/2026-08-29-gold-set-first-run.md`): the
+  guard reached 75.0% precision but dropped recall from 100% to 42.9%, losing 4 of 7 true
+  breaks. The pre-registered condition only covers one direction, and it is the *safer* one —
+  §6.1 makes a lost break a permanent integration error while a false break is a synthesis
+  error that lasts a day. **Both directions are regressions.** n is 21 classifiable, so read the
+  per-item table, not the aggregate.
 - **Criterion 3 — zero confirmations claimed from a single observation.** The replay contains a
   live instance to test against: "SK Hynix +13% confirms memory-AI bull case", asserted on
   2026-07-15 and broken on 2026-07-16. Under the evidence floor (§3.3) that claim must never be
