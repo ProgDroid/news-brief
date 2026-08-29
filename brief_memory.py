@@ -118,7 +118,18 @@ def _find_duplicate(text: str, rows) -> dict | None:
 
 def _reaffirm(base: dict, mc: dict, today: str) -> None:
     """Fold today's restatement of a claim into its existing row, in place."""
-    base["claim"] = mc.get("claim", base.get("claim", ""))
+    # Claim text is immutable once the claim is not standing — INCLUDING on the
+    # very reply that breaks it, which is exactly how the 2026-08-29 replay
+    # destroyed the Patriot assertion: it marked the claim broken and rewrote it
+    # into a description of its own reversal, so the ledger read back as though
+    # the reversal had itself been reversed. The original wording is what the
+    # reader was told and what the break is measured against; the reversal
+    # belongs in broken_by. Rewording stays correct for refining a claim that is,
+    # and remains, standing.
+    was = _coerce_status(base.get("status")) or _DEFAULT_STATUS
+    now = _coerce_status(mc.get("status")) or was
+    if was == _DEFAULT_STATUS and now == _DEFAULT_STATUS:
+        base["claim"] = mc.get("claim", base.get("claim", ""))
     base["topic"] = mc.get("topic", base.get("topic", ""))
     base["last_reaffirmed"] = today
     base["restate_count"] = base.get("restate_count", 0) + 1

@@ -1268,3 +1268,100 @@ def test_reconcile_prompt_asks_to_reuse_existing_ids():
     p = bm.build_reconcile_prompt({"version": 1, "claims": []}, "brief").lower()
     assert "different words" in p
     assert "twice" in p
+
+
+# ── Fix #6: claim text immutable once status != standing (news-brief-jx9.5) ───
+def test_claim_text_is_frozen_when_the_same_reply_marks_it_broken():
+    """The measured Patriot case: the 2026-08-29 replay marked the claim broken
+    AND rewrote its text into a description of its own reversal, so the ledger
+    read back as though the reversal had itself been reversed."""
+    prior = {
+        "version": 1,
+        "claims": [
+            _mk_claim("c-0001", claim="Ukraine holds a Patriot production licence")
+        ],
+    }
+    out = bm.merge_ledger(
+        prior,
+        [
+            {
+                "id": "c-0001",
+                "claim": "Trump reversed course on Ukraine's Patriot-production licence",
+                "status": "broken",
+                "broken_by": "Trump reversed the licence",
+            }
+        ],
+        "2026-06-24",
+    )
+    got = out["claims"][0]
+    assert got["claim"] == "Ukraine holds a Patriot production licence"
+    assert got["status"] == "broken"
+    assert got["broken_by"] == "Trump reversed the licence"
+
+
+def test_claim_text_is_frozen_on_an_already_broken_claim():
+    prior = {
+        "version": 1,
+        "claims": [
+            dict(
+                _mk_claim("c-0001", claim="the original assertion"),
+                status="broken",
+                broke_on="2026-06-21",
+            )
+        ],
+    }
+    out = bm.merge_ledger(
+        prior, [{"id": "c-0001", "claim": "a later rewrite"}], "2026-06-24"
+    )
+    assert out["claims"][0]["claim"] == "the original assertion"
+
+
+def test_claim_text_is_frozen_when_marked_challenged():
+    prior = {
+        "version": 1,
+        "claims": [_mk_claim("c-0001", claim="the original assertion")],
+    }
+    out = bm.merge_ledger(
+        prior,
+        [{"id": "c-0001", "claim": "a rewrite", "status": "challenged"}],
+        "2026-06-24",
+    )
+    assert out["claims"][0]["claim"] == "the original assertion"
+
+
+def test_a_standing_claim_can_still_be_refined():
+    """Rewording is correct for a refinement and wrong only for a break."""
+    prior = {
+        "version": 1,
+        "claims": [_mk_claim("c-0001", claim="the original assertion")],
+    }
+    out = bm.merge_ledger(
+        prior, [{"id": "c-0001", "claim": "the refined assertion"}], "2026-06-24"
+    )
+    assert out["claims"][0]["claim"] == "the refined assertion"
+
+
+def test_a_reworded_duplicate_cannot_rewrite_a_broken_claim():
+    """The dedup path (news-brief-pon) folds through the same reaffirm, so it
+    must not become a back door around immutability."""
+    prior = {
+        "version": 1,
+        "claims": [
+            dict(
+                _mk_claim(
+                    "c-0001", claim="Ukraine was granted a Patriot production licence"
+                ),
+                status="broken",
+                broke_on="2026-06-21",
+            )
+        ],
+    }
+    out = bm.merge_ledger(
+        prior,
+        [{"claim": "Ukraine has been granted the Patriot production licence"}],
+        "2026-06-24",
+    )
+    assert len(out["claims"]) == 1
+    assert (
+        out["claims"][0]["claim"] == "Ukraine was granted a Patriot production licence"
+    )
