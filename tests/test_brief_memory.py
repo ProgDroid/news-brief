@@ -178,10 +178,10 @@ def test_render_lists_claims_with_instruction():
         ],
     }
     block = bm.render_established_block(ledger)
-    assert "ESTABLISHED" in block
+    assert "BACKGROUND ALREADY REPORTED" in block  # header rewritten by jx9.2
     assert "BOJ at 1.0% since 2026-06-16" in block
     assert "japan" in block
-    assert "one clause" in block.lower()
+    assert "do not re-report" in block.lower()
 
 
 def test_build_reconcile_prompt_contains_ledger_and_brief():
@@ -306,7 +306,7 @@ def test_reconcile_prompt_teaches_severity():
     p = bm.build_reconcile_prompt({"version": 1, "claims": []}, "brief")
     assert "severity" in p
     assert '"high"' in p
-    assert "when unsure" in p.lower()
+    assert "use it by default" in p.lower()  # rubric recalibrated by 47q
 
 
 def test_part_a_feeds_back_beyond_2000_chars():
@@ -1542,3 +1542,116 @@ def test_render_output_is_unaffected_by_origin():
     assert bm.render_established_block(authored) == bm.render_established_block(
         extracted
     )
+
+
+# ── Fix #9/#10: ESTABLISHED block rewrite + driver (news-brief-jx9.2) ─────────
+def test_established_block_drops_the_heading_the_model_echoed():
+    """The model adopted the old heading as vocabulary and shipped literal
+    '(established)' tags meaning 'I know this and am not telling you'. Success
+    criterion #4 is zero withheld-explanation markers."""
+    ledger = {"version": 1, "claims": [_mk_claim("c-0001", claim="a fact")]}
+    block = bm.render_established_block(ledger)
+    assert "THE READER ALREADY KNOWS THESE" not in block
+    assert "in place of an explanation" in block.lower()
+
+
+def test_established_block_permits_restating_a_driver():
+    """Section 1.2: all three memory channels were suppressive, while MARKET
+    PULSE asks the model to explain moves. Yesterday's driver is by construction
+    not today's news, so the block has to grant permission explicitly."""
+    ledger = {"version": 1, "claims": [_mk_claim("c-0001", claim="a fact")]}
+    block = bm.render_established_block(ledger).lower()
+    assert "driver" in block
+    assert "still operating" in block
+
+
+def test_render_includes_the_driver_when_present():
+    ledger = {
+        "version": 1,
+        "claims": [
+            dict(
+                _mk_claim("c-0001", claim="Brent holds a risk premium"),
+                driver="Hormuz transit risk",
+            )
+        ],
+    }
+    assert "Hormuz transit risk" in bm.render_established_block(ledger)
+
+
+def test_render_omits_the_driver_marker_when_absent():
+    ledger = {"version": 1, "claims": [_mk_claim("c-0001", claim="a plain fact")]}
+    rows = [
+        ln
+        for ln in bm.render_established_block(ledger).splitlines()
+        if ln.strip().startswith("•")
+    ]
+    assert len(rows) == 1
+    assert "driver:" not in rows[0]
+
+
+def test_merge_records_driver_on_a_new_claim():
+    out = bm.merge_ledger(
+        {"version": 1, "claims": []},
+        [{"claim": "Brent holds a risk premium", "driver": "Hormuz transit risk"}],
+        "2026-06-24",
+    )
+    assert out["claims"][0]["driver"] == "Hormuz transit risk"
+
+
+def test_merge_keeps_a_prior_driver_when_the_model_omits_it():
+    prior = {
+        "version": 1,
+        "claims": [dict(_mk_claim("c-0001"), driver="Hormuz transit risk")],
+    }
+    out = bm.merge_ledger(prior, [{"id": "c-0001", "claim": "c-0001"}], "2026-06-24")
+    assert out["claims"][0]["driver"] == "Hormuz transit risk"
+
+
+def test_parse_extracts_driver():
+    got = bm.parse_reconcile_response('[{"claim": "a", "driver": "the mechanism"}]')
+    assert got[0]["driver"] == "the mechanism"
+
+
+def test_reconcile_prompt_asks_for_a_driver():
+    p = bm.build_reconcile_prompt({"version": 1, "claims": []}, "brief").lower()
+    assert "driver" in p
+
+
+# ── news-brief-47q: severity rubric is degenerate (high on 25/25) ─────────────
+def test_reconcile_prompt_gives_worked_examples_for_every_severity_level():
+    """The old rubric said 'use normal by default' but gave examples only for
+    high, so everything read as high. Section 12.2: a field needs per-value
+    rules, a stated default, worked examples spanning its range, and an explicit
+    negative case, or it comes back uniform - which is worse than missing."""
+    p = bm.build_reconcile_prompt({"version": 1, "claims": []}, "brief").lower()
+    # The old rubric already had per-value rules; what it lacked was concrete
+    # examples below the "high" tier, which is why everything read as high.
+    assert "scheduled rate decision" in p  # a worked "normal" example
+    assert "procedural step" in p  # a worked "low" example
+
+
+def test_reconcile_prompt_warns_against_over_marking_high():
+    p = bm.build_reconcile_prompt({"version": 1, "claims": []}, "brief").lower()
+    assert "miscalibrated" in p
+    assert "continuation" in p
+
+
+def test_reconcile_budget_keeps_headroom_for_a_full_working_set():
+    """Every field added to the reply schema eats output budget. This repo has
+    hit max_tokens truncation four times; a truncated reply fails safe (the prior
+    ledger is kept) but silently loses a day of memory, so keep real headroom
+    rather than a thin margin. Adding another field should trip this test."""
+    item = {
+        "id": "c-0001",
+        "claim": "x" * 200,
+        "topic": "geopolitics",
+        "source_count": 4,
+        "severity": "high",
+        "status": "broken",
+        "broken_by": "y" * 60,
+        "origin": "extracted",
+        "driver": "z" * 60,
+    }
+    worst = json.dumps([item] * bm.WORKING_SET_SIZE, indent=2)
+    approx_tokens = len(worst) / 3.5  # conservative chars/token for JSON
+    assert bm.RECONCILE_MAX_TOKENS >= approx_tokens * 1.5

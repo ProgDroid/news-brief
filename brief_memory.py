@@ -58,14 +58,22 @@ RECONCILE_MODEL = "claude-haiku-4-5-20251001"
 # from a change in the world. Version 1 is the template as of the Epic 1 repair —
 # rows written before this existed carry no prompt_version at all, and that
 # absence is itself the correct reading.
-# v2 (news-brief-jx9.3): added the "origin" rule. v1 was the Epic 1 repair
-# template — status rules, restatement/absence negative cases, id-reuse pressure.
-PROMPT_VERSION = 2
+# v3 (news-brief-jx9.2 / 47q): recalibrated the severity rubric with worked
+# examples across all three tiers plus an over-marking warning, and added the
+# "driver" rule. v2 added "origin". v1 was the Epic 1 repair template — status
+# rules, restatement/absence negative cases, id-reuse pressure.
+PROMPT_VERSION = 3
 # A full working set serialises to ~2400 output tokens, so the old 2048
 # budget truncated the JSON array before its closing "]" — the parser then
 # misreported the cut-off as "no JSON array". Give generous headroom and bound
 # the model's output (see _RECONCILE_TEMPLATE) so it stays well inside this.
-RECONCILE_MAX_TOKENS = 4096
+# Raised 4096 -> 8192 when Epic 1 added status/broken_by/origin/driver to the
+# reply schema: a worst-case full working set measured ~3.7k output tokens, i.e.
+# under 400 tokens of headroom. Truncation here fails SAFE (the prior ledger is
+# kept) but silently loses a day of memory, and this repo has hit max_tokens
+# truncation four separate times. test_reconcile_budget_keeps_headroom_for_a_
+# full_working_set trips if another field erodes the margin again.
+RECONCILE_MAX_TOKENS = 8192
 
 
 def is_enabled() -> bool:
@@ -175,6 +183,9 @@ def _reaffirm(base: dict, mc: dict, today: str) -> None:
     base["origin"] = _coerce_origin(mc.get("origin")) or base.get(
         "origin", _DEFAULT_ORIGIN
     )
+    drv = mc.get("driver")
+    if isinstance(drv, str) and drv.strip():
+        base["driver"] = drv.strip()
     _apply_status(base, mc.get("status"), mc.get("broken_by"), today)
 
 
@@ -243,6 +254,8 @@ def merge_ledger(
             "severity": _coerce_severity(mc.get("severity")) or _DEFAULT_SEVERITY,
             "origin": _coerce_origin(mc.get("origin")) or _DEFAULT_ORIGIN,
         }
+        if isinstance(mc.get("driver"), str) and mc["driver"].strip():
+            row["driver"] = mc["driver"].strip()
         _apply_status(row, mc.get("status"), mc.get("broken_by"), today)
         _stamp_provenance(row, extractor_model, prompt_version)
         result.append(row)
@@ -302,11 +315,22 @@ brief. Rules:
   SOURCE HEADLINES (the "SOURCE:" blocks) whose headline supports that fact. Count
   outlets, not headlines. Use 0 when the fact is not covered in today's headlines,
   when no source headlines are provided, or when you are unsure.
-- For each fact, set "severity" to one of "low", "normal", or "high". "high" =
-  a major standing development the reader must not have re-explained (wars,
-  leadership or regime changes, major policy-regime shifts, market-structural
-  events); "normal" = a typical durable fact (use this by default); "low" = a
-  true but minor, low-stakes detail. When unsure, use "normal".
+- For each fact, set "severity" to "low", "normal" or "high", using these worked
+  examples so the boundary is not guesswork:
+    high = a war starting or ending, a leadership or regime change, a central
+      bank changing its policy REGIME, a market-structural break.
+    normal = a scheduled rate decision landing where expected, a named
+      negotiation opening or continuing, a sanctions package, an earnings-path
+      revision. THIS IS THE COMMON CASE — use it by default.
+    low = a single official's remark, a minor procedural step, a true but
+      low-stakes detail no reader would act on.
+  An ongoing war is not "high" every day it runs: the escalation is "high", the
+  continuation is "normal". If you are marking more than a few facts "high" you
+  are miscalibrated.
+- For each fact, set "driver" to a short phrase naming the MECHANISM behind it —
+  what is producing it or why it holds ("Hormuz transit risk", "BOJ policy
+  normalisation"). Omit it when there is no clear mechanism. Unlike the fact
+  itself, a driver MAY be restated in later briefs whenever it explains a move.
 - For each fact, set "status" to one of "standing", "challenged", or "broken".
   "standing" = the fact still holds (use this by default); "challenged" = today's
   brief reports something that puts it in doubt without settling it; "broken" =
@@ -328,7 +352,7 @@ brief. Rules:
   honestly rather than dropping it. When in doubt, use "extracted".
 - Return at most {max_claims} items — keep only the most important durable facts,
   and keep each "claim" to one terse sentence (no more than ~30 words).
-Each array item: {{"id": "<existing id, omit if new>", "claim": "<short fact>", "topic": "<short label>", "source_count": <integer>, "severity": "<low|normal|high>", "status": "<standing|challenged|broken>", "broken_by": "<what contradicted it; omit unless broken>", "origin": "<extracted|authored>"}}.
+Each array item: {{"id": "<existing id, omit if new>", "claim": "<short fact>", "topic": "<short label>", "source_count": <integer>, "severity": "<low|normal|high>", "status": "<standing|challenged|broken>", "broken_by": "<what contradicted it; omit unless broken>", "origin": "<extracted|authored>", "driver": "<short mechanism phrase; omit if none>"}}.
 Output the JSON array and nothing else.
 
 CURRENT memory:
@@ -366,15 +390,29 @@ def render_established_block(ledger: dict) -> str:
     for c in claims:
         cue = _corroboration_cue(c.get("source_count"))
         tag = f" ({cue})" if cue else ""
-        rows.append(f"  • [{c.get('topic') or 'general'}]{tag} {c['claim']}")
+        driver = str(c.get("driver") or "").strip()
+        note = f" — driver: {driver}" if driver else ""
+        rows.append(f"  • [{c.get('topic') or 'general'}]{tag} {c['claim']}{note}")
     lines = "\n".join(rows)
+    # The old header ("ESTABLISHED — THE READER ALREADY KNOWS THESE") was adopted
+    # by the model as vocabulary: it began shipping literal "(established)" tags
+    # meaning "I know this and am not telling you". The instruction was also
+    # purely suppressive, while MARKET PULSE simultaneously asks the model to
+    # explain moves — and yesterday's driver is by construction not today's news,
+    # so the two directives contradicted each other. Hence the explicit
+    # permission to restate a driver.
     return (
-        "## ESTABLISHED — THE READER ALREADY KNOWS THESE\n"
-        "Reference each in at most one clause, and only if still relevant. Do NOT "
-        "re-explain or restate them as news. Lead every section with what has "
-        "CHANGED since. The parenthetical is how broadly the fact was corroborated "
-        "across outlets: lean on 'widely corroborated' facts with confidence and "
-        "treat 'single-source' ones more tentatively.\n\n" + lines + "\n"
+        "## BACKGROUND ALREADY REPORTED\n"
+        "Previous briefs already reported these. Do not re-report them as if they "
+        "were today's news, and never emit a bare marker such as '(established)' "
+        "or '(as noted)' in place of an explanation — if something is worth "
+        "mentioning, write it plainly in the prose. You MAY restate the DRIVER of "
+        "any of these whenever it explains something today: a mechanism that is "
+        "still operating is not old news, and an unexplained move is worse than a "
+        "repeated explanation. Lead with what has CHANGED. The parenthetical is "
+        "how broadly the fact was corroborated across outlets: lean on 'widely "
+        "corroborated' facts with confidence and treat 'single-source' ones more "
+        "tentatively.\n\n" + lines + "\n"
     )
 
 
@@ -484,6 +522,9 @@ def parse_reconcile_response(text: str) -> list[dict]:
             org = _coerce_origin(item.get("origin"))
             if org is not None:
                 entry["origin"] = org
+            drv = item.get("driver")
+            if isinstance(drv, str) and drv.strip():
+                entry["driver"] = drv.strip()
             out.append(entry)
     return out
 
