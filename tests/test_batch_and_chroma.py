@@ -35,7 +35,7 @@ def test_submit_batch_includes_web_search_tool(monkeypatch):
     req = cap["json"]["requests"][0]
     assert req["custom_id"] == "cid-1"
     params = req["params"]
-    assert params["tools"] == [{"type": "web_search_20250305", "name": "web_search"}]
+    assert params["tools"] == [{"type": "web_search_20260209", "name": "web_search"}]
     assert params["system"] == "SYS"
     assert params["messages"] == [{"role": "user", "content": "USER"}]
     assert cap["url"].endswith("/v1/messages/batches")

@@ -1724,7 +1724,7 @@ def run_dig(query: str, since: str | None = None) -> str:
             "Output Telegram HTML only: <b>, <i>, <code>, <a href>. Bullets with •. "
             "No markdown, no # headers, no code fences. Under 500 words."
         ),
-        "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+        "tools": [{"type": "web_search_20260209", "name": "web_search"}],
         "messages": [
             {
                 "role": "user",
@@ -2830,7 +2830,7 @@ def submit_batch(
         "messages": [{"role": "user", "content": prompt_user}],
     }
     if web_search:
-        params["tools"] = [{"type": "web_search_20250305", "name": "web_search"}]
+        params["tools"] = [{"type": "web_search_20260209", "name": "web_search"}]
     payload = {"requests": [{"custom_id": custom_id, "params": params}]}
     resp = requests.post(
         "https://api.anthropic.com/v1/messages/batches",

@@ -63,6 +63,10 @@ ANTHROPIC_HEADERS = {
 # Default Sonnet model for the brief/trading synthesis calls. Override on the
 # host with NEWSBRIEF_MODEL (single knob — also read by brief.SIGNALS_MODEL and
 # claim_verify.VERIFY_MODEL) to swap models without a code change or redeploy.
+# NOTE: brief.py declares the web_search_20260209 server tool, which requires
+# Opus 4.6+ or Sonnet 4.6+. Setting this knob to Haiku 4.5 (or any older model)
+# would 400 every call that browses — the tool version is a constraint on what
+# this override may be set to.
 MODEL = os.environ.get("NEWSBRIEF_MODEL", "claude-sonnet-5")
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
