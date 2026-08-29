@@ -141,7 +141,7 @@ def test_merge_retires_stale_claims():
     assert out["claims"] == []
 
 
-def test_merge_caps_to_most_recent():
+def test_working_set_takes_most_recent():
     claims = [
         {
             "id": f"c-{i:04d}",
@@ -154,8 +154,8 @@ def test_merge_caps_to_most_recent():
         for i in range(1, 6)
     ]
     prior = {"version": 1, "claims": claims}
-    out = bm.merge_ledger(prior, [], "2026-06-24", cap=2, retire_after_days=999)
-    kept = [c["last_reaffirmed"] for c in out["claims"]]
+    out = bm.merge_ledger(prior, [], "2026-06-24", retire_after_days=999)
+    kept = [c["last_reaffirmed"] for c in bm.select_working_set(out, limit=2)]
     assert kept == ["2026-06-15", "2026-06-14"]
 
 
@@ -299,7 +299,7 @@ def test_messages_call_budget_fits_full_ledger(monkeypatch):
 
 def test_reconcile_prompt_bounds_output_size():
     p = bm.build_reconcile_prompt({"version": 1, "claims": []}, "brief")
-    assert f"at most {bm.MAX_CLAIMS}" in p
+    assert f"at most {bm.WORKING_SET_SIZE}" in p
 
 
 def test_reconcile_prompt_teaches_severity():
@@ -806,7 +806,7 @@ def test_missing_severity_treated_as_normal_for_retention():
     assert out["claims"] == []
 
 
-def test_cap_keeps_high_severity_over_fresher_normal():
+def test_working_set_keeps_high_severity_over_fresher_normal():
     prior = {
         "version": 1,
         "claims": [
@@ -830,8 +830,8 @@ def test_cap_keeps_high_severity_over_fresher_normal():
             },
         ],
     }
-    out = bm.merge_ledger(prior, [], "2026-06-24", cap=1)
-    assert [c["id"] for c in out["claims"]] == ["c-0001"]
+    out = bm.merge_ledger(prior, [], "2026-06-24")
+    assert [c["id"] for c in bm.select_working_set(out, limit=1)] == ["c-0001"]
 
 
 def test_cap_orders_by_severity_then_recency():
@@ -862,3 +862,409 @@ def test_cap_orders_by_severity_then_recency():
         "c-normA",
         "c-low",
     ]
+
+
+# ── Fix #1: storage / working-set split (news-brief-j07) ──────────────────────
+def _mk_claim(cid, day="2026-06-24", sev="normal", claim=None):
+    return {
+        "id": cid,
+        "claim": claim if claim is not None else cid,
+        "topic": "x",
+        "first_seen": day,
+        "last_reaffirmed": day,
+        "restate_count": 1,
+        "severity": sev,
+    }
+
+
+def _ledger_of(n, **kw):
+    return {
+        "version": 1,
+        "claims": [_mk_claim(f"c-{i:04d}", **kw) for i in range(1, n + 1)],
+    }
+
+
+def test_merge_stores_more_than_the_working_set_size():
+    out = bm.merge_ledger(_ledger_of(30), [], "2026-06-24")
+    assert len(out["claims"]) == 30
+
+
+def test_select_working_set_limits_to_size():
+    assert len(bm.select_working_set(_ledger_of(30))) == bm.WORKING_SET_SIZE
+
+
+def test_select_working_set_takes_most_recent_first():
+    ledger = {
+        "version": 1,
+        "claims": [
+            _mk_claim("c-0001", "2026-06-10"),
+            _mk_claim("c-0002", "2026-06-14"),
+            _mk_claim("c-0003", "2026-06-12"),
+        ],
+    }
+    got = [c["id"] for c in bm.select_working_set(ledger, limit=2)]
+    assert got == ["c-0002", "c-0003"]
+
+
+def test_select_working_set_prefers_high_severity_over_fresher_normal():
+    ledger = {
+        "version": 1,
+        "claims": [
+            _mk_claim("c-high", "2026-06-20", "high"),
+            _mk_claim("c-norm", "2026-06-24", "normal"),
+        ],
+    }
+    assert [c["id"] for c in bm.select_working_set(ledger, limit=1)] == ["c-high"]
+
+
+def test_select_working_set_on_empty_ledger_is_empty():
+    assert bm.select_working_set({"version": 1, "claims": []}) == []
+
+
+def test_reconcile_prompt_sends_only_the_working_set():
+    ledger = _ledger_of(30)
+    p = bm.build_reconcile_prompt(ledger, "brief")
+    sent = [c["id"] for c in ledger["claims"] if c["id"] in p]
+    assert len(sent) == bm.WORKING_SET_SIZE
+
+
+def test_render_established_block_shows_only_the_working_set():
+    ledger = {
+        "version": 1,
+        "claims": [
+            _mk_claim(f"c-{i:04d}", claim=f"fact number {i}") for i in range(1, 31)
+        ],
+    }
+    assert (
+        bm.render_established_block(ledger).count("fact number") == bm.WORKING_SET_SIZE
+    )
+
+
+def test_claim_outside_the_working_set_survives_reconcile():
+    """The regression the split exists for: a claim the model never saw, because
+    it fell outside the prompt window, must not be dropped from storage."""
+    out = bm.merge_ledger(
+        _ledger_of(30), [{"id": "c-0001", "claim": "c-0001"}], "2026-06-24"
+    )
+    assert len(out["claims"]) == 30
+    assert "c-0030" in {c["id"] for c in out["claims"]}
+
+
+# ── Fix #3: claim status lifecycle, QUARANTINED (news-brief-jx9.8) ────────────
+# The field is written and never read: rendering, TTL and working-set ordering
+# all ignore it until the restatement guard (news-brief-93u) lifts the detector
+# above its measured ~61% precision. The quarantine tests below pin that.
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("standing", "standing"),
+        ("BROKEN", "broken"),
+        ("  challenged  ", "challenged"),
+        ("resolved", None),
+        ("", None),
+        (None, None),
+        (3, None),
+    ],
+)
+def test_coerce_status(raw, expected):
+    assert bm._coerce_status(raw) == expected
+
+
+def test_merge_new_claim_defaults_to_standing():
+    out = bm.merge_ledger({"version": 1, "claims": []}, [{"claim": "x"}], "2026-06-24")
+    assert out["claims"][0]["status"] == "standing"
+
+
+def test_merge_new_claim_takes_explicit_status():
+    out = bm.merge_ledger(
+        {"version": 1, "claims": []},
+        [{"claim": "x", "status": "challenged"}],
+        "2026-06-24",
+    )
+    assert out["claims"][0]["status"] == "challenged"
+
+
+def test_merge_invalid_status_defaults_to_standing():
+    out = bm.merge_ledger(
+        {"version": 1, "claims": []},
+        [{"claim": "x", "status": "wobbly"}],
+        "2026-06-24",
+    )
+    assert out["claims"][0]["status"] == "standing"
+
+
+def test_merge_marks_a_reaffirmed_claim_broken_and_dates_it():
+    prior = {"version": 1, "claims": [_mk_claim("c-0001", "2026-06-20")]}
+    out = bm.merge_ledger(
+        prior,
+        [{"id": "c-0001", "claim": "c-0001", "status": "broken"}],
+        "2026-06-24",
+    )
+    got = out["claims"][0]
+    assert got["status"] == "broken"
+    assert got["broke_on"] == "2026-06-24"
+
+
+def test_merge_records_broken_by():
+    prior = {"version": 1, "claims": [_mk_claim("c-0001", "2026-06-20")]}
+    out = bm.merge_ledger(
+        prior,
+        [
+            {
+                "id": "c-0001",
+                "claim": "c-0001",
+                "status": "broken",
+                "broken_by": "Trump reversed the licence",
+            }
+        ],
+        "2026-06-24",
+    )
+    assert out["claims"][0]["broken_by"] == "Trump reversed the licence"
+
+
+def test_merge_marks_a_reaffirmed_claim_challenged():
+    prior = {"version": 1, "claims": [_mk_claim("c-0001", "2026-06-20")]}
+    out = bm.merge_ledger(
+        prior,
+        [{"id": "c-0001", "claim": "c-0001", "status": "challenged"}],
+        "2026-06-24",
+    )
+    assert out["claims"][0]["status"] == "challenged"
+
+
+def test_merge_keeps_prior_status_when_model_omits_it():
+    prior = {"version": 1, "claims": [dict(_mk_claim("c-0001"), status="broken")]}
+    out = bm.merge_ledger(prior, [{"id": "c-0001", "claim": "c-0001"}], "2026-06-24")
+    assert out["claims"][0]["status"] == "broken"
+
+
+def test_broke_on_is_not_overwritten_by_a_later_merge():
+    prior = {
+        "version": 1,
+        "claims": [dict(_mk_claim("c-0001"), status="broken", broke_on="2026-06-21")],
+    }
+    out = bm.merge_ledger(
+        prior,
+        [{"id": "c-0001", "claim": "c-0001", "status": "broken"}],
+        "2026-06-24",
+    )
+    assert out["claims"][0]["broke_on"] == "2026-06-21"
+
+
+def test_prior_claim_without_status_reads_as_standing():
+    prior = {"version": 1, "claims": [_mk_claim("c-0001")]}
+    out = bm.merge_ledger(prior, [{"id": "c-0001", "claim": "c-0001"}], "2026-06-24")
+    assert out["claims"][0]["status"] == "standing"
+
+
+def test_parse_extracts_status_and_broken_by():
+    got = bm.parse_reconcile_response(
+        '[{"claim": "a", "status": "broken", "broken_by": "the reversal"}]'
+    )
+    assert got[0]["status"] == "broken"
+    assert got[0]["broken_by"] == "the reversal"
+
+
+def test_parse_tolerates_bad_status():
+    got = bm.parse_reconcile_response('[{"claim": "a", "status": 7}]')
+    assert "status" not in got[0]
+
+
+def test_reconcile_prompt_teaches_status_values_and_default():
+    p = bm.build_reconcile_prompt({"version": 1, "claims": []}, "brief").lower()
+    assert '"standing"' in p
+    assert '"challenged"' in p
+    assert '"broken"' in p
+    assert "in doubt" in p
+
+
+def test_reconcile_prompt_says_a_restatement_is_not_a_break():
+    p = bm.build_reconcile_prompt({"version": 1, "claims": []}, "brief").lower()
+    assert "restatement" in p
+    assert "not a break" in p
+
+
+def test_reconcile_prompt_says_absence_is_not_contradiction():
+    p = bm.build_reconcile_prompt({"version": 1, "claims": []}, "brief").lower()
+    assert "not contradiction" in p
+
+
+# — Quarantine: nothing reads status yet —
+def test_render_output_is_unaffected_by_status():
+    standing = {"version": 1, "claims": [_mk_claim("c-0001", claim="a durable fact")]}
+    broken = {
+        "version": 1,
+        "claims": [
+            dict(
+                _mk_claim("c-0001", claim="a durable fact"),
+                status="broken",
+                broke_on="2026-06-24",
+                broken_by="the reversal",
+            )
+        ],
+    }
+    assert bm.render_established_block(broken) == bm.render_established_block(standing)
+
+
+def test_broken_claim_still_retires_on_ttl():
+    """Quarantine boundary: news-brief-jx9.6 will exempt non-standing claims from
+    the TTL. Until it lands, status must not change retention."""
+    prior = {
+        "version": 1,
+        "claims": [dict(_mk_claim("c-0001", "2026-06-10"), status="broken")],
+    }
+    assert bm.merge_ledger(prior, [], "2026-06-24")["claims"] == []
+
+
+# ── Fix #2: claim dedup / id reuse (news-brief-pon) ───────────────────────────
+# Conservative by construction: two claims whose numeric tokens differ are never
+# merged, whatever their wording overlap. Duplicates only waste working-set slots
+# (storage is unbounded since news-brief-j07), but a false merge destroys an
+# assertion, so the asymmetry is priced in.
+@pytest.mark.parametrize(
+    "a,b,expected",
+    [
+        # identical
+        (
+            "Ukraine was granted a Patriot production licence",
+            "Ukraine was granted a Patriot production licence",
+            True,
+        ),
+        # differs only in function words
+        (
+            "Ukraine has been granted a Patriot production licence",
+            "Ukraine was granted the Patriot production licence",
+            True,
+        ),
+        # same words, different number -> never merged
+        (
+            "The BOJ raised the policy rate to 1.0%",
+            "The BOJ raised the policy rate to 1.5%",
+            False,
+        ),
+        (
+            "Japan's 10-year JGB held around 2.88%",
+            "Japan's 10-year JGB held around 2.70%",
+            False,
+        ),
+        # genuinely different assertions about the same subject
+        (
+            "Iran and Oman are negotiating a shipping framework",
+            "Iran and Oman signed a shipping framework",
+            False,
+        ),
+        # unrelated
+        (
+            "Ukraine was granted a Patriot production licence",
+            "The BOJ held rates steady",
+            False,
+        ),
+        # empty / degenerate never merges
+        ("", "", False),
+        ("the and of", "the and of", False),
+    ],
+)
+def test_is_duplicate_claim(a, b, expected):
+    assert bm._is_duplicate_claim(a, b) is expected
+
+
+def test_merge_reuses_the_id_of_a_near_identical_new_claim():
+    prior = {
+        "version": 1,
+        "claims": [
+            _mk_claim(
+                "c-0001", claim="Ukraine has been granted a Patriot production licence"
+            )
+        ],
+    }
+    out = bm.merge_ledger(
+        prior,
+        [{"claim": "Ukraine was granted the Patriot production licence"}],
+        "2026-06-24",
+    )
+    assert len(out["claims"]) == 1
+    assert out["claims"][0]["id"] == "c-0001"
+
+
+def test_merge_reusing_an_id_counts_as_a_reaffirmation():
+    prior = {
+        "version": 1,
+        "claims": [
+            _mk_claim(
+                "c-0001",
+                "2026-06-20",
+                claim="Ukraine has been granted a Patriot production licence",
+            )
+        ],
+    }
+    out = bm.merge_ledger(
+        prior,
+        [{"claim": "Ukraine was granted the Patriot production licence"}],
+        "2026-06-24",
+    )
+    assert out["claims"][0]["restate_count"] == 2
+    assert out["claims"][0]["last_reaffirmed"] == "2026-06-24"
+
+
+def test_merge_does_not_merge_claims_differing_in_a_number():
+    prior = {
+        "version": 1,
+        "claims": [_mk_claim("c-0001", claim="The BOJ raised the policy rate to 1.0%")],
+    }
+    out = bm.merge_ledger(
+        prior,
+        [{"claim": "The BOJ raised the policy rate to 1.5%"}],
+        "2026-06-24",
+    )
+    assert len(out["claims"]) == 2
+
+
+def test_merge_dedups_near_identical_claims_within_one_response():
+    """The measured Patriot case: three near-identical claims in a single reply."""
+    out = bm.merge_ledger(
+        {"version": 1, "claims": []},
+        [
+            {"claim": "Ukraine was granted a Patriot production licence"},
+            {"claim": "Ukraine has been granted the Patriot production licence"},
+            {"claim": "Ukraine was granted a Patriot production licence"},
+        ],
+        "2026-06-24",
+    )
+    assert len(out["claims"]) == 1
+
+
+def test_merge_keeps_genuinely_distinct_claims():
+    out = bm.merge_ledger(
+        {"version": 1, "claims": []},
+        [
+            {"claim": "Ukraine was granted a Patriot production licence"},
+            {"claim": "The BOJ held rates steady"},
+        ],
+        "2026-06-24",
+    )
+    assert len(out["claims"]) == 2
+
+
+def test_merge_does_not_dedup_a_claim_the_model_gave_an_explicit_id():
+    """An echoed id is authoritative — never second-guess it with similarity."""
+    prior = {
+        "version": 1,
+        "claims": [
+            _mk_claim(
+                "c-0001", claim="Ukraine was granted a Patriot production licence"
+            ),
+            _mk_claim("c-0002", claim="The BOJ held rates steady"),
+        ],
+    }
+    out = bm.merge_ledger(
+        prior,
+        [{"id": "c-0002", "claim": "Ukraine was granted a Patriot production licence"}],
+        "2026-06-24",
+    )
+    assert {c["id"] for c in out["claims"]} == {"c-0001", "c-0002"}
+
+
+def test_reconcile_prompt_asks_to_reuse_existing_ids():
+    p = bm.build_reconcile_prompt({"version": 1, "claims": []}, "brief").lower()
+    assert "different words" in p
+    assert "twice" in p
