@@ -33,6 +33,16 @@ _DEFAULT_SEVERITY = "normal"
 # them. news-brief-jx9.5 and news-brief-jx9.6 are the first readers.
 _VALID_STATUS = frozenset({"standing", "challenged", "broken"})
 _DEFAULT_STATUS = "standing"
+# Where a claim came from (spec 4.1). 'extracted' is source-grounded and is the
+# only kind a propagation rule, thesis or calibration aggregate may ever read;
+# 'authored' is the brief's own interpretation, persisted and scorable but never
+# readable back as established fact. ALSO QUARANTINED for now: the 4.1 render
+# filter is not wired, because this is an unmeasured classifier in the same
+# prompt where news-brief-47q shows severity came back degenerate ('high' 25/25),
+# and a uniformly-'authored' result would silently empty the ESTABLISHED block.
+# Wire the filter once the gold set (news-brief-jx9.7) shows real variance.
+_VALID_ORIGIN = frozenset({"extracted", "authored"})
+_DEFAULT_ORIGIN = "extracted"
 # Wording overlap at which two claims count as the same fact. See _is_duplicate_claim.
 DEDUP_SIMILARITY = 0.85
 _DEDUP_STOPWORDS = frozenset(
@@ -48,7 +58,9 @@ RECONCILE_MODEL = "claude-haiku-4-5-20251001"
 # from a change in the world. Version 1 is the template as of the Epic 1 repair —
 # rows written before this existed carry no prompt_version at all, and that
 # absence is itself the correct reading.
-PROMPT_VERSION = 1
+# v2 (news-brief-jx9.3): added the "origin" rule. v1 was the Epic 1 repair
+# template — status rules, restatement/absence negative cases, id-reuse pressure.
+PROMPT_VERSION = 2
 # A full working set serialises to ~2400 output tokens, so the old 2048
 # budget truncated the JSON array before its closing "]" — the parser then
 # misreported the cut-off as "no JSON array". Give generous headroom and bound
@@ -158,6 +170,11 @@ def _reaffirm(base: dict, mc: dict, today: str) -> None:
     )
     new_sev = _coerce_severity(mc.get("severity"))
     base["severity"] = new_sev or base.get("severity", _DEFAULT_SEVERITY)
+    # Sourcing can arrive later, so an authored claim may legitimately be
+    # promoted to extracted; omitting the field leaves it as it was.
+    base["origin"] = _coerce_origin(mc.get("origin")) or base.get(
+        "origin", _DEFAULT_ORIGIN
+    )
     _apply_status(base, mc.get("status"), mc.get("broken_by"), today)
 
 
@@ -224,6 +241,7 @@ def merge_ledger(
             "restate_count": 1,
             "source_count": mc.get("source_count", 0) or 0,
             "severity": _coerce_severity(mc.get("severity")) or _DEFAULT_SEVERITY,
+            "origin": _coerce_origin(mc.get("origin")) or _DEFAULT_ORIGIN,
         }
         _apply_status(row, mc.get("status"), mc.get("broken_by"), today)
         _stamp_provenance(row, extractor_model, prompt_version)
@@ -301,9 +319,16 @@ brief. Rules:
   short phrase naming what contradicted it, and do NOT reword its "claim" — the
   original wording is what the reader was told, and it is what the break is
   measured against.
+- For each fact, set "origin" to "extracted" or "authored". "extracted" = the
+  fact is grounded in what today's sources actually reported (use this by
+  default); "authored" = it is the brief's own interpretation, framing or
+  forward-looking read rather than something a source stated. "Iran and Oman are
+  negotiating a shipping framework" is extracted; "this represents a genuine
+  escalation ladder" is authored. Interpretation is wanted, not banned — mark it
+  honestly rather than dropping it. When in doubt, use "extracted".
 - Return at most {max_claims} items — keep only the most important durable facts,
   and keep each "claim" to one terse sentence (no more than ~30 words).
-Each array item: {{"id": "<existing id, omit if new>", "claim": "<short fact>", "topic": "<short label>", "source_count": <integer>, "severity": "<low|normal|high>", "status": "<standing|challenged|broken>", "broken_by": "<what contradicted it; omit unless broken>"}}.
+Each array item: {{"id": "<existing id, omit if new>", "claim": "<short fact>", "topic": "<short label>", "source_count": <integer>, "severity": "<low|normal|high>", "status": "<standing|challenged|broken>", "broken_by": "<what contradicted it; omit unless broken>", "origin": "<extracted|authored>"}}.
 Output the JSON array and nothing else.
 
 CURRENT memory:
@@ -386,6 +411,16 @@ def _coerce_status(v) -> str | None:
     return None
 
 
+def _coerce_origin(v) -> str | None:
+    """Canonical origin ('extracted'/'authored'), or None to leave the row's
+    existing origin alone. Case-insensitive; anything outside the enum is None."""
+    if isinstance(v, str):
+        s = v.strip().lower()
+        if s in _VALID_ORIGIN:
+            return s
+    return None
+
+
 def _apply_status(row: dict, proposed, broken_by, today: str) -> None:
     """Write status/broke_on/broken_by onto a claim row.
 
@@ -446,6 +481,9 @@ def parse_reconcile_response(text: str) -> list[dict]:
             bb = item.get("broken_by")
             if isinstance(bb, str) and bb.strip():
                 entry["broken_by"] = bb.strip()
+            org = _coerce_origin(item.get("origin"))
+            if org is not None:
+                entry["origin"] = org
             out.append(entry)
     return out
 

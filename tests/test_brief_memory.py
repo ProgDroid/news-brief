@@ -1443,3 +1443,102 @@ def test_an_untouched_prior_claim_keeps_its_own_provenance():
     untouched = next(c for c in out["claims"] if c["id"] == "c-0002")
     assert "extractor_model" not in untouched
     assert "prompt_version" not in untouched
+
+
+# ── Fix #13: origin extracted vs authored (news-brief-jx9.3) ──────────────────
+# Spec 4.1. QUARANTINED on the read side for the same reason as status: the rule
+# says an authored row may never render back as established fact, but this is an
+# unmeasured classifier in the very prompt where news-brief-47q proves the
+# failure mode already happened (severity came back 'high' 25/25). A uniformly
+# 'authored' result would silently empty the ESTABLISHED block and kill the
+# anti-repetition feature. Enforce the filter once the gold set shows variance.
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("extracted", "extracted"),
+        ("AUTHORED", "authored"),
+        ("  authored  ", "authored"),
+        ("inferred", None),
+        ("", None),
+        (None, None),
+        (2, None),
+    ],
+)
+def test_coerce_origin(raw, expected):
+    assert bm._coerce_origin(raw) == expected
+
+
+def test_new_claim_defaults_to_extracted():
+    out = bm.merge_ledger({"version": 1, "claims": []}, [{"claim": "x"}], "2026-06-24")
+    assert out["claims"][0]["origin"] == "extracted"
+
+
+def test_new_claim_can_be_marked_authored():
+    out = bm.merge_ledger(
+        {"version": 1, "claims": []},
+        [
+            {
+                "claim": "this represents a genuine escalation ladder",
+                "origin": "authored",
+            }
+        ],
+        "2026-06-24",
+    )
+    assert out["claims"][0]["origin"] == "authored"
+
+
+def test_invalid_origin_defaults_to_extracted():
+    out = bm.merge_ledger(
+        {"version": 1, "claims": []},
+        [{"claim": "x", "origin": "vibes"}],
+        "2026-06-24",
+    )
+    assert out["claims"][0]["origin"] == "extracted"
+
+
+def test_reaffirm_keeps_prior_origin_when_the_model_omits_it():
+    prior = {"version": 1, "claims": [dict(_mk_claim("c-0001"), origin="authored")]}
+    out = bm.merge_ledger(prior, [{"id": "c-0001", "claim": "c-0001"}], "2026-06-24")
+    assert out["claims"][0]["origin"] == "authored"
+
+
+def test_reaffirm_can_promote_an_authored_claim_to_extracted():
+    """Sourcing can arrive later, and a claim that becomes source-grounded should
+    stop being quarantined interpretation."""
+    prior = {"version": 1, "claims": [dict(_mk_claim("c-0001"), origin="authored")]}
+    out = bm.merge_ledger(
+        prior,
+        [{"id": "c-0001", "claim": "c-0001", "origin": "extracted"}],
+        "2026-06-24",
+    )
+    assert out["claims"][0]["origin"] == "extracted"
+
+
+def test_parse_extracts_origin():
+    got = bm.parse_reconcile_response('[{"claim": "a", "origin": "authored"}]')
+    assert got[0]["origin"] == "authored"
+
+
+def test_parse_tolerates_bad_origin():
+    assert (
+        "origin" not in bm.parse_reconcile_response('[{"claim": "a", "origin": 2}]')[0]
+    )
+
+
+def test_reconcile_prompt_teaches_origin_with_a_default_and_a_negative_case():
+    p = bm.build_reconcile_prompt({"version": 1, "claims": []}, "brief").lower()
+    assert '"extracted"' in p
+    assert '"authored"' in p
+    assert "interpretation" in p
+
+
+def test_render_output_is_unaffected_by_origin():
+    """Quarantine: the 4.1 filter is not wired until the field shows variance."""
+    extracted = {"version": 1, "claims": [_mk_claim("c-0001", claim="a fact")]}
+    authored = {
+        "version": 1,
+        "claims": [dict(_mk_claim("c-0001", claim="a fact"), origin="authored")],
+    }
+    assert bm.render_established_block(authored) == bm.render_established_block(
+        extracted
+    )
