@@ -1365,3 +1365,81 @@ def test_a_reworded_duplicate_cannot_rewrite_a_broken_claim():
     assert (
         out["claims"][0]["claim"] == "Ukraine was granted a Patriot production licence"
     )
+
+
+# ── Fix #14: extractor provenance on every row (news-brief-jx9.4) ─────────────
+# Spec 12.2: the model is a configuration value and integration errors are
+# permanent, so a row that cannot name its extractor cannot be re-audited when
+# the extractor changes. Precedent: the Sonnet 4.6 -> 5 swap silently changed
+# thinking behaviour and inflated tokens ~30%, truncating signals with no error.
+def test_new_claim_records_extractor_model_and_prompt_version():
+    out = bm.merge_ledger({"version": 1, "claims": []}, [{"claim": "x"}], "2026-06-24")
+    got = out["claims"][0]
+    assert got["extractor_model"] == bm.RECONCILE_MODEL
+    assert got["prompt_version"] == bm.PROMPT_VERSION
+
+
+def test_reaffirmed_claim_updates_provenance_to_the_current_extractor():
+    """A reaffirmed row's content is only ever as recent as the extractor that
+    last touched it, so provenance tracks the latest write, not the first."""
+    prior = {
+        "version": 1,
+        "claims": [
+            dict(
+                _mk_claim("c-0001"),
+                extractor_model="claude-sonnet-4-6",
+                prompt_version=0,
+            )
+        ],
+    }
+    out = bm.merge_ledger(prior, [{"id": "c-0001", "claim": "c-0001"}], "2026-06-24")
+    got = out["claims"][0]
+    assert got["extractor_model"] == bm.RECONCILE_MODEL
+    assert got["prompt_version"] == bm.PROMPT_VERSION
+
+
+def test_provenance_is_injectable_so_it_records_what_actually_ran():
+    out = bm.merge_ledger(
+        {"version": 1, "claims": []},
+        [{"claim": "x"}],
+        "2026-06-24",
+        extractor_model="some-other-model",
+        prompt_version=99,
+    )
+    got = out["claims"][0]
+    assert got["extractor_model"] == "some-other-model"
+    assert got["prompt_version"] == 99
+
+
+def test_a_broken_claim_updates_provenance_even_though_its_text_is_frozen():
+    """The text freeze from news-brief-jx9.5 must not freeze provenance too: the
+    status verdict on this row came from the current extractor."""
+    prior = {
+        "version": 1,
+        "claims": [
+            dict(
+                _mk_claim("c-0001", claim="the original assertion"),
+                extractor_model="claude-sonnet-4-6",
+                prompt_version=0,
+            )
+        ],
+    }
+    out = bm.merge_ledger(
+        prior,
+        [{"id": "c-0001", "claim": "a rewrite", "status": "broken"}],
+        "2026-06-24",
+    )
+    got = out["claims"][0]
+    assert got["claim"] == "the original assertion"
+    assert got["extractor_model"] == bm.RECONCILE_MODEL
+    assert got["prompt_version"] == bm.PROMPT_VERSION
+
+
+def test_an_untouched_prior_claim_keeps_its_own_provenance():
+    """A claim the model never returned was not re-extracted, so nothing about
+    its provenance changed - including a pre-versioning row that has none."""
+    prior = {"version": 1, "claims": [_mk_claim("c-0001"), _mk_claim("c-0002")]}
+    out = bm.merge_ledger(prior, [{"id": "c-0001", "claim": "c-0001"}], "2026-06-24")
+    untouched = next(c for c in out["claims"] if c["id"] == "c-0002")
+    assert "extractor_model" not in untouched
+    assert "prompt_version" not in untouched

@@ -42,6 +42,13 @@ _DEDUP_STOPWORDS = frozenset(
 _NUMBER_RE = re.compile(r"\d[\d.,]*")
 _WORD_RE = re.compile(r"[a-z0-9]+")
 RECONCILE_MODEL = "claude-haiku-4-5-20251001"
+# BUMP THIS whenever _RECONCILE_TEMPLATE changes in a way that could move the
+# boundary the model draws on any field. Rows carry it so a later audit can tell
+# which prompt produced a verdict; without it a prompt change is indistinguishable
+# from a change in the world. Version 1 is the template as of the Epic 1 repair —
+# rows written before this existed carry no prompt_version at all, and that
+# absence is itself the correct reading.
+PROMPT_VERSION = 1
 # A full working set serialises to ~2400 output tokens, so the old 2048
 # budget truncated the JSON array before its closing "]" — the parser then
 # misreported the cut-off as "no JSON array". Give generous headroom and bound
@@ -116,6 +123,18 @@ def _find_duplicate(text: str, rows) -> dict | None:
     return None
 
 
+def _stamp_provenance(row: dict, extractor_model: str, prompt_version: int) -> None:
+    """Record which extractor and which prompt version last wrote this row.
+
+    Stamped on every write, not just the first: a row's content is only ever as
+    recent as the extractor that last touched it, and that is what a later audit
+    needs to know. It is deliberately NOT covered by the jx9.5 text freeze — a
+    broken claim keeps its original wording, but the verdict that broke it came
+    from whichever model is named here."""
+    row["extractor_model"] = extractor_model
+    row["prompt_version"] = prompt_version
+
+
 def _reaffirm(base: dict, mc: dict, today: str) -> None:
     """Fold today's restatement of a claim into its existing row, in place."""
     # Claim text is immutable once the claim is not standing — INCLUDING on the
@@ -157,6 +176,8 @@ def merge_ledger(
     today: str,
     *,
     retire_after_days: int = RETIRE_AFTER_DAYS,
+    extractor_model: str = RECONCILE_MODEL,
+    prompt_version: int = PROMPT_VERSION,
 ) -> dict:
     by_id = {c["id"]: c for c in prior.get("claims", []) if "id" in c}
     next_num = _max_id_num(prior) + 1
@@ -168,6 +189,7 @@ def merge_ledger(
             # An echoed id is authoritative — never second-guess it with similarity.
             base = dict(by_id[cid])
             _reaffirm(base, mc, today)
+            _stamp_provenance(base, extractor_model, prompt_version)
             result.append(base)
             returned.add(cid)
             continue
@@ -189,6 +211,7 @@ def merge_ledger(
             log.info(f"Brief-memory: reused {twin['id']} for a reworded claim")
             base = dict(twin)
             _reaffirm(base, mc, today)
+            _stamp_provenance(base, extractor_model, prompt_version)
             result.append(base)
             returned.add(base["id"])
             continue
@@ -203,6 +226,7 @@ def merge_ledger(
             "severity": _coerce_severity(mc.get("severity")) or _DEFAULT_SEVERITY,
         }
         _apply_status(row, mc.get("status"), mc.get("broken_by"), today)
+        _stamp_provenance(row, extractor_model, prompt_version)
         result.append(row)
         next_num += 1
     for c in prior.get("claims", []):
