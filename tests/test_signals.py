@@ -573,3 +573,36 @@ def test_annotate_signal_sources_sets_kind_and_perspective(monkeypatch):
     assert out[1]["source_kind"] == "unknown"
     assert out[2]["source_kind"] == "unknown"
     assert out[2]["source_perspective"] is None
+
+
+# ── news-brief-jx9.1: raise fetch_rss capture depth ───────────────────────────
+def test_fetch_rss_default_captures_deeper_than_five_items(monkeypatch):
+    """One poll a day at max_items=5 across 26 feeds saw 130 headlines total, so
+    anything that appeared and rolled past position 5 between polls was never
+    seen at all."""
+    items = b"".join(
+        (
+            f"<item><title>Headline {i}</title>"
+            f"<description>Body {i}</description></item>"
+        ).encode()
+        for i in range(1, 26)
+    )
+    sample = b'<?xml version="1.0"?><rss><channel>' + items + b"</channel></rss>"
+    monkeypatch.setattr(brief.requests, "get", lambda *a, **k: _FakeResp(200, sample))
+
+    feed = {"name": "Test Wire", "url": "http://x", "category": "geo"}
+    out = brief.fetch_rss(feed)
+
+    assert "Headline 25" in out
+    assert out.count("Headline ") == 25
+
+
+def test_fetch_rss_still_honours_an_explicit_max_items(monkeypatch):
+    items = b"".join(
+        f"<item><title>Headline {i}</title></item>".encode() for i in range(1, 26)
+    )
+    sample = b'<?xml version="1.0"?><rss><channel>' + items + b"</channel></rss>"
+    monkeypatch.setattr(brief.requests, "get", lambda *a, **k: _FakeResp(200, sample))
+
+    feed = {"name": "Test Wire", "url": "http://x", "category": "geo"}
+    assert brief.fetch_rss(feed, max_items=3).count("Headline ") == 3

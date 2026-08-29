@@ -106,3 +106,62 @@ def test_query_chroma_returns_empty_on_failure(monkeypatch):
     monkeypatch.setattr(brief.requests, "post", boom)
     assert brief.query_chroma("q") == []
     assert brief.query_chroma_latest("t") == []
+
+
+# ── news-brief-ba9: citation-boundary newlines corrupting brief prose ─────────
+def test_fetch_batch_results_joins_citation_split_blocks_without_newlines(monkeypatch):
+    """The API splits prose into separate text blocks at citation boundaries, so
+    joining them with a newline inserted a line break mid-sentence — often right
+    before a comma. Measured across 90 archived briefs: 85 affected, mean ~4.7
+    breaks each, worst 12."""
+    payload = {
+        "result": {
+            "type": "succeeded",
+            "message": {
+                "content": [
+                    {"type": "text", "text": "Brent rose 2% on Hormuz transit risk"},
+                    {"type": "text", "text": ", according to shipping data."},
+                ]
+            },
+        }
+    }
+
+    class _StreamResp:
+        def raise_for_status(self):
+            pass
+
+        def iter_lines(self):
+            yield brief.json.dumps(payload).encode()
+
+    monkeypatch.setattr(brief.requests, "get", lambda *a, **k: _StreamResp())
+    monkeypatch.setattr(brief, "_dump_raw_batch_result", lambda *a, **k: None)
+
+    out = brief.fetch_batch_results("http://example.invalid/results")
+    assert out == "Brent rose 2% on Hormuz transit risk, according to shipping data."
+    assert "\n" not in out
+
+
+def test_fetch_batch_results_still_skips_non_text_blocks(monkeypatch):
+    payload = {
+        "result": {
+            "type": "succeeded",
+            "message": {
+                "content": [
+                    {"type": "thinking", "thinking": "dropped"},
+                    {"type": "text", "text": "kept"},
+                ]
+            },
+        }
+    }
+
+    class _StreamResp:
+        def raise_for_status(self):
+            pass
+
+        def iter_lines(self):
+            yield brief.json.dumps(payload).encode()
+
+    monkeypatch.setattr(brief.requests, "get", lambda *a, **k: _StreamResp())
+    monkeypatch.setattr(brief, "_dump_raw_batch_result", lambda *a, **k: None)
+
+    assert brief.fetch_batch_results("http://example.invalid/results") == "kept"

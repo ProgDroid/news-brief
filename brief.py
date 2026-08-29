@@ -1809,7 +1809,7 @@ def _rss_retry_wait(resp, attempt: int) -> float:
     return max(0.0, min(wait, RSS_MAX_BACKOFF))
 
 
-def fetch_rss(feed: dict, max_items: int = 5) -> str:
+def fetch_rss(feed: dict, max_items: int = 25) -> str:
     try:
         # Fetch with requests rather than letting feedparser fetch: feedparser
         # uses no socket timeout, so one hung feed (a wedged Nitter, not a dead
@@ -2945,7 +2945,11 @@ def fetch_batch_results(results_url: str) -> str | None:
             result = json.loads(line)
             if result.get("result", {}).get("type") == "succeeded":
                 blocks = result["result"]["message"]["content"]
-                text = "\n".join(b["text"] for b in blocks if b.get("type") == "text")
+                # Joined with NO separator: the API splits prose into separate
+                # text blocks at citation boundaries, so a "\n" here landed
+                # mid-sentence — usually right before a comma. It corrupted every
+                # brief that cited anything (85 of 90 archived, ~4.7 breaks each).
+                text = "".join(b["text"] for b in blocks if b.get("type") == "text")
                 _dump_raw_batch_result(result, text)
                 return text
         except json.JSONDecodeError:
