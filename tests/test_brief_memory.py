@@ -1,4 +1,5 @@
 import json
+import logging
 
 import pytest
 
@@ -1651,7 +1652,164 @@ def test_reconcile_budget_keeps_headroom_for_a_full_working_set():
         "broken_by": "y" * 60,
         "origin": "extracted",
         "driver": "z" * 60,
+        "kind": "claim",
     }
     worst = json.dumps([item] * bm.WORKING_SET_SIZE, indent=2)
     approx_tokens = len(worst) / 3.5  # conservative chars/token for JSON
     assert bm.RECONCILE_MAX_TOKENS >= approx_tokens * 1.5
+
+
+# ── Fix #5: claim-admission guard (news-brief-93u) ────────────────────────────
+# Spec 3.3: "Market levels are Observation rows; a claim may cite them but must
+# not be one." The prompt has forbidden ephemeral price levels since the feature
+# shipped and they were admitted anyway, so the rule needs enforcement at merge
+# time. The boundary is not lexical — gs-14 ("Brent surged 1.2% on Sunday, first
+# real repricing") and gs-16 ("Brent muted at -0.2%; market pricing contained
+# war, repricing trigger remains an Iranian tanker hit") open identically and
+# only one is admissible — so the model labels and merge_ledger enforces.
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("claim", "claim"),
+        ("observation", "observation"),
+        ("OBSERVATION", "observation"),
+        ("  claim  ", "claim"),
+        ("measurement", None),
+        ("", None),
+        (None, None),
+        (7, None),
+    ],
+)
+def test_coerce_kind(raw, expected):
+    assert bm._coerce_kind(raw) == expected
+
+
+def test_an_observation_is_not_admitted_to_the_ledger():
+    out = bm.merge_ledger(
+        {"version": 1, "claims": []},
+        [
+            {
+                "claim": "Japan's 10-year yield held around 2.88% on Thursday",
+                "kind": "observation",
+            }
+        ],
+        "2026-06-24",
+    )
+    assert out["claims"] == []
+
+
+def test_a_claim_is_admitted():
+    out = bm.merge_ledger(
+        {"version": 1, "claims": []},
+        [{"claim": "BOJ raised its policy rate to 1.0%", "kind": "claim"}],
+        "2026-06-24",
+    )
+    assert [c["claim"] for c in out["claims"]] == ["BOJ raised its policy rate to 1.0%"]
+
+
+def test_a_missing_kind_is_admitted():
+    """Fails OPEN, deliberately. Defaulting a missing field to rejection means a
+    model that quietly stops emitting `kind` silently empties the ledger with no
+    error raised — the exact silent-shape-change this repo has been bitten by.
+    Absence is made loud instead: `kind` is a variance field in the gold scorer,
+    so a field coming back absent shows up in the report the run it happens."""
+    out = bm.merge_ledger({"version": 1, "claims": []}, [{"claim": "x"}], "2026-06-24")
+    assert len(out["claims"]) == 1
+
+
+def test_an_unrecognised_kind_is_admitted():
+    out = bm.merge_ledger(
+        {"version": 1, "claims": []},
+        [{"claim": "x", "kind": "vibes"}],
+        "2026-06-24",
+    )
+    assert len(out["claims"]) == 1
+
+
+def test_an_admitted_row_does_not_store_kind():
+    """Admission is a decision made about a row, not a property of it. Every row
+    that survives the guard is a claim by construction, so storing the field
+    would add a column that is uniform on every read — which 12.2 rates worse
+    than a missing one, because it looks populated. Variance is read off the
+    model's replies in the scorer, where it carries information."""
+    out = bm.merge_ledger(
+        {"version": 1, "claims": []},
+        [{"claim": "x", "kind": "claim"}],
+        "2026-06-24",
+    )
+    assert "kind" not in out["claims"][0]
+
+
+def test_a_rejected_observation_does_not_consume_an_id():
+    out = bm.merge_ledger(
+        {"version": 1, "claims": []},
+        [
+            {"claim": "Brent -0.6% on the day", "kind": "observation"},
+            {"claim": "the MOU was signed on June 14", "kind": "claim"},
+        ],
+        "2026-06-24",
+    )
+    assert [c["id"] for c in out["claims"]] == ["c-0001"]
+
+
+def test_an_echoed_id_is_exempt_from_the_admission_guard():
+    """The guard runs at ADMISSION. An echoed id is reaffirmation of a row that
+    is already in the ledger, and jx9.5 makes stored claims immutable, so a
+    late 'observation' label must not retro-evict an existing claim."""
+    prior = {"version": 1, "claims": [_mk_claim("c-0001", claim="a standing fact")]}
+    out = bm.merge_ledger(
+        prior,
+        [{"id": "c-0001", "claim": "a standing fact", "kind": "observation"}],
+        "2026-06-24",
+    )
+    assert [c["id"] for c in out["claims"]] == ["c-0001"]
+
+
+def test_a_reworded_duplicate_is_exempt_from_the_admission_guard():
+    """The dedup path (news-brief-pon) resolves to an existing row, so it is
+    reaffirmation too — the same back door immutability had to close."""
+    prior = {"version": 1, "claims": [_mk_claim("c-0001", claim="a standing fact")]}
+    out = bm.merge_ledger(
+        prior,
+        [{"claim": "a standing fact", "kind": "observation"}],
+        "2026-06-24",
+    )
+    assert [c["id"] for c in out["claims"]] == ["c-0001"]
+
+
+def test_a_rejected_observation_is_logged_with_its_claim_text(caplog):
+    """A silent drop is unattributable. Log the gate that fired and the text it
+    fired on, so the operator can tell a working guard from an over-firing one."""
+    with caplog.at_level(logging.INFO):
+        bm.merge_ledger(
+            {"version": 1, "claims": []},
+            [{"claim": "RGLD -0.6% while bullion was flat", "kind": "observation"}],
+            "2026-06-24",
+        )
+    assert "observation" in caplog.text
+    assert "RGLD -0.6% while bullion was flat" in caplog.text
+
+
+def test_parse_extracts_kind():
+    got = bm.parse_reconcile_response('[{"claim": "a", "kind": "observation"}]')
+    assert got[0]["kind"] == "observation"
+
+
+def test_parse_tolerates_bad_kind():
+    assert "kind" not in bm.parse_reconcile_response('[{"claim": "a", "kind": 7}]')[0]
+
+
+def test_reconcile_prompt_teaches_kind_with_a_default_and_a_negative_case():
+    p = bm.build_reconcile_prompt({"version": 1, "claims": []}, "brief").lower()
+    assert '"observation"' in p
+    assert 'use "claim"' in p  # the stated default, wrapped across lines
+    assert "2.88%" in p  # the spec's named admission failure, as a worked case
+
+
+def test_reconcile_prompt_shows_both_sides_of_the_price_boundary():
+    """One worked example teaches the easy half. The measured failure is the
+    boundary itself, so the rubric has to carry a price-anchored row that IS
+    admissible next to one that is not."""
+    p = bm.build_reconcile_prompt({"version": 1, "claims": []}, "brief").lower()
+    assert "surged 1.2%" in p  # gs-14: a day's move with a label on it
+    assert "contained war" in p  # gs-16: a thesis that names its own falsifier

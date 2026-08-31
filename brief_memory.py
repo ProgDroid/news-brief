@@ -43,6 +43,15 @@ _DEFAULT_STATUS = "standing"
 # Wire the filter once the gold set (news-brief-jx9.7) shows real variance.
 _VALID_ORIGIN = frozenset({"extracted", "authored"})
 _DEFAULT_ORIGIN = "extracted"
+# Claim admission (news-brief-93u). Spec 3.3: "Market levels are Observation
+# rows; a claim may cite them but must not be one." The prompt has forbidden
+# ephemeral price levels since this feature shipped and admitted them anyway
+# (6 of the 23 gold-set rows), so the rule is enforced here rather than merely
+# restated there. Unlike severity/status/origin this is NOT stored on the row:
+# everything that survives the guard is a claim, so the column would be uniform
+# on every read, which spec 12.2 rates worse than a missing one.
+_VALID_KIND = frozenset({"claim", "observation"})
+_DEFAULT_KIND = "claim"
 # Wording overlap at which two claims count as the same fact. See _is_duplicate_claim.
 DEDUP_SIMILARITY = 0.85
 _DEDUP_STOPWORDS = frozenset(
@@ -58,11 +67,13 @@ RECONCILE_MODEL = "claude-haiku-4-5-20251001"
 # from a change in the world. Version 1 is the template as of the Epic 1 repair —
 # rows written before this existed carry no prompt_version at all, and that
 # absence is itself the correct reading.
-# v3 (news-brief-jx9.2 / 47q): recalibrated the severity rubric with worked
-# examples across all three tiers plus an over-marking warning, and added the
-# "driver" rule. v2 added "origin". v1 was the Epic 1 repair template — status
-# rules, restatement/absence negative cases, id-reuse pressure.
-PROMPT_VERSION = 3
+# v4 (news-brief-93u): added the "kind" rubric — claim vs observation — that the
+# claim-admission guard in merge_ledger enforces. v3 (news-brief-jx9.2 / 47q):
+# recalibrated the severity rubric with worked examples across all three tiers
+# plus an over-marking warning, and added the "driver" rule. v2 added "origin".
+# v1 was the Epic 1 repair template — status rules, restatement/absence negative
+# cases, id-reuse pressure.
+PROMPT_VERSION = 4
 # A full working set serialises to ~2400 output tokens, so the old 2048
 # budget truncated the JSON array before its closing "]" — the parser then
 # misreported the cut-off as "no JSON array". Give generous headroom and bound
@@ -243,6 +254,19 @@ def merge_ledger(
             result.append(base)
             returned.add(base["id"])
             continue
+        # Claim-admission guard. Judged only on genuinely NEW rows: both paths
+        # above resolve to a row already in the ledger, and reaffirming one is
+        # not admitting it, so a late "observation" label must not retro-evict a
+        # standing claim (jx9.5 froze those). Fails OPEN on a missing or
+        # unrecognised label — a model that quietly stops emitting the field
+        # would otherwise empty the ledger silently. Absence is caught loudly
+        # instead, as a variance field in scripts/score_gold_set.py.
+        if (_coerce_kind(mc.get("kind")) or _DEFAULT_KIND) == "observation":
+            log.info(
+                "Brief-memory: rejected an observation rather than admitting it "
+                f"as a durable claim: {mc['claim'][:120]}"
+            )
+            continue
         row = {
             "id": f"c-{next_num:04d}",
             "claim": mc["claim"],
@@ -350,9 +374,23 @@ brief. Rules:
   negotiating a shipping framework" is extracted; "this represents a genuine
   escalation ladder" is authored. Interpretation is wanted, not banned — mark it
   honestly rather than dropping it. When in doubt, use "extracted".
+- For each fact, set "kind" to "claim" or "observation". "claim" = an assertion
+  that can still be true or false tomorrow: an event that happened, a decision
+  taken, or a standing thesis about how something works. "observation" = a
+  measurement of where a market sat on one day — a price, a level, a percentage
+  move, a spread, a one-day divergence. A fact may CITE a level; it must not BE
+  one. "Japan's 10-year yield held around 2.88% on Thursday" is an observation:
+  when the yield prints 2.70% nothing has been contradicted, the number was
+  simply superseded. "Brent surged 1.2% on Sunday, the first real repricing of
+  the escalation" is also an observation — one day's move with a label attached.
+  But "the market is pricing a contained war, not a closed strait; the repricing
+  trigger remains an Iranian tanker hit" IS a claim: it says how the market will
+  behave and names what would prove it wrong. The test is whether the fact would
+  still mean something a week from now with its numbers stripped out. When in
+  doubt, use "claim".
 - Return at most {max_claims} items — keep only the most important durable facts,
   and keep each "claim" to one terse sentence (no more than ~30 words).
-Each array item: {{"id": "<existing id, omit if new>", "claim": "<short fact>", "topic": "<short label>", "source_count": <integer>, "severity": "<low|normal|high>", "status": "<standing|challenged|broken>", "broken_by": "<what contradicted it; omit unless broken>", "origin": "<extracted|authored>", "driver": "<short mechanism phrase; omit if none>"}}.
+Each array item: {{"id": "<existing id, omit if new>", "claim": "<short fact>", "topic": "<short label>", "source_count": <integer>, "severity": "<low|normal|high>", "status": "<standing|challenged|broken>", "broken_by": "<what contradicted it; omit unless broken>", "origin": "<extracted|authored>", "kind": "<claim|observation>", "driver": "<short mechanism phrase; omit if none>"}}.
 Output the JSON array and nothing else.
 
 CURRENT memory:
@@ -459,6 +497,13 @@ def _coerce_origin(v) -> str | None:
     return None
 
 
+def _coerce_kind(v) -> str | None:
+    if not isinstance(v, str):
+        return None
+    v = v.strip().lower()
+    return v if v in _VALID_KIND else None
+
+
 def _apply_status(row: dict, proposed, broken_by, today: str) -> None:
     """Write status/broke_on/broken_by onto a claim row.
 
@@ -522,6 +567,9 @@ def parse_reconcile_response(text: str) -> list[dict]:
             org = _coerce_origin(item.get("origin"))
             if org is not None:
                 entry["origin"] = org
+            knd = _coerce_kind(item.get("kind"))
+            if knd is not None:
+                entry["kind"] = knd
             drv = item.get("driver")
             if isinstance(drv, str) and drv.strip():
                 entry["driver"] = drv.strip()

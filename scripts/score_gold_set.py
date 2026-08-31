@@ -69,9 +69,10 @@ CLASSIFIABLE = ("true_break", "false_break")
 VALID_LABELS = frozenset(CLASSIFIABLE + ("unclear",))
 
 TRANSPORTS = ("auto", "rest", "sdk")
+MODES = ("break", "admission")
 
 # Fields whose values are checked for variance across everything the model returns.
-VARIANCE_FIELDS = ("severity", "status", "origin")
+VARIANCE_FIELDS = ("severity", "status", "origin", "kind")
 
 
 def sdk_call(system: str, user: str) -> str:
@@ -191,6 +192,188 @@ def probe(item: dict, call=None) -> dict:
     out["row"] = match
     out["predicted"] = match.get("status") or brief_memory._DEFAULT_STATUS
     return out
+
+
+def build_admission_brief(item: dict) -> str:
+    """The claim itself, presented as the whole of today's brief.
+
+    CAVEAT, and it is the load-bearing one for this mode: this is the claim as the
+    seed extractor already compressed it, not the brief prose it was drawn from.
+    So the probe measures the model's JUDGMENT of a durable fact — would it label
+    this a claim or an observation — and not extraction end to end. A brief whose
+    prose buries the same price print could still yield a different call.
+    """
+    return f"## TODAY\n\n{item['claim']}\n"
+
+
+def admission_probe(item: dict, call=None) -> dict:
+    """Run one item through the live template AND through merge_ledger.
+
+    Scoring the enforcement path rather than the raw `kind` field means the run
+    fails if the wiring breaks, not only if the judgment does — the guard is the
+    drop in merge_ledger, and a field nothing acts on is not a guard.
+    """
+    caller = call or choose_call()
+    prompt = brief_memory.build_reconcile_prompt(
+        brief_memory.empty_ledger(), build_admission_brief(item)
+    )
+    out = {
+        "id": item["id"],
+        "admissible": bool(item["admissible"]),
+        "predicted": None,
+        "reason": None,
+        "row": None,
+        "rows": None,
+        "kinds": None,
+        "n_rows": 0,
+        "n_admitted": 0,
+        "admitted_claims": None,
+        "error": None,
+    }
+    try:
+        rows = brief_memory.parse_reconcile_response(
+            caller(brief_memory._RECONCILE_SYSTEM, prompt)
+        )
+    except Exception as e:  # noqa: BLE001 - the failure itself is the datum
+        out["error"] = f"{type(e).__name__}: {e}"
+        return out
+    merged = brief_memory.merge_ledger(
+        brief_memory.empty_ledger(), rows, item["first_seen"]
+    )
+    out["row"] = rows[0] if rows else None
+    out["rows"] = rows
+    out["kinds"] = [r.get("kind") for r in rows]
+    out["n_rows"] = len(rows)
+    out["n_admitted"] = len(merged["claims"])
+    out["admitted_claims"] = [c["claim"] for c in merged["claims"]]
+    if out["n_admitted"] == 0:
+        out["predicted"] = "rejected"
+        # Nothing entered the ledger either way, but "the model never proposed
+        # it" is a different mechanism from "the guard caught it", and a guard
+        # credited for extraction misses cannot be falsified.
+        out["reason"] = "not_emitted" if not rows else "observation"
+    elif out["n_admitted"] == out["n_rows"]:
+        out["predicted"] = "admitted"
+    else:
+        # The model answered one price-anchored claim with two rows — the level
+        # as an observation, the thesis as a claim. That is the rubric working as
+        # written, and calling it a bare "admitted" would hide the guard firing.
+        out["predicted"] = "split"
+        out["reason"] = "level dropped, thesis kept"
+    return out
+
+
+def score_admission(results: list[dict]) -> dict:
+    """Precision and recall of the GUARD, whose positive class is rejection.
+
+    The operational number is `junk_share_after`: of the rows that still enter the
+    ledger, what share should never have been there. Precision and recall answer
+    how the guard behaves; that one answers whether the ledger got cleaner.
+    """
+    # A split is a partial outcome on a single row and is excluded from the
+    # denominator rather than forced into a cell, the same way the break scorer
+    # excludes `unclear`. Read them off the per-item table by hand.
+    scored = [r for r in results if r["predicted"] in ("admitted", "rejected")]
+    tp = sum(1 for r in scored if not r["admissible"] and r["predicted"] == "rejected")
+    fp = sum(1 for r in scored if r["admissible"] and r["predicted"] == "rejected")
+    fn = sum(1 for r in scored if not r["admissible"] and r["predicted"] == "admitted")
+    tn = sum(1 for r in scored if r["admissible"] and r["predicted"] == "admitted")
+    admitted = tn + fn
+    return {
+        "n_items": len(results),
+        "n_scored": len(scored),
+        "n_errors": sum(1 for r in results if r.get("error")),
+        "n_split": sum(1 for r in results if r["predicted"] == "split"),
+        "n_not_emitted": sum(1 for r in results if r.get("reason") == "not_emitted"),
+        "tp": tp,
+        "fp": fp,
+        "fn": fn,
+        "tn": tn,
+        "precision": (tp / (tp + fp)) if (tp + fp) else None,
+        "recall": (tp / (tp + fn)) if (tp + fn) else None,
+        # Before the guard nothing was ever rejected: recall 0 by construction,
+        # and precision undefined because it never made a positive call.
+        "baseline_recall": 0.0,
+        "baseline_precision": None,
+        "junk_share_before": ((tp + fn) / len(scored)) if scored else None,
+        "junk_share_after": (fn / admitted) if admitted else None,
+        "lost": fp,
+    }
+
+
+def format_admission_report(
+    doc: dict, results: list[dict], scores: dict, variance: dict
+) -> str:
+    lines = [
+        "=" * 78,
+        "CLAIM-ADMISSION GUARD (news-brief-93u)",
+        "=" * 78,
+        f"fixture      : {len(doc['items'])} items, "
+        f"{sum(1 for i in doc['items'] if not i['admissible'])} labelled inadmissible",
+        f"scored under : {brief_memory.RECONCILE_MODEL}  "
+        f"prompt_version={brief_memory.PROMPT_VERSION}",
+        "",
+        f"{'id':<7}{'gold':<15}{'predicted':<11}note",
+        "-" * 78,
+    ]
+    for r in results:
+        gold = "admissible" if r["admissible"] else "INADMISSIBLE"
+        if r["error"]:
+            note = r["error"][:44]
+        elif r["admissible"] and r["predicted"] == "rejected":
+            note = "LOST a good claim"
+        elif not r["admissible"] and r["predicted"] == "admitted":
+            note = "junk let through"
+        elif r["predicted"] == "split":
+            note = (
+                f"{r['n_rows'] - r['n_admitted']}/{r['n_rows']} dropped: {r['reason']}"
+            )
+        else:
+            note = r["reason"] or ""
+        lines.append(f"{r['id']:<7}{gold:<15}{str(r['predicted'] or '-'):<11}{note}")
+
+    lines += [
+        "-" * 78,
+        "",
+        "=" * 78,
+        "SCORE",
+        "=" * 78,
+        f"scored {scores['n_scored']}/{scores['n_items']}   "
+        f"split (excluded) {scores['n_split']}   errors {scores['n_errors']}",
+        f"tp {scores['tp']}   fp {scores['fp']}   fn {scores['fn']}   tn {scores['tn']}",
+        "",
+        f"precision  {_pct(scores['precision']):>8}   baseline {_pct(scores['baseline_precision'])}",
+        f"recall     {_pct(scores['recall']):>8}   baseline {_pct(scores['baseline_recall'])}",
+        "",
+        f"junk share of the ledger, before : {_pct(scores['junk_share_before'])}",
+        f"junk share of the ledger, after  : {_pct(scores['junk_share_after'])}",
+        f"good claims lost                 : {scores['lost']}   <- these stop being "
+        "re-explained; a break on them can never be measured",
+    ]
+    if scores["n_not_emitted"]:
+        lines.append(
+            f"NOTE {scores['n_not_emitted']} rejection(s) were the model emitting no row "
+            "at all, not the guard firing. Do not credit those to the guard."
+        )
+
+    lines += [
+        "",
+        "=" * 78,
+        "ENUM VARIANCE (a uniform field looks populated and says nothing)",
+        "=" * 78,
+        "`kind` is the field this guard runs on: degenerate or absent here means",
+        "the numbers above measure the default, not a judgment.",
+    ]
+    for f, v in variance.items():
+        flag = (
+            "  <- DEGENERATE"
+            if v["degenerate"]
+            else ("  <- ABSENT" if v["absent"] else "")
+        )
+        lines.append(
+            f"{f:<10} n={v['n']:<4} distinct={v['distinct']}  {v['counts']}{flag}"
+        )
+    return "\n".join(lines)
 
 
 def score(results: list[dict]) -> dict:
@@ -340,15 +523,29 @@ def main(argv=None) -> int:
         help="auto uses the production REST path when ANTHROPIC_API_KEY is set, "
         "else the SDK against an `ant auth login` profile",
     )
+    ap.add_argument(
+        "--mode",
+        choices=MODES,
+        default="break",
+        help="break scores contradiction detection on a stored claim; admission "
+        "scores whether the claim should have been stored at all",
+    )
     args = ap.parse_args(argv)
 
     doc = load_gold_set()
     items = doc["items"][: args.limit] if args.limit else doc["items"]
     caller = choose_call(args.transport)
+    admission = args.mode == "admission"
 
     if args.dry_run:
-        sample = brief_memory.build_reconcile_prompt(
-            build_probe_ledger(items[0]), build_probe_brief(items[0])
+        sample = (
+            brief_memory.build_reconcile_prompt(
+                brief_memory.empty_ledger(), build_admission_brief(items[0])
+            )
+            if admission
+            else brief_memory.build_reconcile_prompt(
+                build_probe_ledger(items[0]), build_probe_brief(items[0])
+            )
         )
         print(
             f"{len(items)} items would be scored via {caller.__name__}. "
@@ -359,17 +556,22 @@ def main(argv=None) -> int:
 
     results = []
     for i, item in enumerate(items, 1):
-        r = probe(item, call=caller)
+        r = (
+            admission_probe(item, call=caller)
+            if admission
+            else probe(item, call=caller)
+        )
         results.append(r)
         print(
             f"  [{i}/{len(items)}] {r['id']} -> {r['predicted'] or r['error']}",
             flush=True,
         )
 
-    scores = score(results)
+    scores = score_admission(results) if admission else score(results)
     variance = field_variance([r["row"] for r in results if r["row"]])
     print()
-    print(format_report(doc, results, scores, variance))
+    formatter = format_admission_report if admission else format_report
+    print(formatter(doc, results, scores, variance))
 
     if args.json:
         args.json.write_text(

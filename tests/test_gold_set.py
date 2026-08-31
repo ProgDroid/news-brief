@@ -15,13 +15,18 @@ from scripts.score_gold_set import (
     CLASSIFIABLE,
     GOLD_SET_PATH,
     VALID_LABELS,
+    VARIANCE_FIELDS,
+    admission_probe,
+    build_admission_brief,
     build_probe_brief,
     build_probe_ledger,
     choose_call,
     field_variance,
     load_gold_set,
+    main,
     probe,
     score,
+    score_admission,
     sdk_call,
 )
 
@@ -276,3 +281,143 @@ def test_load_gold_set_rejects_an_empty_file(tmp_path):
 def test_gold_set_path_points_at_the_committed_fixture():
     assert GOLD_SET_PATH.exists()
     assert GOLD_SET_PATH.name == "gold_set_breaks.json"
+
+
+# ── Admission mode (news-brief-93u) ───────────────────────────────────────────
+# The break scorer asks "is this contradiction a break?". Admission asks the
+# prior question: should this row have entered the ledger at all? Six fixture
+# rows are labelled admissible=false, and the first run showed the single
+# surviving false positive and two of the four lost breaks all sit on them.
+def _stub(payload):
+    def call(system, user):
+        return json.dumps(payload)
+
+    return call
+
+
+def test_admission_brief_carries_the_claim_text():
+    b = build_admission_brief(ITEMS[0])
+    assert ITEMS[0]["claim"] in b
+
+
+def test_an_observation_label_is_scored_as_rejected():
+    r = admission_probe(ITEMS[0], call=_stub([{"claim": "x", "kind": "observation"}]))
+    assert r["predicted"] == "rejected"
+    assert r["reason"] == "observation"
+
+
+def test_a_claim_label_is_scored_as_admitted():
+    r = admission_probe(ITEMS[0], call=_stub([{"claim": "x", "kind": "claim"}]))
+    assert r["predicted"] == "admitted"
+
+
+def test_an_unlabelled_row_is_scored_as_admitted():
+    """merge_ledger fails open on a missing `kind`, and the scorer has to report
+    what the guard actually does, not what it was meant to do."""
+    r = admission_probe(ITEMS[0], call=_stub([{"claim": "x"}]))
+    assert r["predicted"] == "admitted"
+
+
+def test_emitting_nothing_is_rejected_but_recorded_separately():
+    """The row does not enter the ledger either way, so it scores as a rejection
+    — but 'the model never proposed it' is a different mechanism from 'the guard
+    caught it', and a guard credited for extraction misses is unfalsifiable."""
+    r = admission_probe(ITEMS[0], call=_stub([]))
+    assert r["predicted"] == "rejected"
+    assert r["reason"] == "not_emitted"
+
+
+def test_admission_probe_captures_a_failed_call():
+    def boom(system, user):
+        raise RuntimeError("connection reset")
+
+    r = admission_probe(ITEMS[0], call=boom)
+    assert r["predicted"] is None
+    assert "connection reset" in r["error"]
+
+
+def _adm(admissible, predicted):
+    return {"id": "x", "admissible": admissible, "predicted": predicted, "error": None}
+
+
+def test_score_admission_counts_the_guard_not_the_break():
+    results = [
+        _adm(False, "rejected"),  # tp - junk kept out
+        _adm(False, "admitted"),  # fn - junk let through
+        _adm(True, "rejected"),  # fp - a good claim lost
+        _adm(True, "admitted"),  # tn
+        _adm(True, "admitted"),
+    ]
+    s = score_admission(results)
+    assert (s["tp"], s["fp"], s["fn"], s["tn"]) == (1, 1, 1, 2)
+    assert s["precision"] == 0.5
+    assert s["recall"] == 0.5
+
+
+def test_score_admission_excludes_errored_rows():
+    s = score_admission([_adm(False, "rejected"), _adm(True, None)])
+    assert s["n_scored"] == 1
+
+
+def test_score_admission_reports_the_baseline_as_admitting_everything():
+    """Before the guard nothing was ever rejected, so its recall is 0 by
+    construction and its junk share is just the fixture's inadmissible rate."""
+    s = score_admission([_adm(False, "rejected"), _adm(True, "admitted")])
+    assert s["baseline_recall"] == 0.0
+    assert s["junk_share_before"] == 0.5
+
+
+def test_junk_share_after_is_measured_over_what_still_gets_in():
+    """The number that matters operationally: of the rows that still enter the
+    ledger, what share should never have been there."""
+    s = score_admission(
+        [_adm(False, "rejected"), _adm(False, "admitted"), _adm(True, "admitted")]
+    )
+    assert s["junk_share_before"] == pytest.approx(2 / 3)
+    assert s["junk_share_after"] == 0.5
+
+
+def test_kind_is_a_variance_field():
+    """A guard driven by a field that comes back uniform is not a guard."""
+    assert "kind" in VARIANCE_FIELDS
+    v = field_variance([{"kind": "claim"}, {"kind": "claim"}], fields=("kind",))
+    assert v["kind"]["degenerate"] is True
+
+
+def test_admission_dry_run_needs_no_api_key(capsys):
+    assert main(["--mode", "admission", "--dry-run", "--limit", "1"]) == 0
+    assert ITEMS[0]["claim"] in capsys.readouterr().out
+
+
+def test_a_split_reply_records_both_outcomes():
+    """The model may answer a price-anchored claim with TWO rows: the level as an
+    observation and the thesis as a claim. That is the rubric working as written
+    ('a fact may cite a level; it must not BE one'), and collapsing it to a bare
+    'admitted' hides the guard firing. Splits are reported, not scored."""
+    r = admission_probe(
+        ITEMS[0],
+        call=_stub(
+            [
+                {"claim": "Brent traded near $90", "kind": "observation"},
+                {"claim": "the two narratives cannot both hold", "kind": "claim"},
+            ]
+        ),
+    )
+    assert r["predicted"] == "split"
+    assert (r["n_rows"], r["n_admitted"]) == (2, 1)
+
+
+def test_probe_records_every_kind_the_model_used():
+    r = admission_probe(
+        ITEMS[0],
+        call=_stub([{"claim": "a", "kind": "observation"}, {"claim": "b"}]),
+    )
+    assert r["kinds"] == ["observation", None]
+
+
+def test_score_admission_excludes_splits_but_counts_them():
+    results = [_adm(False, "rejected"), _adm(False, "split"), _adm(True, "admitted")]
+    s = score_admission(results)
+    assert s["n_split"] == 1
+    assert s["n_scored"] == 2
+    assert s["recall"] == 1.0
