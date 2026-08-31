@@ -551,8 +551,10 @@ import scheduler
 UTC = timezone.utc
 
 
-def dt(y, m, d, hh, mm):
-    return datetime(y, m, d, hh, mm, tzinfo=UTC)
+def dt(y, m, d, hh, mm, ss=0):
+    # `ss` matters: several cases below sit a few seconds past a fire time,
+    # which is exactly where a polled scheduler observes it.
+    return datetime(y, m, d, hh, mm, ss, tzinfo=UTC)
 
 
 DAILY = scheduler.Schedule(
