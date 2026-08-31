@@ -40,6 +40,13 @@ x-newsbrief: &newsbrief
     - APCA_DATA_URL=${APCA_DATA_URL:-https://data.alpaca.markets}
     - POLYGRAM_EMAIL=${POLYGRAM_EMAIL:-}
     - POLYGRAM_PASSWORD=${POLYGRAM_PASSWORD:-}
+    # Modal proxy auth for the podcast MCP endpoint, which is deployed with
+    # requires_proxy_auth=True. Without these the call 401s at Modal's edge and
+    # the brief ships with no podcast context — and setting them on the host or
+    # in .env does nothing on its own, because compose passes through ONLY what
+    # is declared here. brief.py logs a warning naming the cause when unset.
+    - MODAL_PROXY_KEY=${MODAL_PROXY_KEY:-}
+    - MODAL_PROXY_SECRET=${MODAL_PROXY_SECRET:-}
     # Live prediction trading (REAL MONEY). All default to off/empty, and an empty
     # value keeps common.py's built-in default — so omitting them from your .env is
     # exactly as safe as not having these lines at all. Compose passes through ONLY
