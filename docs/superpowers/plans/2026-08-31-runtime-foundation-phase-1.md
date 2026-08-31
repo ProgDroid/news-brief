@@ -70,7 +70,7 @@ back everything requires `steps=0`, explicitly.
 `requirements.txt` — append:
 
 ```
-psycopg[binary]==3.2.10
+psycopg[binary]==3.3.4
 ```
 
 > Confirm the current stable `psycopg` 3.x at implementation time and pin that exact version; the project pins every dependency.
@@ -108,7 +108,7 @@ Add a Postgres service to the `test` job, immediately under `runs-on: ubuntu-lat
 ```yaml
     services:
       postgres:
-        image: postgres:17-alpine
+        image: postgres:18-alpine
         env:
           POSTGRES_PASSWORD: newsbrief
           POSTGRES_USER: newsbrief
@@ -131,7 +131,7 @@ and set the URL on the test step:
         run: pytest -q
 ```
 
-> Pin the same Postgres major here as in `docker-compose.yml`. `17-alpine` is a placeholder — confirm current stable.
+> Pinned to the current stable major, confirmed live during Task 1. Keep this identical to `docker-compose.yml`.
 
 - [ ] **Step 2: Write the failing tests**
 
@@ -153,7 +153,7 @@ pytestmark = pytest.mark.skipif(
     not db.database_url(),
     reason="DATABASE_URL is not set: start a Postgres and export it, e.g. "
     "docker run --rm -d -p 5432:5432 -e POSTGRES_PASSWORD=newsbrief "
-    "-e POSTGRES_USER=newsbrief -e POSTGRES_DB=newsbrief_test postgres:17-alpine",
+    "-e POSTGRES_USER=newsbrief -e POSTGRES_DB=newsbrief_test postgres:18-alpine",
 )
 
 
@@ -273,7 +273,7 @@ Start a database first:
 ```bash
 docker run --rm -d --name newsbrief-testdb -p 5432:5432 \
   -e POSTGRES_PASSWORD=newsbrief -e POSTGRES_USER=newsbrief \
-  -e POSTGRES_DB=newsbrief_test postgres:17-alpine
+  -e POSTGRES_DB=newsbrief_test postgres:18-alpine
 export DATABASE_URL=postgresql://newsbrief:newsbrief@localhost:5432/newsbrief_test
 pytest tests/test_db.py -v
 ```
@@ -1971,7 +1971,7 @@ services:
   # uid, and a `user:` override against an initialised data directory fails in a
   # way that reads as corruption.
   postgres:
-    image: postgres:17-alpine
+    image: postgres:18-alpine
     environment:
       - POSTGRES_USER=${POSTGRES_USER:-newsbrief}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
