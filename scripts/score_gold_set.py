@@ -72,7 +72,7 @@ TRANSPORTS = ("auto", "rest", "sdk")
 MODES = ("break", "admission")
 
 # Fields whose values are checked for variance across everything the model returns.
-VARIANCE_FIELDS = ("severity", "status", "origin", "kind")
+VARIANCE_FIELDS = ("severity", "status", "origin", "kind", "horizon_days")
 
 
 def sdk_call(system: str, user: str) -> str:

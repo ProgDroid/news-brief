@@ -213,3 +213,106 @@ been caught then. It is amended in bd rather than quietly reinterpreted.
   reversal ("talks are advancing" → "talks have collapsed") passes untouched. That is
   a real gap, not a solved problem — it is simply not measurable on this fixture,
   where every persistent miss happened to be numeric.
+
+---
+
+# `jx9.6`: the quarantine lifts, and the horizon lands
+
+**2026-08-31.** Epic 1's last item. Fixes #11 and #12, plus the decision that had
+been blocking it since 2026-08-29.
+
+## The gate, and why it was answered against its own wording
+
+The pre-registered condition was *"lift only after `jx9.9` restores recall AND a
+re-score holds precision."* Recall was **not** restored in the `broken` sense — it
+runs 14–57% across eight runs with no trend. Lifting anyway was a judgment call,
+made explicitly rather than by quietly reinterpreting the gate.
+
+What justified it is a number the gate did not anticipate:
+
+| run | all rows: precision / fp | **admissible rows only** |
+|---|---|---|
+| A, B, C (v4) | 100% / 0 | **100% / 0** |
+| D (v4+guard) | 75% / 1 | **100% / 0** |
+| E (v4+guard) | 100% / 0 | **100% / 0** |
+| F, G, H (v5) | 50%, 100%, 75% / 1, 0, 1 | **100% / 0** |
+
+**Every false positive in eight runs sat on an inadmissible row** — `gs-21` twice,
+which `93u` now rejects upstream. Break mode seeds the claim straight into the probe
+ledger, bypassing admission, so the "all rows" column scores a population production
+can no longer produce. On the rows that actually reach the ledger, `broken` has never
+once been wrong.
+
+That is the field the retention exemption keys on, so the risk the gate was written to
+protect against — a wrong verdict changing what the ledger keeps — is the one thing
+these runs measure directly. Low recall makes the lift **safer**, not riskier: fewer
+rows are affected, and the affected ones have never been wrong.
+
+## What shipped
+
+**TTL exemption, both non-standing statuses.** A broken claim is the accountability
+record and must outlive the window; a challenged one is still waiting to resolve.
+Ordinary silence still ages a *standing* claim out.
+
+**The working set splits them, deliberately against the spec's one-line phrasing.**
+§12.3 fix #11 says "exempt non-standing claims from TTL *and cap*". Taken literally
+that pins broken claims into the 25-row window — the window that is sent to the model
+and rendered to the reader — and crowding-out is this system's measured primary
+failure. The two statuses want opposite treatment:
+
+- **`broken` leaves the window entirely.** It stays in storage for measurement.
+  Rendering it under *"previous briefs already reported these"* would state a fact the
+  ledger knows to be false.
+- **`challenged` ranks first**, so it is never what gets crowded out — a challenge
+  that leaves the window can never resolve. Implemented as **priority, not extra
+  slots**: the cap is a prompt budget, and growing it courts the truncation this repo
+  has hit four times.
+
+Challenged claims render with an `(in doubt)` cue, the same parenthetical shape as the
+existing corroboration cue. `jx9.2`'s lesson was that a *bare marker replacing an
+explanation* gets adopted as vocabulary, not that parentheticals are unsafe.
+
+**`horizon_days` / `resolution_date`, shipped quarantined.** `horizon_elapsed` is
+stamped alongside `broke_on` at resolution and never rewritten. Nothing reads any of
+them; retention still runs purely on the TTL.
+
+That gives the epic one consistent rule instead of an ad-hoc call per field:
+**quarantine is the default for an unmeasured field, and measurement is what lifts
+it.** `status` earned its lift across eight runs. `horizon_days` has earned nothing
+yet, so it ships written and unread.
+
+## `horizon_days` survived its first measurement, which no new field here had
+
+| mode | `horizon_days` |
+|---|---|
+| admission (new rows) | `{7: 10, 30: 7, 180: 4, 60: 2}` — 4 distinct |
+| break (echoed rows) | absent, n=0 |
+
+Two things are worth noting. It did **not** pile up on the stated default of 30 — `7`
+is the modal answer — so this is judgment, not default-echo, which is the failure
+`severity` showed at `high` 25/25. And the absence in break mode is the rubric working
+as written, not a gap: it says to omit the field for a fact already in memory, and
+every break probe echoes an existing id.
+
+`origin` stays quarantined. It is still unmeasured and was not in scope.
+
+## Also measured this run
+
+The v5 admission run came back **precision 100%, recall 100%, junk share after 0%**
+(tp 2, fp 0, fn 0) — the best admission result so far, though on 2 scored positives
+with 4 splits excluded. The `jx9.9` rewrite guard fired 6–7 times per run, consistent
+with its earlier rate.
+
+## Caveats
+
+- **Eight runs is eight samples of a noisy quantity, not a proof.** "100% precision on
+  admissible rows, always" rests on 5 admissible true breaks and a handful of positive
+  calls per run.
+- **This is the first change in Epic 1 that alters brief output.** Everything before it
+  was byte-identical. Broken claims now leave the reader-facing block and challenged
+  ones carry a cue.
+- **Storage now grows without bound in time** for non-standing rows — filed as
+  `news-brief-6wc`. The fix, when it is needed, is archiving resolved rows out of the
+  hot file, never eviction: deleting the accountability record defeats the point.
+- **`horizon_days` variance is one admission run.** It is quarantined precisely
+  because one run is not enough to wire anything to it.

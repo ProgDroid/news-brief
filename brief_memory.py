@@ -6,7 +6,7 @@ the brief unaffected and the prior ledger intact)."""
 import json
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import requests
@@ -52,6 +52,17 @@ _DEFAULT_ORIGIN = "extracted"
 # on every read, which spec 12.2 rates worse than a missing one.
 _VALID_KIND = frozenset({"claim", "observation"})
 _DEFAULT_KIND = "claim"
+# Claim horizon (news-brief-jx9.6, spec 3.3). "Broken at 2 days against a 180-day
+# horizon" is a calibration datapoint; "broken" alone is not. WRITE-THEN-
+# QUARANTINE: horizon_days and resolution_date are written on every row that
+# earns them and read by NOTHING — retention still runs purely on the TTL. That
+# is this epic's settled rule: quarantine is the default for an unmeasured field,
+# and measurement is what lifts it. `status` earned its lift across five gold-set
+# runs; these have earned nothing yet, and 12.2 predicts what an unmeasured field
+# comes back as (severity: `high` 25/25). There is deliberately NO code-side
+# default — a numeric default would make the field degenerate by construction,
+# and an absent horizon is the honest reading.
+_MAX_HORIZON_DAYS = 3650
 # Wording overlap at which two claims count as the same fact. See _is_duplicate_claim.
 DEDUP_SIMILARITY = 0.85
 _DEDUP_STOPWORDS = frozenset(
@@ -67,13 +78,14 @@ RECONCILE_MODEL = "claude-haiku-4-5-20251001"
 # from a change in the world. Version 1 is the template as of the Epic 1 repair —
 # rows written before this existed carry no prompt_version at all, and that
 # absence is itself the correct reading.
-# v4 (news-brief-93u): added the "kind" rubric — claim vs observation — that the
+# v5 (news-brief-jx9.6): added the "horizon_days" rubric with worked examples
+# across its range. v4 (news-brief-93u): added the "kind" rubric — claim vs observation — that the
 # claim-admission guard in merge_ledger enforces. v3 (news-brief-jx9.2 / 47q):
 # recalibrated the severity rubric with worked examples across all three tiers
 # plus an over-marking warning, and added the "driver" rule. v2 added "origin".
 # v1 was the Epic 1 repair template — status rules, restatement/absence negative
 # cases, id-reuse pressure.
-PROMPT_VERSION = 4
+PROMPT_VERSION = 5
 # A full working set serialises to ~2400 output tokens, so the old 2048
 # budget truncated the JSON array before its closing "]" — the parser then
 # misreported the cut-off as "no JSON array". Give generous headroom and bound
@@ -235,6 +247,7 @@ def _reaffirm(base: dict, mc: dict, today: str) -> None:
     drv = mc.get("driver")
     if isinstance(drv, str) and drv.strip():
         base["driver"] = drv.strip()
+    _set_horizon(base, mc.get("horizon_days"), base.get("first_seen", today))
     _apply_status(base, proposed, evidence, today)
 
 
@@ -318,6 +331,7 @@ def merge_ledger(
         }
         if isinstance(mc.get("driver"), str) and mc["driver"].strip():
             row["driver"] = mc["driver"].strip()
+        _set_horizon(row, mc.get("horizon_days"), today)
         _apply_status(row, mc.get("status"), mc.get("broken_by"), today)
         _stamp_provenance(row, extractor_model, prompt_version)
         result.append(row)
@@ -325,10 +339,16 @@ def merge_ledger(
     for c in prior.get("claims", []):
         if c.get("id") not in returned:
             result.append(dict(c))
+    # Non-standing claims are exempt from the TTL (news-brief-jx9.6). A broken
+    # claim is the accountability record — spec 3.3: the original claim is what
+    # accountability is measured against — and a challenged one is still waiting
+    # to resolve. Ordinary silence still ages a STANDING claim out, which is what
+    # keeps storage from growing without bound.
     result = [
         c
         for c in result
-        if _days_between(c["last_reaffirmed"], today) - _ttl_bonus(c.get("severity"))
+        if (_coerce_status(c.get("status")) or _DEFAULT_STATUS) != _DEFAULT_STATUS
+        or _days_between(c["last_reaffirmed"], today) - _ttl_bonus(c.get("severity"))
         <= retire_after_days
     ]
     # Stored in working-set order (severity first, then recency) so the window is
@@ -342,12 +362,34 @@ def merge_ledger(
 
 
 def select_working_set(ledger: dict, limit: int = WORKING_SET_SIZE) -> list[dict]:
-    """The window of claims the model and the reader actually see: highest
-    severity first, then most recently reaffirmed. Everything outside it stays in
-    storage untouched — merge_ledger keeps any claim the model did not return."""
-    claims = sorted(
-        ledger.get("claims", []),
-        key=lambda c: (_severity_rank(c.get("severity")), c.get("last_reaffirmed", "")),
+    """The window of claims the model and the reader actually see: challenged
+    first, then highest severity, then most recently reaffirmed. Everything
+    outside it stays in storage untouched — merge_ledger keeps any claim the
+    model did not return.
+
+    The two non-standing statuses get opposite treatment (news-brief-jx9.6).
+    BROKEN claims are resolved: they belong in storage for measurement and are
+    dropped from this window entirely, because rendering one under "previous
+    briefs already reported these" states a fact the ledger knows to be false.
+    CHALLENGED claims are live: they rank first so they are never what gets
+    crowded out, since a challenge that leaves the window can never resolve —
+    the mechanism the 2026-08-29 replay showed losing 54 of 68 claims.
+
+    Note the exemption is PRIORITY, not extra slots: the cap is a prompt budget
+    (~2,400 output tokens) and growing the window would risk the truncation this
+    repo has hit four times.
+    """
+    claims = [
+        c
+        for c in ledger.get("claims", [])
+        if (_coerce_status(c.get("status")) or _DEFAULT_STATUS) != "broken"
+    ]
+    claims.sort(
+        key=lambda c: (
+            (_coerce_status(c.get("status")) or _DEFAULT_STATUS) == "challenged",
+            _severity_rank(c.get("severity")),
+            c.get("last_reaffirmed", ""),
+        ),
         reverse=True,
     )
     return claims[:limit]
@@ -426,9 +468,21 @@ brief. Rules:
   behave and names what would prove it wrong. The test is whether the fact would
   still mean something a week from now with its numbers stripped out. When in
   doubt, use "claim".
+- For each NEW fact, set "horizon_days" to how long you expect it to hold before
+  it is either settled or overtaken — the point at which someone should ask "is
+  this still true?". Use these worked examples so the range is not guesswork:
+    180 = a structural or strategic condition (an alliance posture, a trade
+      regime, a central bank's policy stance).
+    30 = a negotiation, a campaign, a sanctions package working through — a
+      process with a plausible resolution inside a month. USE THIS BY DEFAULT.
+    7 = a fast-moving situation expected to settle within the week (a scheduled
+      vote, a deadline, an imminent decision).
+  A one-time event that simply happened and cannot un-happen still gets a
+  horizon: it is how long the event stays worth knowing, not how long it stays
+  true. Omit the field only for a fact already in memory. When in doubt, use 30.
 - Return at most {max_claims} items — keep only the most important durable facts,
   and keep each "claim" to one terse sentence (no more than ~30 words).
-Each array item: {{"id": "<existing id, omit if new>", "claim": "<short fact>", "topic": "<short label>", "source_count": <integer>, "severity": "<low|normal|high>", "status": "<standing|challenged|broken>", "broken_by": "<what contradicted it; omit unless broken>", "origin": "<extracted|authored>", "kind": "<claim|observation>", "driver": "<short mechanism phrase; omit if none>"}}.
+Each array item: {{"id": "<existing id, omit if new>", "claim": "<short fact>", "topic": "<short label>", "source_count": <integer>, "severity": "<low|normal|high>", "status": "<standing|challenged|broken>", "broken_by": "<what contradicted it; omit unless broken>", "origin": "<extracted|authored>", "kind": "<claim|observation>", "horizon_days": <integer; omit for a fact already in memory>, "driver": "<short mechanism phrase; omit if none>"}}.
 Output the JSON array and nothing else.
 
 CURRENT memory:
@@ -464,8 +518,17 @@ def render_established_block(ledger: dict) -> str:
         return ""
     rows = []
     for c in claims:
+        # A challenged claim is still worth not re-explaining, but the model must
+        # not lean on it. Same parenthetical shape as the corroboration cue: what
+        # jx9.2 found harmful was a BARE marker standing in place of an
+        # explanation, not a cue attached to one.
+        cues = []
+        if (_coerce_status(c.get("status")) or _DEFAULT_STATUS) == "challenged":
+            cues.append("in doubt")
         cue = _corroboration_cue(c.get("source_count"))
-        tag = f" ({cue})" if cue else ""
+        if cue:
+            cues.append(cue)
+        tag = f" ({', '.join(cues)})" if cues else ""
         driver = str(c.get("driver") or "").strip()
         note = f" — driver: {driver}" if driver else ""
         rows.append(f"  • [{c.get('topic') or 'general'}]{tag} {c['claim']}{note}")
@@ -535,6 +598,42 @@ def _coerce_origin(v) -> str | None:
     return None
 
 
+def _coerce_horizon_days(v) -> int | None:
+    """How long the claim is expected to hold, in days. bool is rejected before
+    the int check because bool subclasses int, so True would otherwise read as a
+    one-day horizon."""
+    if isinstance(v, bool) or not isinstance(v, (int, str)):
+        return None
+    try:
+        n = int(str(v).strip())
+    except (TypeError, ValueError):
+        return None
+    return n if 1 <= n <= _MAX_HORIZON_DAYS else None
+
+
+def _resolution_date(first_seen: str, horizon_days: int) -> str | None:
+    try:
+        start = datetime.strptime(first_seen, "%Y-%m-%d")
+    except (TypeError, ValueError):
+        return None
+    return (start + timedelta(days=horizon_days)).strftime("%Y-%m-%d")
+
+
+def _set_horizon(row: dict, proposed, first_seen: str) -> None:
+    """Write horizon_days and its derived resolution_date, once. The horizon is a
+    commitment made when the claim was made; letting it drift on every
+    reaffirmation would make 'broken at 2 days against 180' unfalsifiable."""
+    if row.get("horizon_days") is not None:
+        return
+    days = _coerce_horizon_days(proposed)
+    if days is None:
+        return
+    row["horizon_days"] = days
+    resolves = _resolution_date(first_seen, days)
+    if resolves:
+        row["resolution_date"] = resolves
+
+
 def _coerce_kind(v) -> str | None:
     if not isinstance(v, str):
         return None
@@ -553,6 +652,12 @@ def _apply_status(row: dict, proposed, broken_by, today: str) -> None:
     row["status"] = _coerce_status(proposed) or prior
     if row["status"] != _DEFAULT_STATUS and not row.get("broke_on"):
         row["broke_on"] = today
+        # How much of the claim's own horizon it survived. Recorded only when a
+        # horizon exists, because elapsed days mean nothing without the
+        # commitment they are measured against, and stamped alongside broke_on so
+        # a later reaffirmation cannot move it.
+        if row.get("horizon_days") is not None:
+            row["horizon_elapsed"] = _days_between(row.get("first_seen", today), today)
     if isinstance(broken_by, str) and broken_by.strip():
         row["broken_by"] = broken_by.strip()
 
@@ -608,6 +713,9 @@ def parse_reconcile_response(text: str) -> list[dict]:
             knd = _coerce_kind(item.get("kind"))
             if knd is not None:
                 entry["kind"] = knd
+            hor = _coerce_horizon_days(item.get("horizon_days"))
+            if hor is not None:
+                entry["horizon_days"] = hor
             drv = item.get("driver")
             if isinstance(drv, str) and drv.strip():
                 entry["driver"] = drv.strip()

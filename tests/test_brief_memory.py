@@ -1091,8 +1091,11 @@ def test_reconcile_prompt_says_absence_is_not_contradiction():
 
 
 # — Quarantine: nothing reads status yet —
-def test_render_output_is_unaffected_by_status():
-    standing = {"version": 1, "claims": [_mk_claim("c-0001", claim="a durable fact")]}
+def test_a_broken_claim_is_not_rendered_as_background():
+    """INVERTED by news-brief-jx9.6, deliberately, not deleted: this asserted the
+    render was unaffected by status while the field was quarantined. Presenting a
+    broken claim under 'Previous briefs already reported these' states a fact the
+    ledger knows to be false — the exact failure the epic exists to remove."""
     broken = {
         "version": 1,
         "claims": [
@@ -1104,16 +1107,49 @@ def test_render_output_is_unaffected_by_status():
             )
         ],
     }
-    assert bm.render_established_block(broken) == bm.render_established_block(standing)
+    assert bm.render_established_block(broken) == ""
 
 
-def test_broken_claim_still_retires_on_ttl():
-    """Quarantine boundary: news-brief-jx9.6 will exempt non-standing claims from
-    the TTL. Until it lands, status must not change retention."""
+def test_a_challenged_claim_is_rendered_with_a_doubt_cue():
+    """It is still live and still worth not re-explaining, but the model must not
+    lean on it. Same parenthetical shape as the corroboration cue already there."""
+    challenged = {
+        "version": 1,
+        "claims": [
+            dict(_mk_claim("c-0001", claim="a durable fact"), status="challenged")
+        ],
+    }
+    block = bm.render_established_block(challenged)
+    assert "a durable fact" in block
+    assert "in doubt" in block
+
+
+def test_a_broken_claim_is_exempt_from_the_ttl():
+    """INVERTED by news-brief-jx9.6, deliberately, not deleted: this test used to
+    assert the opposite as the write-then-quarantine boundary. The quarantine
+    lifted once five gold-set runs measured `broken` at ~100% precision. A broken
+    claim is the accountability record — spec 3.3 says the original claim is what
+    accountability is measured against — so it must outlive the TTL."""
     prior = {
         "version": 1,
         "claims": [dict(_mk_claim("c-0001", "2026-06-10"), status="broken")],
     }
+    assert len(bm.merge_ledger(prior, [], "2026-06-24")["claims"]) == 1
+
+
+def test_a_challenged_claim_is_exempt_from_the_ttl():
+    prior = {
+        "version": 1,
+        "claims": [dict(_mk_claim("c-0001", "2026-06-10"), status="challenged")],
+    }
+    assert len(bm.merge_ledger(prior, [], "2026-06-24")["claims"]) == 1
+
+
+def test_a_standing_claim_still_retires_on_ttl():
+    """The exemption is for resolved and disputed rows only. Ordinary silence
+    still ages a claim out, which is what keeps the ledger from growing without
+    bound."""
+    prior = {"version": 1, "claims": [_mk_claim("c-0001", "2026-06-10")]}
     assert bm.merge_ledger(prior, [], "2026-06-24")["claims"] == []
 
 
@@ -1653,6 +1689,7 @@ def test_reconcile_budget_keeps_headroom_for_a_full_working_set():
         "origin": "extracted",
         "driver": "z" * 60,
         "kind": "claim",
+        "horizon_days": 180,
     }
     worst = json.dumps([item] * bm.WORKING_SET_SIZE, indent=2)
     approx_tokens = len(worst) / 3.5  # conservative chars/token for JSON
@@ -1968,3 +2005,176 @@ def test_a_number_dropping_rewrite_with_no_id_becomes_a_new_row():
     claims = {c["claim"] for c in out["claims"]}
     assert "Colombia holds 6 pts, Portugal 4 pts" in claims
     assert "both teams hold 4 pts" in claims
+
+
+# ── Fix #11/#12: retention exemption + horizon (news-brief-jx9.6) ─────────────
+# The write-then-quarantine on `status` LIFTS here. Five gold-set runs measured
+# `broken` at ~100% precision (the one false positive sat on an inadmissible row
+# the 93u guard now rejects upstream), and jx9.9 closed the silent-absorption
+# path, so a contradiction now leaves a record instead of vanishing. The two
+# statuses get opposite treatment on purpose: `broken` is RESOLVED and belongs in
+# storage for measurement, `challenged` is LIVE and has to stay in the model's
+# view or it can never resolve — the crowding-out mechanism the replay showed
+# losing 54 of 68 claims. `origin` stays quarantined: still unmeasured.
+def test_a_broken_claim_leaves_the_working_set():
+    ledger = {
+        "version": 1,
+        "claims": [
+            dict(_mk_claim("c-0001"), status="broken"),
+            _mk_claim("c-0002"),
+        ],
+    }
+    assert [c["id"] for c in bm.select_working_set(ledger)] == ["c-0002"]
+
+
+def test_a_challenged_claim_is_never_the_one_evicted():
+    """Cap exemption, implemented as priority rather than as extra slots: a
+    challenged row outranks standing rows so it is never what gets crowded out."""
+    claims = [_mk_claim(f"c-{i:04d}", sev="high") for i in range(1, 31)]
+    claims.append(dict(_mk_claim("c-0099", sev="low"), status="challenged"))
+    got = bm.select_working_set({"version": 1, "claims": claims})
+    assert "c-0099" in [c["id"] for c in got]
+
+
+def test_the_working_set_still_respects_the_prompt_budget():
+    """The cap is a PROMPT BUDGET, not a storage limit. Exempting challenged rows
+    by growing the window would risk the truncation this repo has hit four times,
+    so the exemption must never make the window bigger."""
+    claims = [dict(_mk_claim(f"c-{i:04d}"), status="challenged") for i in range(1, 41)]
+    assert len(bm.select_working_set({"version": 1, "claims": claims})) == (
+        bm.WORKING_SET_SIZE
+    )
+
+
+# horizon_days / resolution_date ship WRITE-THEN-QUARANTINE, and that is the
+# consistent rule this epic settled on: quarantine is the default for an
+# UNMEASURED field, and measurement is what lifts it. `status` earned its lift
+# today across five runs; these have earned nothing yet, and 12.2 predicts what
+# happens to an unmeasured field — severity came back `high` 25/25.
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        (30, 30),
+        ("90", 90),
+        (1, 1),
+        (0, None),  # a zero-day horizon is not a horizon
+        (-5, None),
+        (99999, None),  # beyond any brief's reach; almost certainly a mis-parse
+        ("soon", None),
+        (None, None),
+        (True, None),  # bool is an int subclass; reject it explicitly
+    ],
+)
+def test_coerce_horizon_days(raw, expected):
+    assert bm._coerce_horizon_days(raw) == expected
+
+
+def test_resolution_date_is_first_seen_plus_the_horizon():
+    out = bm.merge_ledger(
+        {"version": 1, "claims": []},
+        [{"claim": "a thesis", "horizon_days": 30}],
+        "2026-06-01",
+    )
+    got = out["claims"][0]
+    assert got["horizon_days"] == 30
+    assert got["resolution_date"] == "2026-07-01"
+
+
+def test_a_claim_without_a_horizon_carries_no_resolution_date():
+    """No code-side default. A numeric default would make the field degenerate by
+    construction, and absence is the honest reading — the same call made for
+    prompt_version on pre-versioning rows."""
+    out = bm.merge_ledger(
+        {"version": 1, "claims": []}, [{"claim": "a fact"}], "2026-06-01"
+    )
+    assert "horizon_days" not in out["claims"][0]
+    assert "resolution_date" not in out["claims"][0]
+
+
+def test_horizon_elapsed_is_recorded_when_the_claim_resolves():
+    """'Broken at 2 days against a 180-day horizon' is a calibration datapoint;
+    'broken' alone is not (spec 3.3)."""
+    prior = {
+        "version": 1,
+        "claims": [
+            dict(_mk_claim("c-0001", "2026-06-01"), horizon_days=180),
+        ],
+    }
+    out = bm.merge_ledger(
+        prior,
+        [{"id": "c-0001", "claim": "c-0001", "status": "broken", "broken_by": "x"}],
+        "2026-06-03",
+    )
+    assert out["claims"][0]["horizon_elapsed"] == 2
+
+
+def test_horizon_elapsed_is_not_rewritten_by_a_later_reaffirmation():
+    """It records when the ledger learned the claim failed, exactly as broke_on
+    does, so a later touch must not move it."""
+    prior = {
+        "version": 1,
+        "claims": [
+            dict(
+                _mk_claim("c-0001", "2026-06-01"),
+                status="broken",
+                broke_on="2026-06-03",
+                horizon_elapsed=2,
+            )
+        ],
+    }
+    out = bm.merge_ledger(prior, [{"id": "c-0001", "claim": "c-0001"}], "2026-06-20")
+    assert out["claims"][0]["horizon_elapsed"] == 2
+
+
+def test_resolution_date_does_not_affect_retention():
+    """The quarantine: resolution_date is written and read by NOTHING. A standing
+    claim long past its horizon still lives or dies purely on the TTL."""
+    prior = {
+        "version": 1,
+        "claims": [
+            dict(
+                _mk_claim("c-0001", "2026-06-23"),
+                horizon_days=1,
+                resolution_date="2026-06-24",
+            )
+        ],
+    }
+    assert len(bm.merge_ledger(prior, [], "2026-06-25")["claims"]) == 1
+
+
+def test_parse_extracts_horizon_days():
+    got = bm.parse_reconcile_response('[{"claim": "a", "horizon_days": 90}]')
+    assert got[0]["horizon_days"] == 90
+
+
+def test_parse_tolerates_a_bad_horizon():
+    row = bm.parse_reconcile_response('[{"claim": "a", "horizon_days": "soon"}]')[0]
+    assert "horizon_days" not in row
+
+
+def test_reconcile_prompt_teaches_horizon_days_with_worked_examples():
+    p = bm.build_reconcile_prompt({"version": 1, "claims": []}, "brief").lower()
+    assert "horizon_days" in p
+    assert "180" in p  # a worked long-horizon example
+
+
+def test_a_reaffirmation_can_set_a_horizon_the_row_never_had():
+    """Otherwise the 25 rows already in the live ledger could never acquire one."""
+    prior = {"version": 1, "claims": [_mk_claim("c-0001")]}
+    out = bm.merge_ledger(
+        prior, [{"id": "c-0001", "claim": "c-0001", "horizon_days": 60}], "2026-06-24"
+    )
+    assert out["claims"][0]["horizon_days"] == 60
+
+
+def test_a_reaffirmation_does_not_move_an_existing_horizon():
+    """The horizon is a commitment made when the claim was made; letting it drift
+    each day would make 'broken at 2 days against 180' unfalsifiable."""
+    prior = {
+        "version": 1,
+        "claims": [dict(_mk_claim("c-0001"), horizon_days=180)],
+    }
+    out = bm.merge_ledger(
+        prior, [{"id": "c-0001", "claim": "c-0001", "horizon_days": 7}], "2026-06-24"
+    )
+    assert out["claims"][0]["horizon_days"] == 180
