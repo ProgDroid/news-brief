@@ -177,3 +177,77 @@ def test_advisory_lock_cleanup_does_not_mask_the_original_exception(clean_db):
         assert "this_column_does_not_exist" in str(exc_info.value)
     finally:
         conn.close()
+
+
+# APPENDED IN TASK 4, NOT TASK 3. Everything below imports `supervisor`, which
+# does not exist yet at Task 3 — but the `clean_db` fixture lives here, so these
+# ledger tests belong in this file rather than in a duplicated fixture next door.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_a_refused_run_is_recorded_as_missed_not_finished(clean_db):
+    """A supervisor-spawned child that finds the lock held never ran. Recording
+    it 'finished' would make /jobs report work that did not happen."""
+    import supervisor
+
+    run_id = db.start_run(clean_db, "collect", None, "scheduled")
+    supervisor._close_run(run_id, brief.EX_ALREADY_RUNNING)
+
+    status, code = clean_db.execute(
+        "SELECT status, exit_code FROM job_runs WHERE id = %s", (run_id,)
+    ).fetchone()
+    assert status == "missed"
+    assert code == brief.EX_ALREADY_RUNNING
+
+
+def test_reclaim_closes_a_run_orphaned_by_a_restart(clean_db):
+    """A container restart kills the child, so nobody closes its row. Without
+    reclaim the run shows 'running' forever and no alert ever fires."""
+    import supervisor
+
+    run_id = db.start_run(clean_db, "collect", None, "scheduled")
+
+    reclaimed = supervisor.reclaim_orphans(clean_db)
+
+    assert reclaimed == ["collect"]
+    status, code = clean_db.execute(
+        "SELECT status, exit_code FROM job_runs WHERE id = %s", (run_id,)
+    ).fetchone()
+    assert status == "missed"
+    assert code == supervisor.EX_ORPHANED
+
+
+def test_reclaim_leaves_a_genuinely_running_job_alone(clean_db):
+    """Ownership is decided by the advisory lock, not guessed: if a live process
+    still holds it, the run is not an orphan."""
+    import supervisor
+
+    run_id = db.start_run(clean_db, "collect", None, "scheduled")
+    holder = db.connect()
+    with db.advisory_lock(holder, "collect") as got:
+        assert got is True
+        assert supervisor.reclaim_orphans(clean_db) == []
+    holder.close()
+
+    status = clean_db.execute(
+        "SELECT status FROM job_runs WHERE id = %s", (run_id,)
+    ).fetchone()[0]
+    assert status == "running"
+
+
+def test_a_reclaimed_run_is_not_retried(clean_db):
+    """Deliberate: a collect killed halfway has polled its batch and may have
+    opened paper positions, so re-running it blind is worse than not running it.
+    The fire time stays consumed; the operator gets an alert instead."""
+    import scheduler
+    import supervisor
+
+    spec = next(s for s in scheduler.SCHEDULES if s.job == "collect")
+    now = datetime(2026, 8, 31, 6, 0, 30, tzinfo=timezone.utc)
+    fire = scheduler.previous_fire(spec, now)
+    db.start_run(clean_db, "collect", fire, "scheduled")
+
+    supervisor.reclaim_orphans(clean_db)
+
+    d = scheduler.decide(spec, now, db.latest_scheduled_for(clean_db, "collect"))
+    assert d.action == "skip"

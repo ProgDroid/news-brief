@@ -36,7 +36,16 @@ DATA_DIR = Path(os.environ.get("NEWSBRIEF_DATA_DIR", "/app/logs"))
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 def _log_handlers() -> list[logging.Handler]:
+    """Console always; the rotating file only for the process that owns it.
+
+    Several processes each holding a RotatingFileHandler on one file fight over
+    the rotation rename and lose lines. The supervisor is the single writer and
+    sets NEWSBRIEF_LOG_FILE=1 for itself; children inherit an explicit 0 and log
+    to stdout, which the supervisor drains into the file with their name.
+    """
     handlers: list[logging.Handler] = [logging.StreamHandler()]
+    if os.environ.get("NEWSBRIEF_LOG_FILE", "1") != "1":
+        return handlers
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         # Rotate so the log can't grow unbounded over the container's lifetime:

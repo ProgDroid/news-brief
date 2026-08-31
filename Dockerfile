@@ -15,7 +15,7 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-reco
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY common.py trading.py polygram_live.py validation.py brief.py brief_memory.py claim_verify.py retention.py db.py scheduler.py .
+COPY common.py trading.py polygram_live.py validation.py brief.py brief_memory.py claim_verify.py retention.py db.py scheduler.py supervisor.py .
 COPY migrations/ ./migrations/
 COPY enrichment/ ./enrichment/
 
