@@ -53,8 +53,20 @@ def advisory_lock(conn: psycopg.Connection, name: str):
         yield got
     finally:
         if got and not conn.closed:
-            conn.execute("SELECT pg_advisory_unlock(%s)", (key,))
-            conn.commit()
+            # A statement that failed inside the `with` block leaves the
+            # transaction aborted; pg_advisory_unlock on an aborted transaction
+            # raises InFailedSqlTransaction, which — unguarded — replaces the
+            # real error with an unrelated one right as it propagates. Roll
+            # back first so unlock can run, and swallow anything cleanup itself
+            # raises: release bookkeeping must not be able to mask, or invent,
+            # a failure.
+            try:
+                if conn.info.transaction_status == psycopg.pq.TransactionStatus.INERROR:
+                    conn.rollback()
+                conn.execute("SELECT pg_advisory_unlock(%s)", (key,))
+                conn.commit()
+            except Exception:
+                log.exception(f"Failed to release advisory lock for '{name}'")
 
 
 def _ensure_migrations_table(conn: psycopg.Connection) -> None:

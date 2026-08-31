@@ -128,3 +128,52 @@ def test_a_spawned_run_consumes_its_fire_time_immediately(clean_db):
     later = now + timedelta(seconds=scheduler.TICK_SECONDS)
     after = scheduler.decide(spec, later, db.latest_scheduled_for(clean_db, "collect"))
     assert after.action == "skip", "the fire time must be spent at spawn, not at lock"
+
+
+def test_an_infrastructure_failure_alerts_and_exits_nonzero(clean_db, monkeypatch):
+    """A Postgres outage on the connect/lock/start_run path — not just a
+    crash inside fn() — must alert like any other failure, not escape as an
+    unhandled traceback that never reaches Telegram (fix round 1, finding 1)."""
+    alerts = []
+    monkeypatch.setattr(brief, "telegram_alert", lambda msg: alerts.append(msg))
+
+    def broken_connect():
+        raise RuntimeError("could not connect to server")
+
+    monkeypatch.setattr(db, "connect", broken_connect)
+
+    code = brief.run_job("collect", lambda: None, trigger="manual")
+
+    assert code != 0
+    assert alerts, "an infra failure must alert, not vanish as a bare traceback"
+    assert "collect" in alerts[0]
+
+
+def test_an_unknown_trigger_is_coerced_rather_than_reaching_the_database(clean_db):
+    """job_runs.trigger carries CHECK (trigger IN ('scheduled','catchup',
+    'manual')). NEWSBRIEF_TRIGGER arrives from the environment unvalidated, so
+    a typo must be coerced to 'manual' rather than reaching that constraint
+    (fix round 1, finding 2)."""
+    code = brief.run_job("collect", lambda: None, trigger="not-a-real-trigger")
+    assert code == 0
+    assert _runs(clean_db, "collect") == [("finished", "manual")]
+
+
+def test_advisory_lock_cleanup_does_not_mask_the_original_exception(clean_db):
+    """A statement that fails inside the lock aborts the transaction; the
+    unlock in advisory_lock's own cleanup must not raise InFailedSqlTransaction
+    over top of the real error (fix round 1, finding 2)."""
+    import psycopg
+
+    conn = db.connect()
+    try:
+        with pytest.raises(Exception) as exc_info:
+            with db.advisory_lock(conn, "collect") as got:
+                assert got is True
+                conn.execute("SELECT this_column_does_not_exist FROM job_runs")
+        assert not isinstance(exc_info.value, psycopg.errors.InFailedSqlTransaction), (
+            "the release-time error masked the original failure"
+        )
+        assert "this_column_does_not_exist" in str(exc_info.value)
+    finally:
+        conn.close()
