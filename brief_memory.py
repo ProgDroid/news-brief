@@ -147,6 +147,23 @@ def _is_duplicate_claim(a: str, b: str) -> bool:
     return len(a_words & b_words) / len(a_words | b_words) >= DEDUP_SIMILARITY
 
 
+def _dropped_numbers(stored: str, rewritten: str) -> frozenset:
+    """Numbers the STORED claim asserted that a rewrite no longer carries.
+
+    Dropped, never merely different: adding a number is what refinement looks
+    like ("raised to 1.0%" -> "raised to 1.0% on June 16"), and treating that as
+    a contradiction would break the rewording the prompt is right to allow. A
+    number the claim previously asserted going missing is the other thing —
+    "Colombia holds 6 pts" coming back as "both teams hold 4 pts" withdraws an
+    assertion, and on the 2026-08-31 gold-set runs that separated the classes
+    cleanly on admissible rows (fires on gs-08/09/10/16, all true breaks, and
+    on nothing else).
+    """
+    if not rewritten or rewritten == stored:
+        return frozenset()
+    return _claim_fingerprint(stored)[1] - _claim_fingerprint(rewritten)[1]
+
+
 def _find_duplicate(text: str, rows) -> dict | None:
     for row in rows:
         if _is_duplicate_claim(text, row.get("claim", "")):
@@ -178,8 +195,29 @@ def _reaffirm(base: dict, mc: dict, today: str) -> None:
     # and remains, standing.
     was = _coerce_status(base.get("status")) or _DEFAULT_STATUS
     now = _coerce_status(mc.get("status")) or was
+    proposed = mc.get("status")
+    evidence = mc.get("broken_by")
     if was == _DEFAULT_STATUS and now == _DEFAULT_STATUS:
-        base["claim"] = mc.get("claim", base.get("claim", ""))
+        rewritten = mc.get("claim", base.get("claim", ""))
+        # An unmarked rewrite is a contradiction, not a refinement (jx9.9). The
+        # freeze above is conditioned on a field the MODEL sets, so keeping
+        # status "standing" and editing the claim to match the new facts walks
+        # straight through it — which is what three gold-set runs measured it
+        # doing on EVERY true break it scored "standing". The ledger then
+        # self-corrects with no trace it was ever wrong, and an accountability
+        # record that quietly edits its own history cannot be audited at all.
+        # Challenged rather than broken: a dropped number can be innocent
+        # compression, and challenged is still read by nothing.
+        dropped = _dropped_numbers(base.get("claim", ""), rewritten)
+        if dropped:
+            log.info(
+                f"Brief-memory: refused an unmarked rewrite of {base.get('id')} "
+                f"— it withdraws {', '.join(sorted(dropped))}: {rewritten[:120]}"
+            )
+            proposed = "challenged"
+            evidence = evidence or f"unmarked rewrite: {rewritten}"
+        else:
+            base["claim"] = rewritten
     base["topic"] = mc.get("topic", base.get("topic", ""))
     base["last_reaffirmed"] = today
     base["restate_count"] = base.get("restate_count", 0) + 1
@@ -197,7 +235,7 @@ def _reaffirm(base: dict, mc: dict, today: str) -> None:
     drv = mc.get("driver")
     if isinstance(drv, str) and drv.strip():
         base["driver"] = drv.strip()
-    _apply_status(base, mc.get("status"), mc.get("broken_by"), today)
+    _apply_status(base, proposed, evidence, today)
 
 
 def _days_between(d_old: str, d_new: str) -> int:

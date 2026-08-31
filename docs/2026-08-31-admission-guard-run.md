@@ -120,3 +120,96 @@ secured top"*) is still 0/3, and it sits with `gs-09` and `gs-10` in a class the
 restatement guard never touches — numeric and standings negations, not restatements.
 That is the shape of the remaining work, and it is a different fix from rewording the
 restatement guard.
+
+---
+
+# `jx9.9`: an unmarked rewrite is a contradiction, not a refinement
+
+**2026-08-31, same day.** Re-scoping `jx9.9` against the three v4 runs above changed
+the diagnosis completely, so this section supersedes that issue's original premise.
+
+## The defect is not recall
+
+`jx9.9` was filed as "the restatement guard over-corrected and suppressed breaks".
+The runs say otherwise. Of the true breaks scored `standing`, **6 of 6 in run A and
+3 of 3 in runs B and C had their claim text rewritten to the corrected version.**
+
+| stored claim | returned, still `standing` |
+|---|---|
+| "Portugal **tops group** with 4 pts" | "Portugal and Colombia are **tied** at 4 pts" |
+| "**Colombia holds 6 pts**, Portugal 4" | "**both teams hold 4 pts**" |
+| "Tehran **intends to resume** collecting Hormuz fees" | "the toll **is being replaced** by Gulf investment deals" |
+
+The model detects the contradiction and **absorbs it into the claim text**, echoing
+the id and calling it a refinement — which the prompt explicitly permits.
+
+**This is a hole in `jx9.5`.** That fix froze claim text once `status != standing`,
+to stop the replay's Patriot bug. But the freeze is conditioned on a field *the model
+sets*. Keep `status: standing` and the rewrite walks straight through.
+
+The consequence inverts what the issue assumed. A missed break does **not** leave a
+false claim standing — the ledger's content quietly self-corrects, so the reader is
+never told the false fact. What is destroyed is the **accountability record**: no
+trace survives that the claim was ever wrong. §3.3 is explicit that the original
+claim is what accountability is measured against, and a ledger that silently edits
+its own history cannot be audited at all.
+
+## The fix
+
+In `_reaffirm`, when an echoed standing claim comes back rewritten in a way that
+**drops a number the stored claim asserted**: keep the original text, force
+`challenged`, and record the attempted rewrite as `broken_by`.
+
+*Dropped, not changed.* Adding a number is what refinement looks like — "raised to
+1.0%" → "raised to 1.0% on June 16" — and must still reword. Only a withdrawal of
+something previously asserted counts. This reuses `_claim_fingerprint`, already built
+on the principle that numbers are the highest-signal discriminator between claims.
+
+`challenged` rather than `broken`, because a dropped number can be innocent
+compression, and `challenged` is still write-then-quarantine — read by nothing. **A
+false fire costs nothing today, which makes this the cheapest possible moment to turn
+the guard on.** That stops being true when `jx9.6` lifts the quarantine.
+
+## Measured, two runs
+
+The break probe previously read `status` straight off the model's reply and never
+called `merge_ledger`, so the guard was invisible on that path. It now also reports
+`ledger_status` and `guard_fired`; `predicted` is unchanged, so earlier runs stay
+comparable.
+
+| | run D | run E |
+|---|---|---|
+| guard fired | 7 of 23 | 5 of 23 |
+| …on **admissible** rows | `gs-08`, `gs-09` | `gs-08` |
+| **false fires on admissible rows** | **0 of 17** | **0 of 17** |
+| …on inadmissible rows | 5 | 4 |
+| break precision | 75.0% | 100% |
+| break recall | 42.9% | 57.1% |
+
+Every false fire sat on an **inadmissible** row — `gs-03`, `gs-12`, `gs-13`, `gs-21`
+— which the admission guard now rejects upstream, so in production they are never in
+the ledger to be rewritten. On the rows that actually reach this path the guard was
+clean in both runs.
+
+## One acceptance criterion could not be met as written, and why
+
+The issue's criterion 3 asked for `gs-08` and `gs-09` recovered "without precision
+below 75%". **The approved design cannot move that number**: the guard records
+`challenged`, and the gold set's positive class is `broken`, so those rows remain
+false negatives by construction. `gs-08` was caught 2 of 2 runs and `gs-09` 1 of 2 —
+as *detections recorded*, not as breaks. Precision held at 75% and 100%.
+
+The criterion was written before the enforcement verdict was chosen and should have
+been caught then. It is amended in bd rather than quietly reinterpreted.
+
+## Caveats
+
+- **Two runs, n = 5 admissible true breaks.** Zero false fires is 0/17 twice, not a
+  rate estimated from many observations.
+- **The fire rate on admissible rows is 1–2 of 17 reaffirmations.** That is free
+  while `challenged` is read by nothing. **`jx9.6` must re-check it before lifting
+  the quarantine**, since at that point a false fire starts affecting retention.
+- **The guard cannot see a rewrite that drops no number.** A purely qualitative
+  reversal ("talks are advancing" → "talks have collapsed") passes untouched. That is
+  a real gap, not a solved problem — it is simply not measurable on this fixture,
+  where every persistent miss happened to be numeric.

@@ -175,6 +175,8 @@ def probe(item: dict, call=None) -> dict:
         "id": item["id"],
         "label": item["label"],
         "predicted": None,
+        "ledger_status": None,
+        "guard_fired": False,
         "row": None,
         "error": None,
     }
@@ -191,6 +193,21 @@ def probe(item: dict, call=None) -> dict:
         return out
     out["row"] = match
     out["predicted"] = match.get("status") or brief_memory._DEFAULT_STATUS
+    # `predicted` is the model's own label, kept as-is so runs stay comparable
+    # across prompt versions. The jx9.9 guard lives in merge_ledger, which this
+    # path never called, so it was invisible here — run the reply through the
+    # real merge to read the verdict the LEDGER would have recorded. `today` is
+    # first_seen, not resolved_on, because the probe deliberately removes
+    # retention from the measurement; a TTL retirement here would be noise.
+    merged = brief_memory.merge_ledger(
+        build_probe_ledger(item), rows, item["first_seen"]
+    )
+    stored = next((c for c in merged["claims"] if c.get("id") == "c-0001"), None)
+    if stored is not None:
+        out["ledger_status"] = stored.get("status") or brief_memory._DEFAULT_STATUS
+        out["guard_fired"] = str(stored.get("broken_by") or "").startswith(
+            "unmarked rewrite:"
+        )
     return out
 
 
@@ -402,6 +419,11 @@ def score(results: list[dict]) -> dict:
         "n_scored": len(scored),
         "n_unclear": sum(1 for r in results if r["label"] == "unclear"),
         "n_errors": sum(1 for r in results if r["error"]),
+        # Contradictions the model declined to mark and merge_ledger caught
+        # anyway (jx9.9). These are NOT counted as breaks — the gold set's
+        # positive class is "broken" — but they are the ones that stop being
+        # silently absorbed into the claim text.
+        "n_guard_fired": sum(1 for r in results if r.get("guard_fired")),
         "tp": tp,
         "fp": fp,
         "fn": fn,
@@ -454,6 +476,12 @@ def format_report(doc: dict, results: list[dict], scores: dict, variance: dict) 
         note = ""
         if r["error"]:
             note = r["error"][:44]
+        elif r.get("guard_fired"):
+            note = (
+                "guard caught an unmarked rewrite"
+                if r["label"] == "true_break"
+                else "guard fired on a NON-break"
+            )
         elif r["label"] == "true_break" and r["predicted"] != "broken":
             note = "LOST a real break"
         elif r["label"] == "false_break" and r["predicted"] != "broken":
@@ -479,6 +507,9 @@ def format_report(doc: dict, results: list[dict], scores: dict, variance: dict) 
         "",
         f"false positives converted : {scores['converted']}",
         f"true breaks lost          : {scores['lost']}   <- any value here is a regression",
+        "",
+        f"unmarked rewrites refused : {scores['n_guard_fired']}   <- jx9.9 guard; "
+        "recorded as challenged, NOT counted as breaks above",
     ]
     if scores["n_errors"]:
         lines.append(

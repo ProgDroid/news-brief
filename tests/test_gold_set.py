@@ -421,3 +421,56 @@ def test_score_admission_excludes_splits_but_counts_them():
     assert s["n_split"] == 1
     assert s["n_scored"] == 2
     assert s["recall"] == 1.0
+
+
+# ── jx9.9: the break probe must also report the LEDGER's verdict ──────────────
+# `predicted` stays the model's raw label so the 2026-08-29 and v4 runs remain
+# comparable. The guard lives in merge_ledger and never ran on this path, so it
+# was unmeasurable here; `ledger_status` and `guard_fired` are what measure it.
+def test_probe_reports_the_ledger_verdict_alongside_the_model_label():
+    r = probe(
+        ITEMS[8],  # gs-09: "Colombia holds 6 pts, Portugal 4 pts"
+        call=_stub([{"id": "c-0001", "claim": "both teams hold 4 pts"}]),
+    )
+    assert r["predicted"] == "standing"  # what the model said
+    assert r["ledger_status"] == "challenged"  # what the ledger recorded
+    assert r["guard_fired"] is True
+
+
+def test_a_plain_reaffirmation_does_not_fire_the_guard():
+    item = ITEMS[8]
+    r = probe(item, call=_stub([{"id": "c-0001", "claim": item["claim"]}]))
+    assert r["guard_fired"] is False
+    assert r["ledger_status"] == "standing"
+
+
+def test_an_explicit_break_is_not_counted_as_a_guard_fire():
+    """The guard only catches contradictions the model declined to mark."""
+    r = probe(
+        ITEMS[8],
+        call=_stub(
+            [{"id": "c-0001", "claim": "both teams hold 4 pts", "status": "broken"}]
+        ),
+    )
+    assert r["guard_fired"] is False
+    assert r["ledger_status"] == "broken"
+
+
+def test_score_counts_guard_fires():
+    results = [
+        {
+            "id": "a",
+            "label": "true_break",
+            "predicted": "standing",
+            "error": None,
+            "guard_fired": True,
+        },
+        {
+            "id": "b",
+            "label": "false_break",
+            "predicted": "standing",
+            "error": None,
+            "guard_fired": False,
+        },
+    ]
+    assert score(results)["n_guard_fired"] == 1

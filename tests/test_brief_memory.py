@@ -1813,3 +1813,158 @@ def test_reconcile_prompt_shows_both_sides_of_the_price_boundary():
     p = bm.build_reconcile_prompt({"version": 1, "claims": []}, "brief").lower()
     assert "surged 1.2%" in p  # gs-14: a day's move with a label on it
     assert "contained war" in p  # gs-16: a thesis that names its own falsifier
+
+
+# ── jx9.9: an unmarked rewrite is a contradiction, not a refinement ───────────
+# jx9.5 froze claim text once status != standing, but the freeze is conditioned
+# on a field the MODEL controls. Three v4 gold-set runs showed it keeping
+# status=standing and editing the claim to match the new facts instead: every
+# true break scored "standing" had been rewritten (6/6 run A, 3/3 runs B and C).
+# The ledger then self-corrects with no trace it was ever wrong, which destroys
+# the accountability record Epic 1 exists to produce (spec 3.3).
+@pytest.mark.parametrize(
+    "stored,rewritten,expected",
+    [
+        # gs-09: the measured case — an asserted number disappears.
+        ("Colombia holds 6 pts, Portugal 4 pts", "both teams hold 4 pts", {"6"}),
+        # Refinement ADDS detail; nothing asserted is withdrawn.
+        (
+            "BOJ raised the rate to 1.0%",
+            "BOJ raised the rate to 1.0% on June 16",
+            set(),
+        ),
+        # Pure rewording carries no numeric assertion either way.
+        ("Iran suspended the talks", "Tehran has suspended negotiations", set()),
+        # Identical text is not a rewrite at all.
+        ("Colombia holds 6 pts", "Colombia holds 6 pts", set()),
+    ],
+)
+def test_dropped_numbers(stored, rewritten, expected):
+    assert set(bm._dropped_numbers(stored, rewritten)) == expected
+
+
+def _standing(cid="c-0001", claim="Colombia holds 6 pts, Portugal 4 pts"):
+    return {"version": 1, "claims": [_mk_claim(cid, claim=claim)]}
+
+
+def test_a_rewrite_that_drops_an_asserted_number_does_not_replace_the_claim():
+    out = bm.merge_ledger(
+        _standing(), [{"id": "c-0001", "claim": "both teams hold 4 pts"}], "2026-06-27"
+    )
+    assert out["claims"][0]["claim"] == "Colombia holds 6 pts, Portugal 4 pts"
+
+
+def test_a_rewrite_that_drops_an_asserted_number_marks_the_claim_challenged():
+    """challenged, not broken: a dropped number can also be innocent
+    compression, and challenged is still read by nothing, so a false fire costs
+    nothing today. That is what makes this the cheap moment to enforce it."""
+    out = bm.merge_ledger(
+        _standing(), [{"id": "c-0001", "claim": "both teams hold 4 pts"}], "2026-06-27"
+    )
+    assert out["claims"][0]["status"] == "challenged"
+
+
+def test_the_attempted_rewrite_is_recorded_as_the_evidence():
+    """The contradiction has to leave a record, or the guard just suppresses an
+    edit and the ledger still cannot say what it got wrong."""
+    out = bm.merge_ledger(
+        _standing(), [{"id": "c-0001", "claim": "both teams hold 4 pts"}], "2026-06-27"
+    )
+    assert "both teams hold 4 pts" in out["claims"][0]["broken_by"]
+
+
+def test_the_guard_stamps_broke_on():
+    out = bm.merge_ledger(
+        _standing(), [{"id": "c-0001", "claim": "both teams hold 4 pts"}], "2026-06-27"
+    )
+    assert out["claims"][0]["broke_on"] == "2026-06-27"
+
+
+def test_a_refinement_that_only_adds_a_number_still_rewords():
+    """The whole point of the 'dropped, not changed' rule: adding a date or a
+    detail is exactly the refinement the prompt is right to permit."""
+    out = bm.merge_ledger(
+        {
+            "version": 1,
+            "claims": [_mk_claim("c-0001", claim="BOJ raised the rate to 1.0%")],
+        },
+        [{"id": "c-0001", "claim": "BOJ raised the rate to 1.0% on June 16"}],
+        "2026-06-27",
+    )
+    got = out["claims"][0]
+    assert got["claim"] == "BOJ raised the rate to 1.0% on June 16"
+    assert got["status"] == "standing"
+
+
+def test_a_reword_carrying_no_numbers_still_rewords():
+    out = bm.merge_ledger(
+        {
+            "version": 1,
+            "claims": [_mk_claim("c-0001", claim="Iran suspended the talks")],
+        },
+        [{"id": "c-0001", "claim": "Tehran has suspended negotiations"}],
+        "2026-06-27",
+    )
+    assert out["claims"][0]["claim"] == "Tehran has suspended negotiations"
+
+
+def test_an_explicitly_marked_break_is_still_broken_not_downgraded():
+    """The guard must not soften a verdict the model was willing to state."""
+    out = bm.merge_ledger(
+        _standing(),
+        [
+            {
+                "id": "c-0001",
+                "claim": "both teams hold 4 pts",
+                "status": "broken",
+                "broken_by": "both on 4 pts",
+            }
+        ],
+        "2026-06-27",
+    )
+    got = out["claims"][0]
+    assert got["status"] == "broken"
+    assert got["claim"] == "Colombia holds 6 pts, Portugal 4 pts"
+
+
+def test_the_guard_does_not_reopen_an_already_broken_row():
+    """A non-standing row is frozen by jx9.5 before this guard is reached."""
+    prior = {
+        "version": 1,
+        "claims": [
+            dict(
+                _mk_claim("c-0001", claim="Colombia holds 6 pts"),
+                status="broken",
+                broke_on="2026-06-25",
+            )
+        ],
+    }
+    out = bm.merge_ledger(
+        prior, [{"id": "c-0001", "claim": "both teams hold 4 pts"}], "2026-06-27"
+    )
+    got = out["claims"][0]
+    assert got["status"] == "broken"
+    assert got["broke_on"] == "2026-06-25"
+
+
+def test_the_guard_logs_the_rewrite_it_refused(caplog):
+    with caplog.at_level(logging.INFO):
+        bm.merge_ledger(
+            _standing(),
+            [{"id": "c-0001", "claim": "both teams hold 4 pts"}],
+            "2026-06-27",
+        )
+    assert "c-0001" in caplog.text
+    assert "6" in caplog.text
+
+
+def test_a_number_dropping_rewrite_with_no_id_becomes_a_new_row():
+    """_is_duplicate_claim already blocks a merge on any numeric difference, so
+    this case cannot reach the guard — and must not, because minting a separate
+    row leaves the original assertion intact, which is the outcome that matters."""
+    out = bm.merge_ledger(
+        _standing(), [{"claim": "both teams hold 4 pts"}], "2026-06-27"
+    )
+    claims = {c["claim"] for c in out["claims"]}
+    assert "Colombia holds 6 pts, Portugal 4 pts" in claims
+    assert "both teams hold 4 pts" in claims
