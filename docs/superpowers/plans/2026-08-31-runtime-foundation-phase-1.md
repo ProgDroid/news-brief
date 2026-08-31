@@ -919,11 +919,16 @@ def start_run(conn: psycopg.Connection, job: str, scheduled_for, trigger: str) -
     return row[0]
 
 
-def finish_run(conn: psycopg.Connection, run_id: int, exit_code: int) -> None:
+def finish_run(
+    conn: psycopg.Connection, run_id: int, exit_code: int, status: str = "finished"
+) -> None:
+    """Close a run. `status` is a parameter because not every closed run ran:
+    a refusal and a restart-orphan both end as 'missed', and recording those as
+    'finished' would make /jobs claim work happened that did not."""
     conn.execute(
-        "UPDATE job_runs SET status = 'finished', finished_at = now(), exit_code = %s "
+        "UPDATE job_runs SET status = %s, finished_at = now(), exit_code = %s "
         "WHERE id = %s",
-        (exit_code, run_id),
+        (status, exit_code, run_id),
     )
     conn.commit()
 
@@ -1072,6 +1077,81 @@ def test_a_spawned_run_consumes_its_fire_time_immediately(clean_db):
     later = now + timedelta(seconds=scheduler.TICK_SECONDS)
     after = scheduler.decide(spec, later, db.latest_scheduled_for(clean_db, "collect"))
     assert after.action == "skip", "the fire time must be spent at spawn, not at lock"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APPENDED IN TASK 4, NOT TASK 3. Everything below imports `supervisor`, which
+# does not exist yet at Task 3 — but the `clean_db` fixture lives here, so these
+# ledger tests belong in this file rather than in a duplicated fixture next door.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_a_refused_run_is_recorded_as_missed_not_finished(clean_db):
+    """A supervisor-spawned child that finds the lock held never ran. Recording
+    it 'finished' would make /jobs report work that did not happen."""
+    import supervisor
+
+    run_id = db.start_run(clean_db, "collect", None, "scheduled")
+    supervisor._close_run(run_id, brief.EX_ALREADY_RUNNING)
+
+    status, code = clean_db.execute(
+        "SELECT status, exit_code FROM job_runs WHERE id = %s", (run_id,)
+    ).fetchone()
+    assert status == "missed"
+    assert code == brief.EX_ALREADY_RUNNING
+
+
+def test_reclaim_closes_a_run_orphaned_by_a_restart(clean_db):
+    """A container restart kills the child, so nobody closes its row. Without
+    reclaim the run shows 'running' forever and no alert ever fires."""
+    import supervisor
+
+    run_id = db.start_run(clean_db, "collect", None, "scheduled")
+
+    reclaimed = supervisor.reclaim_orphans(clean_db)
+
+    assert reclaimed == ["collect"]
+    status, code = clean_db.execute(
+        "SELECT status, exit_code FROM job_runs WHERE id = %s", (run_id,)
+    ).fetchone()
+    assert status == "missed"
+    assert code == supervisor.EX_ORPHANED
+
+
+def test_reclaim_leaves_a_genuinely_running_job_alone(clean_db):
+    """Ownership is decided by the advisory lock, not guessed: if a live process
+    still holds it, the run is not an orphan."""
+    import supervisor
+
+    run_id = db.start_run(clean_db, "collect", None, "scheduled")
+    holder = db.connect()
+    with db.advisory_lock(holder, "collect") as got:
+        assert got is True
+        assert supervisor.reclaim_orphans(clean_db) == []
+    holder.close()
+
+    status = clean_db.execute(
+        "SELECT status FROM job_runs WHERE id = %s", (run_id,)
+    ).fetchone()[0]
+    assert status == "running"
+
+
+def test_a_reclaimed_run_is_not_retried(clean_db):
+    """Deliberate: a collect killed halfway has polled its batch and may have
+    opened paper positions, so re-running it blind is worse than not running it.
+    The fire time stays consumed; the operator gets an alert instead."""
+    import scheduler
+    import supervisor
+
+    spec = next(s for s in scheduler.SCHEDULES if s.job == "collect")
+    now = datetime(2026, 8, 31, 6, 0, 30, tzinfo=timezone.utc)
+    fire = scheduler.previous_fire(spec, now)
+    db.start_run(clean_db, "collect", fire, "scheduled")
+
+    supervisor.reclaim_orphans(clean_db)
+
+    d = scheduler.decide(spec, now, db.latest_scheduled_for(clean_db, "collect"))
+    assert d.action == "skip"
 ```
 
 This test needs `from datetime import datetime, timedelta, timezone` at the top of the file.
@@ -1190,9 +1270,18 @@ if __name__ == "__main__":
     }
     fn = dispatch.get(mode)
     if not fn:
-        import supervisor
-
         if mode == "serve":
+            try:
+                import supervisor
+            except Exception as e:
+                # scheduler.SCHEDULES validates at import time, so a bad edit to
+                # the schedule table raises here. Without this guard the
+                # container crash-loops under `restart: unless-stopped` with
+                # nothing in Telegram — a section 3.3 fail-open violation, and
+                # exactly the silence this design exists to remove.
+                log.exception("Supervisor failed to import")
+                telegram_alert(f"Supervisor failed to start: {type(e).__name__}: {e}")
+                sys.exit(1)
             sys.exit(supervisor.serve())
         print(
             "Usage: brief.py [serve|submit|collect|weekly|paper|commands|monitor|pgdiag]"
@@ -1532,6 +1621,12 @@ def startup(*, migrate=None, connect=None) -> StartupState:
     try:
         conn = connect()
         migrate(conn)
+        try:
+            reclaim_orphans(conn)
+        except Exception:
+            # Reclaim is hygiene, not a precondition: failing it must not stop
+            # the supervisor from doing today's work.
+            log.exception("Orphan reclaim failed; continuing")
         return StartupState(jobs_enabled=True, residents_enabled=True)
     except Exception as e:
         reason = f"{type(e).__name__}: {e}"
@@ -1542,6 +1637,9 @@ def startup(*, migrate=None, connect=None) -> StartupState:
         return StartupState(jobs_enabled=False, residents_enabled=True, reason=reason)
 
 
+EX_ORPHANED = -2  # a run whose supervisor died before it could be closed
+
+
 def _close_run(run_id: int | None, exit_code: int | None) -> None:
     """Close a ledger row on its own connection.
 
@@ -1549,14 +1647,56 @@ def _close_run(run_id: int | None, exit_code: int | None) -> None:
     code even when the child was OOM-killed or SIGKILLed and could therefore
     write nothing itself — which is the failure class that is invisible today
     (spec section 8). A missing exit code is recorded as -1, not as success.
+
+    A refusal closes as 'missed', not 'finished': the child never ran, and a
+    'finished' row would let /jobs report work that did not happen.
     """
     if run_id is None:
         return
+    code = -1 if exit_code is None else exit_code
+    status = "missed" if code == EX_ALREADY_RUNNING else "finished"
     try:
         with db.connect() as conn:
-            db.finish_run(conn, run_id, -1 if exit_code is None else exit_code)
+            db.finish_run(conn, run_id, code, status=status)
     except Exception:
         log.exception(f"Could not close run {run_id}")
+
+
+def reclaim_orphans(conn) -> list[str]:
+    """Close rows left `running` by a supervisor that died mid-job.
+
+    A container restart kills its children, so nothing closes their rows: the run
+    shows as running forever and no alert fires — spec section 8's invisible
+    failure class, reintroduced by the row-at-spawn design itself.
+
+    Ownership is decidable rather than guessed, because the advisory lock died
+    with the child's connection: if we can take the lock, nobody is running that
+    job.
+
+    **The fire time stays consumed and the run is NOT retried.** `latest_
+    scheduled_for` is status-agnostic, so marking the row `missed` does not make
+    `decide` re-evaluate — and that is the behaviour we want. A collect killed
+    halfway has already polled its batch and may have opened paper positions;
+    re-running it blind is worse than not running it. The operator gets an alert
+    naming the job and can re-run by hand.
+    """
+    rows = conn.execute(
+        "SELECT id, job_name FROM job_runs WHERE status = 'running'"
+    ).fetchall()
+    reclaimed: list[str] = []
+    for run_id, job_name in rows:
+        with db.advisory_lock(conn, job_name) as nobody_owns_it:
+            if not nobody_owns_it:
+                continue  # a live process really is running this job
+        db.finish_run(conn, run_id, EX_ORPHANED, status="missed")
+        reclaimed.append(job_name)
+        log.warning(f"[{job_name}] run {run_id} orphaned by a restart; marked missed")
+    if reclaimed:
+        telegram_alert(
+            "Orphaned by a restart and NOT retried (re-run by hand if needed): "
+            + ", ".join(sorted(set(reclaimed)))
+        )
+    return reclaimed
 
 
 def _due_jobs(conn, now: datetime) -> list[tuple[scheduler.Schedule, datetime, str]]:
@@ -1669,8 +1809,15 @@ def serve() -> int:
                         child.run_id = run_id
                         try:
                             child.start()
-                        except Exception:
+                        except Exception as e:
+                            # The fire time is already spent, so this job will
+                            # not be retried until its next one — that must not
+                            # be silent.
                             log.exception(f"[{spec.job}] failed to spawn")
+                            telegram_alert(
+                                f"{spec.job} failed to spawn: {type(e).__name__}: {e} "
+                                f"— not retried until the next scheduled run"
+                            )
                             _close_run(run_id, -1)
                             continue
                         jobs[spec.job] = child
@@ -1689,10 +1836,22 @@ def serve() -> int:
 
 ```bash
 pytest tests/test_supervisor.py -v
+```
+
+Expected: 8 passed.
+
+- [ ] **Step 5a: Append the four ledger tests to `tests/test_job_interlock.py`**
+
+They are written out in Task 3 under the `APPENDED IN TASK 4` banner — the refusal-records-missed
+test and the three reclaim tests. They live in that file because `clean_db` does, and they could
+not run in Task 3 because `supervisor` did not exist yet.
+
+```bash
+pytest tests/test_job_interlock.py -v
 pytest -q
 ```
 
-Expected: 8 passed; full suite green.
+Expected: 10 passed in the first; full suite green.
 
 - [ ] **Step 6: Register the module (now that it exists)**
 
@@ -1899,6 +2058,16 @@ The first draft of this plan would have shipped six silent failures, **two of wh
 6. **Task 1 pre-registered `scheduler.py` and `supervisor.py`** in the Dockerfile COPY and ruff lists "so later tasks need no Dockerfile change" — which would have failed the image build and two CI runs, on a repo that commits straight to main. Each module is now registered by the task that creates it, and Task 4 builds the image to prove the tax was paid.
 
 **The pattern worth keeping:** every one of these was invisible to tests written from the same mental model as the code. "The suite is green" was never going to be evidence here — which is the argument for the fresh-context review gate, not for more of my own tests.
+
+### Second review, of the repairs
+
+The repairs were themselves reviewed, and three of them had holes:
+
+7. **Row-at-spawn reintroduced spec §8's invisible failure.** A supervisor that dies mid-job leaves a `running` row nobody closes: the run shows as running forever, no alert fires, and the work is silently dropped. Fixed by `reclaim_orphans` at startup, which decides ownership rather than guessing it — the advisory lock died with the child's connection, so being able to take it proves nobody is running the job.
+8. **A refused run closed as `finished`.** The child never ran; `/jobs` would have reported work that did not happen. `_close_run` now writes `missed` for `EX_ALREADY_RUNNING`, and `db.finish_run` takes a status because not every closed run ran.
+9. **A spawn failure consumed the fire time silently.** Now alerts, since the job will not be retried until its next one.
+
+**One correction to the review**, worth recording because it changed the policy rather than the code: it suggested marking an orphan `missed` so `decide` would "re-evaluate normally, and re-run inside grace." It would not — `latest_scheduled_for` is status-agnostic, so the fire time stays consumed either way. That turns out to be the behaviour we want and is now explicit: a collect killed halfway has already polled its batch and may have opened paper positions, so it is alerted and left for the operator rather than re-run blind. The mechanism was the reviewer's; the policy is deliberate.
 
 **Type consistency:** `Schedule(job, kind, at, every_minutes, grace_minutes)` and `Decision(action, scheduled_for, reason)` are used identically in Tasks 2 and 4. `db.start_run` returns the `int` that `db.finish_run` takes. `Child(name, argv=None, env=None)` matches every call site. `scheduled_for` crosses the process boundary as an ISO string in `NEWSBRIEF_SCHEDULED_FOR` and is inserted into a `TIMESTAMPTZ` column, which psycopg adapts.
 
