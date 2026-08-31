@@ -196,10 +196,20 @@ probe technique survives intact.
 **Global** — capture, submit, collect, weekly, monitor. One run serves every user.
 **Per-user** — render and deliver, iterating the users table, which initially holds one row.
 
-### 4.2 Two trigger kinds
+### 4.2 Two trigger kinds, plus a weekday filter
 
-Daily-at-`HH:MM` and every-`N`-minutes cover every job in the system. No cron expressions, no
-parser, no `croniter`.
+Daily-at-`HH:MM` and every-`N`-minutes, with an optional set of weekdays on the daily kind. No cron
+expressions, no parser, no `croniter`.
+
+**Correction:** an earlier draft claimed two kinds "cover every job in the system". They do not —
+`weekly` runs `0 21 * * 0`, Sunday only, and a plain daily schedule would have produced seven
+weekly reports a week, each marking the paper book to market. The weekday filter is the minimum
+addition that covers the real schedule; it is not a step toward a cron parser.
+
+**A grace window shorter than one scheduler tick is unsatisfiable.** The scheduler is polled, so a
+fire time is observed some seconds after it passes and a zero-minute grace can never be met — the
+job would be recorded `missed` forever. Every schedule's grace must exceed the tick interval, and
+that is asserted in code rather than left to care.
 
 ### 4.3 `job_runs`
 

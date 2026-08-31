@@ -57,7 +57,13 @@
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: `db.connect() -> psycopg.Connection`; `db.run_migrations(conn, direction="up", target=None) -> list[str]`; `db.advisory_lock(conn, name) -> ContextManager[bool]`; `db.database_url() -> str`; `db.MIGRATIONS_DIR`.
+- Produces: `db.connect() -> psycopg.Connection`; `db.run_migrations(conn, direction="up", steps=None) -> list[str]`; `db.advisory_lock(conn, name) -> ContextManager[bool]`; `db.database_url() -> str`; `db.MIGRATIONS_DIR`.
+
+**`steps` is a safety parameter, not a convenience.** Rolling back defaults to **one** migration. A
+runner whose `down` applies every applied migration would, with 0001–0012 in place, drop
+`job_runs`, `settings`, `users` and every KB table on a call meant to undo 0012 — and spec §5.3's
+entire premise is that KB schema is *learned*, so "undo the last one" is the expected use. Rolling
+back everything requires `steps=0`, explicitly.
 
 - [ ] **Step 1: Add the dependency and the three-place module registration**
 
@@ -69,10 +75,16 @@ psycopg[binary]==3.2.10
 
 > Confirm the current stable `psycopg` 3.x at implementation time and pin that exact version; the project pins every dependency.
 
-`Dockerfile` — the COPY line becomes (adding `db.py`, `scheduler.py`, `supervisor.py` now so later tasks need no Dockerfile change, plus the migrations directory):
+> **Register each module in the task that creates it — never ahead of time.** `COPY` of a file
+> that does not exist fails the image build, and `ruff check` on a missing path exits non-zero.
+> This repo commits straight to `main` and the workflow fires on `Dockerfile` and
+> `requirements.txt`, so pre-registering `scheduler.py` and `supervisor.py` here would publish two
+> red CI runs and a broken image. Task 2 registers `scheduler.py`; Task 4 registers `supervisor.py`.
+
+`Dockerfile` — add `db.py` and the migrations directory only:
 
 ```dockerfile
-COPY common.py trading.py polygram_live.py validation.py brief.py brief_memory.py claim_verify.py retention.py db.py scheduler.py supervisor.py .
+COPY common.py trading.py polygram_live.py validation.py brief.py brief_memory.py claim_verify.py retention.py db.py .
 COPY migrations/ ./migrations/
 COPY enrichment/ ./enrichment/
 ```
@@ -81,16 +93,14 @@ COPY enrichment/ ./enrichment/
 
 ```yaml
       - 'db.py'
-      - 'scheduler.py'
-      - 'supervisor.py'
       - 'migrations/**'
 ```
 
-And in **both** ruff lines, insert `db.py scheduler.py supervisor.py` after `validation.py`:
+And in **both** ruff lines, insert `db.py` after `validation.py`:
 
 ```yaml
-          ruff check brief.py brief_memory.py claim_verify.py retention.py common.py trading.py polygram_live.py validation.py db.py scheduler.py supervisor.py enrichment scripts tests
-          ruff format --check brief.py brief_memory.py claim_verify.py retention.py common.py trading.py polygram_live.py validation.py db.py scheduler.py supervisor.py enrichment scripts tests
+          ruff check brief.py brief_memory.py claim_verify.py retention.py common.py trading.py polygram_live.py validation.py db.py enrichment scripts tests
+          ruff format --check brief.py brief_memory.py claim_verify.py retention.py common.py trading.py polygram_live.py validation.py db.py enrichment scripts tests
 ```
 
 Add a Postgres service to the `test` job, immediately under `runs-on: ubuntu-latest`:
@@ -175,10 +185,55 @@ def test_up_is_idempotent(conn):
     assert db.run_migrations(conn) == []
 
 
-def test_down_restores_the_prior_schema(conn):
+@pytest.fixture()
+def two_migrations(tmp_path, monkeypatch):
+    """0001 plus a throwaway 0002, in a temp directory.
+
+    With ONE migration on disk, a correct `down` and one that drops the entire
+    database are indistinguishable — both leave an empty schema and both make
+    the test pass. A second migration is what makes default-one-step behaviour
+    observable at all, which is why this fixture exists rather than testing
+    against the real migrations directory.
+    """
+    for name in ("0001_runtime_foundation_up.sql", "0001_runtime_foundation_down.sql"):
+        (tmp_path / name).write_text(
+            (db.MIGRATIONS_DIR / name).read_text(encoding="utf-8"), encoding="utf-8"
+        )
+    (tmp_path / "0002_throwaway_up.sql").write_text(
+        "CREATE TABLE throwaway (id INT);", encoding="utf-8"
+    )
+    (tmp_path / "0002_throwaway_down.sql").write_text(
+        "DROP TABLE throwaway;", encoding="utf-8"
+    )
+    monkeypatch.setattr(db, "MIGRATIONS_DIR", tmp_path)
+    return tmp_path
+
+
+def test_down_defaults_to_exactly_one_step(conn, two_migrations):
+    db.run_migrations(conn)
+    assert "throwaway" in _tables(conn)
+
+    reverted = db.run_migrations(conn, direction="down")
+
+    assert reverted == ["0002_throwaway"]
+    assert "throwaway" not in _tables(conn)
+    assert {"users", "settings", "job_runs"} <= _tables(conn), (
+        "a default rollback must undo the LAST migration, not the database"
+    )
+    assert db.applied_versions(conn) == ["0001_runtime_foundation"]
+
+
+def test_rolling_back_everything_requires_steps_zero(conn, two_migrations):
+    db.run_migrations(conn)
+    db.run_migrations(conn, direction="down", steps=0)
+    assert _tables(conn) == {"schema_migrations"}
+    assert db.applied_versions(conn) == []
+
+
+def test_down_restores_the_prior_schema(conn, two_migrations):
     before = _tables(conn)
     db.run_migrations(conn)
-    db.run_migrations(conn, direction="down")
+    db.run_migrations(conn, direction="down", steps=0)
     after = _tables(conn) - {"schema_migrations"}
     assert after == before - {"schema_migrations"}
 
@@ -366,8 +421,19 @@ def _available(direction: str) -> list[tuple[str, Path]]:
     return [(p.name[: -len(suffix)], p) for p in found]
 
 
-def run_migrations(conn: psycopg.Connection, direction: str = "up") -> list[str]:
-    """Apply pending migrations in order; return the versions applied.
+def run_migrations(
+    conn: psycopg.Connection, direction: str = "up", steps: int | None = None
+) -> list[str]:
+    """Apply migrations in order; return the versions changed.
+
+    up:   every pending migration, ascending. `steps` caps how many.
+    down: the most recently applied migration, descending — exactly ONE by
+          default. `steps=0` means every applied migration and must be asked
+          for explicitly, because it drops every table in the database. Spec
+          section 5.3 exists because KB schema is learned rather than
+          specified, so the expected use is "undo 0012", not "undo everything";
+          a runner that defaults to the latter is a loaded gun in a codebase
+          whose whole premise is that migrations get reverted.
 
     Each migration runs in its own transaction, so a failure leaves the versions
     before it applied and the failing one absent — a resumable state rather than
@@ -376,9 +442,20 @@ def run_migrations(conn: psycopg.Connection, direction: str = "up") -> list[str]
     """
     _ensure_migrations_table(conn)
     done = set(applied_versions(conn))
-    pending = [(v, p) for v, p in _available(direction) if (v not in done) == (direction == "up")]
-    if direction == "down":
+    available = _available(direction)
+
+    if direction == "up":
+        pending = [(v, p) for v, p in available if v not in done]
+        limit = steps or None
+    elif direction == "down":
+        pending = [(v, p) for v, p in available if v in done]
         pending.reverse()
+        limit = 1 if steps is None else (None if steps == 0 else steps)
+    else:
+        raise ValueError(f"unknown direction: {direction}")
+
+    if limit is not None:
+        pending = pending[:limit]
 
     changed: list[str] = []
     for version, path in pending:
@@ -415,7 +492,7 @@ Append to `tests/conftest.py`:
 pytest tests/test_db.py -v
 ```
 
-Expected: 6 passed.
+Expected: 8 passed.
 
 Then verify the loud-skip path actually skips rather than errors:
 
@@ -423,7 +500,7 @@ Then verify the loud-skip path actually skips rather than errors:
 DATABASE_URL= pytest tests/test_db.py -v
 ```
 
-Expected: 6 skipped, each showing the `docker run` hint.
+Expected: 8 skipped, each showing the `docker run` hint. A skip here is correct; a skip in CI means the `services:` block is broken, since the workflow sets `DATABASE_URL`.
 
 - [ ] **Step 8: Commit**
 
@@ -446,7 +523,12 @@ bd close news-brief-0q0.1 news-brief-0q0.6
 
 **Interfaces:**
 - Consumes: nothing. `scheduler.py` imports no project module and performs no I/O.
-- Produces: `scheduler.Schedule(job, kind, at, every_minutes, grace_minutes)`; `scheduler.previous_fire(spec, now) -> datetime`; `scheduler.decide(spec, now, last_scheduled_for) -> Decision`; `scheduler.Decision(action, scheduled_for, reason)` where `action` is `"run" | "skip" | "missed"`; `scheduler.SCHEDULES: tuple[Schedule, ...]`.
+- Produces: `scheduler.Schedule(job, kind, at, every_minutes, grace_minutes, weekdays=None)`; `scheduler.previous_fire(spec, now) -> datetime`; `scheduler.decide(spec, now, last_scheduled_for) -> Decision`; `scheduler.Decision(action, scheduled_for, reason)` where `action` is `"run" | "skip" | "missed"`; `scheduler.SCHEDULES: tuple[Schedule, ...]`; `scheduler.TICK_SECONDS: int`.
+
+**Two corrections carried from review, both of which would have shipped silently:**
+
+1. **`weekly` is Sunday-only** — `0 21 * * 0` in `docker-compose.yml:16` and `README.md:236`. A plain daily schedule produces seven weekly reports a week, each marking the paper book to market. Hence `weekdays`.
+2. **A grace window shorter than one tick is unsatisfiable.** The scheduler is polled every `TICK_SECONDS`, so a fire time is always observed some seconds late; `grace_minutes=0` means `lateness <= 0` is never true and the job is recorded `missed` forever. `TICK_SECONDS` therefore lives in `scheduler.py`, next to the rule that depends on it, and the floor is asserted rather than remembered.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -477,7 +559,16 @@ DAILY = scheduler.Schedule(
     job="collect", kind="daily", at="06:00", every_minutes=None, grace_minutes=120
 )
 EVERY_30 = scheduler.Schedule(
-    job="capture", kind="interval", at=None, every_minutes=30, grace_minutes=10
+    job="monitor", kind="interval", at=None, every_minutes=30, grace_minutes=10
+)
+# 2026-08-30 is a Sunday; 2026-08-31 a Monday. ISO weekday 7 = Sunday.
+SUNDAY_ONLY = scheduler.Schedule(
+    job="weekly",
+    kind="daily",
+    at="21:00",
+    every_minutes=None,
+    grace_minutes=180,
+    weekdays=(7,),
 )
 
 
@@ -567,22 +658,71 @@ def test_coalesces_to_latest_never_replays_a_backlog():
     assert d.scheduled_for == dt(2026, 9, 3, 6, 0)
 
 
-def test_zero_grace_never_catches_up():
-    weekly = scheduler.Schedule(
-        job="weekly", kind="daily", at="21:00", every_minutes=None, grace_minutes=0
-    )
-    late = scheduler.decide(
-        weekly,
-        now=dt(2026, 8, 31, 21, 0) + timedelta(seconds=1),
-        last_scheduled_for=None,
-    )
-    assert late.action == "missed"
+def test_a_grace_shorter_than_one_tick_is_rejected_at_construction():
+    """A polled scheduler observes a fire time seconds late, so a zero-minute
+    grace can never be satisfied and the job is recorded missed forever. An
+    earlier draft of this plan asserted that behaviour as CORRECT and would have
+    shipped a permanently dead weekly report with a green suite."""
+    with pytest.raises(ValueError, match="grace"):
+        scheduler.Schedule(
+            job="weekly",
+            kind="daily",
+            at="21:00",
+            every_minutes=None,
+            grace_minutes=0,
+        )
 
 
-def test_every_schedule_has_a_positive_or_zero_grace():
+@pytest.mark.parametrize(
+    "now,expected",
+    [
+        # Sunday 21:00 exactly, and later that evening.
+        (dt(2026, 8, 30, 21, 0), dt(2026, 8, 30, 21, 0)),
+        (dt(2026, 8, 30, 23, 59), dt(2026, 8, 30, 21, 0)),
+        # Sunday before the hour: the previous Sunday, a week earlier.
+        (dt(2026, 8, 30, 20, 59), dt(2026, 8, 23, 21, 0)),
+        # Monday and mid-week both look back to Sunday.
+        (dt(2026, 8, 31, 9, 0), dt(2026, 8, 30, 21, 0)),
+        (dt(2026, 9, 2, 12, 0), dt(2026, 8, 30, 21, 0)),
+    ],
+)
+def test_previous_fire_respects_weekdays(now, expected):
+    assert scheduler.previous_fire(SUNDAY_ONLY, now) == expected
+
+
+def test_weekly_does_not_fire_on_a_monday():
+    """The bug this test exists for: a plain daily schedule would produce seven
+    weekly reports a week, each marking the paper book to market."""
+    monday_evening = dt(2026, 8, 31, 21, 0)
+    d = scheduler.decide(
+        SUNDAY_ONLY, now=monday_evening, last_scheduled_for=dt(2026, 8, 30, 21, 0)
+    )
+    assert d.action == "skip"
+
+
+def test_weekly_fires_on_sunday_within_grace():
+    d = scheduler.decide(
+        SUNDAY_ONLY, now=dt(2026, 8, 30, 21, 0, 4), last_scheduled_for=None
+    )
+    assert d.action == "run"
+    assert d.scheduled_for == dt(2026, 8, 30, 21, 0)
+
+
+def test_every_real_schedule_is_satisfiable():
+    """Guards the whole class: every configured job must be able to fire at all."""
     for spec in scheduler.SCHEDULES:
-        assert spec.grace_minutes >= 0
+        assert spec.grace_minutes * 60 > scheduler.TICK_SECONDS, (
+            f"{spec.job}: grace {spec.grace_minutes}m is not longer than one "
+            f"{scheduler.TICK_SECONDS}s tick, so it can never fire"
+        )
         assert (spec.at is None) != (spec.every_minutes is None)
+
+
+def test_the_configured_weekly_matches_the_cron_entry_it_replaces():
+    """0 21 * * 0 — Sunday only. The cutover must change when nothing."""
+    weekly = next(s for s in scheduler.SCHEDULES if s.job == "weekly")
+    assert weekly.at == "21:00"
+    assert weekly.weekdays == (7,)
 ```
 
 - [ ] **Step 2: Run the tests and verify they fail**
@@ -601,12 +741,18 @@ records that this rule exists only because the scheduler moved inside the
 container, and section 9 makes it the most heavily tested logic in the system —
 which is affordable exactly because it is a function of its arguments.
 
-Two trigger kinds cover every job we have, so there is no cron expression parser
-(spec section 4.2).
+Two trigger kinds plus a weekday filter cover every job we have, so there is no
+cron expression parser (spec section 4.2). The weekday filter is not optional
+sugar: `weekly` is `0 21 * * 0`, and a plain daily schedule would produce seven
+weekly reports a week.
 """
 
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
+
+# The supervisor's poll interval lives here, beside the rule that depends on it:
+# a grace window shorter than one tick can never be satisfied.
+TICK_SECONDS = 30
 
 
 @dataclass(frozen=True)
@@ -616,6 +762,22 @@ class Schedule:
     at: str | None  # "HH:MM", UTC, for kind="daily"
     every_minutes: int | None  # for kind="interval"
     grace_minutes: int  # how late a run may start and still happen
+    weekdays: tuple[int, ...] | None = None  # ISO 1=Mon..7=Sun; None = every day
+
+    def __post_init__(self) -> None:
+        if (self.at is None) == (self.every_minutes is None):
+            raise ValueError(f"{self.job}: set exactly one of at / every_minutes")
+        if self.grace_minutes * 60 <= TICK_SECONDS:
+            # A polled scheduler always observes a fire time some seconds late,
+            # so a sub-tick grace is never satisfiable: every fire time is
+            # recorded `missed` and the job never runs. Silently, and with a
+            # green suite — which is exactly how it got into an earlier draft.
+            raise ValueError(
+                f"{self.job}: grace_minutes={self.grace_minutes} is not longer "
+                f"than one {TICK_SECONDS}s tick, so this job could never fire"
+            )
+        if self.weekdays is not None and self.kind != "daily":
+            raise ValueError(f"{self.job}: weekdays only apply to daily schedules")
 
 
 @dataclass(frozen=True)
@@ -625,14 +787,18 @@ class Decision:
     reason: str
 
 
-# Times match the cron entries being retired, so the cutover changes when
-# nothing. Grace is sized to the job: capture is cheap and frequent, so a stale
-# catch-up is worthless; collect is the day's brief and worth an hour or two
-# late; weekly is dated content that must never arrive on the wrong day.
+# Times and days match the cron entries being retired exactly, so the cutover
+# changes when nothing:
+#   0 20 * * *  submit    0  6 * * *  collect
+#   0 21 * * 0  weekly    0  *  * * *  monitor
+# Grace is sized to the job: monitor is cheap and hourly, so a stale catch-up is
+# worthless; collect is the day's brief and worth being hours late; weekly is
+# dated content, so its grace is wide enough to survive a restart but stops
+# before midnight so it can never arrive on the wrong day.
 SCHEDULES: tuple[Schedule, ...] = (
     Schedule("submit", "daily", "20:00", None, grace_minutes=60),
     Schedule("collect", "daily", "06:00", None, grace_minutes=120),
-    Schedule("weekly", "daily", "21:00", None, grace_minutes=0),
+    Schedule("weekly", "daily", "21:00", None, grace_minutes=180, weekdays=(7,)),
     Schedule("monitor", "interval", None, 60, grace_minutes=15),
 )
 
@@ -641,8 +807,17 @@ def previous_fire(spec: Schedule, now: datetime) -> datetime:
     """The most recent moment this schedule was due, at or before `now`."""
     if spec.kind == "daily":
         hh, mm = (int(x) for x in spec.at.split(":"))
-        today = datetime.combine(now.date(), time(hh, mm), tzinfo=now.tzinfo)
-        return today if today <= now else today - timedelta(days=1)
+        candidate = datetime.combine(now.date(), time(hh, mm), tzinfo=now.tzinfo)
+        if candidate > now:
+            candidate -= timedelta(days=1)
+        if not spec.weekdays:
+            return candidate
+        # Walk back to the most recent allowed weekday — at most seven steps.
+        for _ in range(7):
+            if candidate.isoweekday() in spec.weekdays:
+                return candidate
+            candidate -= timedelta(days=1)
+        raise ValueError(f"{spec.job}: weekdays={spec.weekdays} matches no day")
 
     if spec.kind == "interval":
         midnight = datetime.combine(now.date(), time(0, 0), tzinfo=now.tzinfo)
@@ -680,14 +855,21 @@ def decide(spec: Schedule, now: datetime, last_scheduled_for: datetime | None) -
 - [ ] **Step 4: Run the tests and verify they pass**
 
 Run: `pytest tests/test_scheduler.py -v`
-Expected: 20 passed.
+Expected: 26 passed. If `test_every_real_schedule_is_satisfiable` fails, a schedule's grace is
+shorter than a tick — fix the schedule, never the assertion.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Register the module (now that it exists)**
+
+`Dockerfile` — append `scheduler.py` to the COPY line. `.github/workflows/docker-publish.yml` —
+add `- 'scheduler.py'` to the `paths:` filter and `scheduler.py` to **both** ruff lines.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 ruff format scheduler.py tests/test_scheduler.py
 ruff check scheduler.py tests/test_scheduler.py
-git add scheduler.py tests/test_scheduler.py
+pytest -q
+git add scheduler.py tests/test_scheduler.py Dockerfile .github/workflows/docker-publish.yml
 git commit -m "feat(scheduler): schedule arithmetic and the catch-up decision"
 ```
 
@@ -706,6 +888,13 @@ git commit -m "feat(scheduler): schedule arithmetic and the catch-up decision"
 - Produces: `db.latest_scheduled_for(conn, job) -> datetime | None`; `db.start_run(conn, job, scheduled_for, trigger) -> int`; `db.finish_run(conn, run_id, exit_code) -> None`; `db.record_missed(conn, job, scheduled_for) -> None`; `brief.JOB_MODES: frozenset[str]`; `brief.EX_ALREADY_RUNNING = 75`.
 
 **Why the dispatch and not the supervisor:** spec §4.4a. A guard living in the supervisor is exactly what the one caller bypassing the supervisor — `docker compose run --rm newsbrief collect`, which §3.6 deliberately preserves — evades. That call is how the double-collect this whole plan exists to prevent would come back.
+
+**Who owns the ledger row.** The supervisor writes the row *before it spawns* and closes it *at reap*; a supervisor-spawned child receives `NEWSBRIEF_RUN_ID` and never touches the row. A manually invoked run has no run id, so it creates and closes its own. Two reasons, both from review:
+
+1. **It kills a respawn storm.** If the child wrote the row only after acquiring the lock, a refused run would write nothing, `latest_scheduled_for` would still return nothing, and the next tick would decide "run" again — roughly 240 spawns and 240 Telegram alerts across collect's two-hour grace. Writing at spawn consumes the fire time immediately, so the storm cannot form.
+2. **The supervisor sees deaths the child cannot report.** A child killed by the OOM killer or SIGKILL writes nothing at all, so a completion row written by the child can never record it. The supervisor has the exit code either way.
+
+**`paper` is deliberately absent from `JOB_MODES`.** It mutates the book, but `mode_paper` takes `file_lock(BOOK_FILE)` itself (`trading.py:1951`), as does every load→mutate→save span, so integrity is already covered at the resource level. Adding it would also not help: `collect` calls `mode_paper()` in-process while holding the `"collect"` key, which would never contend with a `"paper"` key. Do **not** re-key the advisory lock to the resource — that duplicates `file_lock` and invents a deadlock ordering between two locking systems.
 
 - [ ] **Step 1: Add the run-ledger helpers to `db.py`**
 
@@ -827,12 +1016,85 @@ def test_a_crashing_job_records_a_nonzero_exit_and_releases_the_lock(clean_db):
     with db.connect() as other:
         with db.advisory_lock(other, "collect") as acquired:
             assert acquired is True, "the lock must not survive a crashed job"
+
+
+def test_a_supervisor_owned_run_leaves_the_ledger_to_the_supervisor(clean_db):
+    """The supervisor writes the row before spawning and closes it at reap, so
+    the child must neither open nor close one."""
+    run_id = db.start_run(clean_db, "collect", None, "scheduled")
+
+    code = brief.run_job("collect", lambda: None, run_id=run_id)
+
+    assert code == 0
+    rows = clean_db.execute(
+        "SELECT id, status FROM job_runs WHERE job_name = 'collect'"
+    ).fetchall()
+    assert rows == [(run_id, "running")]
+
+
+def test_a_bookkeeping_failure_does_not_fail_the_job(clean_db, monkeypatch):
+    """The lock connection sits idle for the job's whole duration, so closing
+    the row can fail on a connection the server has since dropped. A SUCCESSFUL
+    collect must not become an exit-1 crash alert because of that."""
+
+    def work():
+        def broken_connect():
+            raise RuntimeError("connection dropped while the job ran")
+
+        monkeypatch.setattr(db, "connect", broken_connect)
+
+    code = brief.run_job("collect", work, trigger="manual")
+
+    assert code == 0, "bookkeeping must not be able to fail a job"
+
+
+def test_a_spawned_run_consumes_its_fire_time_immediately(clean_db):
+    """The anti-storm invariant, and the reason the supervisor writes the row
+    before spawning rather than letting the child write it after taking the
+    lock. Lives here rather than in test_supervisor.py because it needs a real
+    database and this is where that fixture is.
+
+    Without it: a child that dies before recording anything leaves
+    latest_scheduled_for empty, decide() still says "run", and the supervisor
+    respawns every tick for the whole grace window — ~240 spawns and ~240
+    Telegram alerts across collect's two hours.
+    """
+    import scheduler
+
+    spec = next(s for s in scheduler.SCHEDULES if s.job == "collect")
+    now = datetime(2026, 8, 31, 6, 0, 30, tzinfo=timezone.utc)
+
+    before = scheduler.decide(spec, now, db.latest_scheduled_for(clean_db, "collect"))
+    assert before.action == "run"
+
+    db.start_run(clean_db, "collect", before.scheduled_for, "scheduled")
+
+    later = now + timedelta(seconds=scheduler.TICK_SECONDS)
+    after = scheduler.decide(spec, later, db.latest_scheduled_for(clean_db, "collect"))
+    assert after.action == "skip", "the fire time must be spent at spawn, not at lock"
 ```
+
+This test needs `from datetime import datetime, timedelta, timezone` at the top of the file.
 
 - [ ] **Step 3: Run the test and verify it fails**
 
 Run: `pytest tests/test_job_interlock.py -v`
 Expected: FAIL with `AttributeError: module 'brief' has no attribute 'run_job'`.
+
+- [ ] **Step 3a: Add the shared exit code to `common.py`**
+
+Both `brief.py` and `supervisor.py` need it, and `supervisor` importing `brief` would be circular
+(`brief` imports `supervisor` for the `serve` branch). `common.py` is the shared-infrastructure
+module both already import, so it goes there — after the `REQUIRED_ENV` block:
+
+```python
+# sysexits.h EX_TEMPFAIL, "try again later": the exit code a job uses when
+# another entry path already holds its lock. Shared because the supervisor
+# reads it when reaping and must not mistake a refusal for a crash.
+EX_ALREADY_RUNNING = 75
+```
+
+Then add `EX_ALREADY_RUNNING` to the `from common import (...)` list at `brief.py:43`.
 
 - [ ] **Step 4: Add `run_job` and rewrite the dispatch in `brief.py`**
 
@@ -844,17 +1106,43 @@ Replace the `if __name__ == "__main__":` block at the foot of `brief.py` with:
 # guard lives HERE and not in the supervisor: the supervisor is not the only
 # caller — `docker compose run --rm newsbrief collect` is a documented debug
 # path (spec section 3.6), and a guard the bypass path skips is not a guard.
-JOB_MODES = frozenset({"submit", "collect", "weekly", "monitor", "capture"})
+# `capture` is NOT here: mode_capture does not exist yet (Epic 2, spec 7.2).
+# `paper` is NOT here either — see the note above; the book is already guarded
+# by file_lock at the resource level, which is the right grain for it.
+JOB_MODES = frozenset({"submit", "collect", "weekly", "monitor"})
 
-# sysexits.h EX_TEMPFAIL: "try again later", which is exactly the situation.
-EX_ALREADY_RUNNING = 75
+# EX_ALREADY_RUNNING is imported from common (see Step 3a): the supervisor needs
+# it too, and `supervisor` importing `brief` would be circular — brief imports
+# supervisor for the `serve` branch.
 
 
-def run_job(mode, fn, *, scheduled_for=None, trigger="manual") -> int:
+def _finish_quietly(run_id, code) -> None:
+    """Close a ledger row on a FRESH connection; never change the job's outcome.
+
+    The connection holding the job lock has been idle for the whole run — hours,
+    for a collect — so an idle-session timeout, a reaper or a Postgres restart
+    may have dropped it. Recording the result on that connection would turn a
+    SUCCESSFUL collect into an exit-1 crash alert plus a permanently `running`
+    row. Bookkeeping must not be able to fail a job.
+    """
+    import db
+
+    try:
+        with db.connect() as fresh:
+            db.finish_run(fresh, run_id, code)
+    except Exception:
+        log.exception(f"Could not record completion of run {run_id} (exit {code})")
+
+
+def run_job(mode, fn, *, scheduled_for=None, trigger="manual", run_id=None) -> int:
     """Run `fn` under the job lock, recording the attempt in job_runs.
 
     Returns the exit code the caller should exit with. The lock is session
     scoped, so a SIGKILL of this process releases it when the connection drops.
+
+    `run_id` is set when the supervisor spawned us: it already wrote the row and
+    will close it at reap, so we leave the ledger alone. Without one we are a
+    manual invocation and own the row ourselves.
     """
     import db
 
@@ -867,7 +1155,9 @@ def run_job(mode, fn, *, scheduled_for=None, trigger="manual") -> int:
                 )
                 return EX_ALREADY_RUNNING
 
-            run_id = db.start_run(conn, mode, scheduled_for, trigger)
+            owns_row = run_id is None
+            if owns_row:
+                run_id = db.start_run(conn, mode, scheduled_for, trigger)
             try:
                 fn()
                 code = 0
@@ -875,7 +1165,8 @@ def run_job(mode, fn, *, scheduled_for=None, trigger="manual") -> int:
                 log.exception(f"Mode '{mode}' crashed")
                 telegram_alert(f"{mode} crashed: {type(e).__name__}: {e}")
                 code = 1
-            db.finish_run(conn, run_id, code)
+            if owns_row:
+                _finish_quietly(run_id, code)
             return code
 
 
@@ -909,11 +1200,21 @@ if __name__ == "__main__":
         sys.exit(1)
 
     if mode in JOB_MODES:
-        # Trigger is "manual" here by definition: the supervisor passes its own
-        # scheduled_for via NEWSBRIEF_SCHEDULED_FOR when it spawns the child.
+        # A supervisor-spawned child inherits all three; a human running
+        # `docker compose run --rm newsbrief collect` inherits none, and so
+        # defaults to a manual run that owns its own ledger row.
         scheduled_for = os.environ.get("NEWSBRIEF_SCHEDULED_FOR") or None
         trigger = os.environ.get("NEWSBRIEF_TRIGGER", "manual")
-        sys.exit(run_job(mode, fn, scheduled_for=scheduled_for, trigger=trigger))
+        env_run_id = os.environ.get("NEWSBRIEF_RUN_ID")
+        sys.exit(
+            run_job(
+                mode,
+                fn,
+                scheduled_for=scheduled_for,
+                trigger=trigger,
+                run_id=int(env_run_id) if env_run_id else None,
+            )
+        )
 
     try:
         fn()
@@ -932,7 +1233,7 @@ pytest tests/test_job_interlock.py -v
 pytest -q
 ```
 
-Expected: 3 passed in the first; the full suite green (`serve` is not yet importable only if `supervisor.py` is missing — it is imported lazily inside the branch, so the suite is unaffected until Task 4).
+Expected: 6 passed in the first; the full suite green. `supervisor` does not exist yet, but it is imported lazily inside the `serve` branch of the dispatch, so nothing imports it at module load and the suite is unaffected until Task 4.
 
 - [ ] **Step 6: Commit**
 
@@ -1112,14 +1413,15 @@ from datetime import datetime, timezone
 
 import db
 import scheduler
-from common import log, telegram_alert
+from common import log, telegram_alert, EX_ALREADY_RUNNING
 
 # Children that stay up. `commands` is the Telegram long-poll daemon and the
 # ONLY getUpdates consumer (a second one 409s) — under the supervisor exactly
 # one process owns that constraint, which a stray `compose up` used to violate.
 RESIDENT_MODES = ("commands",)
 
-TICK_SECONDS = 30
+# The tick interval lives in scheduler.py, next to the grace-floor rule that
+# depends on it: a schedule whose grace is shorter than one tick can never fire.
 BACKOFF_BASE_SECONDS = 2
 BACKOFF_CEILING_SECONDS = 300
 CRASH_LOOP_LIMIT = 5
@@ -1156,6 +1458,7 @@ class Child:
         self.name = name
         self.argv = argv or [sys.executable, "brief.py", name]
         self.env = env
+        self.run_id: int | None = None  # set for job children; None for residents
         self.proc: subprocess.Popen | None = None
         self._reader: threading.Thread | None = None
 
@@ -1239,6 +1542,23 @@ def startup(*, migrate=None, connect=None) -> StartupState:
         return StartupState(jobs_enabled=False, residents_enabled=True, reason=reason)
 
 
+def _close_run(run_id: int | None, exit_code: int | None) -> None:
+    """Close a ledger row on its own connection.
+
+    The supervisor is authoritative for the children it spawned: it has the exit
+    code even when the child was OOM-killed or SIGKILLed and could therefore
+    write nothing itself — which is the failure class that is invisible today
+    (spec section 8). A missing exit code is recorded as -1, not as success.
+    """
+    if run_id is None:
+        return
+    try:
+        with db.connect() as conn:
+            db.finish_run(conn, run_id, -1 if exit_code is None else exit_code)
+    except Exception:
+        log.exception(f"Could not close run {run_id}")
+
+
 def _due_jobs(conn, now: datetime) -> list[tuple[scheduler.Schedule, datetime, str]]:
     """Decide every schedule, recording misses. Returns what should run now."""
     ready = []
@@ -1303,7 +1623,13 @@ def serve() -> int:
             code = child.wait(timeout=0)
             child.join_reader(timeout=5)
             del jobs[mode]
-            if code not in (0, None):
+            _close_run(child.run_id, code)
+            if code == EX_ALREADY_RUNNING:
+                log.warning(
+                    f"[{mode}] refused: another entry path holds the job lock. "
+                    f"Recorded and not retried until the next fire time."
+                )
+            elif code not in (0, None):
                 # The invisible failure class: a child killed by the OOM killer
                 # or SIGKILL never reaches its own except block, so today this
                 # is silence — indistinguishable from a quiet news day.
@@ -1322,19 +1648,36 @@ def serve() -> int:
                                 f"time; skipping {scheduled_for.isoformat()}"
                             )
                             continue
+                        # Write the row BEFORE spawning. This consumes the fire
+                        # time immediately, so a child that dies before it can
+                        # record anything — refused lock, missing env var,
+                        # import error — is not respawned on every tick for the
+                        # whole grace window. Writing it after the child took
+                        # its lock would mean ~240 spawns and ~240 alerts across
+                        # collect's two hours. It is also why job children need
+                        # no backoff of their own: the fire time is already
+                        # spent, so there is nothing to back off from.
+                        run_id = db.start_run(conn, spec.job, scheduled_for, trigger)
                         child = Child(
                             spec.job,
                             env={
                                 "NEWSBRIEF_SCHEDULED_FOR": scheduled_for.isoformat(),
                                 "NEWSBRIEF_TRIGGER": trigger,
+                                "NEWSBRIEF_RUN_ID": str(run_id),
                             },
                         )
-                        child.start()
+                        child.run_id = run_id
+                        try:
+                            child.start()
+                        except Exception:
+                            log.exception(f"[{spec.job}] failed to spawn")
+                            _close_run(run_id, -1)
+                            continue
                         jobs[spec.job] = child
             except Exception:
                 log.exception("Scheduler tick failed; continuing")
 
-        stopping.wait(TICK_SECONDS)
+        stopping.wait(scheduler.TICK_SECONDS)
 
     for child in list(jobs.values()) + list(residents.values()):
         child.terminate()
@@ -1351,12 +1694,35 @@ pytest -q
 
 Expected: 8 passed; full suite green.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Register the module (now that it exists)**
+
+`Dockerfile` — append `supervisor.py` to the COPY line. `.github/workflows/docker-publish.yml` —
+add `- 'supervisor.py'` to the `paths:` filter and `supervisor.py` to **both** ruff lines. This is
+the last of the three new modules, so after this the COPY line reads:
+
+```dockerfile
+COPY common.py trading.py polygram_live.py validation.py brief.py brief_memory.py claim_verify.py retention.py db.py scheduler.py supervisor.py .
+```
+
+- [ ] **Step 7: Verify the image actually builds**
+
+The three-place tax is only paid correctly if the build succeeds; a missing COPY is a runtime
+`ModuleNotFoundError` that no test catches.
+
+```bash
+docker build -t newsbrief-check . && echo "BUILD_OK"
+docker run --rm --entrypoint python newsbrief-check -c "import supervisor, scheduler, db; print('imports OK')"
+```
+
+Expected: `BUILD_OK` then `imports OK`.
+
+- [ ] **Step 8: Commit**
 
 ```bash
 ruff format supervisor.py common.py tests/test_supervisor.py
 ruff check supervisor.py common.py tests/test_supervisor.py
-git add supervisor.py common.py tests/test_supervisor.py
+pytest -q
+git add supervisor.py common.py tests/test_supervisor.py Dockerfile .github/workflows/docker-publish.yml
 git commit -m "feat(supervisor): resident and job children, single-writer log, fail-open startup"
 bd close news-brief-0q0.2 news-brief-0q0.3
 ```
@@ -1519,7 +1885,20 @@ On the deploy host, delete the four `docker compose run --rm newsbrief-*` cron e
 
 **Spec coverage:** §3.1 → Task 5 Step 2. §3.2 → Task 4 Steps 1, 4. §3.3 → Task 4 (`startup`, `RestartTracker`, no business logic). §3.4 → Task 4 (`Child.start` env-only, all coordination via `db`). §3.5 → Task 1 Step 1. §3.6 → preserved; Task 3 makes it safe. §4.1–4.4 → Task 2. §4.4a → Task 3. §4.6 → no APScheduler anywhere. §5.3 → Task 1 (up/down pairs, per-migration transaction). §5.4 → Task 1 (`psycopg[binary]`, `DATABASE_URL` in the anchor). §6.1 → `users` table created in 0001; **seeding and readers are phase 2 (`0q0.7`), out of scope here.** §7.1 → Task 5. §8 → Task 4 (`startup`, OOM alerting, healthcheck). §9 → all four test files.
 
-**Known gaps, deliberate:** §5.5 (`pg_dump` backup job) and the `/jobs` Telegram command are not in this plan — both depend on the supervisor existing and belong to the phase that follows. **File follow-up beads for them under `news-brief-0q0` before closing the epic.** Success criteria 5 and 10 cannot be met until they land.
+**Known gaps, deliberate:** §5.5 (`pg_dump` backup job) and the `/jobs` Telegram command are not in this plan — both depend on the supervisor existing and belong to the phase that follows. Filed as `news-brief-0q0.8` and `news-brief-0q0.9`. Success criteria 5 and 10 cannot be met until they land.
+
+## Repairs from hostile review
+
+The first draft of this plan would have shipped six silent failures, **two of which its own tests asserted as correct**. Recorded so the same shapes are recognisable later:
+
+1. **`weekly` was scheduled daily.** It is `0 21 * * 0` — Sunday only. Seven weekly reports a week, each marking the paper book to market. Fixed by `Schedule.weekdays`, plus a correction to spec §4.2, which claimed two trigger kinds cover every job.
+2. **`grace_minutes=0` is unsatisfiable against a polled scheduler**, so weekly would never have fired at all — and `test_zero_grace_never_catches_up` asserted that as correct. Now rejected at construction, with `TICK_SECONDS` moved into `scheduler.py` beside the rule that depends on it.
+3. **A respawn storm.** A refused run wrote no row, so the fire time was never consumed and the next tick decided "run" again: ~240 spawns and ~240 Telegram alerts across collect's grace window. Fixed by writing the ledger row at spawn — which also removes any need for per-job backoff, since a spent fire time is not retried.
+4. **`finish_run` ran outside the guard**, on a connection idle for the job's whole duration, so a dropped session turned a *successful* collect into an exit-1 crash alert and a permanently `running` row. Now `_finish_quietly` on a fresh connection, and bookkeeping can never change a job's outcome.
+5. **`JOB_MODES` named `capture`, which does not exist** (Epic 2), and the question of adding `paper` was resolved against: `file_lock(BOOK_FILE)` already covers book integrity at the resource level.
+6. **Task 1 pre-registered `scheduler.py` and `supervisor.py`** in the Dockerfile COPY and ruff lists "so later tasks need no Dockerfile change" — which would have failed the image build and two CI runs, on a repo that commits straight to main. Each module is now registered by the task that creates it, and Task 4 builds the image to prove the tax was paid.
+
+**The pattern worth keeping:** every one of these was invisible to tests written from the same mental model as the code. "The suite is green" was never going to be evidence here — which is the argument for the fresh-context review gate, not for more of my own tests.
 
 **Type consistency:** `Schedule(job, kind, at, every_minutes, grace_minutes)` and `Decision(action, scheduled_for, reason)` are used identically in Tasks 2 and 4. `db.start_run` returns the `int` that `db.finish_run` takes. `Child(name, argv=None, env=None)` matches every call site. `scheduled_for` crosses the process boundary as an ISO string in `NEWSBRIEF_SCHEDULED_FOR` and is inserted into a `TIMESTAMPTZ` column, which psycopg adapts.
 
