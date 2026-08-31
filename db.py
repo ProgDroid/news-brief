@@ -137,3 +137,46 @@ def run_migrations(
         changed.append(version)
         log.info(f"Migration {version} {direction} applied")
     return changed
+
+
+def latest_scheduled_for(conn: psycopg.Connection, job: str):
+    """Greatest scheduled_for recorded for this job, or None. Feeds decide()."""
+    row = conn.execute(
+        "SELECT max(scheduled_for) FROM job_runs WHERE job_name = %s", (job,)
+    ).fetchone()
+    return row[0] if row else None
+
+
+def start_run(conn: psycopg.Connection, job: str, scheduled_for, trigger: str) -> int:
+    row = conn.execute(
+        "INSERT INTO job_runs (job_name, scheduled_for, trigger, status, started_at) "
+        "VALUES (%s, %s, %s, 'running', now()) RETURNING id",
+        (job, scheduled_for, trigger),
+    ).fetchone()
+    conn.commit()
+    return row[0]
+
+
+def finish_run(
+    conn: psycopg.Connection, run_id: int, exit_code: int, status: str = "finished"
+) -> None:
+    """Close a run. `status` is a parameter because not every closed run ran:
+    a refusal and a restart-orphan both end as 'missed', and recording those as
+    'finished' would make /jobs claim work happened that did not."""
+    conn.execute(
+        "UPDATE job_runs SET status = %s, finished_at = now(), exit_code = %s "
+        "WHERE id = %s",
+        (status, exit_code, run_id),
+    )
+    conn.commit()
+
+
+def record_missed(conn: psycopg.Connection, job: str, scheduled_for) -> None:
+    """A fire time that passed outside its grace window. Recorded, not run —
+    so the next tick sees it as accounted for and does not re-evaluate it."""
+    conn.execute(
+        "INSERT INTO job_runs (job_name, scheduled_for, trigger, status) "
+        "VALUES (%s, %s, 'scheduled', 'missed')",
+        (job, scheduled_for),
+    )
+    conn.commit()

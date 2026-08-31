@@ -41,6 +41,7 @@ from common import (
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
     REQUIRED_ENV,
+    EX_ALREADY_RUNNING,
     DATA_DIR,
     SIGNALS_DIR,
     log,
@@ -3614,7 +3615,75 @@ def mode_monitor():
         log.warning(f"Live exit sweep failed: {e}")
 
 
-# ── Entry ─────────────────────────────────────────────────────────────────────
+# ── Job entry ─────────────────────────────────────────────────────────────────
+# Modes that mutate shared state and must never run twice concurrently. The
+# guard lives HERE and not in the supervisor: the supervisor is not the only
+# caller — `docker compose run --rm newsbrief collect` is a documented debug
+# path (spec section 3.6), and a guard the bypass path skips is not a guard.
+# `capture` is NOT here: mode_capture does not exist yet (Epic 2, spec 7.2).
+# `paper` is NOT here either — see the note above; the book is already guarded
+# by file_lock at the resource level, which is the right grain for it.
+JOB_MODES = frozenset({"submit", "collect", "weekly", "monitor"})
+
+# EX_ALREADY_RUNNING is imported from common (see Step 3a): the supervisor needs
+# it too, and `supervisor` importing `brief` would be circular — brief imports
+# supervisor for the `serve` branch.
+
+
+def _finish_quietly(run_id, code) -> None:
+    """Close a ledger row on a FRESH connection; never change the job's outcome.
+
+    The connection holding the job lock has been idle for the whole run — hours,
+    for a collect — so an idle-session timeout, a reaper or a Postgres restart
+    may have dropped it. Recording the result on that connection would turn a
+    SUCCESSFUL collect into an exit-1 crash alert plus a permanently `running`
+    row. Bookkeeping must not be able to fail a job.
+    """
+    import db
+
+    try:
+        with db.connect() as fresh:
+            db.finish_run(fresh, run_id, code)
+    except Exception:
+        log.exception(f"Could not record completion of run {run_id} (exit {code})")
+
+
+def run_job(mode, fn, *, scheduled_for=None, trigger="manual", run_id=None) -> int:
+    """Run `fn` under the job lock, recording the attempt in job_runs.
+
+    Returns the exit code the caller should exit with. The lock is session
+    scoped, so a SIGKILL of this process releases it when the connection drops.
+
+    `run_id` is set when the supervisor spawned us: it already wrote the row and
+    will close it at reap, so we leave the ledger alone. Without one we are a
+    manual invocation and own the row ourselves.
+    """
+    import db
+
+    with db.connect() as conn:
+        with db.advisory_lock(conn, mode) as acquired:
+            if not acquired:
+                log.warning(
+                    f"{mode} is already running (job lock held); refusing to start a "
+                    f"second one. Check /jobs or job_runs for the holder."
+                )
+                return EX_ALREADY_RUNNING
+
+            owns_row = run_id is None
+            if owns_row:
+                run_id = db.start_run(conn, mode, scheduled_for, trigger)
+            try:
+                fn()
+                code = 0
+            except Exception as e:
+                log.exception(f"Mode '{mode}' crashed")
+                telegram_alert(f"{mode} crashed: {type(e).__name__}: {e}")
+                code = 1
+            if owns_row:
+                _finish_quietly(run_id, code)
+            return code
+
+
 if __name__ == "__main__":
     import sys
 
@@ -3634,15 +3703,47 @@ if __name__ == "__main__":
         "pgdiag": mode_pgdiag,
     }
     fn = dispatch.get(mode)
-    if fn:
-        try:
-            fn()
-        except Exception as e:
-            # Last-resort alert: without this, an uncaught crash is visible only
-            # in the log file and the reader just silently gets no brief.
-            log.exception(f"Mode '{mode}' crashed")
-            telegram_alert(f"{mode} crashed: {type(e).__name__}: {e}")
-            sys.exit(1)
-    else:
-        print("Usage: brief.py [submit|collect|weekly|paper|commands|monitor|pgdiag]")
+    if not fn:
+        if mode == "serve":
+            try:
+                import supervisor
+            except Exception as e:
+                # scheduler.SCHEDULES validates at import time, so a bad edit to
+                # the schedule table raises here. Without this guard the
+                # container crash-loops under `restart: unless-stopped` with
+                # nothing in Telegram — a section 3.3 fail-open violation, and
+                # exactly the silence this design exists to remove.
+                log.exception("Supervisor failed to import")
+                telegram_alert(f"Supervisor failed to start: {type(e).__name__}: {e}")
+                sys.exit(1)
+            sys.exit(supervisor.serve())
+        print(
+            "Usage: brief.py [serve|submit|collect|weekly|paper|commands|monitor|pgdiag]"
+        )
+        sys.exit(1)
+
+    if mode in JOB_MODES:
+        # A supervisor-spawned child inherits all three; a human running
+        # `docker compose run --rm newsbrief collect` inherits none, and so
+        # defaults to a manual run that owns its own ledger row.
+        scheduled_for = os.environ.get("NEWSBRIEF_SCHEDULED_FOR") or None
+        trigger = os.environ.get("NEWSBRIEF_TRIGGER", "manual")
+        env_run_id = os.environ.get("NEWSBRIEF_RUN_ID")
+        sys.exit(
+            run_job(
+                mode,
+                fn,
+                scheduled_for=scheduled_for,
+                trigger=trigger,
+                run_id=int(env_run_id) if env_run_id else None,
+            )
+        )
+
+    try:
+        fn()
+    except Exception as e:
+        # Last-resort alert for non-job modes: without this, an uncaught crash is
+        # visible only in the log file and the reader silently gets no brief.
+        log.exception(f"Mode '{mode}' crashed")
+        telegram_alert(f"{mode} crashed: {type(e).__name__}: {e}")
         sys.exit(1)

@@ -24,6 +24,11 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 REQUIRED_ENV = ("ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")
 
+# sysexits.h EX_TEMPFAIL, "try again later": the exit code a job uses when
+# another entry path already holds its lock. Shared because the supervisor
+# reads it when reaping and must not mistake a refusal for a crash.
+EX_ALREADY_RUNNING = 75
+
 # Root for all persistent state, archives and the log file. /app/logs is the
 # container volume mount; override NEWSBRIEF_DATA_DIR for local runs and tests.
 DATA_DIR = Path(os.environ.get("NEWSBRIEF_DATA_DIR", "/app/logs"))
