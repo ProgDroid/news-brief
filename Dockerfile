@@ -2,8 +2,13 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# System deps for feedparser/requests (curl removed: nothing in the image uses it)
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# System deps for feedparser/requests (curl removed: nothing in the image uses it).
+# `upgrade` is deliberate: python:3.12-slim lags Debian security updates by days
+# to weeks, and the CI Trivy gate fails the run on a FIXABLE CRITICAL/HIGH. Without
+# this the build ships whatever the base image last baked — 2026-08-31 that was
+# openssl 3.5.6-1~deb13u2, one patch behind CVE-2026-14456. Upgrading here patches
+# the class, not the instance, so the next CVE does not need another commit.
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
