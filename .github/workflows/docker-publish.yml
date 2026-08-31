@@ -12,6 +12,8 @@ on:
       - 'trading.py'
       - 'polygram_live.py'
       - 'validation.py'
+      - 'db.py'
+      - 'migrations/**'
       - 'enrichment/**'
       - 'scripts/**'
       - 'tests/**'
@@ -35,6 +37,20 @@ env:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_PASSWORD: newsbrief
+          POSTGRES_USER: newsbrief
+          POSTGRES_DB: newsbrief_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - name: Checkout
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
@@ -49,10 +65,12 @@ jobs:
 
       - name: Lint
         run: |
-          ruff check brief.py brief_memory.py claim_verify.py retention.py common.py trading.py polygram_live.py validation.py enrichment scripts tests
-          ruff format --check brief.py brief_memory.py claim_verify.py retention.py common.py trading.py polygram_live.py validation.py enrichment scripts tests
+          ruff check brief.py brief_memory.py claim_verify.py retention.py common.py trading.py polygram_live.py validation.py db.py enrichment scripts tests
+          ruff format --check brief.py brief_memory.py claim_verify.py retention.py common.py trading.py polygram_live.py validation.py db.py enrichment scripts tests
 
       - name: Test
+        env:
+          DATABASE_URL: postgresql://newsbrief:newsbrief@localhost:5432/newsbrief_test
         run: pytest -q
 
   build-and-push:
