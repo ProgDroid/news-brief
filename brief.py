@@ -123,6 +123,12 @@ CHROMA_MCP_URL = os.environ.get(
     "CHROMA_MCP_URL", "https://progdroid--podcast-mcp-server-mcp-server.modal.run/mcp"
 )
 
+# Modal proxy auth. The MCP endpoint is deployed with requires_proxy_auth=True,
+# so Modal rejects unauthenticated calls at its edge before a container starts.
+# Create a token pair with `modal workspace proxy-tokens create`.
+MODAL_PROXY_KEY = os.environ.get("MODAL_PROXY_KEY", "").strip()
+MODAL_PROXY_SECRET = os.environ.get("MODAL_PROXY_SECRET", "").strip()
+
 MAX_TOKENS = 16384  # whole-turn budget; web-search loop + brief + signals JSON
 
 STATE_FILE = DATA_DIR / "batch_state.json"
@@ -2058,14 +2064,26 @@ def _chroma_call(payload: dict, log_label: str) -> list[str]:
     requires the client to advertise it accepts both application/json and
     text/event-stream; omitting that Accept header yields 406 Not Acceptable.
     """
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    }
+    if MODAL_PROXY_KEY and MODAL_PROXY_SECRET:
+        headers["Modal-Key"] = MODAL_PROXY_KEY
+        headers["Modal-Secret"] = MODAL_PROXY_SECRET
+    else:
+        # Say this loudly. Without the pair Modal returns 401, which the broad
+        # except below would otherwise log as a generic Chroma failure and the
+        # brief would quietly ship with no podcast context at all.
+        log.warning(
+            "MODAL_PROXY_KEY / MODAL_PROXY_SECRET unset; the podcast MCP endpoint "
+            "requires proxy auth and will reject this call with 401."
+        )
     try:
         resp = requests.post(
             CHROMA_MCP_URL,
             json=payload,
-            headers={
-                "Content-Type": "application/json",
-                "Accept": "application/json, text/event-stream",
-            },
+            headers=headers,
             # Modal serverless cold-starts can exceed 20s on the first call of a run.
             timeout=60,
         )
