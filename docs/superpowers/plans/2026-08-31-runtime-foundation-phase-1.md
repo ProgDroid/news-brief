@@ -396,8 +396,20 @@ def advisory_lock(conn: psycopg.Connection, name: str):
         yield got
     finally:
         if got and not conn.closed:
-            conn.execute("SELECT pg_advisory_unlock(%s)", (key,))
-            conn.commit()
+            # A statement that failed inside the `with` block leaves the
+            # transaction aborted; pg_advisory_unlock on an aborted transaction
+            # raises InFailedSqlTransaction, which — unguarded — replaces the
+            # real error with an unrelated one right as it propagates. Roll
+            # back first so unlock can run, and swallow anything cleanup itself
+            # raises: release bookkeeping must not be able to mask, or invent,
+            # a failure.
+            try:
+                if conn.info.transaction_status == psycopg.pq.TransactionStatus.INERROR:
+                    conn.rollback()
+                conn.execute("SELECT pg_advisory_unlock(%s)", (key,))
+                conn.commit()
+            except Exception:
+                log.exception(f"Failed to release advisory lock for '{name}'")
 
 
 def _ensure_migrations_table(conn: psycopg.Connection) -> None:
@@ -1198,6 +1210,16 @@ JOB_MODES = frozenset({"submit", "collect", "weekly", "monitor"})
 # supervisor for the `serve` branch.
 
 
+_VALID_TRIGGERS = frozenset({"scheduled", "catchup", "manual"})
+
+
+def _coerce_trigger(trigger) -> str:
+    """`job_runs.trigger` carries a CHECK constraint. A typo'd env var must not
+    be able to reach it: the violation aborts the transaction, and the aborted
+    transaction then makes the lock's own cleanup raise over the real error."""
+    return trigger if trigger in _VALID_TRIGGERS else "manual"
+
+
 def _finish_quietly(run_id, code) -> None:
     """Close a ledger row on a FRESH connection; never change the job's outcome.
 
@@ -1225,31 +1247,46 @@ def run_job(mode, fn, *, scheduled_for=None, trigger="manual", run_id=None) -> i
     `run_id` is set when the supervisor spawned us: it already wrote the row and
     will close it at reap, so we leave the ledger alone. Without one we are a
     manual invocation and own the row ourselves.
+
+    Everything here — connect, lock, start_run, not just `fn()` — is wrapped:
+    a Postgres outage during a scheduled collect must alert like any other
+    crash, not vanish as an unhandled traceback that never reaches Telegram.
     """
     import db
 
-    with db.connect() as conn:
-        with db.advisory_lock(conn, mode) as acquired:
-            if not acquired:
-                log.warning(
-                    f"{mode} is already running (job lock held); refusing to start a "
-                    f"second one. Check /jobs or job_runs for the holder."
-                )
-                return EX_ALREADY_RUNNING
+    try:
+        with db.connect() as conn:
+            with db.advisory_lock(conn, mode) as acquired:
+                if not acquired:
+                    log.warning(
+                        f"{mode} is already running (job lock held); refusing to "
+                        f"start a second one. Check /jobs or job_runs for the holder."
+                    )
+                    return EX_ALREADY_RUNNING
 
-            owns_row = run_id is None
-            if owns_row:
-                run_id = db.start_run(conn, mode, scheduled_for, trigger)
-            try:
-                fn()
-                code = 0
-            except Exception as e:
-                log.exception(f"Mode '{mode}' crashed")
-                telegram_alert(f"{mode} crashed: {type(e).__name__}: {e}")
-                code = 1
-            if owns_row:
-                _finish_quietly(run_id, code)
-            return code
+                owns_row = run_id is None
+                if owns_row:
+                    run_id = db.start_run(
+                        conn, mode, scheduled_for, _coerce_trigger(trigger)
+                    )
+                try:
+                    fn()
+                    code = 0
+                except Exception as e:
+                    log.exception(f"Mode '{mode}' crashed")
+                    telegram_alert(f"{mode} crashed: {type(e).__name__}: {e}")
+                    code = 1
+                if owns_row:
+                    _finish_quietly(run_id, code)
+                return code
+    except Exception as e:
+        # Reaches here only for failures OUTSIDE fn() — connect, lock acquire,
+        # or start_run — which the inner try above does not cover. Without this,
+        # a Postgres outage during a scheduled collect logs a traceback and
+        # sends no alert: work fails closed, but observability fails open.
+        log.exception(f"Mode '{mode}' crashed")
+        telegram_alert(f"{mode} crashed: {type(e).__name__}: {e}")
+        return 1
 
 
 if __name__ == "__main__":
