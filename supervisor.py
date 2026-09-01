@@ -19,7 +19,7 @@ import signal
 import threading
 import subprocess
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import db
 import scheduler
@@ -37,9 +37,10 @@ BACKOFF_CEILING_SECONDS = 300
 CRASH_LOOP_LIMIT = 5
 CRASH_LOOP_WINDOW_SECONDS = 600
 # A resident alive this long has demonstrated it is not crash-looping; only
-# then does its failure count reset. Resetting at spawn instead (fix round 1,
-# Minor 7) cleared the count before a real crash loop could ever grow it past
-# CRASH_LOOP_LIMIT, making the backoff ceiling unreachable.
+# then does its failure count reset (see ResidentPool._note_stability, which
+# is where this is applied). Resetting at spawn instead cleared the count
+# before a real crash loop could ever grow it past CRASH_LOOP_LIMIT, making
+# the backoff ceiling unreachable.
 RESIDENT_STABLE_SECONDS = CRASH_LOOP_WINDOW_SECONDS
 
 
@@ -139,6 +140,76 @@ class Child:
     @property
     def running(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
+
+
+@dataclass
+class ResidentPool:
+    """Keeps the resident children up: at most one reap or one start per tick.
+
+    Reaping and starting are deliberately different ticks. Doing both in one
+    could not work: the backoff was measured from the same `now` it was then
+    compared against, so the start never fired on the crash tick, and the dead
+    Child stayed in the dict — every later tick re-entered the reap branch, the
+    failure count climbed, the crash-loop alert re-fired, and the backoff was
+    pushed further out each time. Past four failures the delay exceeded one
+    tick and the start line became permanently unreachable: the Telegram bot,
+    which is the operator's only control channel, stayed dead while an alert
+    went out every 30 seconds forever (fix round 2, Critical 1).
+
+    So a reap removes the child and only records when the next start becomes
+    due; a later tick, observing the elapsed backoff against a fresher `now`,
+    starts a new one.
+    """
+
+    tracker: RestartTracker = field(default_factory=RestartTracker)
+    children: dict[str, Child] = field(default_factory=dict)
+    failures: dict[str, int] = field(default_factory=dict)
+    started_at: dict[str, float] = field(default_factory=dict)
+    next_start: dict[str, float] = field(default_factory=dict)
+
+    def tick(self, now_mono: float, spawn=None) -> None:
+        """One pass over RESIDENT_MODES. `spawn` is injectable for tests."""
+        spawn = spawn or Child
+        for mode in RESIDENT_MODES:
+            child = self.children.get(mode)
+            if child is not None and child.running:
+                self._note_stability(mode, now_mono)
+                continue
+            if child is not None:
+                self._reap(mode, child, now_mono)
+                continue
+            if now_mono >= self.next_start.get(mode, 0.0):
+                fresh = spawn(mode)
+                fresh.start()
+                self.children[mode] = fresh
+                self.started_at[mode] = now_mono
+
+    def _note_stability(self, mode: str, now_mono: float) -> None:
+        """Clear the failure count only once a child has proved it stays up.
+
+        Resetting at spawn instead cleared it before a real crash loop could
+        ever grow it past CRASH_LOOP_LIMIT, so the backoff ceiling was
+        unreachable (fix round 2, Minor 5).
+        """
+        if now_mono - self.started_at.get(mode, now_mono) >= RESIDENT_STABLE_SECONDS:
+            self.failures[mode] = 0
+
+    def _reap(self, mode: str, child: Child, now_mono: float) -> None:
+        code = child.wait(timeout=0)
+        # Drain what the child wrote on its way out; without this its last
+        # lines — usually the traceback that says why it died — are dropped.
+        child.join_reader(timeout=5)
+        del self.children[mode]
+        self.started_at.pop(mode, None)
+        self.failures[mode] = self.failures.get(mode, 0) + 1
+        delay = backoff_delay(self.failures[mode])
+        self.next_start[mode] = now_mono + delay
+        log.warning(f"[{mode}] exited with {code}; restarting in {delay:.0f}s")
+        if self.tracker.record(mode):
+            telegram_alert(
+                f"{mode} has restarted {CRASH_LOOP_LIMIT} times in "
+                f"{CRASH_LOOP_WINDOW_SECONDS // 60} minutes — crash loop"
+            )
 
 
 @dataclass
@@ -257,12 +328,51 @@ def _due_jobs(conn, now: datetime) -> list[tuple[scheduler.Schedule, datetime, s
         last = db.latest_scheduled_for(conn, spec.job)
         decision = scheduler.decide(spec, now, last)
         if decision.action == "run":
-            trigger = "catchup" if now > decision.scheduled_for else "scheduled"
+            # `decide` returns previous_fire(), which is by construction <= now,
+            # so a bare `now > scheduled_for` labelled EVERY run a catchup and
+            # the ledger never recorded a 'scheduled' one — the column stopped
+            # distinguishing anything (fix round 2, Important 2). A polled
+            # scheduler always observes a fire time a few seconds late, so the
+            # honest threshold is the poll interval that made it late.
+            lateness = now - decision.scheduled_for
+            trigger = (
+                "catchup"
+                if lateness > timedelta(seconds=scheduler.TICK_SECONDS)
+                else "scheduled"
+            )
             ready.append((spec, decision.scheduled_for, trigger))
         elif decision.action == "missed":
             log.warning(f"[{spec.job}] {decision.reason}")
             db.record_missed(conn, spec.job, decision.scheduled_for)
     return ready
+
+
+def shutdown(jobs: dict[str, Child], residents: dict[str, Child]) -> None:
+    """Stop every child and close the ledger rows this supervisor owns.
+
+    Terminating a job child without closing its row left it `running` for the
+    next boot's `reclaim_orphans`, so every ordinary `compose down` produced an
+    "Orphaned by a restart and NOT retried" alert — which trains the operator to
+    ignore the one alert that matters (fix round 2, Important 3). A planned stop
+    must leave no orphans.
+
+    The row closes as `finished` carrying the signal-derived exit code (-15 for
+    SIGTERM on Linux), not as `missed`: the child really did run, and the
+    non-zero code says how it ended. `missed` stays reserved for work that never
+    started at all. No alert fires here — a stop we asked for is not a failure.
+    """
+    for mode, child in list(jobs.items()):
+        child.terminate()
+        code = child.wait(timeout=0)
+        # Drain before closing the row, so the child's last lines reach the log
+        # file the supervisor is about to stop writing.
+        child.join_reader(timeout=5)
+        del jobs[mode]
+        log.info(f"[{mode}] stopped for shutdown with {code}")
+        _close_run(child.run_id, code)
+    for child in residents.values():
+        child.terminate()
+        child.join_reader(timeout=5)
 
 
 def serve() -> int:
@@ -279,34 +389,14 @@ def serve() -> int:
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
 
-    residents: dict[str, Child] = {}
-    failures: dict[str, int] = {}
-    next_start: dict[str, float] = {}
-    tracker = RestartTracker()
+    pool = ResidentPool()
     jobs: dict[str, Child] = {}
 
     while not stopping.is_set():
         now_mono = time.monotonic()
 
         if state.residents_enabled:
-            for mode in RESIDENT_MODES:
-                child = residents.get(mode)
-                if child is not None and child.running:
-                    continue
-                if child is not None:
-                    code = child.wait(timeout=0)
-                    log.warning(f"[{mode}] exited with {code}; will restart")
-                    failures[mode] = failures.get(mode, 0) + 1
-                    if tracker.record(mode):
-                        telegram_alert(
-                            f"{mode} has restarted {CRASH_LOOP_LIMIT} times in "
-                            f"{CRASH_LOOP_WINDOW_SECONDS // 60} minutes — crash loop"
-                        )
-                    next_start[mode] = now_mono + backoff_delay(failures[mode])
-                if now_mono >= next_start.get(mode, 0.0):
-                    residents[mode] = Child(mode)
-                    residents[mode].start()
-                    failures[mode] = 0
+            pool.tick(now_mono)
 
         for mode, child in list(jobs.items()):
             if child.running:
@@ -377,7 +467,6 @@ def serve() -> int:
 
         stopping.wait(scheduler.TICK_SECONDS)
 
-    for child in list(jobs.values()) + list(residents.values()):
-        child.terminate()
+    shutdown(jobs, pool.children)
     log.info("Supervisor stopped")
     return 0

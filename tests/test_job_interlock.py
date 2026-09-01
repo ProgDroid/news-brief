@@ -251,3 +251,29 @@ def test_a_reclaimed_run_is_not_retried(clean_db):
 
     d = scheduler.decide(spec, now, db.latest_scheduled_for(clean_db, "collect"))
     assert d.action == "skip"
+
+
+def test_a_planned_shutdown_closes_the_job_row(clean_db):
+    """A `compose down` mid-job must leave no `running` row behind. Otherwise
+    the next boot's reclaim_orphans closes it and fires "Orphaned by a restart
+    and NOT retried" on every ordinary deploy, training the operator to ignore
+    the one alert that matters (fix round 2, Important 3)."""
+    import sys
+
+    import supervisor
+
+    run_id = db.start_run(clean_db, "collect", None, "scheduled")
+    child = supervisor.Child(
+        "collect", [sys.executable, "-c", "import time; time.sleep(60)"]
+    )
+    child.run_id = run_id
+    child.start()
+
+    supervisor.shutdown({"collect": child}, {})
+
+    status, code = clean_db.execute(
+        "SELECT status, exit_code FROM job_runs WHERE id = %s", (run_id,)
+    ).fetchone()
+    assert status != "running", "a planned stop must not leave an orphan row"
+    assert status == "finished"
+    assert code not in (None, 0), "a terminated child did not exit cleanly"
