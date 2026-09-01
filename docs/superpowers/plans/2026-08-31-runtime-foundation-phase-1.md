@@ -1986,6 +1986,28 @@ code path reads it.
 - One `getUpdates` consumer only: the bot responds and the log shows no 409.
 ```
 
+- [ ] **Step 1a: Reconcile the shutdown budget with the compose stop timeout**
+
+Added after Task 4's review. `shutdown` currently terminates job children **serially** — `terminate(grace=20)`
+then `wait(5)` then `join_reader(5)`, per child, for up to four schedules. Under Docker's 10-second default the
+supervisor is SIGKILLed part-way through, `running` rows survive, and the next boot reports them as orphans:
+the Important-5 fix from Task 4 is inert in production, and every routine deploy fires the false alert that
+trains an operator to ignore the real one.
+
+Three changes, in `supervisor.py`:
+
+1. **Broadcast, then wait once.** SIGTERM every child first, then wait against a single shared deadline
+   (`SHUTDOWN_BUDGET_SECONDS`), rather than serially per child. Worst case drops from roughly 4×30s to ~30s.
+2. **Close the ledger rows BEFORE escalating to SIGKILL.** If the container teardown kills us part-way, the rows
+   are the part Important 5 exists for; killing the children is something teardown does anyway. Order the work
+   by what survives being interrupted.
+3. **Close every row on ONE connection, with an explicit `connect_timeout`.** `_close_run`'s per-child
+   `db.connect()` blocks on its own connect timeout, *outside* any wait budget — so with the database slow or
+   gone, a bounded shutdown is not bounded at all.
+
+Test it with a child that **ignores SIGTERM**. Neither existing shutdown test would catch a regression here:
+both use children that die instantly, so they never exercise the deadline at all.
+
 - [ ] **Step 2: Rewrite `docker-compose.yml`**
 
 Replace the five services with two, and add `DATABASE_URL` to the anchor's `environment:` block (it is invisible in the container otherwise):
@@ -2001,7 +2023,17 @@ services:
   newsbrief:
     <<: *newsbrief
     command: [serve]
+    # The anchor defaults to restart: "no". This override is load-bearing, not
+    # cosmetic: a resident child that fails to spawn still takes the supervisor
+    # down, and this is what makes that self-heal instead of stopping the stack.
     restart: unless-stopped
+    # Must exceed supervisor.SHUTDOWN_BUDGET_SECONDS with room for the ledger
+    # writes. Docker's default is 10s, which would SIGKILL the supervisor
+    # mid-shutdown and leave `running` rows for the next boot to report as
+    # orphans — reinstating, on every routine deploy, the false alert that
+    # spec section 8's shutdown handling exists to remove. If you tune either
+    # number, tune both.
+    stop_grace_period: 45s
     depends_on:
       postgres:
         condition: service_healthy
