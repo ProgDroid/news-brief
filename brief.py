@@ -3742,6 +3742,21 @@ def mode_pgdiag():
     telegram_send_long("\n".join(out))
 
 
+def mode_backup():
+    """Scheduled logical backup of the database. See backup.py for the version guard.
+
+    Thin on purpose: everything that can go wrong raises, and `run_job` already
+    logs the traceback and sends the Telegram alert, so a refusal here reaches
+    the operator through the same path as any other job failure. A successful
+    backup is deliberately SILENT — /jobs answers "did it run", and a nightly
+    "backup OK" message is how an operator learns to ignore the channel.
+    """
+    import backup
+
+    log.info("=== BACKUP ===")
+    backup.run_backup()
+
+
 def mode_monitor():
     """Hourly cross-asset volume-anomaly alerts + live-position exit sweep/reconcile.
 
@@ -3780,7 +3795,7 @@ def mode_monitor():
 # `capture` is NOT here: mode_capture does not exist yet (Epic 2, spec 7.2).
 # `paper` is NOT here either — see the note above; the book is already guarded
 # by file_lock at the resource level, which is the right grain for it.
-JOB_MODES = frozenset({"submit", "collect", "weekly", "monitor"})
+JOB_MODES = frozenset({"submit", "collect", "weekly", "monitor", "backup"})
 
 # EX_ALREADY_RUNNING is imported from common (see Step 3a): the supervisor needs
 # it too, and `supervisor` importing `brief` would be circular — brief imports
@@ -3883,6 +3898,7 @@ if __name__ == "__main__":
         "commands": mode_commands,
         "paper": mode_paper,
         "monitor": mode_monitor,
+        "backup": mode_backup,
         "pgdiag": mode_pgdiag,
     }
     fn = dispatch.get(mode)
@@ -3901,7 +3917,8 @@ if __name__ == "__main__":
                 sys.exit(1)
             sys.exit(supervisor.serve())
         print(
-            "Usage: brief.py [serve|submit|collect|weekly|paper|commands|monitor|pgdiag]"
+            "Usage: brief.py "
+            "[serve|submit|collect|weekly|paper|commands|monitor|backup|pgdiag]"
         )
         sys.exit(1)
 

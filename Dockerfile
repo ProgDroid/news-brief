@@ -12,10 +12,27 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-reco
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+# pg_dump for the scheduled backup job, from PGDG rather than Debian.
+# This is NOT interchangeable with `postgresql-client`: Debian trixie's is
+# version 17, and pg_dump REFUSES to dump a server newer than itself, so the
+# Debian package would produce a backup job that fails every night and looks
+# from the outside exactly like a job that has not run yet. The major here must
+# track the `postgres:` image major in docker-compose.yml -- backup.py compares
+# the two at runtime and refuses loudly if they ever diverge, so this coupling
+# alerts instead of rotting.
+# The signing key is fetched with the interpreter already in the image, which is
+# why curl still does not need to come back.
+RUN . /etc/os-release \
+    && install -d /usr/share/keyrings \
+    && python -c "import urllib.request; urllib.request.urlretrieve('https://www.postgresql.org/media/keys/ACCC4CF8.asc','/usr/share/keyrings/pgdg.asc')" \
+    && echo "deb [signed-by=/usr/share/keyrings/pgdg.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
+    && apt-get update && apt-get install -y --no-install-recommends postgresql-client-18 \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY common.py trading.py polygram_live.py validation.py brief.py brief_memory.py claim_verify.py retention.py db.py scheduler.py supervisor.py .
+COPY common.py trading.py polygram_live.py validation.py brief.py brief_memory.py claim_verify.py retention.py db.py scheduler.py supervisor.py backup.py .
 COPY migrations/ ./migrations/
 COPY enrichment/ ./enrichment/
 

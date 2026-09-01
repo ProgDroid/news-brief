@@ -52,17 +52,24 @@ class Decision:
     reason: str
 
 
-# Times and days match the cron entries being retired exactly, so the cutover
-# changes when nothing:
+# The first four match the cron entries retired at the 2026-09-01 cutover
+# exactly, so that cutover changed when nothing:
 #   0 20 * * *  submit    0  6 * * *  collect
 #   0 21 * * 0  weekly    0  *  * * *  monitor
+# `backup` is the one schedule that never had a cron entry — it is new work, at
+# 07:00 so it runs AFTER the 06:00 collect and therefore captures the day's
+# largest write rather than yesterday's state.
 # Grace is sized to the job: monitor is cheap and hourly, so a stale catch-up is
 # worthless; collect is the day's brief and worth being hours late; weekly is
 # dated content, so its grace is wide enough to survive a restart but stops
-# before midnight so it can never arrive on the wrong day.
+# before midnight so it can never arrive on the wrong day. backup gets the
+# widest window of all, because a late backup is still a good backup — it is the
+# most lateness-tolerant job here — but it stays bounded so a catch-up cannot
+# surface at an arbitrary hour with no schedule to explain it.
 SCHEDULES: tuple[Schedule, ...] = (
     Schedule("submit", "daily", "20:00", None, grace_minutes=60),
     Schedule("collect", "daily", "06:00", None, grace_minutes=120),
+    Schedule("backup", "daily", "07:00", None, grace_minutes=180),
     Schedule("weekly", "daily", "21:00", None, grace_minutes=180, weekdays=(7,)),
     Schedule("monitor", "interval", None, 60, grace_minutes=15),
 )

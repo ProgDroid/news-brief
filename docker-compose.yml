@@ -83,6 +83,13 @@ x-newsbrief: &newsbrief
     # Self-hosted Nitter on the shared network (Twitter/X feeds). Defaults to the
     # service named `nitter` on Nitter's internal port 8080; override if it differs.
     - NITTER_BASE_URL=${NITTER_BASE_URL:-http://nitter:8080}
+    # How many daily pg_dump files the backup job keeps (default 14; <=0
+    # keeps them all and prunes nothing). Declared here because compose
+    # passes through ONLY what this block names -- setting it on the host
+    # or in .env without a line here leaves it unset inside the container
+    # and the default silently stands, which is the exact bug class the
+    # discrete POSTGRES_* block above exists to retire.
+    - NEWSBRIEF_BACKUP_RETENTION_DAYS=${NEWSBRIEF_BACKUP_RETENTION_DAYS:-}
     # Postgres holds the run ledger, the advisory locks that interlock the entry
     # paths, and the scheduler's state. These MUST be declared here: compose
     # passes through only what this block names, so setting them on the host or
@@ -137,9 +144,10 @@ services:
     # down, and this is what makes that self-heal instead of stopping the stack.
     restart: unless-stopped
     # Must exceed the WHOLE of supervisor.shutdown, not just its child-exit
-    # budget: 25s budget + 2s drain + 5s connect + 4s of ledger writes + 2s reap,
+    # budget: 25s budget + 2s drain + 5s connect + 5s of ledger writes + 2s reap,
     # plus up to 5s for a tick-path connect already in flight when the signal
-    # arrived — ~43s. The arithmetic is written out beside
+    # arrived — ~44s (the ledger-write row scales with the number of
+    # schedules). The arithmetic is written out beside
     # SHUTDOWN_BUDGET_SECONDS in supervisor.py.
     #
     # The remaining ~17s is NOT slack to be reclaimed. It is cover for the two

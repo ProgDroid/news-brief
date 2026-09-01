@@ -61,11 +61,17 @@ RESIDENT_STABLE_SECONDS = CRASH_LOOP_WINDOW_SECONDS
 #     25  this budget           children exit after the broadcast
 #   +  2  SHUTDOWN_DRAIN        final output of whichever children did exit
 #   +  5  DB_CONNECT_TIMEOUT    opening the one connection the rows close on
-#   +  4  DB_STATEMENT_TIMEOUT  4 schedules x 2 statements x 0.5s
+#   +  5  DB_STATEMENT_TIMEOUT  5 schedules x 2 statements x 0.5s
 #   +  2  SHUTDOWN_DRAIN again  reaping whatever had to be SIGKILLed
 #   ----
-#     38  plus up to 5s for a tick-path connect already in flight when the
-#         signal arrived, so ~43s
+#     39  plus up to 5s for a tick-path connect already in flight when the
+#         signal arrived, so ~44s
+#
+# This row scales with len(scheduler.SCHEDULES) and is the ONLY line here
+# that does. Adding a schedule costs 1s of worst case; the 60s grace
+# absorbs it, but if this table is ever left behind by the schedule list
+# the next person reconciles a budget that does not add up and concludes
+# the wrong thing.
 #
 # A mixed fleet reaches it: one child exits late with a grandchild holding its
 # pipe open (the first drain), another ignores SIGTERM entirely (the reap).

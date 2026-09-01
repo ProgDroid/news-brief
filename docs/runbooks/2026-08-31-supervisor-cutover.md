@@ -145,9 +145,9 @@ Every phase is bounded, and the worst case is the sum of the bounds:
 | children exit after the SIGTERM broadcast | 25s |
 | drain the final output of whichever children did exit | 2s |
 | open the one connection the rows close on | 5s |
-| the ledger writes (4 schedules x 2 statements x 0.5s) | 4s |
+| the ledger writes (5 schedules x 2 statements x 0.5s) | 5s |
 | reap whatever had to be SIGKILLed | 2s |
-| **worst case** | **43s** |
+| **worst case** | **44s** |
 
 The 60s `stop_grace_period` is deliberately more than that, not equal to it. The
 remaining ~17s is **not slack to reclaim**: it is cover for the two things the
@@ -162,6 +162,6 @@ writes land, the rows stay `running`, and the next boot's `reclaim_orphans` fire
 alert that trains an operator to ignore the real one. If you tune either number,
 tune both.
 
-A clean stop can therefore take up to ~43s when a job is running. That is not a
+A clean stop can therefore take up to ~44s when a job is running. That is not a
 hang. In practice it is about a second: the job modes install no SIGTERM handler,
 so they exit on the signal and nothing else in the list is reached.
