@@ -92,6 +92,45 @@ def previous_fire(spec: Schedule, now: datetime) -> datetime:
     raise ValueError(f"unknown schedule kind: {spec.kind}")
 
 
+def next_fire(spec: Schedule, now: datetime) -> datetime:
+    """The soonest moment this schedule is due, strictly AFTER `now`.
+
+    The forward twin of `previous_fire`. The catch-up rule never needs it — it
+    only ever asks what is already owed — so this exists for the /jobs command,
+    which answers the operator's other question: when is this next due?
+
+    Strictly after, not at-or-after: standing exactly on a fire time, the answer
+    is the following one. At-or-after would make /jobs report "next: in 0s" for
+    the whole second the job is due.
+    """
+    if spec.kind == "daily":
+        hh, mm = (int(x) for x in spec.at.split(":"))
+        candidate = datetime.combine(now.date(), time(hh, mm), tzinfo=now.tzinfo)
+        if candidate <= now:
+            candidate += timedelta(days=1)
+        if not spec.weekdays:
+            return candidate
+        # Walk forward to the next allowed weekday — at most seven steps.
+        for _ in range(7):
+            if candidate.isoweekday() in spec.weekdays:
+                return candidate
+            candidate += timedelta(days=1)
+        raise ValueError(f"{spec.job}: weekdays={spec.weekdays} matches no day")
+
+    if spec.kind == "interval":
+        midnight = datetime.combine(now.date(), time(0, 0), tzinfo=now.tzinfo)
+        elapsed = int((now - midnight).total_seconds() // 60)
+        step = elapsed - (elapsed % spec.every_minutes) + spec.every_minutes
+        # Clamped to midnight because `previous_fire` re-anchors there: whenever
+        # every_minutes does not divide 1440 the day's last slot is short, and
+        # projecting a full interval past it lands on a time that never fires.
+        # Only 60m is configured today, and 60 divides 1440, so the unclamped
+        # version would be wrong invisibly until the first interval that doesn't.
+        return min(midnight + timedelta(minutes=step), midnight + timedelta(days=1))
+
+    raise ValueError(f"unknown schedule kind: {spec.kind}")
+
+
 def decide(
     spec: Schedule, now: datetime, last_scheduled_for: datetime | None
 ) -> Decision:

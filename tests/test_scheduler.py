@@ -184,3 +184,94 @@ def test_the_configured_weekly_matches_the_cron_entry_it_replaces():
     weekly = next(s for s in scheduler.SCHEDULES if s.job == "weekly")
     assert weekly.at == "21:00"
     assert weekly.weekdays == (7,)
+
+
+# ── next_fire: the forward twin ──────────────────────────────────────────────
+# `previous_fire` answers "what do I owe?"; the /jobs command asks the opposite
+# question, "when is this next due?", and no existing function answers it.
+
+# An interval that does NOT divide 1440. The anchor resets at midnight, so the
+# last slot of the day is short — the arithmetic must not project past it.
+EVERY_50 = scheduler.Schedule(
+    job="odd", kind="interval", at=None, every_minutes=50, grace_minutes=10
+)
+
+
+@pytest.mark.parametrize(
+    "now,expected",
+    [
+        (dt(2026, 8, 31, 5, 59), dt(2026, 8, 31, 6, 0)),
+        # Strictly after `now`: standing exactly on a fire time, the NEXT one is
+        # tomorrow's. Returning today's would make /jobs say "next: 0s" forever.
+        (dt(2026, 8, 31, 6, 0), dt(2026, 9, 1, 6, 0)),
+        (dt(2026, 8, 31, 6, 1), dt(2026, 9, 1, 6, 0)),
+        (dt(2026, 8, 31, 23, 59), dt(2026, 9, 1, 6, 0)),
+    ],
+)
+def test_next_fire_daily(now, expected):
+    assert scheduler.next_fire(DAILY, now) == expected
+
+
+@pytest.mark.parametrize(
+    "now,expected",
+    [
+        (dt(2026, 8, 31, 6, 0), dt(2026, 8, 31, 6, 30)),
+        (dt(2026, 8, 31, 6, 29), dt(2026, 8, 31, 6, 30)),
+        (dt(2026, 8, 31, 6, 30), dt(2026, 8, 31, 7, 0)),
+        (dt(2026, 8, 31, 23, 45), dt(2026, 9, 1, 0, 0)),
+    ],
+)
+def test_next_fire_interval(now, expected):
+    assert scheduler.next_fire(EVERY_30, now) == expected
+
+
+def test_next_fire_does_not_project_past_the_midnight_anchor():
+    """The last slot of the day is short whenever the interval does not divide
+    1440, because `previous_fire` re-anchors at midnight. At 23:59 with a 50m
+    interval the previous slot is 23:20, and 23:20 + 50m = 00:10 tomorrow — a
+    time that never fires, since tomorrow's slots start at 00:00. Only 60m is
+    configured today, and 60 divides 1440, so this is invisible in production
+    until someone adds the first interval that does not."""
+    assert scheduler.previous_fire(EVERY_50, dt(2026, 8, 31, 23, 59)) == dt(
+        2026, 8, 31, 23, 20
+    )
+    assert scheduler.next_fire(EVERY_50, dt(2026, 8, 31, 23, 59)) == dt(
+        2026, 9, 1, 0, 0
+    )
+
+
+@pytest.mark.parametrize(
+    "now,expected",
+    [
+        # Monday: the next Sunday, not tomorrow.
+        (dt(2026, 8, 31, 12, 0), dt(2026, 9, 6, 21, 0)),
+        # Sunday before the hour: later today.
+        (dt(2026, 8, 30, 20, 0), dt(2026, 8, 30, 21, 0)),
+        # Sunday exactly on it, and just after: a week out.
+        (dt(2026, 8, 30, 21, 0), dt(2026, 9, 6, 21, 0)),
+        (dt(2026, 8, 30, 21, 1), dt(2026, 9, 6, 21, 0)),
+    ],
+)
+def test_next_fire_respects_weekdays(now, expected):
+    assert scheduler.next_fire(SUNDAY_ONLY, now) == expected
+
+
+@pytest.mark.parametrize("spec", scheduler.SCHEDULES)
+def test_next_fire_is_the_successor_of_previous_fire(spec):
+    """Round-trip invariant on every real schedule: the answer is strictly in
+    the future, and it is itself a fire time."""
+    now = dt(2026, 8, 31, 13, 7, 42)
+    nxt = scheduler.next_fire(spec, now)
+    assert nxt > now
+    assert scheduler.previous_fire(spec, nxt) == nxt
+
+
+def test_next_fire_rejects_an_unknown_kind():
+    spec = object.__new__(scheduler.Schedule)
+    object.__setattr__(spec, "job", "bogus")
+    object.__setattr__(spec, "kind", "hourly-ish")
+    object.__setattr__(spec, "at", None)
+    object.__setattr__(spec, "every_minutes", None)
+    object.__setattr__(spec, "weekdays", None)
+    with pytest.raises(ValueError, match="unknown schedule kind"):
+        scheduler.next_fire(spec, dt(2026, 8, 31, 6, 0))

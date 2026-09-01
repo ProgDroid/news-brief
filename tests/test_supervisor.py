@@ -6,7 +6,7 @@ reap, drain, backoff or fail-open startup, which is all this module does.
 
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import supervisor
 
@@ -528,3 +528,202 @@ def test_a_failed_seed_disables_jobs(monkeypatch):
     state = supervisor.startup(migrate=lambda c: None, connect=lambda: object())
     assert state.jobs_enabled is False
     assert "job_runs is gone" in state.reason
+
+
+# ── Manual runs: the queue /run writes and the tick claims ───────────────────
+
+NOW = datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc)
+
+
+def _queued(run_id, job, created_at):
+    return {
+        "id": run_id,
+        "job_name": job,
+        "scheduled_for": None,
+        "trigger": "manual",
+        "status": "queued",
+        "started_at": None,
+        "finished_at": None,
+        "exit_code": None,
+        "created_at": created_at,
+    }
+
+
+def _capture_closes(monkeypatch, closed):
+    monkeypatch.setattr(
+        supervisor.db,
+        "finish_run",
+        lambda conn, rid, code, status="finished": closed.append((rid, code, status)),
+    )
+
+
+def test_a_fresh_manual_request_is_offered_for_claiming(monkeypatch):
+    monkeypatch.setattr(
+        supervisor.db,
+        "queued_runs",
+        lambda conn: [_queued(1, "collect", NOW - timedelta(minutes=1))],
+    )
+
+    ready = supervisor._manual_jobs(None, NOW)
+
+    assert [(spec.job, run_id) for spec, run_id in ready] == [("collect", 1)]
+
+
+def test_a_manual_request_past_its_ttl_is_closed_rather_than_run(monkeypatch):
+    """A request made while jobs were disabled, or behind a collect that ran
+    long, must not fire hours later as a surprise. It is closed as `missed` —
+    not `finished`, which would let /jobs claim work that never happened."""
+    closed, alerts = [], []
+    _capture_closes(monkeypatch, closed)
+    monkeypatch.setattr(supervisor, "telegram_alert", alerts.append)
+    monkeypatch.setattr(
+        supervisor.db,
+        "queued_runs",
+        lambda conn: [_queued(1, "collect", NOW - timedelta(hours=3))],
+    )
+
+    ready = supervisor._manual_jobs(None, NOW)
+
+    assert ready == []
+    assert closed == [(1, supervisor.EX_QUEUE_EXPIRED, "missed")]
+    assert len(alerts) == 1 and "collect" in alerts[0]
+
+
+def test_the_ttl_boundary_still_runs(monkeypatch):
+    monkeypatch.setattr(
+        supervisor.db,
+        "queued_runs",
+        lambda conn: [
+            _queued(
+                1,
+                "collect",
+                NOW - timedelta(seconds=supervisor.MANUAL_QUEUE_TTL_SECONDS),
+            )
+        ],
+    )
+
+    assert len(supervisor._manual_jobs(None, NOW)) == 1
+
+
+def test_a_queued_row_naming_an_unknown_job_is_closed_with_its_own_reason(monkeypatch):
+    """Distinguishable from an expiry. Aging it out would work eventually, but
+    the operator would be told the request went stale when in truth the job does
+    not exist — a wrong reason is worse than a late one."""
+    closed, alerts = [], []
+    _capture_closes(monkeypatch, closed)
+    monkeypatch.setattr(supervisor, "telegram_alert", alerts.append)
+    monkeypatch.setattr(
+        supervisor.db,
+        "queued_runs",
+        lambda conn: [_queued(1, "backfill", NOW - timedelta(minutes=1))],
+    )
+
+    ready = supervisor._manual_jobs(None, NOW)
+
+    assert ready == []
+    assert closed == [(1, supervisor.EX_UNKNOWN_JOB, "missed")]
+    assert "backfill" in alerts[0]
+
+
+class _RecordingChild(_FakeChild):
+    """A _FakeChild that reports its spawn into a shared op list, so a claim can
+    be shown to happen BEFORE the process exists."""
+
+    ops = None
+
+    def __init__(self, name, argv=None, env=None, **kw):
+        super().__init__(name, argv, env, **kw)
+        self.spawn_env = dict(env or {})
+
+    def start(self):
+        _RecordingChild.ops.append(("spawn", self.name, self.run_id, self.spawn_env))
+        super().start()
+
+
+def _manual_serve_harness(monkeypatch, ops, claim_result=True, stop_after=1):
+    import scheduler
+
+    connect = _serve_harness(monkeypatch, stop_after=stop_after)
+    monkeypatch.setattr(supervisor, "telegram_alert", lambda msg: None)
+    monkeypatch.setattr(supervisor, "_due_jobs", lambda conn, now: [])
+    monkeypatch.setattr(supervisor, "_close_runs", lambda outcomes: None)
+    monkeypatch.setattr(supervisor, "_close_run", lambda rid, code: None)
+    monkeypatch.setattr(
+        supervisor.db,
+        "claim_queued",
+        lambda conn, rid: (ops.append(("claim", rid)), claim_result)[1],
+    )
+    _RecordingChild.ops = ops
+    monkeypatch.setattr(supervisor, "Child", _RecordingChild)
+    spec = next(s for s in scheduler.SCHEDULES if s.job == "monitor")
+    monkeypatch.setattr(supervisor, "_manual_jobs", lambda conn, now: [(spec, 42)])
+    return connect
+
+
+def test_a_queued_manual_run_is_claimed_before_the_child_is_spawned(monkeypatch):
+    """Same ordering the scheduled path uses for start_run: the row moves out of
+    `queued` first, so a tick that dies between the two leaves a row the orphan
+    reclaim can close rather than a request that is spawned twice."""
+    ops = []
+    _manual_serve_harness(monkeypatch, ops)
+
+    assert supervisor.serve() == 0
+    assert [op[0] for op in ops] == ["claim", "spawn"]
+    assert ops[0] == ("claim", 42)
+
+
+def test_a_claimed_manual_child_carries_its_run_id_and_no_fire_time(monkeypatch):
+    """scheduled_for is NULL on a manual row, so the child must not be handed
+    one. brief.py already defaults it to None; this pins that the supervisor
+    does not invent a value."""
+    ops = []
+    _manual_serve_harness(monkeypatch, ops)
+
+    assert supervisor.serve() == 0
+    _, name, run_id, env = ops[1]
+    assert name == "monitor" and run_id == 42
+    assert env["NEWSBRIEF_TRIGGER"] == "manual"
+    assert env["NEWSBRIEF_RUN_ID"] == "42"
+    assert "NEWSBRIEF_SCHEDULED_FOR" not in env
+
+
+def test_a_row_that_lost_its_claim_is_not_spawned(monkeypatch):
+    """claim_queued returning False means something else already took the row.
+    Spawning anyway is the double-run this guard exists to prevent."""
+    ops = []
+    _manual_serve_harness(monkeypatch, ops, claim_result=False)
+
+    assert supervisor.serve() == 0
+    assert [op[0] for op in ops] == ["claim"]
+
+
+def test_a_manual_run_waits_rather_than_racing_a_job_already_running(monkeypatch):
+    """Unlike a scheduled fire time, a manual request is not consumed by being
+    skipped: it stays queued until the running child exits, and its TTL is what
+    stops it waiting forever. Skipping it silently would drop the request."""
+    import scheduler
+
+    ops = []
+    connect = _serve_harness(monkeypatch, stop_after=3)
+    monkeypatch.setattr(supervisor, "telegram_alert", lambda msg: None)
+    monkeypatch.setattr(supervisor, "_close_runs", lambda outcomes: None)
+    monkeypatch.setattr(supervisor.db, "start_run", lambda *a, **k: 7)
+    monkeypatch.setattr(
+        supervisor.db, "claim_queued", lambda conn, rid: ops.append(("claim", rid))
+    )
+    _RecordingChild.ops = ops
+    monkeypatch.setattr(supervisor, "Child", _RecordingChild)
+
+    spec = next(s for s in scheduler.SCHEDULES if s.job == "collect")
+    fire = datetime(2026, 9, 2, 6, 0, tzinfo=timezone.utc)
+    due = [[(spec, fire, "scheduled")]]
+    monkeypatch.setattr(
+        supervisor, "_due_jobs", lambda conn, now: due.pop() if due else []
+    )
+    monkeypatch.setattr(supervisor, "_manual_jobs", lambda conn, now: [(spec, 42)])
+
+    assert supervisor.serve() == 0
+    assert len(connect.calls) >= 2, "needs the spawn tick and at least one wait tick"
+    assert [op[0] for op in ops] == ["spawn"], (
+        f"collect was already running, so the queued row must not be claimed; got {ops}"
+    )

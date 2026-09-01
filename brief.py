@@ -66,6 +66,7 @@ from common import (
     split_html_message,
 )
 import common
+import scheduler
 import trading
 import polygram_live
 from trading import (
@@ -674,6 +675,11 @@ HELP_TEXT = """<b>newsbrief commands</b>
 
 /positions — open positions with live marks
 /performance — performance report + go-live gate
+
+/jobs — scheduler status: each job's last run, exit code and next due time
+/run [job]
+  Run a job now, out of schedule. The supervisor picks it up within 30s.
+  e.g. <code>/run collect</code>
 
 /reset — clear all overrides
 /status — show current overrides
@@ -1525,6 +1531,15 @@ def _handle_telegram_update(update: dict, fb: dict) -> dict:
 
     elif text == "/status":
         telegram_send(f"<b>Current overrides</b>\n\n{feedback_summary(fb)}")
+
+    elif text == "/jobs":
+        _jobs_render()
+
+    elif text == "/run":
+        _run_request("")
+
+    elif text.startswith("/run "):
+        _run_request(text[len("/run ") :].strip())
 
     elif text == "/addsource":
         _wizard_start(chat_id)
@@ -3266,9 +3281,151 @@ def mode_weekly():
 
 # Bot command menu (Telegram autocomplete). Registered automatically by the
 # daemon; keep in sync with the handlers in _handle_telegram_update and HELP_TEXT.
+# ── /jobs + /run: the scheduler's operator surface ────────────────────────────
+# The commands daemon is a CHILD of the supervisor, so it can READ the run ledger
+# but cannot spawn anything. /jobs is therefore a query, and /run is an INSERT
+# the supervisor claims on its next tick.
+
+# The daemon is a long-poll loop, so a command that cannot answer must fail fast
+# rather than block the loop that serves every other command. This is shorter
+# than the supervisor's own budget for the same reason.
+JOBS_DB_TIMEOUT_SECONDS = 5
+
+
+def _human_delta(seconds: float) -> str:
+    """A duration an operator reads at a glance: 45s, 12m, 7h, 3d."""
+    seconds = int(abs(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 86400:
+        return f"{seconds // 3600}h"
+    return f"{seconds // 86400}d"
+
+
+def _job_stamp(when: datetime) -> str:
+    """Weekday plus time. Weekly's next fire can be six days out, and a bare
+    clock time would read as today."""
+    return when.strftime("%a %H:%M UTC")
+
+
+def _job_icon(row: dict | None) -> str:
+    if row is None:
+        return "•"
+    if row["status"] == "finished" and row["exit_code"]:
+        return "❌"
+    return {"finished": "✅", "missed": "⚠️", "running": "🔄", "queued": "⏳"}.get(
+        row["status"], "•"
+    )
+
+
+def _format_last_run(row: dict | None, now: datetime) -> str:
+    if row is None:
+        return "never run"
+    when = row["finished_at"] or row["started_at"] or row["created_at"]
+    age = _human_delta((now - when).total_seconds())
+    if row["status"] == "running":
+        return f"running since {_job_stamp(when)} ({age})"
+    if row["status"] == "queued":
+        return f"queued {age} ago, waiting for the supervisor"
+    if row["status"] == "missed":
+        return f"missed — did not run, {_job_stamp(when)} ({age} ago)"
+
+    from supervisor import EXIT_GLOSS
+
+    code = row["exit_code"]
+    gloss = EXIT_GLOSS.get(code)
+    detail = f"exit {code}" + (f" — {gloss}" if gloss else "")
+    return f"{detail}, {_job_stamp(when)} ({age} ago)"
+
+
+def _format_jobs(latest: dict, now: datetime) -> str:
+    """One block per schedule, from the latest ledger row for each.
+
+    Driven by scheduler.SCHEDULES, NOT by what the ledger happens to contain. A
+    job with no rows at all is the single most important thing this command can
+    report on the morning after a cutover, and iterating over rows would render
+    exactly that case as nothing at all.
+    """
+    out = ["<b>⚙️ Jobs</b>", ""]
+    for spec in scheduler.SCHEDULES:
+        row = latest.get(spec.job)
+        nxt = scheduler.next_fire(spec, now)
+        out.append(f"{_job_icon(row)} <b>{spec.job}</b>")
+        out.append(f"   last: {_format_last_run(row, now)}")
+        out.append(
+            f"   next: {_job_stamp(nxt)} (in {_human_delta((nxt - now).total_seconds())})"
+        )
+        out.append("")
+    return "\n".join(out).rstrip()
+
+
+def _ledger_unreachable(e: Exception) -> str:
+    return f"<code>{html.escape(f'{type(e).__name__}: {e}')}</code>"
+
+
+def _jobs_render() -> None:
+    """Answer 'did collect run, and did it work' without an SSH session."""
+    import db
+
+    try:
+        with db.connect(connect_timeout=JOBS_DB_TIMEOUT_SECONDS) as conn:
+            latest = db.latest_runs(conn, [s.job for s in scheduler.SCHEDULES])
+    except Exception as e:
+        # An unreadable ledger must not render as four jobs that never ran. That
+        # is a confident wrong answer, and it is the one the operator would act
+        # on hardest.
+        log.exception("/jobs could not read the ledger")
+        telegram_send(
+            f"<b>⚙️ Jobs</b>\n\nCannot read the run ledger, so this is "
+            f"UNKNOWN rather than empty: {_ledger_unreachable(e)}"
+        )
+        return
+    telegram_send_long(_format_jobs(latest, datetime.now(timezone.utc)))
+
+
+def _run_request(job: str) -> None:
+    """Queue an on-demand run for the supervisor to claim on its next tick."""
+    import db
+
+    known = [s.job for s in scheduler.SCHEDULES]
+    if not job:
+        telegram_send(
+            "Usage: <code>/run [job]</code>\n\nJobs: "
+            + ", ".join(f"<b>{j}</b>" for j in known)
+        )
+        return
+    if job not in known:
+        # Refused here rather than in the supervisor: a typo should cost a reply,
+        # not a row the tick has to discard with an alert of its own.
+        telegram_send(
+            f"❌ <b>{html.escape(job)}</b> is not a job.\n\nJobs: "
+            + ", ".join(f"<b>{j}</b>" for j in known)
+        )
+        return
+    try:
+        with db.connect(connect_timeout=JOBS_DB_TIMEOUT_SECONDS) as conn:
+            run_id = db.enqueue_manual(conn, job)
+    except Exception as e:
+        log.exception(f"/run {job} could not queue")
+        telegram_send(
+            f"Could not reach the run ledger, so <b>{html.escape(job)}</b> was "
+            f"NOT requested: {_ledger_unreachable(e)}"
+        )
+        return
+    telegram_send(
+        f"⏳ <b>{html.escape(job)}</b> requested (run {run_id}). The supervisor "
+        f"picks it up within {int(scheduler.TICK_SECONDS)}s — watch it with "
+        f"<code>/jobs</code>."
+    )
+
+
 BOT_COMMANDS = [
     ("help", "Show command help"),
     ("status", "Show current overrides"),
+    ("jobs", "Scheduler status: last run, exit code, next due"),
+    ("run", "Run a job now (collect, submit, weekly, monitor)"),
     ("addsource", "Add a temporary news source (guided)"),
     ("predict", "Open a conviction prediction bet (guided)"),
     ("sources", "List / remove temporary sources"),

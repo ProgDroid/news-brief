@@ -84,8 +84,22 @@ and neither should you start one by hand. Its command menu auto-registers with T
 | `/removesource <name>` | Remove a temporary source by name (the `/sources` button does the same) |
 | `/positions` | Open positions with live marks |
 | `/performance` | Performance report + go-live gate status |
+| `/jobs` | Scheduler status: each job's last run, exit code and next due time |
+| `/run <job>` | Run a job now, out of schedule (`collect`, `submit`, `weekly`, `monitor`) |
 
 Pins are listed by `/status`. `/reset` restores the default pin set.
+
+`/jobs` reads the `job_runs` ledger, so it answers "did collect run, and did it
+work" without an SSH session. A job that has never run is listed as such rather
+than omitted, and a ledger it cannot reach is reported as UNKNOWN — never as an
+empty list, which would read as four jobs that never ran.
+
+`/run` does not spawn anything: the commands daemon is a child of the supervisor,
+so the command writes a queued row and the supervisor claims it on its next tick
+(within 30s). A request that is still unclaimed after 15 minutes — because jobs
+were disabled, or because it queued behind a long `collect` — is discarded with
+an alert rather than started that far after it was asked for. Manual runs carry
+no `scheduled_for`, so they can never consume a scheduled fire time.
 
 ### News sources: always-on vs. temporary
 

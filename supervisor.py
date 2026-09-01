@@ -413,6 +413,27 @@ def startup(*, migrate=None, connect=None) -> StartupState:
 
 EX_ORPHANED = -2  # a run whose supervisor died before it could be closed
 EX_SHUTDOWN_KILLED = -3  # a run still going at the shutdown deadline, SIGKILLed
+EX_QUEUE_EXPIRED = -4  # a manual request that went stale before it was claimed
+EX_UNKNOWN_JOB = -5  # a queued row naming a job no schedule defines
+
+# What a negative exit code means, in the words /jobs shows the operator. Kept
+# beside the constants themselves: a copy in brief.py would be a second source
+# of truth for numbers that only ever appear here.
+EXIT_GLOSS = {
+    EX_ALREADY_RUNNING: "refused, another run held the lock",
+    EX_ORPHANED: "orphaned by a restart",
+    EX_SHUTDOWN_KILLED: "killed at the shutdown deadline",
+    EX_QUEUE_EXPIRED: "request expired before it was claimed",
+    EX_UNKNOWN_JOB: "no such job",
+    -1: "killed, or it never reported",
+}
+
+# How long a /run request may sit unclaimed before it is discarded instead of
+# run. Long enough to outwait a collect that is already going (they run for
+# minutes, and the request waits for the lock rather than racing it); short
+# enough that a request made while jobs were disabled cannot surface hours later
+# as a job nobody is expecting. There is no reading that makes this exact.
+MANUAL_QUEUE_TTL_SECONDS = 15 * 60
 
 
 def seed_first_boot(conn, now: datetime | None = None) -> list[str]:
@@ -595,6 +616,82 @@ def _due_jobs(conn, now: datetime) -> list[tuple[scheduler.Schedule, datetime, s
     return ready
 
 
+def _manual_jobs(conn, now: datetime) -> list[tuple[scheduler.Schedule, int]]:
+    """Queued /run requests worth claiming. Stale and bogus rows are closed here.
+
+    /run writes a row rather than spawning, because the commands daemon is a
+    child of this process and cannot fork a job. Two kinds of row must never
+    reach a spawn: one naming a job no schedule defines, and one that has sat
+    unclaimed past its TTL — a request made while jobs were disabled, or queued
+    behind a long collect, which would otherwise fire hours later as a job
+    nobody is expecting.
+
+    Both close as `missed` rather than `finished`, so /jobs cannot report work
+    that never happened, and they close with DIFFERENT exit codes: aging out a
+    row for a job that does not exist would eventually stop it too, but it would
+    tell the operator the request went stale when the truth is that he mistyped
+    the name. A wrong reason is worse than a late one.
+    """
+    by_name = {spec.job: spec for spec in scheduler.SCHEDULES}
+    ready: list[tuple[scheduler.Schedule, int]] = []
+    for row in db.queued_runs(conn):
+        run_id, job = row["id"], row["job_name"]
+        spec = by_name.get(job)
+        if spec is None:
+            db.finish_run(conn, run_id, EX_UNKNOWN_JOB, status="missed")
+            log.error(f"[{job}] queued run {run_id} names no known job; discarded")
+            telegram_alert(
+                f"A run was queued for '{job}', which is not a job. Discarded. "
+                f"Known jobs: {', '.join(sorted(by_name))}"
+            )
+            continue
+        waited = (now - row["created_at"]).total_seconds()
+        if waited > MANUAL_QUEUE_TTL_SECONDS:
+            db.finish_run(conn, run_id, EX_QUEUE_EXPIRED, status="missed")
+            log.warning(
+                f"[{job}] queued run {run_id} waited {int(waited)}s, past the "
+                f"{MANUAL_QUEUE_TTL_SECONDS}s limit; discarded rather than run late"
+            )
+            telegram_alert(
+                f"/run {job} sat unclaimed for {int(waited // 60)}m and was "
+                f"discarded rather than started this long after it was asked for"
+            )
+            continue
+        ready.append((spec, run_id))
+    return ready
+
+
+def _spawn_job(
+    job: str,
+    run_id: int,
+    env: dict[str, str],
+    jobs: dict[str, "Child"],
+    not_retried: str,
+) -> None:
+    """Start one job child and register it, or close its row and say why not.
+
+    The ledger row exists BEFORE this is called on both paths — written by
+    `start_run` for a scheduled fire time, claimed out of `queued` for a manual
+    one. So a spawn failure has already consumed the thing that would have
+    caused a retry. That is deliberate: it is what stops a job that cannot start
+    respawning on every tick for a whole grace window. It is also exactly why
+    the failure cannot be left silent, hence `not_retried`, which says in the
+    alert what the operator has lost.
+    """
+    child = Child(job, env=env)
+    child.run_id = run_id
+    try:
+        child.start()
+    except Exception as e:
+        log.exception(f"[{job}] failed to spawn")
+        telegram_alert(
+            f"{job} failed to spawn: {type(e).__name__}: {e} — {not_retried}"
+        )
+        _close_run(run_id, -1)
+        return
+    jobs[job] = child
+
+
 def shutdown(jobs: dict[str, Child], residents: dict[str, Child]) -> None:
     """Stop every child and close the ledger rows this supervisor owns.
 
@@ -744,29 +841,47 @@ def serve() -> int:
                         # no backoff of their own: the fire time is already
                         # spent, so there is nothing to back off from.
                         run_id = db.start_run(conn, spec.job, scheduled_for, trigger)
-                        child = Child(
+                        _spawn_job(
                             spec.job,
-                            env={
+                            run_id,
+                            {
                                 "NEWSBRIEF_SCHEDULED_FOR": scheduled_for.isoformat(),
                                 "NEWSBRIEF_TRIGGER": trigger,
                                 "NEWSBRIEF_RUN_ID": str(run_id),
                             },
+                            jobs,
+                            "not retried until the next scheduled run",
                         )
-                        child.run_id = run_id
-                        try:
-                            child.start()
-                        except Exception as e:
-                            # The fire time is already spent, so this job will
-                            # not be retried until its next one — that must not
-                            # be silent.
-                            log.exception(f"[{spec.job}] failed to spawn")
-                            telegram_alert(
-                                f"{spec.job} failed to spawn: {type(e).__name__}: {e} "
-                                f"— not retried until the next scheduled run"
-                            )
-                            _close_run(run_id, -1)
+
+                    # Manual requests come after the due ones so an operator
+                    # asking for a run can never starve a scheduled fire time.
+                    for spec, run_id in _manual_jobs(conn, datetime.now(timezone.utc)):
+                        if spec.job in jobs:
+                            # Unlike a fire time, a manual request is not
+                            # consumed by being skipped: the row stays queued
+                            # and a later tick reconsiders it once the running
+                            # child exits. The TTL is what stops it waiting
+                            # forever, so this needs no alert of its own.
                             continue
-                        jobs[spec.job] = child
+                        if not db.claim_queued(conn, run_id):
+                            # The row left `queued` between the read and here.
+                            # Spawning anyway is the double run the status
+                            # predicate on the UPDATE exists to prevent.
+                            log.warning(
+                                f"[{spec.job}] queued run {run_id} was no longer "
+                                f"claimable; not spawning"
+                            )
+                            continue
+                        _spawn_job(
+                            spec.job,
+                            run_id,
+                            {
+                                "NEWSBRIEF_TRIGGER": "manual",
+                                "NEWSBRIEF_RUN_ID": str(run_id),
+                            },
+                            jobs,
+                            "the request is discarded, not retried",
+                        )
             except Exception:
                 log.exception("Scheduler tick failed; continuing")
 

@@ -38,8 +38,20 @@ def _tables(conn) -> set[str]:
 
 def test_up_creates_the_four_tables(conn):
     applied = db.run_migrations(conn)
-    assert applied == ["0001_runtime_foundation"]
+    assert applied == ["0001_runtime_foundation", "0002_job_runs_created_at"]
     assert {"schema_migrations", "users", "settings", "job_runs"} <= _tables(conn)
+
+
+def test_0002_gives_job_runs_the_created_at_a_queued_row_is_aged_by(conn):
+    db.run_migrations(conn)
+    columns = {
+        r[0]
+        for r in conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'job_runs'"
+        ).fetchall()
+    }
+    assert "created_at" in columns
 
 
 def test_up_is_idempotent(conn):
@@ -147,3 +159,92 @@ def test_connect_options_reach_the_server_as_a_statement_timeout():
         assert setting == f"{supervisor.SHUTDOWN_DB_STATEMENT_TIMEOUT_MS}ms"
         with pytest.raises(psycopg.errors.QueryCanceled):
             c.execute("SELECT pg_sleep(5)")
+
+
+# ── The /jobs read path and the manual-run queue ─────────────────────────────
+
+
+@pytest.fixture()
+def schema(conn):
+    """A migrated database. The ledger tests below need tables, not a blank slate."""
+    db.run_migrations(conn)
+    return conn
+
+
+def test_latest_runs_returns_the_most_recent_row_per_job(schema):
+    db.finish_run(schema, db.start_run(schema, "collect", None, "manual"), 0)
+    second = db.start_run(schema, "collect", None, "manual")
+    db.finish_run(schema, second, 3)
+
+    latest = db.latest_runs(schema, ["collect"])
+
+    assert latest["collect"]["exit_code"] == 3
+    assert latest["collect"]["status"] == "finished"
+
+
+def test_latest_runs_does_not_let_a_missed_row_hide_behind_an_older_success(schema):
+    """The ordering test. A `missed` row is inserted with started_at NULL, so
+    ordering by started_at would surface Tuesday's green run and leave the
+    operator believing a job that has stopped running is fine — the exact
+    silence /jobs exists to break."""
+    db.finish_run(schema, db.start_run(schema, "weekly", None, "scheduled"), 0)
+    db.record_missed(schema, "weekly", None)
+
+    latest = db.latest_runs(schema, ["weekly"])
+
+    assert latest["weekly"]["status"] == "missed"
+    assert latest["weekly"]["started_at"] is None
+
+
+def test_latest_runs_omits_a_job_that_has_never_run(schema):
+    db.finish_run(schema, db.start_run(schema, "collect", None, "manual"), 0)
+
+    latest = db.latest_runs(schema, ["collect", "submit"])
+
+    assert set(latest) == {"collect"}
+
+
+def test_enqueue_manual_leaves_the_catch_up_rule_untouched(schema):
+    """A manual row carries scheduled_for NULL, and latest_scheduled_for is
+    max(scheduled_for), which ignores NULLs. So /run collect at 15:00 cannot
+    consume tomorrow's 06:00 fire time — the property the seeding fix in
+    425b736 depends on."""
+    db.enqueue_manual(schema, "collect")
+
+    assert db.latest_scheduled_for(schema, "collect") is None
+
+
+def test_enqueue_manual_records_a_queued_row_with_an_age(schema):
+    run_id = db.enqueue_manual(schema, "collect")
+
+    queued = db.queued_runs(schema)
+
+    assert [(r["id"], r["job_name"]) for r in queued] == [(run_id, "collect")]
+    assert queued[0]["created_at"] is not None
+
+
+def test_claim_queued_moves_the_row_to_running(schema):
+    run_id = db.enqueue_manual(schema, "monitor")
+
+    assert db.claim_queued(schema, run_id) is True
+
+    latest = db.latest_runs(schema, ["monitor"])["monitor"]
+    assert latest["status"] == "running"
+    assert latest["started_at"] is not None
+    assert db.queued_runs(schema) == []
+
+
+def test_claim_queued_refuses_a_row_that_is_no_longer_queued(schema):
+    """Guards the double-spawn: whatever the tick believed when it read the
+    queue, only a row still in `queued` may be claimed."""
+    run_id = db.enqueue_manual(schema, "monitor")
+    assert db.claim_queued(schema, run_id) is True
+
+    assert db.claim_queued(schema, run_id) is False
+
+
+def test_queued_rows_are_returned_oldest_first(schema):
+    first = db.enqueue_manual(schema, "collect")
+    second = db.enqueue_manual(schema, "monitor")
+
+    assert [r["id"] for r in db.queued_runs(schema)] == [first, second]

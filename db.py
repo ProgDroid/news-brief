@@ -269,3 +269,85 @@ def record_missed(conn: psycopg.Connection, job: str, scheduled_for) -> None:
         (job, scheduled_for),
     )
     conn.commit()
+
+
+# ── The /jobs read path and the manual-run queue ─────────────────────────────
+
+_RUN_COLUMNS = (
+    "id",
+    "job_name",
+    "scheduled_for",
+    "trigger",
+    "status",
+    "started_at",
+    "finished_at",
+    "exit_code",
+    "created_at",
+)
+_RUN_SELECT = ", ".join(_RUN_COLUMNS)
+
+
+def _run_row(row) -> dict:
+    return dict(zip(_RUN_COLUMNS, row))
+
+
+def latest_runs(conn: psycopg.Connection, jobs) -> dict[str, dict]:
+    """The most recent row for each named job, keyed by job name.
+
+    Ordered by id, NOT by started_at. A `missed` row is inserted with started_at
+    NULL, so ordering by started_at would skip past it to an older successful
+    run and let a job that has stopped running keep reporting green — precisely
+    the silence /jobs exists to break.
+
+    A job with no history is absent from the mapping rather than present as
+    None, so the caller can tell "never run" from "ran and told us nothing".
+    """
+    rows = conn.execute(
+        f"SELECT DISTINCT ON (job_name) {_RUN_SELECT} FROM job_runs "
+        "WHERE job_name = ANY(%s) ORDER BY job_name, id DESC",
+        (list(jobs),),
+    ).fetchall()
+    return {row[1]: _run_row(row) for row in rows}
+
+
+def enqueue_manual(conn: psycopg.Connection, job: str) -> int:
+    """Record an on-demand request for the supervisor to claim.
+
+    The commands daemon is a CHILD of the supervisor and cannot spawn a job
+    itself, which is why `trigger='manual'` and `status='queued'` exist from the
+    first migration: a manual run is an INSERT here and a claim on the next tick.
+
+    scheduled_for stays NULL. latest_scheduled_for is max(scheduled_for), which
+    ignores NULLs, so no manual run can consume a scheduled fire time.
+    """
+    row = conn.execute(
+        "INSERT INTO job_runs (job_name, scheduled_for, trigger, status) "
+        "VALUES (%s, NULL, 'manual', 'queued') RETURNING id",
+        (job,),
+    ).fetchone()
+    conn.commit()
+    return row[0]
+
+
+def queued_runs(conn: psycopg.Connection) -> list[dict]:
+    """Unclaimed manual requests, oldest first."""
+    rows = conn.execute(
+        f"SELECT {_RUN_SELECT} FROM job_runs WHERE status = 'queued' ORDER BY id"
+    ).fetchall()
+    return [_run_row(row) for row in rows]
+
+
+def claim_queued(conn: psycopg.Connection, run_id: int) -> bool:
+    """Move one queued row to running. False if it was no longer queued.
+
+    The status predicate in the WHERE clause is the guard against a double
+    spawn: the tick acts on a list it read a moment earlier, and only a row
+    still in `queued` may be claimed.
+    """
+    cur = conn.execute(
+        "UPDATE job_runs SET status = 'running', started_at = now() "
+        "WHERE id = %s AND status = 'queued'",
+        (run_id,),
+    )
+    conn.commit()
+    return cur.rowcount == 1

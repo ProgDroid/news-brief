@@ -1,11 +1,14 @@
 """Phase 5 Telegram command handlers: /watch /unwatch /positions /performance."""
 
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 import brief
 import common
+import db
+import scheduler
 import trading
 
 
@@ -1223,3 +1226,169 @@ def test_close_picker_labels_prediction_by_question(monkeypatch):
     # The tap still resolves by the hashed TICKER, so relabelling changed nothing.
     assert pred["callback_data"] == f"close:{brief._short_id('2774056')}"
     assert equity["text"] == "❌ SHEL_US_EQ"  # non-predictions unchanged
+
+
+# ── /jobs and /run: the scheduler's operator surface ─────────────────────────
+
+JOBS_NOW = datetime(2026, 9, 2, 13, 0, tzinfo=timezone.utc)
+
+
+def _job_row(**kw):
+    row = {
+        "id": 1,
+        "job_name": "collect",
+        "scheduled_for": None,
+        "trigger": "scheduled",
+        "status": "finished",
+        "started_at": JOBS_NOW - timedelta(hours=8),
+        "finished_at": JOBS_NOW - timedelta(hours=7),
+        "exit_code": 0,
+        "created_at": JOBS_NOW - timedelta(hours=8),
+    }
+    row.update(kw)
+    return row
+
+
+class _FakeConn:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_jobs_view_reports_a_clean_run_as_a_success():
+    out = brief._format_jobs({"collect": _job_row()}, JOBS_NOW)
+    assert "✅ <b>collect</b>" in out
+    assert "exit 0" in out and "7h ago" in out
+
+
+def test_jobs_view_distinguishes_a_failing_exit_code_from_a_clean_one():
+    out = brief._format_jobs({"collect": _job_row(exit_code=2)}, JOBS_NOW)
+    assert "❌ <b>collect</b>" in out and "exit 2" in out
+
+
+def test_jobs_view_shows_a_missed_run_as_missed_not_as_a_success():
+    """The row a started_at ordering would have hidden. It has to read as a
+    problem, not as an absence."""
+    out = brief._format_jobs(
+        {
+            "weekly": _job_row(
+                job_name="weekly",
+                status="missed",
+                started_at=None,
+                finished_at=None,
+                exit_code=None,
+            )
+        },
+        JOBS_NOW,
+    )
+    assert "⚠️ <b>weekly</b>" in out and "missed" in out
+
+
+def test_jobs_view_shows_a_running_job_with_how_long_it_has_been_going():
+    out = brief._format_jobs(
+        {
+            "monitor": _job_row(
+                job_name="monitor",
+                status="running",
+                started_at=JOBS_NOW - timedelta(minutes=2),
+                finished_at=None,
+                exit_code=None,
+            )
+        },
+        JOBS_NOW,
+    )
+    assert "🔄 <b>monitor</b>" in out and "2m" in out
+
+
+def test_jobs_view_lists_every_scheduled_job_even_with_an_empty_ledger():
+    """Answering only for jobs that have run would make a job that has NEVER
+    run invisible — the failure most worth seeing on the morning after a
+    cutover."""
+    out = brief._format_jobs({}, JOBS_NOW)
+
+    for spec in scheduler.SCHEDULES:
+        assert spec.job in out
+    assert out.count("never run") == len(scheduler.SCHEDULES)
+
+
+def test_jobs_view_gives_every_job_a_next_due_time():
+    out = brief._format_jobs({}, JOBS_NOW)
+    assert out.count("next:") == len(scheduler.SCHEDULES)
+
+
+def test_jobs_says_why_it_cannot_answer_rather_than_showing_an_empty_list(monkeypatch):
+    """A database that is down must not render as four jobs that never ran —
+    that is a confident wrong answer, and the operator would act on it."""
+    sent = _capture(monkeypatch)
+
+    def boom(**kwargs):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(db, "connect", boom)
+
+    brief._handle_telegram_update(_update("/jobs"), _fb())
+
+    assert len(sent) == 1
+    assert "connection refused" in sent[0] and "RuntimeError" in sent[0]
+
+
+def test_run_queues_the_job_and_confirms(monkeypatch):
+    sent = _capture(monkeypatch)
+    queued = []
+    monkeypatch.setattr(db, "connect", lambda **kw: _FakeConn())
+    monkeypatch.setattr(
+        db, "enqueue_manual", lambda conn, job: (queued.append(job), 9)[1]
+    )
+
+    brief._handle_telegram_update(_update("/run collect"), _fb())
+
+    assert queued == ["collect"]
+    assert "collect" in sent[0]
+
+
+def test_run_refuses_an_unknown_job_before_it_touches_the_database(monkeypatch):
+    """Validation first. A typo must cost a reply, not a connection and a row
+    the supervisor then has to discard with an alert."""
+    sent = _capture(monkeypatch)
+    monkeypatch.setattr(
+        db, "connect", lambda **kw: pytest.fail("validated after connecting")
+    )
+
+    brief._handle_telegram_update(_update("/run bakfill"), _fb())
+
+    assert "bakfill" in sent[0]
+    assert "collect" in sent[0], "a refusal should name the jobs that do exist"
+
+
+def test_run_with_no_argument_lists_what_can_be_run(monkeypatch):
+    sent = _capture(monkeypatch)
+    monkeypatch.setattr(
+        db, "connect", lambda **kw: pytest.fail("no job was named; nothing to queue")
+    )
+
+    brief._handle_telegram_update(_update("/run"), _fb())
+
+    assert all(spec.job in sent[0] for spec in scheduler.SCHEDULES)
+
+
+def test_run_says_why_it_cannot_queue_rather_than_claiming_it_did(monkeypatch):
+    sent = _capture(monkeypatch)
+
+    def boom(**kwargs):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(db, "connect", boom)
+
+    brief._handle_telegram_update(_update("/run collect"), _fb())
+
+    assert "connection refused" in sent[0]
+    assert "queued" not in sent[0].lower()
+
+
+def test_the_new_commands_reach_telegram_autocomplete():
+    """setMyCommands syncs off BOT_COMMANDS, so a handler missing from that list
+    works only for someone who already knows it exists."""
+    names = [name for name, _ in brief.BOT_COMMANDS]
+    assert "jobs" in names and "run" in names
