@@ -37,15 +37,18 @@ On top of the brief it runs two analytics layers:
 
 ## How it works
 
-The script is a single file (`brief.py`) with several modes, driven by cron:
+The script is a single file (`brief.py`) with several modes. A supervisor (`serve`) runs them on
+schedule inside one long-lived container — see [Schedule](#5-schedule); the times below come from
+`scheduler.SCHEDULES`, not from host cron:
 
-| Mode | What it does | Suggested cron (UTC) |
-|------|--------------|----------------------|
-| `submit` | Fetch feeds + Chroma context + portfolio, submit the batch job | `0 20 * * *` |
-| `collect` | Poll for the result, deliver the brief, split off signals, open paper positions, then post a daily trade update | `0 6 * * *` |
-| `weekly` | Synthesise the last 7 briefs; mark the paper book to market + post the performance report | `0 21 * * 0` (Sun) |
-| `commands` | **Long-running bot daemon** — real-time Telegram commands + buttons (long polling). Run as a service, not cron. | `docker compose up -d` |
-| `monitor` | Hourly cross-asset volume-anomaly alerts | `0 * * * *` |
+| Mode | What it does | Runs (UTC) |
+|------|--------------|------------|
+| `serve` | **The supervisor.** Owns scheduling, spawns the job modes as child processes, keeps `commands` resident | the container's only entrypoint |
+| `submit` | Fetch feeds + Chroma context + portfolio, submit the batch job | `20:00` daily |
+| `collect` | Poll for the result, deliver the brief, split off signals, open paper positions, then post a daily trade update | `06:00` daily |
+| `weekly` | Synthesise the last 7 briefs; mark the paper book to market + post the performance report | `21:00` Sunday |
+| `commands` | **Long-running bot daemon** — real-time Telegram commands + buttons (long polling). Resident, not scheduled | always |
+| `monitor` | Hourly cross-asset volume-anomaly alerts | hourly |
 | `paper` | Open paper positions from today's signals snapshot (also run automatically inside `collect`) | — |
 
 The submit→collect split uses the Batch API's cheaper async processing; the ~10h window between
@@ -55,9 +58,10 @@ the 8pm submit and 6am collect sits comfortably inside the 24h batch turnaround.
 
 ## Telegram commands
 
-Handled in real time by the `commands` daemon (`docker compose up -d newsbrief-commands`).
-The daemon is the **only** `getUpdates` consumer — a second poller gets a 409, so the
-other modes deliberately don't poll. Its command menu auto-registers with Telegram
+Handled in real time by the `commands` daemon, which the supervisor keeps resident (so it is
+started by `docker compose up -d`, along with everything else). The daemon is the **only**
+`getUpdates` consumer — a second poller gets a 409, so the other modes deliberately don't poll,
+and neither should you start one by hand. Its command menu auto-registers with Telegram
 (`setMyCommands`) on startup whenever it changes, so no manual BotFather step is needed.
 
 | Command | Effect |
@@ -198,6 +202,10 @@ cp .env.example .env
 | `ANTHROPIC_API_KEY` | yes | Claude Batch + Messages API |
 | `TELEGRAM_BOT_TOKEN` | yes | Bot token from @BotFather |
 | `TELEGRAM_CHAT_ID` | yes | Your chat ID (delivery target + command auth) |
+| `POSTGRES_PASSWORD` | yes | Password for the stack's Postgres — the stack refuses to start without it |
+| `POSTGRES_USER` | no | Postgres role (default `newsbrief`) |
+| `POSTGRES_DB` | no | Database name (default `newsbrief`) |
+| `DATABASE_URL` | no | Derived from the three above; set it only to use a database outside this stack |
 | `CHROMA_MCP_URL` | no | Podcast Chroma MCP endpoint (defaults to the hosted Modal URL) |
 | `T212_API_KEY_ID` | no | Trading212 key **ID** — paired with `T212_API_KEY` for HTTP Basic auth |
 | `T212_API_KEY` | no | Read-only Trading212 key — enables portfolio weights + paper symbol mapping |
@@ -221,38 +229,70 @@ docker build -t newsbrief .
 
 ### 5. Schedule
 
-Use the committed [`docker-compose.yml`](docker-compose.yml). The image's entrypoint is
-`python brief.py`, so each mode is just a service whose `command:` is the mode — and all shared
-config lives once in the `&newsbrief` YAML anchor, so changing the image/user/volume/env is a
-single edit that every mode inherits. The container runs **non-root** via `user: "${PUID}:${PGID}"`
-(those must own `${APPDATA_DIR}/news-brief`).
-
-Trigger the batch modes from your container scheduler or host cron, and start the
-commands daemon once as a persistent service:
-
-```cron
-0 20 * * *   docker compose run --rm newsbrief-submit
-0  6 * * *   docker compose run --rm newsbrief-collect
-0 21 * * 0   docker compose run --rm newsbrief-weekly
-0  *  * * *  docker compose run --rm newsbrief-monitor
-```
+Use the committed [`docker-compose.yml`](docker-compose.yml). It defines two services: the
+application, and the Postgres it keeps its run ledger in. The image's entrypoint is
+`python brief.py`, so a service is just a `command:` naming a mode — and all shared config lives
+once in the `&newsbrief` YAML anchor, so changing the image/user/volume/env is a single edit.
+The application container runs **non-root** via `user: "${PUID}:${PGID}"` (those must own
+`${APPDATA_DIR}/news-brief`); Postgres deliberately does not inherit that, because the official
+image manages its own uid.
 
 ```sh
-docker compose up -d newsbrief-commands   # real-time bot daemon (not cron)
+docker compose up -d          # supervisor + postgres; jobs run on their own schedule
 ```
 
-Adding a mode is one new two-line service in the compose file. The `/app/logs` volume holds all
-state and archives, so it must persist across runs.
+There is no cron. The `newsbrief` service runs `serve`, a supervisor that owns scheduling: it
+spawns each job as a child process when it comes due and keeps the Telegram daemon resident as
+the single `getUpdates` consumer. So a stack `up` starts **no** work, and a redeploy runs only
+what the catch-up rule says was actually missed — not "everything, now", which is what a
+container scheduler firing on start would do.
+
+The schedule table lives in [`scheduler.SCHEDULES`](scheduler.py); changing when a job runs is a
+code change, reviewed and deployed like any other. Every run — scheduled, caught up, missed, or
+started by hand — is recorded in the `job_runs` table in Postgres, which is what you query to
+see what ran:
+
+```sh
+docker compose exec -T postgres psql -U newsbrief -d newsbrief \
+  -c "SELECT job_name, scheduled_for, trigger, status, exit_code FROM job_runs ORDER BY id DESC LIMIT 20;"
+```
+
+A `/jobs` Telegram command reporting each job's last run and next due time is the intended
+front end for that table and is **not built yet** (`news-brief-0q0.9`).
+
+`POSTGRES_PASSWORD` is now **required** in `.env`; the stack refuses to start without it rather
+than bringing up an unauthenticated database. `DATABASE_URL` is derived from it (with
+`POSTGRES_USER`/`POSTGRES_DB`), so set it explicitly only to point at a database outside this
+stack. The ledger lives in the `newsbrief-pgdata` named volume, which survives
+`docker compose down` — but not `down -v`.
+
+A one-off run by hand still works and is interlocked against the supervisor's copy of the same
+job, so it cannot double-run:
+
+```sh
+docker compose run --rm newsbrief collect    # force a collect now
+docker compose run --rm newsbrief pgdiag     # database diagnostics
+```
+
+The cutover from the old five-service, host-cron layout — including the rollback — is written up
+in [`docs/runbooks/2026-08-31-supervisor-cutover.md`](docs/runbooks/2026-08-31-supervisor-cutover.md).
+
+The `/app/logs` volume holds all state and archives, so it must persist across runs.
 
 ---
 
 ## Deployment
 
 `.github/workflows/docker-publish.yml` builds and pushes the image to
-`ghcr.io/<owner>/news-brief` on every push to `main` that touches `brief.py`, `Dockerfile`, or
-`requirements.txt` (and on manual `workflow_dispatch`). The committed `docker-compose.yml` pulls
-that published image, so deploying a change is `git push` → CI rebuilds → `docker compose pull`,
-with no edits to the compose file.
+`ghcr.io/<owner>/news-brief` on every push to `main` that touches the application modules,
+`migrations/`, the `Dockerfile`, or `requirements.txt` (and on manual `workflow_dispatch`). The
+committed `docker-compose.yml` pulls that published image, so deploying a change is `git push` →
+CI rebuilds → `docker compose pull && docker compose up -d`, with no edits to the compose file.
+
+A deploy stops the supervisor, which takes up to ~35s: it gives its children the shutdown budget
+to exit and then closes their `job_runs` rows, so an ordinary redeploy leaves no run looking
+orphaned. Schema changes ride along in `migrations/` and are applied at startup, before any job
+is allowed to run.
 
 ---
 
@@ -260,11 +300,16 @@ with no edits to the compose file.
 
 ```
 news-brief/
-├── brief.py                 # The entire application
+├── brief.py                 # The application: every mode, and all the business logic
+├── supervisor.py            # `serve`: child processes, the log, shutdown — no business logic
+├── scheduler.py             # The schedule table and the pure "should this run now?" rule
+├── db.py                    # The only module that imports psycopg: connections, locks, ledger
+├── migrations/              # Numbered up/down SQL pairs, applied at supervisor startup
 ├── Dockerfile
-├── docker-compose.yml       # One anchor + per-mode services (non-root, ghcr image)
-├── requirements.txt         # feedparser, requests (the only dependencies)
+├── docker-compose.yml       # One anchor + two services: the app and its Postgres
+├── requirements.txt         # feedparser, requests, psycopg (the only dependencies)
 ├── .env.example
+├── docs/runbooks/           # Operational runbooks (cutover, rollback)
 ├── docs/superpowers/        # Design specs + implementation plans
 └── .github/workflows/docker-publish.yml
 

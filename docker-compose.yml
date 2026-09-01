@@ -1,27 +1,34 @@
 # newsbrief — one image, one config source.
 #
-# The image's ENTRYPOINT is `python brief.py`, so each service differs ONLY by the
-# mode in `command:`. All shared configuration lives once in the &newsbrief anchor —
+# The image's ENTRYPOINT is `python brief.py`, so a service differs ONLY by the mode
+# in `command:`. All shared configuration lives once in the &newsbrief anchor —
 # change the image tag, user, volume, or env in ONE place and every mode inherits it.
 #
 # Values are interpolated from your stack environment / a .env beside this file:
 #   ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID   (required)
+#   POSTGRES_PASSWORD                                         (required)
 #   T212_API_KEY, T212_BASE_URL, CHROMA_MCP_URL, NITTER_BASE_URL  (optional)
 #   PUID / PGID    — host uid:gid that OWNS the logs volume (runs the container non-root)
 #   APPDATA_DIR    — host path for persistent state + archives
 #
-# Schedule the batch modes with your container scheduler or host cron, e.g.:
-#   0 20 * * *   docker compose run --rm newsbrief-submit
-#   0  6 * * *   docker compose run --rm newsbrief-collect
-#   0 21 * * 0   docker compose run --rm newsbrief-weekly
-#   0  *  * * *  docker compose run --rm newsbrief-monitor
+# Start the whole stack once and leave it up:
+#   docker compose up -d
 #
-# newsbrief-commands is NOT a cron job — it's a long-lived bot daemon that handles
-# Telegram commands and buttons in real time via long polling. Start it once and
-# leave it running (it restarts on its own):
-#   docker compose up -d newsbrief-commands
-# Only ONE getUpdates consumer may run per bot, so do not also poll the bot from a
-# cron `run` — the other modes deliberately don't.
+# There is no cron here any more and there must not be: the supervisor owns
+# scheduling, and the table lives in `scheduler.SCHEDULES`. Adding a host cron
+# entry back alongside it produces a second, competing run of the same job.
+# Because scheduling is now internal, a stack `up` starts NO work — jobs run when
+# they are due, and a redeploy runs only what the catch-up rule says was missed.
+#
+# A one-off run by hand is still `docker compose run --rm`, which takes its own
+# ledger row and is interlocked against the supervisor's copy of the same job:
+#   docker compose run --rm newsbrief pgdiag     # database diagnostics
+#   docker compose run --rm newsbrief collect    # force a collect now
+#   docker compose run --rm --entrypoint bash newsbrief   # a shell in the image
+#
+# Only ONE getUpdates consumer may run per bot. The supervisor keeps the Telegram
+# daemon resident as a child, so it is that one consumer — do not also start a
+# `commands` service or run the mode by hand, or the bot 409s and goes deaf.
 
 x-newsbrief: &newsbrief
   image: ghcr.io/progdroid/news-brief:latest
@@ -71,6 +78,18 @@ x-newsbrief: &newsbrief
     # Self-hosted Nitter on the shared network (Twitter/X feeds). Defaults to the
     # service named `nitter` on Nitter's internal port 8080; override if it differs.
     - NITTER_BASE_URL=${NITTER_BASE_URL:-http://nitter:8080}
+    # Postgres holds the run ledger, the advisory locks that interlock the entry
+    # paths, and the scheduler's state. It MUST be declared here: compose passes
+    # through only what this block names, so setting DATABASE_URL on the host or
+    # in .env alone leaves it unset inside the container and every job refuses to
+    # start (db.connect says exactly that). The default matches the `postgres`
+    # service below and is BUILT FROM THE SAME VARIABLES, so setting
+    # POSTGRES_PASSWORD alone is enough. A hardcoded default here would silently
+    # disagree with it on every deploy that sets a password, which is all of
+    # them — the container would start and then fail to authenticate.
+    # Set DATABASE_URL yourself to point at a database outside this stack, or if
+    # your password contains characters that need percent-encoding in a URL.
+    - DATABASE_URL=${DATABASE_URL:-postgresql://${POSTGRES_USER:-newsbrief}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-newsbrief}}
     # - CHROMA_MCP_URL=${CHROMA_MCP_URL}   # optional: override the default podcast MCP endpoint
   volumes:
     - "${APPDATA_DIR:-./appdata}/news-brief:/app/logs"
@@ -81,28 +100,49 @@ x-newsbrief: &newsbrief
   # networks: [ default, nitter_network ]
 
 services:
-  newsbrief-submit:
+  # One long-lived service. Its supervisor owns scheduling, spawns each job as a
+  # child process, and keeps the Telegram daemon resident. A stack `up` therefore
+  # starts no work: jobs run when they are due, and a redeploy runs only what the
+  # catch-up rule says was actually missed.
+  newsbrief:
     <<: *newsbrief
-    command: [submit]
+    command: [serve]
+    # The anchor defaults to restart: "no". This override is load-bearing, not
+    # cosmetic: a resident child that fails to spawn still takes the supervisor
+    # down, and this is what makes that self-heal instead of stopping the stack.
+    restart: unless-stopped
+    # Must exceed supervisor.SHUTDOWN_BUDGET_SECONDS (30s) with room for the
+    # ledger writes that follow it. Docker's default is 10s, which would SIGKILL
+    # the supervisor mid-shutdown and leave `running` rows for the next boot to
+    # report as orphans — reinstating, on every routine deploy, the false alert
+    # that spec section 8's shutdown handling exists to remove. If you tune
+    # either number, tune both.
+    stop_grace_period: 45s
+    depends_on:
+      postgres:
+        condition: service_healthy
 
-  newsbrief-collect:
-    <<: *newsbrief
-    command: [collect]
-
-  newsbrief-weekly:
-    <<: *newsbrief
-    command: [weekly]
-
-  # Long-lived bot daemon (real-time Telegram commands + buttons). Unlike the cron
-  # modes, this stays up; override the anchor's `restart: "no"` so it self-heals.
-  newsbrief-commands:
-    <<: *newsbrief
-    command: [commands]
+  # Deliberately does NOT inherit the anchor: the official image manages its own
+  # uid, and a `user:` override against an initialised data directory fails in a
+  # way that reads as corruption.
+  postgres:
+    # Same major as CI and as the psycopg pinned in requirements.txt.
+    image: postgres:18-alpine
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-newsbrief}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      - POSTGRES_DB=${POSTGRES_DB:-newsbrief}
+    volumes:
+      - newsbrief-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-newsbrief}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     restart: unless-stopped
 
-  newsbrief-monitor:
-    <<: *newsbrief
-    command: [monitor]
+volumes:
+  newsbrief-pgdata:
 
 # Uncomment to attach to a network shared with your self-hosted RSSHub/Nitter stack:
 # networks:
