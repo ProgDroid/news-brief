@@ -124,3 +124,24 @@ def test_different_job_names_do_not_collide(conn):
         with db.advisory_lock(conn, "collect") as a:
             with db.advisory_lock(other, "weekly") as b:
                 assert a is True and b is True
+
+
+def test_connect_options_reach_the_server_as_a_statement_timeout():
+    """The bound supervisor.shutdown depends on, asserted against a real server.
+
+    A wrong libpq option name is not an error — it is silently nothing — so the
+    only honest check is to ask the session what it ended up with, and then to
+    watch a slow statement actually be cut off. Without this, `connect(options=...)`
+    could be inert and the shutdown budget would be a comment rather than a bound.
+    """
+    import psycopg
+    import supervisor
+
+    with db.connect(
+        connect_timeout=supervisor.SHUTDOWN_DB_CONNECT_TIMEOUT_SECONDS,
+        options=f"-c statement_timeout={supervisor.SHUTDOWN_DB_STATEMENT_TIMEOUT_MS}",
+    ) as c:
+        setting = c.execute("SHOW statement_timeout").fetchone()[0]
+        assert setting == f"{supervisor.SHUTDOWN_DB_STATEMENT_TIMEOUT_MS}ms"
+        with pytest.raises(psycopg.errors.QueryCanceled):
+            c.execute("SELECT pg_sleep(5)")

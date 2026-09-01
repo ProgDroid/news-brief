@@ -64,6 +64,17 @@ SHUTDOWN_DRAIN_SECONDS = 2.0
 # connect timeout — outside every budget above, which is how a "bounded"
 # shutdown stops being bounded.
 SHUTDOWN_DB_CONNECT_TIMEOUT_SECONDS = 5
+# And the handshake is only half of it: a database that ACCEPTS the connection
+# and then stalls — lock contention, a wedged disk — passes the connect timeout
+# and hangs on the UPDATE instead. The arithmetic against the 45s
+# stop_grace_period, worst case: 30s budget + 2s drain + 5s connect + four
+# schedules x two statements x 0.5s = 41s, leaving ~4s of margin.
+#
+# Half a second is three orders of magnitude more than an indexed single-row
+# UPDATE needs, and the failure direction is the right way round: a timed-out
+# row is left for the next boot's reclaim_orphans, which is what that exists
+# for, whereas being SIGKILLed part-way loses EVERY remaining row.
+SHUTDOWN_DB_STATEMENT_TIMEOUT_MS = 500
 
 
 def _remaining(deadline: float) -> float:
@@ -335,13 +346,16 @@ def _close_run(run_id: int | None, exit_code: int | None) -> None:
 
 
 def _close_runs(outcomes: list[tuple[int | None, int | None]]) -> None:
-    """Close every row a shutdown owns, on ONE connection with a bounded connect.
+    """Close every row a shutdown owns, on ONE bounded connection.
 
     `_close_run` per child would open a connection per child, and each
     `db.connect()` blocks on libpq's own connect timeout — *outside* any wait
     budget. With the database slow or gone, four children meant four
     unbounded stalls, so a shutdown that is bounded on paper is not bounded at
-    all. One connection, one bound.
+    all. One connection, and both bounds on it: a database that accepts the
+    connection and then stalls would otherwise hang here past the container's
+    stop grace and be SIGKILLed, leaving exactly the `running` rows this
+    function exists to prevent.
 
     A row that cannot be closed is left to the next boot's `reclaim_orphans`,
     which is what it is for; the failure is logged so the resulting alert is
@@ -351,7 +365,10 @@ def _close_runs(outcomes: list[tuple[int | None, int | None]]) -> None:
     if not pending:
         return
     try:
-        with db.connect(connect_timeout=SHUTDOWN_DB_CONNECT_TIMEOUT_SECONDS) as conn:
+        with db.connect(
+            connect_timeout=SHUTDOWN_DB_CONNECT_TIMEOUT_SECONDS,
+            options=f"-c statement_timeout={SHUTDOWN_DB_STATEMENT_TIMEOUT_MS}",
+        ) as conn:
             for run_id, exit_code in pending:
                 code, status = _closing_status(exit_code)
                 try:

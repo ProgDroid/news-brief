@@ -22,9 +22,14 @@
 #
 # A one-off run by hand is still `docker compose run --rm`, which takes its own
 # ledger row and is interlocked against the supervisor's copy of the same job:
-#   docker compose run --rm newsbrief pgdiag     # database diagnostics
 #   docker compose run --rm newsbrief collect    # force a collect now
 #   docker compose run --rm --entrypoint bash newsbrief   # a shell in the image
+#
+# `pgdiag` is NOT a Postgres tool despite how it now reads next to the postgres
+# service — "pg" is PolyGram. It is a read-only probe of the live prediction-market
+# seam. To inspect the run ledger, query Postgres directly:
+#   docker compose exec -T postgres psql -U newsbrief -d newsbrief -c "TABLE job_runs;"
+#   docker compose run --rm newsbrief pgdiag    # PolyGram (prediction markets), not Postgres
 #
 # Only ONE getUpdates consumer may run per bot. The supervisor keeps the Telegram
 # daemon resident as a child, so it is that one consumer — do not also start a
@@ -87,8 +92,22 @@ x-newsbrief: &newsbrief
     # POSTGRES_PASSWORD alone is enough. A hardcoded default here would silently
     # disagree with it on every deploy that sets a password, which is all of
     # them — the container would start and then fail to authenticate.
+    #
+    # The splice is plain compose substitution with NO encoding, so generate the
+    # password URL-safe: `openssl rand -hex 32`. Avoid / % @ $ —
+    #   /  libpq reads what follows as the port: `invalid integer value ... for
+    #      connection option "port"`
+    #   @  truncates the password and corrupts the host: `could not translate
+    #      host name "cd@localhost"`
+    #   %  starts a percent-escape: %zz is `invalid percent-encoded token`, and
+    #      %cd is worse — it decodes silently to a DIFFERENT password
+    #   $  is eaten by compose interpolation unless written $$, and truncates
+    #      identically here AND on the postgres service below, so the stack
+    #      comes up and works with a shorter password than you wrote
+    # `openssl rand -base64` draws from [A-Za-z0-9+/=] and so produces a / about
+    # two times in five; `-hex` cannot.
     # Set DATABASE_URL yourself to point at a database outside this stack, or if
-    # your password contains characters that need percent-encoding in a URL.
+    # the password needs percent-encoding after all.
     - DATABASE_URL=${DATABASE_URL:-postgresql://${POSTGRES_USER:-newsbrief}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-newsbrief}}
     # - CHROMA_MCP_URL=${CHROMA_MCP_URL}   # optional: override the default podcast MCP endpoint
   volumes:

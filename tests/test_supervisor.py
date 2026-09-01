@@ -90,9 +90,21 @@ class _FakeChild:
     `stubborn` models a child that ignores SIGTERM — the case that decides
     whether shutdown fits inside the container's stop grace. `ops` records the
     call order into a shared list when ordering is what is under test.
+    `wait_blocks` makes `wait` actually consume the timeout it is handed, the
+    way a process that is not going to exit does; `waits` records those
+    timeouts, which is how a shared deadline is told from a per-child one.
     """
 
-    def __init__(self, name, argv=None, env=None, stubborn=False, ops=None):
+    def __init__(
+        self,
+        name,
+        argv=None,
+        env=None,
+        stubborn=False,
+        ops=None,
+        wait_blocks=False,
+        waits=None,
+    ):
         self.name = name
         self.run_id = None
         self.alive = True
@@ -104,6 +116,8 @@ class _FakeChild:
         self.killed = 0
         self.stubborn = stubborn
         self.ops = ops
+        self.wait_blocks = wait_blocks
+        self.waits = waits
 
     def _record(self, kind):
         if self.ops is not None:
@@ -118,6 +132,10 @@ class _FakeChild:
 
     def wait(self, timeout=None):
         self._record("wait")
+        if self.waits is not None:
+            self.waits.append(timeout)
+        if self.alive and self.wait_blocks and timeout:
+            time.sleep(timeout)
         return None if self.alive else self.exit_code
 
     def join_reader(self, timeout=5.0):
@@ -280,6 +298,33 @@ def test_shutdown_broadcasts_first_and_closes_rows_before_it_escalates(monkeypat
     )
     assert collect.killed == 1 and submit.killed == 1 and resident.killed == 1
     assert jobs == {}
+
+
+def test_the_shutdown_deadline_is_shared_across_children_not_per_child(monkeypatch):
+    """Two children, because one child cannot tell the two apart.
+
+    The ordering test above uses fakes whose `wait` returns instantly, and the
+    interlock suite's stubborn-child test has a single child — so regressing
+    `_remaining(deadline)` back to a flat SHUTDOWN_BUDGET_SECONDS per child
+    passes both. This is the test that fails: the wall clock doubles, and the
+    second child is handed a whole fresh budget instead of what is left of the
+    shared one.
+    """
+    monkeypatch.setattr(supervisor, "SHUTDOWN_BUDGET_SECONDS", 1.0)
+    monkeypatch.setattr(supervisor, "_close_runs", lambda outcomes: None)
+    waits = []
+    collect = _FakeChild("collect", stubborn=True, wait_blocks=True, waits=waits)
+    submit = _FakeChild("submit", stubborn=True, wait_blocks=True, waits=waits)
+
+    started = time.monotonic()
+    supervisor.shutdown({"collect": collect, "submit": submit}, {})
+    elapsed = time.monotonic() - started
+
+    assert waits[0] >= 0.9, "the first child gets the budget, near enough all of it"
+    assert waits[1] < 0.2, (
+        "the second gets what is LEFT of the shared deadline, not a fresh budget"
+    )
+    assert elapsed < 1.6, "two children must not cost two budgets"
 
 
 def _triggers_at(now):

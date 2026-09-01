@@ -202,7 +202,7 @@ cp .env.example .env
 | `ANTHROPIC_API_KEY` | yes | Claude Batch + Messages API |
 | `TELEGRAM_BOT_TOKEN` | yes | Bot token from @BotFather |
 | `TELEGRAM_CHAT_ID` | yes | Your chat ID (delivery target + command auth) |
-| `POSTGRES_PASSWORD` | yes | Password for the stack's Postgres — the stack refuses to start without it |
+| `POSTGRES_PASSWORD` | yes | Password for the stack's Postgres — the stack refuses to start without it. **Generate it URL-safe: `openssl rand -hex 32`** (see below) |
 | `POSTGRES_USER` | no | Postgres role (default `newsbrief`) |
 | `POSTGRES_DB` | no | Database name (default `newsbrief`) |
 | `DATABASE_URL` | no | Derived from the three above; set it only to use a database outside this stack |
@@ -220,6 +220,16 @@ cp .env.example .env
 | `GATE_MIN_TRADES` | no | Go-live readiness gate: minimum closed trades per asset class (default `30`) |
 | `GATE_MIN_HIT_RATE` | no | Go-live gate: minimum net hit-rate (default `0.55`) |
 | `GATE_SUSTAINED_EVALS` | no | Go-live gate: number of consecutive weekly evals the gate must pass (default `2`) |
+
+**Generate `POSTGRES_PASSWORD` URL-safe — `openssl rand -hex 32` — and avoid `/ % @ $`.**
+Compose splices it into `DATABASE_URL` by plain substitution with no encoding: `/` makes libpq
+read what follows as the port, `@` truncates the password and corrupts the host, and `%` starts
+a percent-escape (`%zz` is a parse error; `%cd` silently decodes to a *different* password). The
+`$` case is the nastiest: compose interpolation eats it unless written `$$`, and it truncates
+identically on `DATABASE_URL` *and* on the postgres service's own `POSTGRES_PASSWORD` — so the
+stack comes up and works, silently, with a shorter password than you wrote. Note that
+`openssl rand -base64 24` draws from `[A-Za-z0-9+/=]`, so roughly two in five of its outputs
+contain a `/` and break the stack; `-hex` cannot.
 
 ### 4. Build & test
 
@@ -271,8 +281,12 @@ job, so it cannot double-run:
 
 ```sh
 docker compose run --rm newsbrief collect    # force a collect now
-docker compose run --rm newsbrief pgdiag     # database diagnostics
+docker compose run --rm newsbrief pgdiag     # PolyGram live-seam probe (see below)
 ```
+
+**`pgdiag` is not a Postgres tool** — the `pg` is PolyGram. It is a read-only probe of the live
+prediction-market seam and it will tell you nothing about the ledger. For that, query Postgres
+with the command above.
 
 The cutover from the old five-service, host-cron layout — including the rollback — is written up
 in [`docs/runbooks/2026-08-31-supervisor-cutover.md`](docs/runbooks/2026-08-31-supervisor-cutover.md).

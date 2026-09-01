@@ -17,10 +17,27 @@ is down.
 1. `POSTGRES_PASSWORD` must be set in the stack `.env`. The compose file fails fast
    with `set POSTGRES_PASSWORD in .env` rather than silently starting an
    unauthenticated database.
-2. `DATABASE_URL` is optional; it defaults to
-   `postgresql://newsbrief:newsbrief@postgres:5432/newsbrief`. If you set
-   `POSTGRES_USER`/`POSTGRES_PASSWORD`/`POSTGRES_DB` away from their defaults you
-   must set `DATABASE_URL` to match — the default is not derived from them.
+
+   **Generate it URL-safe: `openssl rand -hex 32`. Avoid `/ % @ $`.**
+   `POSTGRES_PASSWORD` is spliced into `DATABASE_URL` by plain compose
+   substitution with no encoding:
+
+   | Character | What happens |
+   |---|---|
+   | `/` | libpq reads what follows as the port: `invalid integer value "ab" for connection option "port"` |
+   | `@` | truncates the password and corrupts the host: `could not translate host name "cd@localhost"` |
+   | `%` | starts a percent-escape. `%zz` is `invalid percent-encoded token`; `%cd` is worse — it decodes silently to a *different* password |
+   | `$` | eaten by compose interpolation unless written `$$` — and it truncates identically on `DATABASE_URL` *and* on the postgres service's own `POSTGRES_PASSWORD`, so the stack comes up and works, silently, with a shorter password than you wrote |
+
+   `openssl rand -base64 24` draws from `[A-Za-z0-9+/=]`, so roughly two in five
+   of its outputs contain a `/` and break the stack; `-hex` cannot.
+
+2. `DATABASE_URL` is optional and is **derived from**
+   `POSTGRES_USER`/`POSTGRES_PASSWORD`/`POSTGRES_DB`, so setting the password
+   alone is enough and changing the user or database name needs no second edit.
+   Set `DATABASE_URL` yourself only to point at a database outside this stack,
+   or if the password needs percent-encoding after all.
+
 3. Keep a copy of the pre-cutover `docker-compose.yml` on the host. The rollback
    below reconstructs it, but a copy is faster.
 

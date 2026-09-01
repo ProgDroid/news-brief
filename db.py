@@ -22,13 +22,19 @@ def database_url() -> str:
     return os.environ.get("DATABASE_URL", "")
 
 
-def connect(connect_timeout: int | None = None) -> psycopg.Connection:
-    """Open a connection. `connect_timeout` bounds the TCP/auth handshake.
+def connect(
+    connect_timeout: int | None = None, options: str | None = None
+) -> psycopg.Connection:
+    """Open a connection. Both arguments exist for callers working to a deadline.
 
-    Unbounded is the right default for the long-lived paths, but any caller
-    working against a deadline needs the bound: libpq's own default lets a
-    connect to a slow or vanished server block for far longer than the whole
-    budget it was supposed to fit inside (see supervisor.shutdown).
+    `connect_timeout` bounds the TCP/auth handshake; `options` carries libpq
+    startup options, e.g. `-c statement_timeout=500`. Unbounded is the right
+    default for the long-lived paths — a collect legitimately runs for minutes —
+    but the two bounds are needed together, and neither substitutes for the
+    other: a server that accepts the connection and then stalls (lock
+    contention, a wedged disk) passes the handshake and hangs on the statement.
+    Both stalls happen outside any wait budget the caller keeps for itself, which
+    is how a bounded shutdown stops being bounded (see supervisor.shutdown).
     """
     url = database_url()
     if not url:
@@ -37,7 +43,11 @@ def connect(connect_timeout: int | None = None) -> psycopg.Connection:
             "&newsbrief compose anchor: setting it on the host or in .env alone "
             "delivers nothing through compose."
         )
-    kwargs = {} if connect_timeout is None else {"connect_timeout": connect_timeout}
+    kwargs = {}
+    if connect_timeout is not None:
+        kwargs["connect_timeout"] = connect_timeout
+    if options is not None:
+        kwargs["options"] = options
     return psycopg.connect(url, autocommit=False, **kwargs)
 
 
