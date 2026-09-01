@@ -315,8 +315,97 @@ def test_a_child_that_ignores_sigterm_still_gets_its_row_closed(clean_db, monkey
         "SELECT status, exit_code FROM job_runs WHERE id = %s", (run_id,)
     ).fetchone()
     assert status == "finished", "the row must close even when the child will not"
-    assert code == -1, "no exit code was available yet, and -1 is not success"
+    assert code == supervisor.EX_SHUTDOWN_KILLED, (
+        "SIGKILLed at the deadline is its own fact, distinct from -1's 'we never "
+        "learned the exit code'"
+    )
     assert not child.running, "a child that ignores SIGTERM must still be killed"
     assert elapsed < supervisor.SHUTDOWN_BUDGET_SECONDS + 15, (
         "the budget is shared across children and bounded, not per-child"
     )
+
+
+def _seed_now():
+    """06:05 UTC on a Wednesday: inside collect's 2h grace AND monitor's 15m."""
+    return datetime(2026, 9, 2, 6, 5, 0, tzinfo=timezone.utc)
+
+
+def test_a_first_boot_inside_a_grace_window_runs_nothing(clean_db):
+    """The cutover defect, asserted at the decision rather than the row.
+
+    On first boot job_runs is empty, latest_scheduled_for is None, and decide
+    never reaches its already-recorded branch — so every schedule still inside
+    its grace window fires at once. Deploy at 06:30 and that is a SECOND collect
+    for a morning host cron already ran, and a monitor that calls
+    trading.sweep_live_exits and polygram_live.reconcile_live_book: the live
+    sell path, with real money.
+    """
+    import scheduler
+    import supervisor
+
+    now = _seed_now()
+    # Asked of `decide` directly, because `_due_jobs` WRITES the missed rows it
+    # finds — running it first would seed half the table and hide the defect.
+    would_run = {
+        spec.job
+        for spec in scheduler.SCHEDULES
+        if scheduler.decide(spec, now, None).action == "run"
+    }
+    assert would_run == {"collect", "monitor"}, (
+        "an empty ledger runs both immediately; if that stops being true the "
+        "seed is guarding nothing and this fixture time is wrong"
+    )
+
+    seeded = supervisor.seed_first_boot(clean_db, now)
+
+    assert set(seeded) == {s.job for s in scheduler.SCHEDULES}
+    assert supervisor._due_jobs(clean_db, now) == [], "a first boot must run nothing"
+    for spec in scheduler.SCHEDULES:
+        status, trigger, started = clean_db.execute(
+            "SELECT status, trigger, started_at FROM job_runs WHERE job_name = %s",
+            (spec.job,),
+        ).fetchone()
+        assert (status, trigger) == ("missed", "scheduled")
+        assert started is None, "nothing ran, so nothing has a start time"
+
+
+def test_a_second_boot_does_not_re_seed(clean_db):
+    """Seeding twice would consume a fire time the operator expected to run."""
+    import supervisor
+
+    now = _seed_now()
+    supervisor.seed_first_boot(clean_db, now)
+    before = clean_db.execute("SELECT count(*) FROM job_runs").fetchone()[0]
+
+    assert supervisor.seed_first_boot(clean_db, now) == []
+    assert clean_db.execute("SELECT count(*) FROM job_runs").fetchone()[0] == before
+
+
+def test_a_newly_added_schedule_seeds_although_the_table_is_not_empty(
+    clean_db, monkeypatch
+):
+    """Why the emptiness check is per JOB. A whole-table check would pass on the
+    day a fifth schedule is added — the table is not empty, the new job gets no
+    seed, and the double-run comes back for that job alone."""
+    import scheduler
+    import supervisor
+
+    now = _seed_now()
+    supervisor.seed_first_boot(clean_db, now)
+
+    fresh = scheduler.Schedule("digest", "daily", "06:00", None, grace_minutes=120)
+    monkeypatch.setattr(scheduler, "SCHEDULES", scheduler.SCHEDULES + (fresh,))
+
+    assert supervisor.seed_first_boot(clean_db, now) == ["digest"]
+    assert supervisor._due_jobs(clean_db, now) == []
+
+
+def test_seeding_only_suppresses_the_fire_time_it_consumed(clean_db):
+    """The seed must not disable the job — the NEXT fire time still runs."""
+    import supervisor
+
+    supervisor.seed_first_boot(clean_db, _seed_now())
+
+    tomorrow = datetime(2026, 9, 3, 6, 0, 20, tzinfo=timezone.utc)
+    due = {spec.job for spec, _, _ in supervisor._due_jobs(clean_db, tomorrow)}
+    assert "collect" in due, "ordinary scheduling resumes from the next fire time"

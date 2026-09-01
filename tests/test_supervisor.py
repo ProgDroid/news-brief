@@ -288,9 +288,10 @@ def test_shutdown_broadcasts_first_and_closes_rows_before_it_escalates(monkeypat
         "the ledger rows are what nothing else will do for us; killing children "
         "is what teardown does anyway"
     )
-    assert ops[kinds.index("close")][1] == [(41, None), (42, None)], (
-        "a child still running when the budget expires has no exit code yet, "
-        "which _closing_status records as -1 rather than as success"
+    K = supervisor.EX_SHUTDOWN_KILLED
+    assert ops[kinds.index("close")][1] == [(41, K), (42, K)], (
+        "a child still running when the budget expires is about to be SIGKILLed, "
+        "which is its own fact — not -1's 'we never learned the exit code'"
     )
     assert collect.killed == 1 and submit.killed == 1 and resident.killed == 1
     assert jobs == {}
@@ -347,3 +348,133 @@ def test_a_late_run_records_trigger_catchup(monkeypatch):
 
     triggers = _triggers_at(datetime(2026, 8, 31, 6, 45, 0, tzinfo=timezone.utc))
     assert triggers["collect"] == "catchup"
+
+
+def test_a_crash_loop_alerts_once_per_episode_not_once_per_restart():
+    """An alert that repeats for a condition already reported is how the channel
+    stops being read. Past the limit every restart used to return True, so one
+    episode alerted four times as the backoff ramped."""
+    tracker = supervisor.RestartTracker(limit=3, window_seconds=60)
+    now = time.monotonic()
+    trips = [tracker.record("commands", now + i) for i in range(6)]
+    assert trips == [False, False, True, False, False, False]
+
+    # A restart landing with the window no longer full ends the episode, so a
+    # genuinely new crash loop later is still reported.
+    assert tracker.record("commands", now + 1000) is False
+    later = [tracker.record("commands", now + 1000 + i) for i in range(1, 3)]
+    assert later == [False, True]
+
+
+def test_a_resident_that_cannot_be_spawned_alerts_instead_of_killing_serve():
+    """Popen can fail for reasons unrelated to the child. Unguarded that
+    propagated out of tick and out of serve, killing the supervisor with no
+    alert and orphaning every running job child — and under
+    restart: unless-stopped the container came back and did it again."""
+    alerts = []
+    pool = supervisor.ResidentPool()
+
+    def explode(mode):
+        child = _FakeChild(mode)
+        child.start = lambda: (_ for _ in ()).throw(OSError("fork: cannot allocate"))
+        return child
+
+    original = supervisor.telegram_alert
+    supervisor.telegram_alert = alerts.append
+    try:
+        pool.tick(0.0, spawn=explode)
+        assert pool.children == {}, "a child that never started must not be tracked"
+        assert len(alerts) == 1 and "failed to spawn" in alerts[0]
+
+        # Backed off, and silent on the retry: one alert per episode.
+        pool.tick(supervisor.backoff_delay(1) + 1, spawn=explode)
+        assert len(alerts) == 1, "the backoff would repeat this alert forever"
+
+        # And a spawn that finally works clears the episode.
+        spawned = []
+        pool.tick(1000.0, spawn=_spawner(spawned))
+        assert len(spawned) == 1 and pool.children["commands"] is spawned[0]
+        assert pool.spawn_alerted == set()
+    finally:
+        supervisor.telegram_alert = original
+
+
+class _StopOnNthConnect:
+    """Drives serve() for a fixed number of ticks, then trips its SIGTERM."""
+
+    def __init__(self, handlers, stop_after):
+        self.handlers = handlers
+        self.stop_after = stop_after
+        self.calls = []
+
+    def __call__(self, **kwargs):
+        self.calls.append(kwargs)
+        if len(self.calls) >= self.stop_after:
+            self.handlers[supervisor.signal.SIGTERM](supervisor.signal.SIGTERM, None)
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _serve_harness(monkeypatch, stop_after=1, jobs_enabled=True):
+    handlers = {}
+    monkeypatch.setattr(
+        supervisor.signal, "signal", lambda sig, fn: handlers.setdefault(sig, fn)
+    )
+    monkeypatch.setattr(
+        supervisor,
+        "startup",
+        lambda: supervisor.StartupState(
+            jobs_enabled=jobs_enabled, residents_enabled=False
+        ),
+    )
+    monkeypatch.setattr(supervisor.scheduler, "TICK_SECONDS", 0.01)
+    connect = _StopOnNthConnect(handlers, stop_after)
+    monkeypatch.setattr(supervisor.db, "connect", connect)
+    return connect
+
+
+def test_the_tick_path_connects_with_a_bounded_timeout(monkeypatch):
+    """Only the shutdown path was hardened. libpq with no connect_timeout falls
+    back to the OS TCP timeout (~2 minutes), so a SIGTERM arriving while the
+    loop is blocked in db.connect is not acted on until long after Docker's
+    SIGKILL — and every job row stays `running` for the next boot to call an
+    orphan, which is the exact failure the shutdown work exists to prevent."""
+    connect = _serve_harness(monkeypatch)
+    monkeypatch.setattr(supervisor, "_due_jobs", lambda conn, now: [])
+
+    assert supervisor.serve() == 0
+    assert connect.calls, "the tick opened no connection at all"
+    assert all(c.get("connect_timeout") for c in connect.calls), (
+        f"every tick-path connect must be bounded; got {connect.calls}"
+    )
+
+
+def test_a_job_still_running_at_its_next_fire_time_alerts_once(monkeypatch):
+    """A hung job was log-only: the fire time is dropped silently, so a wedged
+    collect looks exactly like a quiet news day. Once per skipped fire time —
+    not once per 30-second tick, which is the same alert fatigue by another
+    route."""
+    import scheduler
+
+    alerts = []
+    connect = _serve_harness(monkeypatch, stop_after=4)
+    monkeypatch.setattr(supervisor, "telegram_alert", alerts.append)
+    monkeypatch.setattr(supervisor, "_close_runs", lambda outcomes: None)
+    monkeypatch.setattr(supervisor.db, "start_run", lambda *a, **k: 7)
+    monkeypatch.setattr(supervisor, "Child", _FakeChild)
+
+    spec = next(s for s in scheduler.SCHEDULES if s.job == "collect")
+    fire = datetime(2026, 9, 2, 6, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        supervisor, "_due_jobs", lambda conn, now: [(spec, fire, "scheduled")]
+    )
+
+    assert supervisor.serve() == 0
+    assert len(connect.calls) >= 3, "needs a spawn tick and two skip ticks"
+    assert len(alerts) == 1, f"one alert per skipped fire time, got {alerts}"
+    assert "still running" in alerts[0] and fire.isoformat() in alerts[0]

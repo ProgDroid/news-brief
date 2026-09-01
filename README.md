@@ -303,11 +303,16 @@ The `/app/logs` volume holds all state and archives, so it must persist across r
 committed `docker-compose.yml` pulls that published image, so deploying a change is `git push` →
 CI rebuilds → `docker compose pull && docker compose up -d`, with no edits to the compose file.
 
-A deploy stops the supervisor. That is about a second in practice, and bounded at ~38s in the
+A deploy stops the supervisor. That is about a second in practice, and bounded at ~43s in the
 worst case — it gives its children the shutdown budget to exit and then closes their `job_runs`
-rows, so an ordinary redeploy leaves no run looking orphaned. The 45s `stop_grace_period` leaves
-7s of margin over that worst case; the runbook has the breakdown, and tuning either number eats
-into it. Schema changes ride along in `migrations/` and are applied at startup, before any job
+rows, so an ordinary redeploy leaves no run looking orphaned. The 60s `stop_grace_period` sits
+above that deliberately, as cover for the parts that cannot be bounded at all; the runbook has
+the breakdown.
+
+The **first** boot against an empty ledger is a special case: each job's current fire time is
+recorded `missed` without being run, because an empty ledger cannot tell "the old host cron
+already ran this" from "genuinely missed". That is what stops the cutover double-running a
+`collect`, and it costs one legitimate catch-up — see the runbook. Schema changes ride along in `migrations/` and are applied at startup, before any job
 is allowed to run.
 
 ---

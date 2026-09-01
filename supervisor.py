@@ -64,11 +64,28 @@ RESIDENT_STABLE_SECONDS = CRASH_LOOP_WINDOW_SECONDS
 #   +  4  DB_STATEMENT_TIMEOUT  4 schedules x 2 statements x 0.5s
 #   +  2  SHUTDOWN_DRAIN again  reaping whatever had to be SIGKILLed
 #   ----
-#     38  against a 45s stop_grace_period, so 7s of margin
+#     38  plus up to 5s for a tick-path connect already in flight when the
+#         signal arrived, so ~43s
 #
 # A mixed fleet reaches it: one child exits late with a grandchild holding its
 # pipe open (the first drain), another ignores SIGTERM entirely (the reap).
+#
+# **The 60s stop_grace_period is deliberately more than this sum, not equal to
+# it.** Two things the sum does not model: statement_timeout does NOT abort a
+# COMMIT already blocked in fsync, which is the wedged-disk case the timeout was
+# added for; and closing a connection whose socket is wedged is unbounded too.
+# The extra ~17s is cover for what cannot be bounded, not slack to be reclaimed
+# by someone re-deriving this table and finding it generous.
 SHUTDOWN_BUDGET_SECONDS = 25.0
+
+# Every connect the main loop makes must be bounded, not only shutdown's. libpq
+# with no connect_timeout falls back to the OS TCP timeout — roughly two minutes
+# — so a SIGTERM arriving while the loop is blocked in `db.connect` would not be
+# acted on until long after Docker's SIGKILL, and every job row would stay
+# `running` for the next boot to report as an orphan. That is the precise
+# failure the shutdown work exists to prevent, reached by the one path that had
+# not been hardened.
+DB_CONNECT_TIMEOUT_SECONDS = 5
 # A shared bound on draining the children's final output. Small on purpose: the
 # log lines are worth having, but not at the cost of the ledger writes queued
 # behind them, and a grandchild holding the pipe open would otherwise stall the
@@ -82,6 +99,11 @@ SHUTDOWN_DB_CONNECT_TIMEOUT_SECONDS = 5
 # and then stalls — lock contention, a wedged disk — passes the connect timeout
 # and hangs on the UPDATE instead. Its contribution to the worst case is in the
 # arithmetic beside SHUTDOWN_BUDGET_SECONDS above.
+#
+# It is a partial bound, and the arithmetic above says so: statement_timeout
+# does not abort a COMMIT already blocked in fsync, so on the very wedged-disk
+# case this was added for it can be exceeded. That is why the grace period sits
+# above the sum rather than on it.
 #
 # Half a second is three orders of magnitude more than an indexed single-row
 # UPDATE needs, and the failure direction is the right way round: a timed-out
@@ -107,14 +129,31 @@ class RestartTracker:
     limit: int = CRASH_LOOP_LIMIT
     window_seconds: float = CRASH_LOOP_WINDOW_SECONDS
     _events: dict[str, list[float]] = field(default_factory=dict)
+    _in_episode: set[str] = field(default_factory=set)
 
     def record(self, name: str, at: float | None = None) -> bool:
-        """Record a restart; return True if this trips the crash-loop threshold."""
+        """Record a restart; True only on ENTERING a crash-loop episode.
+
+        Returning True on every restart at or past the limit meant one episode
+        alerted once per restart — four times as the backoff ramps, and again
+        whenever the window refills. An alert that repeats for a condition the
+        operator has already been told about is how the channel stops being
+        read, which is the same failure as the false orphan alert, slower.
+
+        The episode ends when a restart lands with the window no longer full,
+        so a genuinely new crash loop later still alerts.
+        """
         at = time.monotonic() if at is None else at
         events = [t for t in self._events.get(name, []) if at - t < self.window_seconds]
         events.append(at)
         self._events[name] = events
-        return len(events) >= self.limit
+        if len(events) < self.limit:
+            self._in_episode.discard(name)
+            return False
+        if name in self._in_episode:
+            return False
+        self._in_episode.add(name)
+        return True
 
 
 class Child:
@@ -235,6 +274,7 @@ class ResidentPool:
     failures: dict[str, int] = field(default_factory=dict)
     started_at: dict[str, float] = field(default_factory=dict)
     next_start: dict[str, float] = field(default_factory=dict)
+    spawn_alerted: set[str] = field(default_factory=set)
 
     def tick(self, now_mono: float, spawn=None) -> None:
         """One pass over RESIDENT_MODES. `spawn` is injectable for tests."""
@@ -248,10 +288,35 @@ class ResidentPool:
                 self._reap(mode, child, now_mono)
                 continue
             if now_mono >= self.next_start.get(mode, 0.0):
-                fresh = spawn(mode)
-                fresh.start()
-                self.children[mode] = fresh
-                self.started_at[mode] = now_mono
+                self._start(mode, spawn, now_mono)
+
+    def _start(self, mode: str, spawn, now_mono: float) -> None:
+        """Start one resident. A spawn failure must not escape this method.
+
+        `Popen` can fail for reasons that have nothing to do with the child —
+        fork failing under memory pressure, the interpreter path gone after an
+        image change. Unguarded, that exception propagated out of `tick` and out
+        of `serve`, killing the supervisor with no alert and orphaning every
+        running job child. Under `restart: unless-stopped` the container then
+        comes straight back and does it again: a silent crash loop, in the
+        process whose entire remit is making failures visible.
+        """
+        fresh = spawn(mode)
+        try:
+            fresh.start()
+        except Exception as e:
+            log.exception(f"[{mode}] failed to spawn")
+            if mode not in self.spawn_alerted:
+                # Once per episode, for the same reason RestartTracker alerts
+                # once: the backoff means this would otherwise repeat forever.
+                self.spawn_alerted.add(mode)
+                telegram_alert(f"{mode} failed to spawn: {type(e).__name__}: {e}")
+            self.failures[mode] = self.failures.get(mode, 0) + 1
+            self.next_start[mode] = now_mono + backoff_delay(self.failures[mode])
+            return
+        self.spawn_alerted.discard(mode)
+        self.children[mode] = fresh
+        self.started_at[mode] = now_mono
 
     def _note_stability(self, mode: str, now_mono: float) -> None:
         """Clear the failure count only once a child has proved it stays up.
@@ -312,6 +377,12 @@ def startup(*, migrate=None, connect=None) -> StartupState:
             # Reclaim is hygiene, not a precondition: failing it must not stop
             # the supervisor from doing today's work.
             log.exception("Orphan reclaim failed; continuing")
+        # Seeding is NOT hygiene and is deliberately not wrapped: if it fails,
+        # the very next tick can run a second collect for a day host cron
+        # already ran, down the live trading path. Letting it raise into the
+        # handler below disables jobs and alerts, which is the fail-closed-on-
+        # work half of this function's contract.
+        seed_first_boot(conn)
         return StartupState(jobs_enabled=True, residents_enabled=True)
     except Exception as e:
         reason = f"{type(e).__name__}: {e}"
@@ -329,6 +400,49 @@ def startup(*, migrate=None, connect=None) -> StartupState:
 
 
 EX_ORPHANED = -2  # a run whose supervisor died before it could be closed
+EX_SHUTDOWN_KILLED = -3  # a run still going at the shutdown deadline, SIGKILLed
+
+
+def seed_first_boot(conn, now: datetime | None = None) -> list[str]:
+    """Consume each job's current fire time, once, on its FIRST EVER boot.
+
+    Without this the cutover double-runs. On first boot `job_runs` is empty, so
+    `latest_scheduled_for` is None, `decide` never reaches its already-recorded
+    branch, and EVERY schedule still inside its grace window fires immediately.
+    Deploy between 06:00 and 08:00 UTC and the supervisor runs a second collect
+    on top of the one host cron already ran that morning; monitor's 15-minute
+    grace means any deploy in the first quarter of ANY hour re-runs `monitor`,
+    which calls `trading.sweep_live_exits` and
+    `polygram_live.reconcile_live_book` — the live sell path, with real money.
+
+    An empty ledger cannot distinguish "host cron already ran this" from
+    "genuinely missed", so we assume the former exactly once, per job, and let
+    ordinary scheduling take over from the next fire time. It is recorded
+    through `record_missed` rather than a new writer, so the row is honest about
+    what happened: the fire time passed and nothing ran.
+
+    The check is per JOB, not on the table as a whole. Whole-table emptiness
+    would break the day a fifth schedule is added — the table is not empty, the
+    new job gets no seed, and this defect comes back for that job alone. Per-job
+    also makes it idempotent if a crash lands mid-seed.
+
+    One legitimate catch-up is suppressed: host down across 06:00, stack up at
+    07:00, no collect. That is the safe direction, it is visible in the ledger
+    as `missed`, and `docker compose run --rm newsbrief collect` recovers it.
+    """
+    now = now or datetime.now(timezone.utc)
+    seeded: list[str] = []
+    for spec in scheduler.SCHEDULES:
+        if db.has_any_run(conn, spec.job):
+            continue
+        fire = scheduler.previous_fire(spec, now)
+        db.record_missed(conn, spec.job, fire)
+        seeded.append(spec.job)
+        log.warning(
+            f"[{spec.job}] first boot: recording {fire.isoformat()} as missed "
+            f"rather than running it, in case another entry path already did"
+        )
+    return seeded
 
 
 def _closing_status(exit_code: int | None) -> tuple[int, str]:
@@ -352,7 +466,7 @@ def _close_run(run_id: int | None, exit_code: int | None) -> None:
         return
     code, status = _closing_status(exit_code)
     try:
-        with db.connect() as conn:
+        with db.connect(connect_timeout=DB_CONNECT_TIMEOUT_SECONDS) as conn:
             db.finish_run(conn, run_id, code, status=status)
     except Exception:
         log.exception(f"Could not close run {run_id}")
@@ -506,7 +620,11 @@ def shutdown(jobs: dict[str, Child], residents: dict[str, Child]) -> None:
         code = child.wait(timeout=0)
         del jobs[mode]
         log.info(f"[{mode}] stopped for shutdown with {code}")
-        outcomes.append((child.run_id, code))
+        # Still running at the deadline: we are about to SIGKILL it, and that is
+        # a different fact from "we never learned the exit code". Recording both
+        # as -1 left /jobs unable to tell a planned stop from an unknown
+        # outcome, which is the distinction an operator reads the column for.
+        outcomes.append((child.run_id, EX_SHUTDOWN_KILLED if code is None else code))
 
     _close_runs(outcomes)
 
@@ -533,6 +651,10 @@ def serve() -> int:
 
     pool = ResidentPool()
     jobs: dict[str, Child] = {}
+    # Fire times already alerted as skipped, per job. Keyed by fire time so a
+    # hang spanning several of monitor's hours reports each one, and cleared
+    # when the job finally exits so it cannot grow without bound.
+    skipped_alerts: dict[str, set[str]] = {}
 
     while not stopping.is_set():
         now_mono = time.monotonic()
@@ -541,11 +663,18 @@ def serve() -> int:
             pool.tick(now_mono)
 
         for mode, child in list(jobs.items()):
+            if stopping.is_set():
+                # Leave the rest to `shutdown`, which closes every remaining row
+                # on ONE bounded connection. Carrying on here would spend a
+                # connect timeout per child before shutdown is even reached, and
+                # that time comes out of the container's stop grace.
+                break
             if child.running:
                 continue
             code = child.wait(timeout=0)
             child.join_reader(timeout=5)
             del jobs[mode]
+            skipped_alerts.pop(mode, None)
             _close_run(child.run_id, code)
             if code == EX_ALREADY_RUNNING:
                 log.warning(
@@ -559,17 +688,30 @@ def serve() -> int:
                 log.error(f"[{mode}] exited with {code}")
                 telegram_alert(f"{mode} exited with code {code}")
 
-        if state.jobs_enabled:
+        if state.jobs_enabled and not stopping.is_set():
             try:
-                with db.connect() as conn:
+                with db.connect(connect_timeout=DB_CONNECT_TIMEOUT_SECONDS) as conn:
                     for spec, scheduled_for, trigger in _due_jobs(
                         conn, datetime.now(timezone.utc)
                     ):
                         if spec.job in jobs:
+                            # A job that outlives its own fire time is a hang,
+                            # and it was log-only: the fire time is silently
+                            # dropped, so a wedged collect looks exactly like a
+                            # quiet news day. Once per skipped fire time, not
+                            # once per 30-second tick.
+                            stamp = scheduled_for.isoformat()
                             log.warning(
                                 f"[{spec.job}] still running from a previous fire "
-                                f"time; skipping {scheduled_for.isoformat()}"
+                                f"time; skipping {stamp}"
                             )
+                            if stamp not in skipped_alerts.setdefault(spec.job, set()):
+                                skipped_alerts[spec.job].add(stamp)
+                                telegram_alert(
+                                    f"{spec.job} is still running from an earlier "
+                                    f"fire time, so {stamp} was skipped and will "
+                                    f"not be retried"
+                                )
                             continue
                         # Write the row BEFORE spawning. This consumes the fire
                         # time immediately, so a child that dies before it can

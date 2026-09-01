@@ -169,6 +169,19 @@ def run_migrations(
     return changed
 
 
+def has_any_run(conn: psycopg.Connection, job: str) -> bool:
+    """Whether this job has EVER been recorded, by any entry path.
+
+    Deliberately per-job and deliberately not `latest_scheduled_for(...) is not
+    None`: a manual run records a NULL scheduled_for, so a job with nothing but
+    manual runs behind it would look untouched to that check.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM job_runs WHERE job_name = %s LIMIT 1", (job,)
+    ).fetchone()
+    return row is not None
+
+
 def latest_scheduled_for(conn: psycopg.Connection, job: str):
     """Greatest scheduled_for recorded for this job, or None. Feeds decide()."""
     row = conn.execute(

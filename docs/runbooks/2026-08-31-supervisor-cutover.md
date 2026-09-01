@@ -108,10 +108,22 @@ Expected:
 - `docker compose ps` shows exactly two services: `newsbrief`, `postgres`.
 - The log shows `=== SERVE (supervisor) ===`, migrations applied, and
   `[commands] started`. It does **not** show `=== COLLECT ===`.
-- `job_runs` has no row whose `started_at` is the deploy time — a stack `up`
-  starts no work, which is the point of the whole change. Jobs appear when they
-  are due, and a redeploy runs only what the catch-up rule says was actually
-  missed.
+- **You should see one row per schedule, `status = missed`, `started_at` NULL,
+  and a `first boot: recording ... as missed` line per job in the log.** That is
+  the first-boot seed, and it is correct: an empty ledger cannot tell "host cron
+  already ran this today" from "genuinely missed", so each job's current fire
+  time is consumed once without running it. Without the seed, a cutover between
+  06:00 and 08:00 UTC would run a second `collect` on top of the morning's, and
+  a cutover in the first 15 minutes of any hour would re-run `monitor` — which
+  goes down the live sell path.
+- `job_runs` has **no row whose `started_at` is the deploy time** — a stack `up`
+  starts no work, which is the point of the whole change. The seed rows above
+  have a NULL `started_at`, so this stays true as written. Jobs appear when they
+  are next due.
+- The seed suppresses exactly one legitimate case: if the host was down across
+  06:00 and you bring the stack up at 07:00, there is no catch-up `collect`. It
+  is visible in the ledger as `missed`, and
+  `docker compose run --rm newsbrief collect` recovers it.
 - `/jobs` in Telegram answers (phase 2 — `news-brief-0q0.9`; until it lands, use
   the psql query above).
 - One `getUpdates` consumer only: the bot responds and the log shows no 409.
@@ -121,7 +133,7 @@ Expected:
 ## Shutdown budget
 
 `docker compose stop|down|restart` sends SIGTERM and then waits
-`stop_grace_period` (45s) before SIGKILL. The supervisor gives its children
+`stop_grace_period` (60s) before SIGKILL. The supervisor gives its children
 `supervisor.SHUTDOWN_BUDGET_SECONDS` (25s) to exit, then closes its `job_runs`
 rows, and only then escalates to SIGKILL itself.
 
@@ -129,15 +141,20 @@ Every phase is bounded, and the worst case is the sum of the bounds:
 
 | Phase | Bound |
 |---|---|
+| a tick-path connect already in flight when the signal arrived | 5s |
 | children exit after the SIGTERM broadcast | 25s |
 | drain the final output of whichever children did exit | 2s |
 | open the one connection the rows close on | 5s |
 | the ledger writes (4 schedules x 2 statements x 0.5s) | 4s |
 | reap whatever had to be SIGKILLed | 2s |
-| **worst case** | **38s** |
+| **worst case** | **43s** |
 
-Against the 45s `stop_grace_period` that leaves **7s of margin**, and that margin
-is what any change to either number eats into.
+The 60s `stop_grace_period` is deliberately more than that, not equal to it. The
+remaining ~17s is **not slack to reclaim**: it is cover for the two things the
+sum cannot bound — `statement_timeout` does not abort a COMMIT already blocked
+in fsync, and closing a connection whose socket is wedged is unbounded too.
+Grace costs nothing when it is not used, because Docker waits only until the
+process exits.
 
 **The two numbers are a pair.** If the container is killed before the ledger
 writes land, the rows stay `running`, and the next boot's `reclaim_orphans` fires
@@ -145,6 +162,6 @@ writes land, the rows stay `running`, and the next boot's `reclaim_orphans` fire
 alert that trains an operator to ignore the real one. If you tune either number,
 tune both.
 
-A clean stop can therefore take up to ~38s when a job is running. That is not a
+A clean stop can therefore take up to ~43s when a job is running. That is not a
 hang. In practice it is about a second: the job modes install no SIGTERM handler,
 so they exit on the signal and nothing else in the list is reached.
