@@ -180,6 +180,18 @@ class Child:
             self.argv,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            # No child of this supervisor is interactive, and saying so is
+            # load-bearing twice over. Left unset, Popen INHERITS the
+            # supervisor's own stdin, which it must first duplicate — and a
+            # handle the OS declines to duplicate turns an ordinary spawn into
+            # an exception before the child exists (observed here as WinError
+            # 50, intermittently, from the pytest runner's stdin). More
+            # importantly a child that ever reads stdin would block forever on
+            # an inherited handle nobody writes to, holding `running` in the
+            # ledger and starving every later fire time: the exact hang the
+            # interlock and the orphan reclaim are built to make impossible.
+            # DEVNULL gives each child a fresh handle that reads EOF at once.
+            stdin=subprocess.DEVNULL,
             text=True,
             # A strict decoder raises UnicodeDecodeError on one bad byte,
             # which kills this thread silently: the child then blocks
