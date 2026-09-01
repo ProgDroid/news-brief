@@ -277,3 +277,46 @@ def test_a_planned_shutdown_closes_the_job_row(clean_db):
     assert status != "running", "a planned stop must not leave an orphan row"
     assert status == "finished"
     assert code not in (None, 0), "a terminated child did not exit cleanly"
+
+
+def test_a_child_that_ignores_sigterm_still_gets_its_row_closed(clean_db, monkeypatch):
+    """The row must be written before the SIGKILL, against a real process.
+
+    The test above uses a child that dies on SIGTERM, so it never reaches the
+    deadline — it would pass even if shutdown escalated first and wrote the
+    ledger afterwards, which is precisely the ordering Docker's stop timeout
+    interrupts.
+
+    The child ignores SIGTERM by having its `signal_stop` neutered rather than
+    by installing SIG_IGN: on Windows `Popen.terminate` is TerminateProcess,
+    which cannot be ignored, and this test has to run on both platforms. The
+    process really does survive the broadcast either way.
+    """
+    import sys
+    import time
+
+    import supervisor
+
+    monkeypatch.setattr(supervisor, "SHUTDOWN_BUDGET_SECONDS", 1.0)
+
+    run_id = db.start_run(clean_db, "collect", None, "scheduled")
+    child = supervisor.Child(
+        "collect", [sys.executable, "-c", "import time; time.sleep(120)"]
+    )
+    child.run_id = run_id
+    child.start()
+    monkeypatch.setattr(child, "signal_stop", lambda: None)
+
+    started = time.monotonic()
+    supervisor.shutdown({"collect": child}, {})
+    elapsed = time.monotonic() - started
+
+    status, code = clean_db.execute(
+        "SELECT status, exit_code FROM job_runs WHERE id = %s", (run_id,)
+    ).fetchone()
+    assert status == "finished", "the row must close even when the child will not"
+    assert code == -1, "no exit code was available yet, and -1 is not success"
+    assert not child.running, "a child that ignores SIGTERM must still be killed"
+    assert elapsed < supervisor.SHUTDOWN_BUDGET_SECONDS + 15, (
+        "the budget is shared across children and bounded, not per-child"
+    )

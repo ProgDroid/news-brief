@@ -85,9 +85,14 @@ def test_a_failed_migration_blocks_jobs_but_still_starts_residents():
 
 
 class _FakeChild:
-    """A Child stand-in: no subprocess, so a tick loop can be driven by hand."""
+    """A Child stand-in: no subprocess, so a tick loop can be driven by hand.
 
-    def __init__(self, name, argv=None, env=None):
+    `stubborn` models a child that ignores SIGTERM — the case that decides
+    whether shutdown fits inside the container's stop grace. `ops` records the
+    call order into a shared list when ordering is what is under test.
+    """
+
+    def __init__(self, name, argv=None, env=None, stubborn=False, ops=None):
         self.name = name
         self.run_id = None
         self.alive = True
@@ -95,6 +100,14 @@ class _FakeChild:
         self.started = False
         self.joined = 0
         self.terminated = 0
+        self.signalled = 0
+        self.killed = 0
+        self.stubborn = stubborn
+        self.ops = ops
+
+    def _record(self, kind):
+        if self.ops is not None:
+            self.ops.append((kind, self.name))
 
     def start(self):
         self.started = True
@@ -104,10 +117,25 @@ class _FakeChild:
         return self.alive
 
     def wait(self, timeout=None):
+        self._record("wait")
         return None if self.alive else self.exit_code
 
     def join_reader(self, timeout=5.0):
         self.joined += 1
+
+    def signal_stop(self):
+        self.signalled += 1
+        self._record("signal")
+        if not self.stubborn:
+            self.alive = False
+
+    def kill(self):
+        if not self.alive:
+            return False
+        self.killed += 1
+        self._record("kill")
+        self.alive = False
+        return True
 
     def terminate(self, grace=20.0):
         self.terminated += 1
@@ -195,7 +223,7 @@ def test_shutdown_closes_job_rows_rather_than_leaving_them_running(monkeypatch):
     `compose down` (fix round 2, Important 3)."""
     closed = []
     monkeypatch.setattr(
-        supervisor, "_close_run", lambda run_id, code: closed.append((run_id, code))
+        supervisor, "_close_runs", lambda outcomes: closed.extend(outcomes)
     )
     job = _FakeChild("collect")
     job.run_id = 41
@@ -207,9 +235,51 @@ def test_shutdown_closes_job_rows_rather_than_leaving_them_running(monkeypatch):
     supervisor.shutdown(jobs, residents)
 
     assert closed == [(41, -15)], "a planned stop must leave no orphan row"
-    assert job.terminated == 1 and resident.terminated == 1
+    assert job.signalled == 1 and resident.signalled == 1
     assert job.joined == 1, "the child's final output must be drained, not dropped"
+    assert job.killed == 0, "a child that honoured SIGTERM must not be SIGKILLed"
     assert jobs == {}, "a stopped job must not stay in the live set"
+
+
+def test_shutdown_broadcasts_first_and_closes_rows_before_it_escalates(monkeypatch):
+    """The ordering, pinned with children that ignore SIGTERM.
+
+    Both other shutdown tests use children that die instantly, so neither ever
+    reaches the deadline or the SIGKILL — a regression here would pass them
+    both. Serially this was terminate(grace=20) + wait(5) + join_reader(5) per
+    child, for up to four schedules: well past any plausible
+    `stop_grace_period`, so Docker's SIGKILL landed BEFORE the ledger rows were
+    closed and the next boot called an ordinary deploy an orphan.
+    """
+    ops = []
+    monkeypatch.setattr(
+        supervisor, "_close_runs", lambda outcomes: ops.append(("close", outcomes))
+    )
+    collect = _FakeChild("collect", stubborn=True, ops=ops)
+    collect.run_id = 41
+    submit = _FakeChild("submit", stubborn=True, ops=ops)
+    submit.run_id = 42
+    resident = _FakeChild("commands", stubborn=True, ops=ops)
+    jobs = {"collect": collect, "submit": submit}
+
+    supervisor.shutdown(jobs, {"commands": resident})
+
+    kinds = [kind for kind, _ in ops]
+    last_signal = max(i for i, k in enumerate(kinds) if k == "signal")
+    assert kinds.index("wait") > last_signal, (
+        "every child must be signalled before the first wait, or the budget is "
+        "spent one child at a time"
+    )
+    assert kinds.index("close") < kinds.index("kill"), (
+        "the ledger rows are what nothing else will do for us; killing children "
+        "is what teardown does anyway"
+    )
+    assert ops[kinds.index("close")][1] == [(41, None), (42, None)], (
+        "a child still running when the budget expires has no exit code yet, "
+        "which _closing_status records as -1 rather than as success"
+    )
+    assert collect.killed == 1 and submit.killed == 1 and resident.killed == 1
+    assert jobs == {}
 
 
 def _triggers_at(now):

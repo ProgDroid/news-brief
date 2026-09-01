@@ -43,6 +43,32 @@ CRASH_LOOP_WINDOW_SECONDS = 600
 # the backoff ceiling unreachable.
 RESIDENT_STABLE_SECONDS = CRASH_LOOP_WINDOW_SECONDS
 
+# How long every child together gets to exit after the SIGTERM broadcast. It is
+# a SHARED deadline, not a per-child one: terminating four job children serially
+# at 20s of grace each took 80s, which no plausible stop_grace_period covers.
+#
+# **docker-compose.yml's `stop_grace_period` must exceed this**, with room for
+# the ledger writes that follow — the comment there says so too, because the
+# pair is only safe while both numbers are tuned together. Under Docker's 10s
+# default the supervisor is SIGKILLed mid-shutdown, its `running` rows survive,
+# and the next boot reports them as orphans: the Task 4 fix goes inert and every
+# routine deploy fires the false alert that trains the operator to ignore the
+# real one.
+SHUTDOWN_BUDGET_SECONDS = 30.0
+# A shared bound on draining the children's final output. Small on purpose: the
+# log lines are worth having, but not at the cost of the ledger writes queued
+# behind them, and a grandchild holding the pipe open would otherwise stall the
+# drain for the whole remaining budget.
+SHUTDOWN_DRAIN_SECONDS = 2.0
+# Without this, closing a row against a stopped database blocks on libpq's own
+# connect timeout — outside every budget above, which is how a "bounded"
+# shutdown stops being bounded.
+SHUTDOWN_DB_CONNECT_TIMEOUT_SECONDS = 5
+
+
+def _remaining(deadline: float) -> float:
+    return max(0.0, deadline - time.monotonic())
+
 
 def backoff_delay(consecutive_failures: int) -> float:
     return float(
@@ -127,14 +153,33 @@ class Child:
         if self._reader is not None:
             self._reader.join(timeout=timeout)
 
+    def signal_stop(self) -> None:
+        """SIGTERM without waiting, so a fleet can be signalled all at once.
+
+        Split out of `terminate` because waiting per child serialises the whole
+        shutdown: the caller broadcasts this to every child, then waits once
+        against a single deadline (see `shutdown`).
+        """
+        if not self.running:
+            return
+        assert self.proc is not None
+        self.proc.terminate()
+
+    def kill(self) -> bool:
+        """SIGKILL if still running. Returns whether a kill was actually sent."""
+        if not self.running:
+            return False
+        assert self.proc is not None
+        log.warning(f"[{self.name}] did not exit in time; killing")
+        self.proc.kill()
+        return True
+
     def terminate(self, grace: float = 20.0) -> None:
         """SIGTERM, wait, then SIGKILL — so a host restart mid-run is safe."""
-        if self.proc is None or self.proc.poll() is not None:
+        if not self.running:
             return
-        self.proc.terminate()
-        if self.wait(timeout=grace) is None:
-            log.warning(f"[{self.name}] did not exit in {grace}s; killing")
-            self.proc.kill()
+        self.signal_stop()
+        if self.wait(timeout=grace) is None and self.kill():
             self.wait(timeout=5)
 
     @property
@@ -262,8 +307,8 @@ def startup(*, migrate=None, connect=None) -> StartupState:
 EX_ORPHANED = -2  # a run whose supervisor died before it could be closed
 
 
-def _close_run(run_id: int | None, exit_code: int | None) -> None:
-    """Close a ledger row on its own connection.
+def _closing_status(exit_code: int | None) -> tuple[int, str]:
+    """How a run is recorded from its exit code.
 
     The supervisor is authoritative for the children it spawned: it has the exit
     code even when the child was OOM-killed or SIGKILLed and could therefore
@@ -273,15 +318,53 @@ def _close_run(run_id: int | None, exit_code: int | None) -> None:
     A refusal closes as 'missed', not 'finished': the child never ran, and a
     'finished' row would let /jobs report work that did not happen.
     """
+    code = -1 if exit_code is None else exit_code
+    return code, ("missed" if code == EX_ALREADY_RUNNING else "finished")
+
+
+def _close_run(run_id: int | None, exit_code: int | None) -> None:
+    """Close one ledger row on its own connection."""
     if run_id is None:
         return
-    code = -1 if exit_code is None else exit_code
-    status = "missed" if code == EX_ALREADY_RUNNING else "finished"
+    code, status = _closing_status(exit_code)
     try:
         with db.connect() as conn:
             db.finish_run(conn, run_id, code, status=status)
     except Exception:
         log.exception(f"Could not close run {run_id}")
+
+
+def _close_runs(outcomes: list[tuple[int | None, int | None]]) -> None:
+    """Close every row a shutdown owns, on ONE connection with a bounded connect.
+
+    `_close_run` per child would open a connection per child, and each
+    `db.connect()` blocks on libpq's own connect timeout — *outside* any wait
+    budget. With the database slow or gone, four children meant four
+    unbounded stalls, so a shutdown that is bounded on paper is not bounded at
+    all. One connection, one bound.
+
+    A row that cannot be closed is left to the next boot's `reclaim_orphans`,
+    which is what it is for; the failure is logged so the resulting alert is
+    attributable rather than mysterious.
+    """
+    pending = [(rid, code) for rid, code in outcomes if rid is not None]
+    if not pending:
+        return
+    try:
+        with db.connect(connect_timeout=SHUTDOWN_DB_CONNECT_TIMEOUT_SECONDS) as conn:
+            for run_id, exit_code in pending:
+                code, status = _closing_status(exit_code)
+                try:
+                    db.finish_run(conn, run_id, code, status=status)
+                except Exception:
+                    # One bad row must not cost the others their close.
+                    log.exception(f"Could not close run {run_id}")
+    except Exception:
+        log.exception(
+            "Could not close runs "
+            + ", ".join(str(rid) for rid, _ in pending)
+            + " on shutdown; the next boot will reclaim them as orphans"
+        )
 
 
 def reclaim_orphans(conn) -> list[str]:
@@ -360,19 +443,48 @@ def shutdown(jobs: dict[str, Child], residents: dict[str, Child]) -> None:
     SIGTERM on Linux), not as `missed`: the child really did run, and the
     non-zero code says how it ended. `missed` stays reserved for work that never
     started at all. No alert fires here — a stop we asked for is not a failure.
+
+    Two things about the ordering are deliberate, and both come from the fact
+    that we may ourselves be SIGKILLed part-way through:
+
+    * **Broadcast, then wait once.** Signalling and waiting per child made the
+      worst case the sum of every child's grace; against a shared deadline it is
+      the longest one.
+    * **The ledger rows close BEFORE the escalation to SIGKILL.** The rows are
+      the part of this function that nothing else will do for us; killing the
+      children is something container teardown does anyway. Work ordered by what
+      survives being interrupted, not by what is tidy.
     """
+    children = list(jobs.values()) + list(residents.values())
+    for child in children:
+        child.signal_stop()
+
+    deadline = time.monotonic() + SHUTDOWN_BUDGET_SECONDS
+    for child in children:
+        child.wait(timeout=_remaining(deadline))
+
+    # Drain only the children that have exited: their pipes are at EOF, so this
+    # returns at once. Joining one still running would spend the budget the
+    # ledger writes need, on output that is about to be killed anyway.
+    drain_deadline = time.monotonic() + SHUTDOWN_DRAIN_SECONDS
+    for child in children:
+        if not child.running:
+            child.join_reader(timeout=_remaining(drain_deadline))
+
+    outcomes: list[tuple[int | None, int | None]] = []
     for mode, child in list(jobs.items()):
-        child.terminate()
         code = child.wait(timeout=0)
-        # Drain before closing the row, so the child's last lines reach the log
-        # file the supervisor is about to stop writing.
-        child.join_reader(timeout=5)
         del jobs[mode]
         log.info(f"[{mode}] stopped for shutdown with {code}")
-        _close_run(child.run_id, code)
-    for child in residents.values():
-        child.terminate()
-        child.join_reader(timeout=5)
+        outcomes.append((child.run_id, code))
+
+    _close_runs(outcomes)
+
+    killed = [child for child in children if child.kill()]
+    reap_deadline = time.monotonic() + SHUTDOWN_DRAIN_SECONDS
+    for child in killed:
+        child.wait(timeout=_remaining(reap_deadline))
+        child.join_reader(timeout=_remaining(reap_deadline))
 
 
 def serve() -> int:

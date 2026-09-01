@@ -22,7 +22,14 @@ def database_url() -> str:
     return os.environ.get("DATABASE_URL", "")
 
 
-def connect() -> psycopg.Connection:
+def connect(connect_timeout: int | None = None) -> psycopg.Connection:
+    """Open a connection. `connect_timeout` bounds the TCP/auth handshake.
+
+    Unbounded is the right default for the long-lived paths, but any caller
+    working against a deadline needs the bound: libpq's own default lets a
+    connect to a slow or vanished server block for far longer than the whole
+    budget it was supposed to fit inside (see supervisor.shutdown).
+    """
     url = database_url()
     if not url:
         raise RuntimeError(
@@ -30,7 +37,8 @@ def connect() -> psycopg.Connection:
             "&newsbrief compose anchor: setting it on the host or in .env alone "
             "delivers nothing through compose."
         )
-    return psycopg.connect(url, autocommit=False)
+    kwargs = {} if connect_timeout is None else {"connect_timeout": connect_timeout}
+    return psycopg.connect(url, autocommit=False, **kwargs)
 
 
 def _lock_key(name: str) -> int:
