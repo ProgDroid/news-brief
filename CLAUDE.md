@@ -67,13 +67,31 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
 
 ## Build & Test
 
-_Add your build and test commands here_
+The pre-push gate is **three** commands, not just pytest — CI runs all three, and
+`ruff format` edits in place, so `git add` every file it touches or CI fails on the
+committed tree while your working tree looks clean.
 
 ```bash
-# Example:
-# npm install
-# npm test
+ruff check .
+ruff format --check .
+pytest -q
 ```
+
+**`pytest` alone reports green with the entire database layer unexecuted.** The
+DB-backed modules skip on `db.is_configured()`, so with no database configured the
+suite passes and says nothing about `db.py`, the migrations, or the run ledger — a
+skip is not a pass. Export a connection first, and check the run count moved:
+
+```bash
+docker run --rm -d -p 5432:5432 -e POSTGRES_PASSWORD=newsbrief \
+  -e POSTGRES_USER=newsbrief -e POSTGRES_DB=newsbrief_test postgres:18-alpine
+export DATABASE_URL="postgresql://newsbrief:newsbrief@localhost:5432/newsbrief_test"
+pytest tests/test_db.py -q   # must report runs, not "skipped"
+```
+
+Local verification of the full stack is **`docker compose config` only**. Never
+`docker compose up -d` here: it starts a second Telegram `getUpdates` consumer and
+409s the live bot.
 
 ## Architecture Overview
 
