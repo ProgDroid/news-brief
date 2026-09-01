@@ -426,6 +426,15 @@ def seed_first_boot(conn, now: datetime | None = None) -> list[str]:
     new job gets no seed, and this defect comes back for that job alone. Per-job
     also makes it idempotent if a crash lands mid-seed.
 
+    It tests `latest_scheduled_for(...) is None` — the exact value `decide`
+    consumes — and not merely "does a row exist". The two diverge for a job
+    whose only history is manual runs, which record a NULL `scheduled_for`:
+    row-existence calls that job touched and skips the seed, while `decide`
+    still sees None and fires it. Seeding on the weaker predicate re-opens the
+    hole it exists to close. The reverse error is cheap by comparison: a
+    manual-only job looks untouched, gets seeded, and loses one catch-up.
+    Whatever gates firing must be what gates seeding.
+
     One legitimate catch-up is suppressed: host down across 06:00, stack up at
     07:00, no collect. That is the safe direction, it is visible in the ledger
     as `missed`, and `docker compose run --rm newsbrief collect` recovers it.
@@ -433,7 +442,7 @@ def seed_first_boot(conn, now: datetime | None = None) -> list[str]:
     now = now or datetime.now(timezone.utc)
     seeded: list[str] = []
     for spec in scheduler.SCHEDULES:
-        if db.has_any_run(conn, spec.job):
+        if db.latest_scheduled_for(conn, spec.job) is not None:
             continue
         fire = scheduler.previous_fire(spec, now)
         db.record_missed(conn, spec.job, fire)

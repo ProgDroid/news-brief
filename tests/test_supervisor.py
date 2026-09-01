@@ -478,3 +478,53 @@ def test_a_job_still_running_at_its_next_fire_time_alerts_once(monkeypatch):
     assert len(connect.calls) >= 3, "needs a spawn tick and two skip ticks"
     assert len(alerts) == 1, f"one alert per skipped fire time, got {alerts}"
     assert "still running" in alerts[0] and fire.isoformat() in alerts[0]
+
+
+def test_startup_seeds_the_first_boot(monkeypatch):
+    """Pins the CALL, not just the function.
+
+    Every other seeding test invokes `seed_first_boot` directly, and the only
+    other `startup` test raises inside `migrate` and returns before reaching it.
+    Between them the call itself was unpinned: it could be deleted, reordered
+    ahead of `migrate`, or wrapped in a swallowing `try` with the suite still
+    green — and the first boot after that would run a second `collect` down the
+    live trading path.
+    """
+    calls = []
+    conn = object()
+
+    monkeypatch.setattr(
+        supervisor, "reclaim_orphans", lambda c: calls.append("reclaim")
+    )
+    monkeypatch.setattr(
+        supervisor, "seed_first_boot", lambda c: calls.append(("seed", c))
+    )
+
+    state = supervisor.startup(
+        migrate=lambda c: calls.append("migrate"), connect=lambda: conn
+    )
+
+    assert state.jobs_enabled is True
+    assert ("seed", conn) in calls, "startup must seed, on the connection it migrated"
+    assert calls.index("migrate") < calls.index(("seed", conn)), (
+        "seeding reads the table migrate creates"
+    )
+
+
+def test_a_failed_seed_disables_jobs(monkeypatch):
+    """Seeding is fail-CLOSED, unlike reclaim: it is the guard, not hygiene.
+
+    If it is ever wrapped in the same forgiving try/except that protects orphan
+    reclaim, the next tick runs the job the seed was meant to consume.
+    """
+
+    def boom(conn):
+        raise RuntimeError("job_runs is gone")
+
+    monkeypatch.setattr(supervisor, "reclaim_orphans", lambda c: None)
+    monkeypatch.setattr(supervisor, "seed_first_boot", boom)
+    monkeypatch.setattr(supervisor, "telegram_alert", lambda m: None)
+
+    state = supervisor.startup(migrate=lambda c: None, connect=lambda: object())
+    assert state.jobs_enabled is False
+    assert "job_runs is gone" in state.reason

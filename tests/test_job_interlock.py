@@ -409,3 +409,29 @@ def test_seeding_only_suppresses_the_fire_time_it_consumed(clean_db):
     tomorrow = datetime(2026, 9, 3, 6, 0, 20, tzinfo=timezone.utc)
     due = {spec.job for spec, _, _ in supervisor._due_jobs(clean_db, tomorrow)}
     assert "collect" in due, "ordinary scheduling resumes from the next fire time"
+
+
+def test_a_job_whose_only_history_is_manual_is_still_seeded(clean_db):
+    """The seed must key on the value `decide` consumes, not on row existence.
+
+    A manual run records a NULL scheduled_for. A row-existence check calls the
+    job touched and skips the seed, but `decide` still sees None and fires it —
+    which is the double-run this whole function exists to prevent, reached by a
+    different door. Testing `latest_scheduled_for(...) is None` keeps the two in
+    agreement; the cost is one lost catch-up for a manual-only job, which is the
+    safe direction.
+    """
+    import scheduler
+    import supervisor
+
+    now = _seed_now()
+    db.finish_run(clean_db, db.start_run(clean_db, "collect", None, "manual"), 0)
+
+    spec = next(s for s in scheduler.SCHEDULES if s.job == "collect")
+    assert db.latest_scheduled_for(clean_db, "collect") is None
+    assert scheduler.decide(spec, now, None).action == "run", (
+        "the manual row did not change what decide would do, so a seed is owed"
+    )
+
+    assert "collect" in supervisor.seed_first_boot(clean_db, now)
+    assert supervisor._due_jobs(clean_db, now) == []
