@@ -202,7 +202,7 @@ cp .env.example .env
 | `ANTHROPIC_API_KEY` | yes | Claude Batch + Messages API |
 | `TELEGRAM_BOT_TOKEN` | yes | Bot token from @BotFather |
 | `TELEGRAM_CHAT_ID` | yes | Your chat ID (delivery target + command auth) |
-| `POSTGRES_PASSWORD` | yes | Password for the stack's Postgres — the stack refuses to start without it. **Generate it URL-safe: `openssl rand -hex 32`** (see below) |
+| `POSTGRES_PASSWORD` | yes | Password for the stack's Postgres. **Generate it URL-safe: `openssl rand -hex 32` — no `/ % @ $`**, which break or silently truncate it (see below). Required even if `DATABASE_URL` points elsewhere: the bundled `postgres` service still starts and still demands it |
 | `POSTGRES_USER` | no | Postgres role (default `newsbrief`) |
 | `POSTGRES_DB` | no | Database name (default `newsbrief`) |
 | `DATABASE_URL` | no | Derived from the three above; set it only to use a database outside this stack |
@@ -303,9 +303,11 @@ The `/app/logs` volume holds all state and archives, so it must persist across r
 committed `docker-compose.yml` pulls that published image, so deploying a change is `git push` →
 CI rebuilds → `docker compose pull && docker compose up -d`, with no edits to the compose file.
 
-A deploy stops the supervisor, which takes up to ~35s: it gives its children the shutdown budget
-to exit and then closes their `job_runs` rows, so an ordinary redeploy leaves no run looking
-orphaned. Schema changes ride along in `migrations/` and are applied at startup, before any job
+A deploy stops the supervisor. That is about a second in practice, and bounded at ~38s in the
+worst case — it gives its children the shutdown budget to exit and then closes their `job_runs`
+rows, so an ordinary redeploy leaves no run looking orphaned. The 45s `stop_grace_period` leaves
+7s of margin over that worst case; the runbook has the breakdown, and tuning either number eats
+into it. Schema changes ride along in `migrations/` and are applied at startup, before any job
 is allowed to run.
 
 ---

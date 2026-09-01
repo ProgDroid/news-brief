@@ -38,12 +38,13 @@ def test_child_output_is_drained_and_prefixed(caplog):
     assert any("[noisy] hello from the child" in r.message for r in caplog.records)
 
 
-def test_wait_times_out_then_terminate_stops_the_child():
+def test_wait_times_out_then_signal_stop_stops_the_child():
     child = supervisor.Child("slow", _fake(0, sleep=30))
     child.start()
     assert child.wait(timeout=0.5) is None, "still running, so no exit code yet"
-    child.terminate(grace=5)
+    child.signal_stop()
     assert child.wait(timeout=10) is not None
+    assert child.kill() is False, "nothing to escalate to once the child is gone"
 
 
 def test_backoff_grows_and_is_capped():
@@ -111,7 +112,6 @@ class _FakeChild:
         self.exit_code = 7
         self.started = False
         self.joined = 0
-        self.terminated = 0
         self.signalled = 0
         self.killed = 0
         self.stubborn = stubborn
@@ -154,10 +154,6 @@ class _FakeChild:
         self._record("kill")
         self.alive = False
         return True
-
-    def terminate(self, grace=20.0):
-        self.terminated += 1
-        self.alive = False
 
 
 def _spawner(into):

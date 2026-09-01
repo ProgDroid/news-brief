@@ -36,7 +36,9 @@ is down.
    `POSTGRES_USER`/`POSTGRES_PASSWORD`/`POSTGRES_DB`, so setting the password
    alone is enough and changing the user or database name needs no second edit.
    Set `DATABASE_URL` yourself only to point at a database outside this stack,
-   or if the password needs percent-encoding after all.
+   or if the password needs percent-encoding after all. Note that
+   `POSTGRES_PASSWORD` is still required in that case: the bundled `postgres`
+   service starts regardless and demands it, even when nothing is using it.
 
 3. Keep a copy of the pre-cutover `docker-compose.yml` on the host. The rollback
    below reconstructs it, but a copy is faster.
@@ -119,15 +121,30 @@ Expected:
 ## Shutdown budget
 
 `docker compose stop|down|restart` sends SIGTERM and then waits
-`stop_grace_period` (45s) before SIGKILL. The supervisor's own budget is
-`supervisor.SHUTDOWN_BUDGET_SECONDS` (30s) for the children to exit, after which
-it closes its `job_runs` rows and only then escalates to SIGKILL.
+`stop_grace_period` (45s) before SIGKILL. The supervisor gives its children
+`supervisor.SHUTDOWN_BUDGET_SECONDS` (25s) to exit, then closes its `job_runs`
+rows, and only then escalates to SIGKILL itself.
 
-**Those two numbers are a pair.** If the container is killed before the ledger
+Every phase is bounded, and the worst case is the sum of the bounds:
+
+| Phase | Bound |
+|---|---|
+| children exit after the SIGTERM broadcast | 25s |
+| drain the final output of whichever children did exit | 2s |
+| open the one connection the rows close on | 5s |
+| the ledger writes (4 schedules x 2 statements x 0.5s) | 4s |
+| reap whatever had to be SIGKILLed | 2s |
+| **worst case** | **38s** |
+
+Against the 45s `stop_grace_period` that leaves **7s of margin**, and that margin
+is what any change to either number eats into.
+
+**The two numbers are a pair.** If the container is killed before the ledger
 writes land, the rows stay `running`, and the next boot's `reclaim_orphans` fires
 "Orphaned by a restart and NOT retried" on what was an ordinary deploy — the false
 alert that trains an operator to ignore the real one. If you tune either number,
-tune both, and keep the grace period comfortably above the budget.
+tune both.
 
-A clean stop is therefore expected to take up to ~35s when a job is running. That
-is not a hang.
+A clean stop can therefore take up to ~38s when a job is running. That is not a
+hang. In practice it is about a second: the job modes install no SIGTERM handler,
+so they exit on the signal and nothing else in the list is reached.

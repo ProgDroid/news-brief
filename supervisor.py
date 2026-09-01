@@ -47,14 +47,28 @@ RESIDENT_STABLE_SECONDS = CRASH_LOOP_WINDOW_SECONDS
 # a SHARED deadline, not a per-child one: terminating four job children serially
 # at 20s of grace each took 80s, which no plausible stop_grace_period covers.
 #
-# **docker-compose.yml's `stop_grace_period` must exceed this**, with room for
-# the ledger writes that follow — the comment there says so too, because the
-# pair is only safe while both numbers are tuned together. Under Docker's 10s
-# default the supervisor is SIGKILLed mid-shutdown, its `running` rows survive,
-# and the next boot reports them as orphans: the Task 4 fix goes inert and every
-# routine deploy fires the false alert that trains the operator to ignore the
-# real one.
-SHUTDOWN_BUDGET_SECONDS = 30.0
+# **docker-compose.yml's `stop_grace_period` must exceed the WHOLE of shutdown**,
+# not just this number — the comment there says so too, because the pair is only
+# safe while both are tuned together. Under Docker's 10s default the supervisor
+# is SIGKILLed mid-shutdown, its `running` rows survive, and the next boot
+# reports them as orphans: the Task 4 fix goes inert and every routine deploy
+# fires the false alert that trains the operator to ignore the real one.
+#
+# Every phase is bounded, so the worst case is the sum of the bounds below and
+# is written out once, here, since four separate constants cannot be audited
+# apart:
+#
+#     25  this budget           children exit after the broadcast
+#   +  2  SHUTDOWN_DRAIN        final output of whichever children did exit
+#   +  5  DB_CONNECT_TIMEOUT    opening the one connection the rows close on
+#   +  4  DB_STATEMENT_TIMEOUT  4 schedules x 2 statements x 0.5s
+#   +  2  SHUTDOWN_DRAIN again  reaping whatever had to be SIGKILLed
+#   ----
+#     38  against a 45s stop_grace_period, so 7s of margin
+#
+# A mixed fleet reaches it: one child exits late with a grandchild holding its
+# pipe open (the first drain), another ignores SIGTERM entirely (the reap).
+SHUTDOWN_BUDGET_SECONDS = 25.0
 # A shared bound on draining the children's final output. Small on purpose: the
 # log lines are worth having, but not at the cost of the ledger writes queued
 # behind them, and a grandchild holding the pipe open would otherwise stall the
@@ -66,9 +80,8 @@ SHUTDOWN_DRAIN_SECONDS = 2.0
 SHUTDOWN_DB_CONNECT_TIMEOUT_SECONDS = 5
 # And the handshake is only half of it: a database that ACCEPTS the connection
 # and then stalls — lock contention, a wedged disk — passes the connect timeout
-# and hangs on the UPDATE instead. The arithmetic against the 45s
-# stop_grace_period, worst case: 30s budget + 2s drain + 5s connect + four
-# schedules x two statements x 0.5s = 41s, leaving ~4s of margin.
+# and hangs on the UPDATE instead. Its contribution to the worst case is in the
+# arithmetic beside SHUTDOWN_BUDGET_SECONDS above.
 #
 # Half a second is three orders of magnitude more than an indexed single-row
 # UPDATE needs, and the failure direction is the right way round: a timed-out
@@ -167,9 +180,9 @@ class Child:
     def signal_stop(self) -> None:
         """SIGTERM without waiting, so a fleet can be signalled all at once.
 
-        Split out of `terminate` because waiting per child serialises the whole
-        shutdown: the caller broadcasts this to every child, then waits once
-        against a single deadline (see `shutdown`).
+        Signalling and waiting are separate methods because doing both together
+        serialises the whole shutdown: the caller broadcasts this to every
+        child, then waits once against a single deadline (see `shutdown`).
         """
         if not self.running:
             return
@@ -177,21 +190,21 @@ class Child:
         self.proc.terminate()
 
     def kill(self) -> bool:
-        """SIGKILL if still running. Returns whether a kill was actually sent."""
+        """SIGKILL if still running. Returns whether a kill was actually sent.
+
+        There is deliberately no `terminate(grace)` helper pairing these two.
+        One existed and had no caller left once `shutdown` started broadcasting:
+        an unreferenced "just stop this child" method sitting beside a shutdown
+        path whose ORDERING is the whole point is the thing a future reader
+        reaches for by mistake, and using it would serialise the budget again
+        and close the ledger rows after the SIGKILL instead of before.
+        """
         if not self.running:
             return False
         assert self.proc is not None
         log.warning(f"[{self.name}] did not exit in time; killing")
         self.proc.kill()
         return True
-
-    def terminate(self, grace: float = 20.0) -> None:
-        """SIGTERM, wait, then SIGKILL — so a host restart mid-run is safe."""
-        if not self.running:
-            return
-        self.signal_stop()
-        if self.wait(timeout=grace) is None and self.kill():
-            self.wait(timeout=5)
 
     @property
     def running(self) -> bool:
