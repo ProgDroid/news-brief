@@ -2072,26 +2072,35 @@ docker compose up -d          # supervisor + postgres; jobs run on their own sch
 
 and note that schedules live in `scheduler.SCHEDULES`, that `/jobs` reports last run and next due, and that `POSTGRES_PASSWORD` is now required in `.env`.
 
-- [ ] **Step 4: Verify the compose file is valid and starts nothing unexpected**
+- [ ] **Step 4: Validate the compose file statically — do NOT bring the stack up here**
 
 ```bash
 docker compose config --quiet && echo "compose OK"
-docker compose up -d
-sleep 20
-docker compose ps
-docker compose logs newsbrief | tail -40
+docker compose config | grep -E "stop_grace_period|restart|command|image"
 ```
 
-Expected: two services up; the log shows `=== SERVE (supervisor) ===`, migrations applied, `[commands] started`, and **no** `=== COLLECT ===`.
+Expected: `compose OK`, exactly two services, `command: serve`, `restart: unless-stopped`, and the
+`stop_grace_period` from Step 1a.
 
-Then confirm the interlock through the bypass path against the running stack:
+> **Do not run `docker compose up -d` on a development machine.** The stack starts the `commands` daemon, and
+> Telegram permits exactly one `getUpdates` consumer per bot token — a second one 409s and knocks the live bot
+> off. If a real `TELEGRAM_BOT_TOKEN` is reachable from this machine's environment or `.env`, bringing the stack
+> up here is a production incident, not a test. The live verification below belongs to the operator, on the
+> deploy host, at cutover time.
+
+**Operator verification, on the deploy host** (this is the content of the runbook's cutover section):
 
 ```bash
+docker compose up -d && sleep 20
+docker compose ps
+docker compose logs newsbrief | tail -40
 docker compose exec -T postgres psql -U newsbrief -d newsbrief \
-  -c "SELECT job_name, scheduled_for, trigger, status FROM job_runs ORDER BY id;"
+  -c "SELECT job_name, scheduled_for, trigger, status, started_at FROM job_runs ORDER BY id;"
 ```
 
-Expected: no row whose `started_at` is the deploy time.
+Expected: two services up; the log shows `=== SERVE (supervisor) ===`, migrations applied, `[commands] started`,
+and **no** `=== COLLECT ===`; and no `job_runs` row whose `started_at` is the deploy time — which is the whole
+point of the change.
 
 - [ ] **Step 5: Commit**
 
