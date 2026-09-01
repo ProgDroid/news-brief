@@ -14,7 +14,7 @@ import db
 import brief
 
 pytestmark = pytest.mark.skipif(
-    not db.database_url(), reason="DATABASE_URL is not set; see tests/test_db.py"
+    not db.is_configured(), reason="No database is configured; see tests/test_db.py"
 )
 
 

@@ -84,31 +84,37 @@ x-newsbrief: &newsbrief
     # service named `nitter` on Nitter's internal port 8080; override if it differs.
     - NITTER_BASE_URL=${NITTER_BASE_URL:-http://nitter:8080}
     # Postgres holds the run ledger, the advisory locks that interlock the entry
-    # paths, and the scheduler's state. It MUST be declared here: compose passes
-    # through only what this block names, so setting DATABASE_URL on the host or
-    # in .env alone leaves it unset inside the container and every job refuses to
-    # start (db.connect says exactly that). The default matches the `postgres`
-    # service below and is BUILT FROM THE SAME VARIABLES, so setting
-    # POSTGRES_PASSWORD alone is enough. A hardcoded default here would silently
-    # disagree with it on every deploy that sets a password, which is all of
-    # them — the container would start and then fail to authenticate.
+    # paths, and the scheduler's state. These MUST be declared here: compose
+    # passes through only what this block names, so setting them on the host or
+    # in .env alone leaves them unset inside the container and every job refuses
+    # to start — db.conninfo says exactly that, naming the ones it could not find.
     #
-    # The splice is plain compose substitution with NO encoding, so generate the
-    # password URL-safe: `openssl rand -hex 32`. Avoid / % @ $ —
-    #   /  libpq reads what follows as the port: `invalid integer value ... for
-    #      connection option "port"`
-    #   @  truncates the password and corrupts the host: `could not translate
-    #      host name "cd@localhost"`
-    #   %  starts a percent-escape: %zz is `invalid percent-encoded token`, and
-    #      %cd is worse — it decodes silently to a DIFFERENT password
-    #   $  is eaten by compose interpolation unless written $$, and truncates
-    #      identically here AND on the postgres service below, so the stack
-    #      comes up and works with a shorter password than you wrote
-    # `openssl rand -base64` draws from [A-Za-z0-9+/=] and so produces a / about
-    # two times in five; `-hex` cannot.
-    # Set DATABASE_URL yourself to point at a database outside this stack, or if
-    # the password needs percent-encoding after all.
-    - DATABASE_URL=${DATABASE_URL:-postgresql://${POSTGRES_USER:-newsbrief}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-newsbrief}}
+    # They are the SAME variables the `postgres` service below is configured
+    # with, so setting POSTGRES_PASSWORD alone is enough and the two sides cannot
+    # disagree. Nothing here builds a URI: db.conninfo hands the values to
+    # psycopg's make_conninfo, which escapes each one as a keyword/value pair, so
+    # the password is carried as a VALUE and never has to survive a URI parse.
+    # `/`, `%` and `@` in a password are safe now; they were not when this line
+    # spliced them into a postgresql:// URI, where `/` was read as the start of
+    # the port, `@` truncated the password and corrupted the host, and `%cd`
+    # decoded silently to a DIFFERENT password.
+    #
+    # One trap is left, and it is compose's rather than libpq's: a `$` in a .env
+    # value is eaten by interpolation unless written `$$`, identically here AND
+    # on the postgres service below — so the stack comes up and works with a
+    # shorter password than you wrote. Generate it with `openssl rand -hex 32`
+    # and there is nothing to escape.
+    - POSTGRES_HOST=${POSTGRES_HOST:-postgres}
+    - POSTGRES_PORT=${POSTGRES_PORT:-5432}
+    - POSTGRES_USER=${POSTGRES_USER:-newsbrief}
+    - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    - POSTGRES_DB=${POSTGRES_DB:-newsbrief}
+    # Set DATABASE_URL to point at a database OUTSIDE this stack: when it is
+    # non-empty it wins over the five above. It is a URI, so percent-encode the
+    # password in it if the password needs it. POSTGRES_PASSWORD stays required
+    # either way — the bundled postgres service below still starts and still
+    # demands one.
+    - DATABASE_URL=${DATABASE_URL:-}
     # - CHROMA_MCP_URL=${CHROMA_MCP_URL}   # optional: override the default podcast MCP endpoint
   volumes:
     - "${APPDATA_DIR:-./appdata}/news-brief:/app/logs"

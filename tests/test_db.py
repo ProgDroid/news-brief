@@ -1,8 +1,10 @@
 """Migration runner and advisory lock.
 
 These tests need a real Postgres: the runner's whole job is to talk to one, and
-a fake would test the fake. They skip loudly when DATABASE_URL is unset so a
-missing database can never read as a pass.
+a fake would test the fake. They skip loudly when no database is configured so a
+missing database can never read as a pass — on `db.is_configured`, the same
+predicate `db.connect` reads, so a run pointed at a database through the
+discrete POSTGRES_* variables is not reported as skipped.
 """
 
 import pytest
@@ -10,8 +12,8 @@ import pytest
 import db
 
 pytestmark = pytest.mark.skipif(
-    not db.database_url(),
-    reason="DATABASE_URL is not set: start a Postgres and export it, e.g. "
+    not db.is_configured(),
+    reason="No database is configured: start a Postgres and export DATABASE_URL, e.g. "
     "docker run --rm -d -p 5432:5432 -e POSTGRES_PASSWORD=newsbrief "
     "-e POSTGRES_USER=newsbrief -e POSTGRES_DB=newsbrief_test postgres:18-alpine",
 )

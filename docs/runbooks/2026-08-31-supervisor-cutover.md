@@ -18,25 +18,25 @@ is down.
    with `set POSTGRES_PASSWORD in .env` rather than silently starting an
    unauthenticated database.
 
-   **Generate it URL-safe: `openssl rand -hex 32`. Avoid `/ % @ $`.**
-   `POSTGRES_PASSWORD` is spliced into `DATABASE_URL` by plain compose
-   substitution with no encoding:
+   **Generate it with `openssl rand -hex 32`. Avoid `$`.**
+   The password is no longer spliced into a URI — compose passes the discrete
+   `POSTGRES_*` variables through and `db.conninfo` builds the libpq connection
+   string with psycopg's `make_conninfo`, which escapes each value. `/`, `%` and
+   `@` are safe in a password now (they were not before). `$` is the survivor,
+   and it is compose's trap rather than libpq's:
 
    | Character | What happens |
    |---|---|
-   | `/` | libpq reads what follows as the port: `invalid integer value "ab" for connection option "port"` |
-   | `@` | truncates the password and corrupts the host: `could not translate host name "cd@localhost"` |
-   | `%` | starts a percent-escape. `%zz` is `invalid percent-encoded token`; `%cd` is worse — it decodes silently to a *different* password |
-   | `$` | eaten by compose interpolation unless written `$$` — and it truncates identically on `DATABASE_URL` *and* on the postgres service's own `POSTGRES_PASSWORD`, so the stack comes up and works, silently, with a shorter password than you wrote |
+   | `$` | eaten by compose interpolation unless written `$$` — and it truncates identically on the app *and* on the postgres service's own `POSTGRES_PASSWORD`, so the stack comes up and works, silently, with a shorter password than you wrote |
 
-   `openssl rand -base64 24` draws from `[A-Za-z0-9+/=]`, so roughly two in five
-   of its outputs contain a `/` and break the stack; `-hex` cannot.
+   `-hex` output cannot contain a `$`, which is the whole reason to prefer it.
 
-2. `DATABASE_URL` is optional and is **derived from**
-   `POSTGRES_USER`/`POSTGRES_PASSWORD`/`POSTGRES_DB`, so setting the password
-   alone is enough and changing the user or database name needs no second edit.
-   Set `DATABASE_URL` yourself only to point at a database outside this stack,
-   or if the password needs percent-encoding after all. Note that
+2. `DATABASE_URL` is optional and now defaults to **empty**: the app reaches the
+   bundled database through `POSTGRES_HOST`/`PORT`/`USER`/`PASSWORD`/`DB`, so
+   setting the password alone is enough and changing the user or database name
+   needs no second edit. Set `DATABASE_URL` yourself only to point at a database
+   outside this stack — it wins over the five when non-empty, and being a URI it
+   brings the percent-encoding rules back for its own password. Note that
    `POSTGRES_PASSWORD` is still required in that case: the bundled `postgres`
    service starts regardless and demands it, even when nothing is using it.
 

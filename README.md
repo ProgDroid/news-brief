@@ -202,10 +202,12 @@ cp .env.example .env
 | `ANTHROPIC_API_KEY` | yes | Claude Batch + Messages API |
 | `TELEGRAM_BOT_TOKEN` | yes | Bot token from @BotFather |
 | `TELEGRAM_CHAT_ID` | yes | Your chat ID (delivery target + command auth) |
-| `POSTGRES_PASSWORD` | yes | Password for the stack's Postgres. **Generate it URL-safe: `openssl rand -hex 32` — no `/ % @ $`**, which break or silently truncate it (see below). Required even if `DATABASE_URL` points elsewhere: the bundled `postgres` service still starts and still demands it |
+| `POSTGRES_PASSWORD` | yes | Password for the stack's Postgres. **Generate it with `openssl rand -hex 32` — avoid `$`**, which compose eats silently (see below). Required even if `DATABASE_URL` points elsewhere: the bundled `postgres` service still starts and still demands it |
 | `POSTGRES_USER` | no | Postgres role (default `newsbrief`) |
 | `POSTGRES_DB` | no | Database name (default `newsbrief`) |
-| `DATABASE_URL` | no | Derived from the three above; set it only to use a database outside this stack |
+| `POSTGRES_HOST` | no | Where the app looks for Postgres (default `postgres`, the service in this stack) |
+| `POSTGRES_PORT` | no | Postgres port (default `5432`) |
+| `DATABASE_URL` | no | A full libpq URI for a database **outside** this stack; wins over the five above when set. Percent-encode the password in it — inside a URI that is on you |
 | `CHROMA_MCP_URL` | no | Podcast Chroma MCP endpoint (defaults to the hosted Modal URL) |
 | `T212_API_KEY_ID` | no | Trading212 key **ID** — paired with `T212_API_KEY` for HTTP Basic auth |
 | `T212_API_KEY` | no | Read-only Trading212 key — enables portfolio weights + paper symbol mapping |
@@ -221,15 +223,19 @@ cp .env.example .env
 | `GATE_MIN_HIT_RATE` | no | Go-live gate: minimum net hit-rate (default `0.55`) |
 | `GATE_SUSTAINED_EVALS` | no | Go-live gate: number of consecutive weekly evals the gate must pass (default `2`) |
 
-**Generate `POSTGRES_PASSWORD` URL-safe — `openssl rand -hex 32` — and avoid `/ % @ $`.**
-Compose splices it into `DATABASE_URL` by plain substitution with no encoding: `/` makes libpq
-read what follows as the port, `@` truncates the password and corrupts the host, and `%` starts
-a percent-escape (`%zz` is a parse error; `%cd` silently decodes to a *different* password). The
-`$` case is the nastiest: compose interpolation eats it unless written `$$`, and it truncates
-identically on `DATABASE_URL` *and* on the postgres service's own `POSTGRES_PASSWORD` — so the
-stack comes up and works, silently, with a shorter password than you wrote. Note that
-`openssl rand -base64 24` draws from `[A-Za-z0-9+/=]`, so roughly two in five of its outputs
-contain a `/` and break the stack; `-hex` cannot.
+**Generate `POSTGRES_PASSWORD` with `openssl rand -hex 32`, and avoid `$`.**
+The password is no longer spliced into a `postgresql://` URI: compose passes `POSTGRES_HOST`,
+`POSTGRES_PORT`, `POSTGRES_USER`, `POSTGRES_PASSWORD` and `POSTGRES_DB` through as themselves,
+and `db.conninfo` builds the libpq connection string from them with psycopg's `make_conninfo`,
+which escapes each value. `/`, `%` and `@` are therefore safe in a password now — they were not
+before, when `/` made libpq read what followed as the port, `@` truncated the password and
+corrupted the host, and `%cd` decoded silently to a *different* password.
+
+The one that still bites is `$`, and it is compose's rather than libpq's: interpolation eats it
+unless written `$$`, and it truncates identically on the app *and* on the postgres service's own
+`POSTGRES_PASSWORD` — so the stack comes up and works, silently, with a shorter password than you
+wrote. `-hex` output cannot contain one. If you set `DATABASE_URL` instead, all of the URI rules
+above come back for that string, so percent-encode its password.
 
 ### 4. Build & test
 
@@ -271,9 +277,9 @@ A `/jobs` Telegram command reporting each job's last run and next due time is th
 front end for that table and is **not built yet** (`news-brief-0q0.9`).
 
 `POSTGRES_PASSWORD` is now **required** in `.env`; the stack refuses to start without it rather
-than bringing up an unauthenticated database. `DATABASE_URL` is derived from it (with
-`POSTGRES_USER`/`POSTGRES_DB`), so set it explicitly only to point at a database outside this
-stack. The ledger lives in the `newsbrief-pgdata` named volume, which survives
+than bringing up an unauthenticated database. The app reaches Postgres through the discrete
+`POSTGRES_*` variables, so setting the password alone is enough; set `DATABASE_URL` explicitly
+only to point at a database outside this stack. The ledger lives in the `newsbrief-pgdata` named volume, which survives
 `docker compose down` — but not `down -v`.
 
 A one-off run by hand still works and is interlocked against the supervisor's copy of the same

@@ -11,15 +11,80 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import psycopg
+from psycopg.conninfo import make_conninfo
 
 from common import log
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 
 
-def database_url() -> str:
-    """Read at call time, not import time, so tests can set it after import."""
-    return os.environ.get("DATABASE_URL", "")
+# The discrete variables compose passes through, and the libpq keyword each one
+# fills. POSTGRES_PORT is deliberately absent: libpq's own 5432 default is the
+# only one of these with a right answer that is not this stack's business.
+_DISCRETE = (
+    ("POSTGRES_HOST", "host"),
+    ("POSTGRES_USER", "user"),
+    ("POSTGRES_PASSWORD", "password"),
+    ("POSTGRES_DB", "dbname"),
+)
+
+
+def conninfo() -> str:
+    """The libpq connection string, built from the environment.
+
+    DATABASE_URL wins when set — that is the escape hatch for a database outside
+    this stack, and what CI and local test runs export. Otherwise the string is
+    built from the discrete POSTGRES_* variables with `make_conninfo`, which
+    escapes each value as a keyword/value pair.
+
+    That difference is the whole point. Compose used to splice POSTGRES_PASSWORD
+    into a `postgresql://` URI by plain substitution with no encoding, so the
+    password had to survive a URI parse: `/` was read as the start of the port,
+    `@` truncated it and corrupted the host, and `%cd` decoded silently to a
+    DIFFERENT password. `openssl rand -base64` draws from [A-Za-z0-9+/=], so
+    roughly two passwords in five carried a `/`. A keyword/value pair has no
+    such grammar to fall foul of — the password is a value, not part of a path.
+
+    One trap survives here and cannot be fixed in this file: compose eats a `$`
+    in a .env value unless it is written `$$`, and it does so identically on the
+    app and on the postgres service, so the stack comes up and works with a
+    shorter password than the operator wrote. That is why the README still says
+    to generate it with `openssl rand -hex 32`.
+
+    Every variable is read at call time, not import time, so a test can set them
+    after importing this module.
+    """
+    url = os.environ.get("DATABASE_URL", "")
+    if url:
+        return url
+    values = {key: os.environ.get(name, "") for name, key in _DISCRETE}
+    missing = [name for name, key in _DISCRETE if not values[key]]
+    if missing:
+        raise RuntimeError(
+            f"The database is not configured: {', '.join(missing)} "
+            f"{'is' if len(missing) == 1 else 'are'} unset and DATABASE_URL is "
+            "empty. In the container these must be declared in the &newsbrief "
+            "compose anchor: setting them on the host or in .env alone delivers "
+            "nothing through compose."
+        )
+    port = os.environ.get("POSTGRES_PORT", "")
+    if port:
+        values["port"] = port
+    return make_conninfo(**values)
+
+
+def is_configured() -> bool:
+    """Whether `connect` has something to connect with.
+
+    The DB-backed test modules skip on this rather than on DATABASE_URL alone,
+    so the guard tests the exact predicate its consumer reads: a suite pointed
+    at a database through the discrete variables must not report itself skipped.
+    """
+    try:
+        conninfo()
+    except RuntimeError:
+        return False
+    return True
 
 
 def connect(
@@ -36,19 +101,13 @@ def connect(
     Both stalls happen outside any wait budget the caller keeps for itself, which
     is how a bounded shutdown stops being bounded (see supervisor.shutdown).
     """
-    url = database_url()
-    if not url:
-        raise RuntimeError(
-            "DATABASE_URL is unset. In the container it must be declared in the "
-            "&newsbrief compose anchor: setting it on the host or in .env alone "
-            "delivers nothing through compose."
-        )
+    dsn = conninfo()
     kwargs = {}
     if connect_timeout is not None:
         kwargs["connect_timeout"] = connect_timeout
     if options is not None:
         kwargs["options"] = options
-    return psycopg.connect(url, autocommit=False, **kwargs)
+    return psycopg.connect(dsn, autocommit=False, **kwargs)
 
 
 def _lock_key(name: str) -> int:
