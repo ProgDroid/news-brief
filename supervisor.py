@@ -36,6 +36,11 @@ BACKOFF_BASE_SECONDS = 2
 BACKOFF_CEILING_SECONDS = 300
 CRASH_LOOP_LIMIT = 5
 CRASH_LOOP_WINDOW_SECONDS = 600
+# A resident alive this long has demonstrated it is not crash-looping; only
+# then does its failure count reset. Resetting at spawn instead (fix round 1,
+# Minor 7) cleared the count before a real crash loop could ever grow it past
+# CRASH_LOOP_LIMIT, making the backoff ceiling unreachable.
+RESIDENT_STABLE_SECONDS = CRASH_LOOP_WINDOW_SECONDS
 
 
 def backoff_delay(consecutive_failures: int) -> float:
@@ -86,6 +91,12 @@ class Child:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            # A strict decoder raises UnicodeDecodeError on one bad byte,
+            # which kills this thread silently: the child then blocks
+            # writing into a pipe nobody drains, `running` stays True
+            # forever, and every future fire time is skipped with only a
+            # warning (fix round 1, Important 4).
+            errors="replace",
             bufsize=1,
             env=child_env,
         )
@@ -95,8 +106,13 @@ class Child:
 
     def _drain(self) -> None:
         assert self.proc is not None and self.proc.stdout is not None
-        for line in self.proc.stdout:
-            log.info(f"[{self.name}] {line.rstrip()}")
+        try:
+            for line in self.proc.stdout:
+                log.info(f"[{self.name}] {line.rstrip()}")
+        except Exception:
+            # See the errors="replace" note above: this thread must not be
+            # able to die without a trace (fix round 1, Important 4).
+            log.exception(f"[{self.name}] output drain crashed")
 
     def wait(self, timeout: float | None = None) -> int | None:
         """Exit code, or None if still running when `timeout` expires."""
@@ -138,9 +154,15 @@ def startup(*, migrate=None, connect=None) -> StartupState:
     A failed migration must not take down the Telegram bot: it is the channel
     the operator would use to find out the migration failed, and recovery would
     otherwise mean SSH plus psql (spec sections 3.3 and 8).
+
+    The connection is always closed before returning (fix round 1, Critical 2):
+    left open it sits idle-in-transaction, holding ACCESS SHARE on job_runs for
+    the life of the process — which blocks any later ALTER TABLE indefinitely,
+    in a system whose whole premise is that the schema gets revised.
     """
     migrate = migrate or db.run_migrations
     connect = connect or db.connect
+    conn = None
     try:
         conn = connect()
         migrate(conn)
@@ -156,6 +178,14 @@ def startup(*, migrate=None, connect=None) -> StartupState:
         log.exception("Migration failed; jobs are disabled, bot still starting")
         telegram_alert(f"Migration failed — jobs disabled, bot still up. {reason}")
         return StartupState(jobs_enabled=False, residents_enabled=True, reason=reason)
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                # Cleanup must not be able to replace the real return value
+                # with an exception of its own.
+                log.exception("Failed to close the startup connection")
 
 
 EX_ORPHANED = -2  # a run whose supervisor died before it could be closed

@@ -40,8 +40,9 @@ def _log_handlers() -> list[logging.Handler]:
 
     Several processes each holding a RotatingFileHandler on one file fight over
     the rotation rename and lose lines. The supervisor is the single writer and
-    sets NEWSBRIEF_LOG_FILE=1 for itself; children inherit an explicit 0 and log
-    to stdout, which the supervisor drains into the file with their name.
+    relies on the default (unset, or explicit "1") for itself; children inherit
+    an explicit 0 and log to stdout, which the supervisor drains into the file
+    with their name.
     """
     handlers: list[logging.Handler] = [logging.StreamHandler()]
     if os.environ.get("NEWSBRIEF_LOG_FILE", "1") != "1":
