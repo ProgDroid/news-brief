@@ -12,21 +12,10 @@ Spec: docs/superpowers/specs/2026-09-02-continuous-capture-design.md
 """
 
 import hashlib
-import time
-from dataclasses import dataclass
 from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 
 import brief
-import common
 from common import log
-
-# EVERY import this module will ever need is declared here, in Tasks 4 through
-# 6. There is no ruff config in this repo, so defaults apply and E402
-# (module-level import not at top of file) is selected: appending an import
-# further down fails `ruff check .` before a single test runs. `common` is
-# imported as a module AND `log` by name on purpose -- a knob must be read as
-# `common.CAPTURE_ENABLED`, since a from-import copy freezes at import time and
-# defeats both host toggles and monkeypatch.
 
 _TRACKING_PREFIXES = ("utm_",)
 _TRACKING_KEYS = {"fbclid", "gclid", "mc_cid", "mc_eid"}
