@@ -209,3 +209,124 @@ def test_next_ledger_num_ignores_rows_without_a_ledger_id(store):
     )
     store.commit()
     assert claim_store.next_ledger_num(store) == 8
+
+
+_ALL_KEYS = {
+    "id": "c-0001",
+    "claim": "a durable fact",
+    "topic": "energy",
+    "first_seen": "2026-06-01",
+    "last_reaffirmed": "2026-06-24",
+    "restate_count": 3,
+    "source_count": 5,
+    "severity": "high",
+    "origin": "extracted",
+    "driver": "a mechanism",
+    "horizon_days": 180,
+    "resolution_date": "2026-12-01",
+    "horizon_elapsed": 23,
+    "status": "broken",
+    "broke_on": "2026-06-22",
+    "broken_by": "a reversal",
+    "extractor_model": "claude-haiku-4-5-20251001",
+    "prompt_version": 5,
+}
+
+
+def test_all_eighteen_ledger_keys_survive_a_round_trip(store):
+    """DDL spec 5.1's full superset, both directions (obligation 2). A key that
+    silently fails to persist is invisible until an audit needs it."""
+    after = {"version": 1, "claims": [dict(_ALL_KEYS)]}
+    claim_store.save_ledger(store, {"version": 1, "claims": []}, after, "2026-06-24")
+    assert claim_store.load_ledger(store)["claims"][0] == _ALL_KEYS
+
+
+def test_save_writes_only_the_rows_that_changed(store):
+    _insert(store, ledger_id="c-0001")
+    _insert(store, ledger_id="c-0002")
+    before = claim_store.load_ledger(store)
+    after = {"version": 1, "claims": [dict(c) for c in before["claims"]]}
+    after["claims"][0]["topic"] = "changed"
+    written, retired = claim_store.save_ledger(store, before, after, "2026-06-25")
+    assert (written, retired) == (1, 0)
+
+
+def test_a_row_the_merge_dropped_is_retired_not_deleted(store):
+    _insert(store, ledger_id="c-0001")
+    _insert(store, ledger_id="c-0002")
+    before = claim_store.load_ledger(store)
+    after = {"version": 1, "claims": [before["claims"][0]]}
+    written, retired = claim_store.save_ledger(store, before, after, "2026-06-25")
+    assert (written, retired) == (0, 1)
+    row = store.execute(
+        "SELECT retired_on FROM claims WHERE ledger_id = 'c-0002'"
+    ).fetchone()
+    assert row[0].strftime("%Y-%m-%d") == "2026-06-25"
+
+
+def test_a_retired_row_leaves_the_ledger_but_not_the_table(store):
+    _insert(store, ledger_id="c-0001")
+    before = claim_store.load_ledger(store)
+    claim_store.save_ledger(store, before, {"version": 1, "claims": []}, "2026-06-25")
+    assert claim_store.load_ledger(store)["claims"] == []
+    assert store.execute("SELECT count(*) FROM claims").fetchone()[0] == 1
+
+
+def test_an_id_echoed_twice_in_one_reply_becomes_one_row(store):
+    """merge_ledger:294 re-enters the `cid in by_id` branch without checking
+    `returned`, so a reply echoing one id twice yields two dicts carrying it.
+    Harmless in a JSON list; two upserts on one unique key here."""
+    _insert(store, ledger_id="c-0001")
+    before = claim_store.load_ledger(store)
+    twin = dict(before["claims"][0])
+    twin["topic"] = "second"
+    after = {"version": 1, "claims": [before["claims"][0], twin]}
+    written, retired = claim_store.save_ledger(store, before, after, "2026-06-25")
+    assert (written, retired) == (1, 0)
+    assert claim_store.load_ledger(store)["claims"][0]["topic"] == "second"
+
+
+def test_an_ordinary_reaffirm_does_not_trip_the_immutability_trigger(store):
+    """claims_freeze_claim_text_trg (0006:274) is BEFORE UPDATE FOR EACH ROW, so
+    ON CONFLICT DO UPDATE fires it on every reaffirm. save_ledger is the first
+    UPDATE writer against this table; nothing had exercised that interaction."""
+    _insert(store, ledger_id="c-0001", status="standing")
+    before = claim_store.load_ledger(store)
+    after = {
+        "version": 1,
+        "claims": [dict(before["claims"][0], last_reaffirmed="2026-06-25")],
+    }
+    written, _ = claim_store.save_ledger(store, before, after, "2026-06-25")
+    assert written == 1
+
+
+def test_rewriting_a_broken_claim_is_refused_by_the_trigger(store):
+    """merge_ledger already refuses this (jx9.5), so the store should never send
+    it. The trigger is defence in depth, and this records that the store's
+    per-row transaction turns its RAISE into one skipped row rather than a lost
+    day of claims."""
+    _insert(
+        store,
+        ledger_id="c-0001",
+        status="broken",
+        resolved_on="2026-06-22",
+        broken_by_note="a reversal",
+    )
+    before = claim_store.load_ledger(store)
+    after = {"version": 1, "claims": [dict(before["claims"][0], claim="rewritten")]}
+    written, _ = claim_store.save_ledger(store, before, after, "2026-06-25")
+    assert written == 0
+    assert claim_store.load_ledger(store)["claims"][0]["claim"] == "a durable fact"
+
+
+def test_one_rejected_row_does_not_cost_the_others(store):
+    """Per-row transactions, following config.py:605-613. A single transaction
+    around the batch would discard every good row for one bad one."""
+    good = dict(_ALL_KEYS)
+    bad = dict(_ALL_KEYS, id="c-0002", status="broken", broke_on=None, broken_by=None)
+    after = {"version": 1, "claims": [good, bad]}
+    written, _ = claim_store.save_ledger(
+        store, {"version": 1, "claims": []}, after, "2026-06-24"
+    )
+    assert written == 1
+    assert [c["id"] for c in claim_store.load_ledger(store)["claims"]] == ["c-0001"]
