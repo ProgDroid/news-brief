@@ -647,3 +647,85 @@ def test_an_open_question_defaults_to_open(kb):
         "INSERT INTO open_questions (story_id, text) VALUES (%s, 'q')", (story_id,)
     )
     assert kb.execute("SELECT status FROM open_questions").fetchone()[0] == "open"
+
+
+def _functions(conn) -> set[str]:
+    rows = conn.execute(
+        "SELECT p.proname FROM pg_proc p "
+        "JOIN pg_namespace n ON n.oid = p.pronamespace "
+        "WHERE n.nspname = 'public'"
+    ).fetchall()
+    return {r[0] for r in rows}
+
+
+def _copy_migrations(tmp_path):
+    for p in db.MIGRATIONS_DIR.glob("*.sql"):
+        (tmp_path / p.name).write_text(p.read_text(encoding="utf-8"), encoding="utf-8")
+    return tmp_path
+
+
+def test_0006_rolls_back_and_reapplies_against_the_real_directory(conn):
+    """The only test in this repo that executes a real down migration.
+
+    Three things can go wrong and only this catches them: a wrong FK drop
+    order, a function left behind by DROP TABLE, and a CREATE FUNCTION that
+    should have been CREATE OR REPLACE. The last one shows only on the second
+    up.
+    """
+    db.run_migrations(conn)
+    conn.commit()
+    assert KB_TABLES <= _tables(conn)
+    assert "claims_freeze_claim_text" in _functions(conn)
+
+    reverted = db.run_migrations(conn, direction="down")
+    conn.commit()
+
+    assert reverted == ["0006_knowledge_base"]
+    assert not (KB_TABLES & _tables(conn)), "a KB table survived the rollback"
+    assert "claims_freeze_claim_text" not in _functions(conn), (
+        "DROP TABLE does not drop a function; the down migration must drop it"
+    )
+    assert {"users", "settings", "job_runs", "sources"} <= _tables(conn), (
+        "rolling back one step must not take the prior migrations with it"
+    )
+
+    reapplied = db.run_migrations(conn)
+    conn.commit()
+    assert reapplied == ["0006_knowledge_base"]
+    assert KB_TABLES <= _tables(conn)
+
+
+def test_the_rollback_assertion_can_actually_fail(conn, tmp_path, monkeypatch):
+    """Negative control for the test above, automated rather than manual.
+
+    A rollback assertion that has never failed proves nothing. This copies the
+    real migrations to a temp directory, strips DROP FUNCTION from 0006's down
+    file, and asserts the function then SURVIVES the rollback -- which is what
+    makes the assertion above meaningful.
+
+    Done as a test rather than as a comment-out-and-restore ritual, because a
+    manual negative control is the step that gets skipped under time pressure,
+    and it leaves a window where an interrupt commits the migration without its
+    function drop.
+    """
+    tmp = _copy_migrations(tmp_path)
+    down = tmp / "0006_knowledge_base_down.sql"
+    down.write_text(
+        "\n".join(
+            line
+            for line in down.read_text(encoding="utf-8").splitlines()
+            if "DROP FUNCTION" not in line
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(db, "MIGRATIONS_DIR", tmp)
+
+    db.run_migrations(conn)
+    conn.commit()
+    db.run_migrations(conn, direction="down")
+    conn.commit()
+
+    assert "claims_freeze_claim_text" in _functions(conn), (
+        "stripping DROP FUNCTION should leave the function behind; if it does "
+        "not, the assertion in the test above cannot fail and proves nothing"
+    )
