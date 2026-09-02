@@ -215,7 +215,7 @@ cp .env.example .env
 |----------|----------|---------|
 | `ANTHROPIC_API_KEY` | yes | Claude Batch + Messages API |
 | `TELEGRAM_BOT_TOKEN` | yes | Bot token from @BotFather |
-| `TELEGRAM_CHAT_ID` | yes | Your chat ID (delivery target + command auth) |
+| `TELEGRAM_CHAT_ID` | first boot only | Seeds the operator row in `users`. Read once, when that table is empty; after that the delivery target and the command-auth gate both come from the row, and editing this variable does nothing |
 | `POSTGRES_PASSWORD` | yes | Password for the stack's Postgres. **Generate it with `openssl rand -hex 32` — avoid `$`**, which compose eats silently (see below). Required even if `DATABASE_URL` points elsewhere: the bundled `postgres` service still starts and still demands it |
 | `POSTGRES_USER` | no | Postgres role (default `newsbrief`) |
 | `POSTGRES_DB` | no | Database name (default `newsbrief`) |

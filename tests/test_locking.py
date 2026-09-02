@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 import pytest
 
 import brief
+import config
 import common
 import trading
 
@@ -23,7 +24,7 @@ def _fb():
 
 
 def _update(text):
-    return {"message": {"text": text, "chat": {"id": brief.TELEGRAM_CHAT_ID}}}
+    return {"message": {"text": text, "chat": {"id": config.chat_id()}}}
 
 
 def test_file_lock_is_exclusive_while_held(tmp_path):

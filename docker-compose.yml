@@ -43,6 +43,13 @@ x-newsbrief: &newsbrief
   environment:
     - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
     - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+    # Bootstrap input, NOT runtime configuration. It is read exactly once — by
+    # config.ensure_seeded, when the `users` table is empty — and by nothing
+    # afterwards: the delivery target and the command-auth gate both resolve
+    # through `users`. Changing it on a seeded deployment therefore does
+    # nothing; change the row. It cannot be dropped, because a first boot has no
+    # other way to learn who the operator is (the bot cannot authorise the
+    # person who would tell it).
     - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
     - T212_API_KEY_ID=${T212_API_KEY_ID:-}
     - T212_API_KEY=${T212_API_KEY:-}

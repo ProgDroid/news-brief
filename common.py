@@ -20,9 +20,36 @@ from pathlib import Path
 # so the module stays importable (for tests, tooling) without a full environment.
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+# TELEGRAM_CHAT_ID is deliberately absent: the delivery target is a row in
+# `users`, resolved through `config.chat_id()` (spec section 6.3). The variable
+# survives in the compose anchor as bootstrap input for `config.ensure_seeded`,
+# read exactly once — when the table is empty — and by nothing at runtime.
+REQUIRED_ENV = ("ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN")
 
-REQUIRED_ENV = ("ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")
+
+def _chat_id() -> str:
+    """The delivery chat id, resolved from the database.
+
+    Imported inside the function on purpose: `db` imports this module, so a
+    module-level `import config` here would close the cycle. Every sender below
+    goes through this one helper rather than repeating the import four times.
+    """
+    import config
+
+    return config.chat_id()
+
+
+def _alert_chat_id() -> str:
+    """Where alerts go: the same row, but with the environment as a last resort.
+
+    `telegram_alert` is how the operator learns Postgres is unreachable, so it
+    is the one sender that must not be able to fail for the reason it is
+    reporting.
+    """
+    import config
+
+    return config.alert_chat_id()
+
 
 # sysexits.h EX_TEMPFAIL, "try again later": the exit code a job uses when
 # another entry path already holds its lock. Shared because the supervisor
@@ -319,7 +346,7 @@ def _redact(text: str) -> str:
 def telegram_send(text: str) -> bool:
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
+        "chat_id": _chat_id(),
         "text": text,
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
@@ -366,7 +393,7 @@ def telegram_alert(text: str) -> None:
     """
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
+        "chat_id": _alert_chat_id(),
         "text": f"🚨 newsbrief: {_redact(text)[:3500]}",
         "disable_web_page_preview": True,
     }
@@ -404,7 +431,7 @@ def telegram_send_buttons(text: str, inline_keyboard: list) -> int | None:
     r = _tg_api(
         "sendMessage",
         {
-            "chat_id": TELEGRAM_CHAT_ID,
+            "chat_id": _chat_id(),
             "text": text,
             "parse_mode": "HTML",
             "disable_web_page_preview": True,
@@ -421,7 +448,7 @@ def telegram_edit_text(
     """Edit an existing message's text (and optionally its keyboard). Passing an
     empty list for inline_keyboard strips the buttons; None leaves them as-is."""
     payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
+        "chat_id": _chat_id(),
         "message_id": message_id,
         "text": text,
         "parse_mode": "HTML",

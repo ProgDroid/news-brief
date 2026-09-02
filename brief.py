@@ -37,9 +37,9 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from urllib.parse import quote_plus, urlsplit
 
+import config
 from common import (
     TELEGRAM_BOT_TOKEN,
-    TELEGRAM_CHAT_ID,
     REQUIRED_ENV,
     EX_ALREADY_RUNNING,
     DATA_DIR,
@@ -1323,7 +1323,7 @@ def _handle_callback_query(cb: dict, fb: dict | None = None) -> dict | None:
     overrides (unpin, reset) stay consistent with the daemon's in-memory copy.
 
     Authorization is NOT done here — `_handle_update` gates every update against
-    TELEGRAM_CHAT_ID before dispatch. Only call this from there."""
+    the active user's chat id before dispatch. Only call this from there."""
     cb_id = cb.get("id", "")
     chat_id = str(cb.get("message", {}).get("chat", {}).get("id", ""))
     data = cb.get("data", "")
@@ -1484,7 +1484,7 @@ def _handle_telegram_update(update: dict, fb: dict) -> dict:
     like 'watch JPY <155' would otherwise silently kill the confirmation.
 
     Authorization is NOT done here — `_handle_update` gates every update against
-    TELEGRAM_CHAT_ID before dispatch. Only call this from there."""
+    the active user's chat id before dispatch. Only call this from there."""
     msg = update.get("message", {})
     text = msg.get("text", "").strip()
     chat_id = str(msg.get("chat", {}).get("id", ""))
@@ -3478,13 +3478,18 @@ def _update_chat_id(update: dict) -> str:
 
 
 def _is_authorized(update: dict) -> bool:
-    """This bot is single-user: only TELEGRAM_CHAT_ID may drive it.
+    """This bot is single-user: only the active user's chat may drive it.
 
     The ONLY gate — `_handle_update` applies it to every update before dispatch, so
     the individual handlers do not (and must not need to) re-check. Keep it that way:
     this check used to be copy-pasted into each handler, and one copy drifted out of
-    order, answering callback queries for foreign chats before rejecting them."""
-    return _update_chat_id(update) == str(TELEGRAM_CHAT_ID)
+    order, answering callback queries for foreign chats before rejecting them.
+
+    The chat id now comes from `users` rather than the environment, so the gate
+    depends on Postgres. `config.chat_id` serves its last known value through a
+    blip rather than raising, which is what keeps the bot answering while the
+    database is the thing that is unwell."""
+    return _update_chat_id(update) == str(config.chat_id())
 
 
 def _handle_update(update: dict, fb: dict) -> dict:
@@ -3891,6 +3896,23 @@ if __name__ == "__main__":
         sys.exit(1)
 
     mode = sys.argv[1] if len(sys.argv) > 1 else ""
+
+    # `serve` seeds inside supervisor.startup, which owns the fail-open policy
+    # for a boot that cannot reach Postgres. Every other mode here arrived by
+    # `docker compose run --rm`, bypassing the supervisor entirely — and a mode
+    # that delivers has nowhere to send without an operator row. Idempotent and
+    # interlocked, so both paths doing it is harmless.
+    if mode and mode != "serve":
+        import db
+
+        try:
+            with db.connect() as _conn:
+                config.ensure_seeded(_conn)
+        except Exception as e:
+            log.exception("Operator seed failed")
+            telegram_alert(f"Operator seed failed: {type(e).__name__}: {e}")
+            sys.exit(1)
+
     dispatch = {
         "submit": mode_submit,
         "collect": mode_collect,

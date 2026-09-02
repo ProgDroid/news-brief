@@ -21,6 +21,7 @@ import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
+import config
 import db
 import scheduler
 from common import log, telegram_alert, EX_ALREADY_RUNNING
@@ -389,6 +390,12 @@ def startup(*, migrate=None, connect=None) -> StartupState:
     try:
         conn = connect()
         migrate(conn)
+        # Identity before work: every job that delivers resolves its target
+        # through `config`, so an unseeded database would fail each of them
+        # separately and late. Inside the try on purpose — a failure here means
+        # we do not know who this deployment serves, which is fail-closed on
+        # work and fail-open on the bot, exactly like a failed migration.
+        config.ensure_seeded(conn)
         try:
             reclaim_orphans(conn)
         except Exception:

@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 import brief
+import config
 import common
 import db
 import scheduler
@@ -17,7 +18,7 @@ def _fb():
 
 
 def _update(text):
-    return {"message": {"text": text, "chat": {"id": brief.TELEGRAM_CHAT_ID}}}
+    return {"message": {"text": text, "chat": {"id": config.chat_id()}}}
 
 
 def _capture(monkeypatch):
@@ -425,7 +426,7 @@ def _cb(data, msg_id=10):
     return {
         "id": "cbid",
         "data": data,
-        "message": {"message_id": msg_id, "chat": {"id": brief.TELEGRAM_CHAT_ID}},
+        "message": {"message_id": msg_id, "chat": {"id": config.chat_id()}},
     }
 
 
@@ -455,7 +456,7 @@ def test_addsource_wizard_quick_domain(monkeypatch, tmp_path):
     _isolate_sources(monkeypatch, tmp_path)
     brief._WIZARD.clear()
     cap = _wire_telegram(monkeypatch)
-    chat = str(brief.TELEGRAM_CHAT_ID)
+    chat = str(config.chat_id())
 
     brief._handle_telegram_update(_update("/addsource"), _fb())
     assert brief._WIZARD[chat]["step"] == "category"
@@ -487,7 +488,7 @@ def test_addsource_wizard_full_url_asks_feed_or_page(monkeypatch, tmp_path):
     _isolate_sources(monkeypatch, tmp_path)
     brief._WIZARD.clear()
     _wire_telegram(monkeypatch)
-    chat = str(brief.TELEGRAM_CHAT_ID)
+    chat = str(config.chat_id())
     brief._handle_telegram_update(_update("/addsource"), _fb())
     brief._handle_callback_query(_cb("as:cat:us"))
     brief._handle_callback_query(_cb("as:kind:regional"))
@@ -533,7 +534,7 @@ def test_addsource_wizard_rejects_garbage_url(monkeypatch, tmp_path):
     _isolate_sources(monkeypatch, tmp_path)
     brief._WIZARD.clear()
     cap = _wire_telegram(monkeypatch)
-    chat = str(brief.TELEGRAM_CHAT_ID)
+    chat = str(config.chat_id())
     brief._handle_telegram_update(_update("/addsource"), _fb())
     brief._handle_callback_query(_cb("as:cat:iran"))
     brief._handle_callback_query(_cb("as:kind:regional"))
@@ -548,7 +549,7 @@ def test_addsource_wizard_captures_state_funded_and_perspective(monkeypatch, tmp
     _isolate_sources(monkeypatch, tmp_path)
     brief._WIZARD.clear()
     _wire_telegram(monkeypatch)
-    chat = str(brief.TELEGRAM_CHAT_ID)
+    chat = str(config.chat_id())
     brief._handle_telegram_update(_update("/addsource"), _fb())
     brief._handle_callback_query(_cb("as:cat:geo"))
     brief._handle_callback_query(_cb("as:kind:regional"))
@@ -572,7 +573,7 @@ def test_addsource_wizard_perspective_skip(monkeypatch, tmp_path):
     _isolate_sources(monkeypatch, tmp_path)
     brief._WIZARD.clear()
     _wire_telegram(monkeypatch)
-    chat = str(brief.TELEGRAM_CHAT_ID)
+    chat = str(config.chat_id())
     brief._handle_telegram_update(_update("/addsource"), _fb())
     brief._handle_callback_query(_cb("as:cat:geo"))
     brief._handle_callback_query(_cb("as:kind:wire"))
@@ -591,7 +592,7 @@ def test_addsource_wizard_cancel_clears(monkeypatch, tmp_path):
     _isolate_sources(monkeypatch, tmp_path)
     brief._WIZARD.clear()
     _wire_telegram(monkeypatch)
-    chat = str(brief.TELEGRAM_CHAT_ID)
+    chat = str(config.chat_id())
     brief._handle_telegram_update(_update("/addsource"), _fb())
     brief._handle_callback_query(_cb("as:cancel"))
     assert chat not in brief._WIZARD
@@ -821,7 +822,7 @@ def _msg_update(text, chat_id):
 
 
 def test_message_from_foreign_chat_is_ignored(monkeypatch, tmp_path):
-    monkeypatch.setattr(brief, "TELEGRAM_CHAT_ID", "42")
+    monkeypatch.setattr(config, "chat_id", lambda: "42")
     sent = _capture(monkeypatch)
     monkeypatch.setattr(trading, "WATCHLIST_FILE", tmp_path / "wl.json")
 
@@ -836,7 +837,7 @@ def test_message_from_foreign_chat_is_ignored(monkeypatch, tmp_path):
 def test_message_from_configured_chat_is_handled(monkeypatch, tmp_path):
     """Guards against the gate rejecting everything (a passing foreign-chat test
     on its own would still pass if the router dropped every update)."""
-    monkeypatch.setattr(brief, "TELEGRAM_CHAT_ID", "42")
+    monkeypatch.setattr(config, "chat_id", lambda: "42")
     _capture(monkeypatch)
     monkeypatch.setattr(trading, "WATCHLIST_FILE", tmp_path / "wl.json")
 
@@ -846,7 +847,7 @@ def test_message_from_configured_chat_is_handled(monkeypatch, tmp_path):
 
 def test_message_with_no_chat_is_ignored(monkeypatch, tmp_path):
     """Fail closed: a malformed update yields chat id "", which must not match."""
-    monkeypatch.setattr(brief, "TELEGRAM_CHAT_ID", "42")
+    monkeypatch.setattr(config, "chat_id", lambda: "42")
     sent = _capture(monkeypatch)
     monkeypatch.setattr(trading, "WATCHLIST_FILE", tmp_path / "wl.json")
 
@@ -858,7 +859,7 @@ def test_message_with_no_chat_is_ignored(monkeypatch, tmp_path):
 def test_callback_from_configured_chat_is_acked(monkeypatch, tmp_path):
     """Positive counterpart to test_foreign_chat_callback_is_ignored: the gate must
     not stop legitimate taps reaching the handler and being answered."""
-    monkeypatch.setattr(brief, "TELEGRAM_CHAT_ID", "42")
+    monkeypatch.setattr(config, "chat_id", lambda: "42")
     _isolate_sources(monkeypatch, tmp_path)
     brief._WIZARD.clear()
     cap = _wire_telegram(monkeypatch)
@@ -905,7 +906,7 @@ def test_malformed_updates_are_unauthorized(monkeypatch, update):
 
     _drain_update_batch catches exceptions per-update, so a raise here would be
     survivable but would fire a "Command failed" alert on every junk update."""
-    monkeypatch.setattr(brief, "TELEGRAM_CHAT_ID", "42")
+    monkeypatch.setattr(config, "chat_id", lambda: "42")
     assert brief._update_chat_id(update) == ""
     assert brief._is_authorized(update) is False
 

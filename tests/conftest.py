@@ -24,6 +24,39 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # means the services block is broken, not that the test is optional.
 
 
+def pytest_configure(config):
+    # The parameter name is fixed by pytest's hookspec and unfortunately collides
+    # with our own `config` module. Harmless: the module is imported inside the
+    # fixture below, never at this scope.
+    config.addinivalue_line(
+        "markers",
+        "real_config: do not stub config.chat_id — the module under test is config itself",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _stubbed_chat_id(request, monkeypatch):
+    """Resolve the delivery chat id without a database, suite-wide.
+
+    From phase 2 the chat id is a row in `users` rather than an environment
+    variable, and production hard-requires Postgres for it. Substituting at the
+    accessor — the seam, not a fallback inside it — is what keeps the ~400 tests
+    that merely need *a* chat id infra-free. The handful that care which chat id
+    override this by patching `config.chat_id` themselves, and `test_config.py`
+    opts out entirely with the `real_config` marker.
+    """
+    if request.node.get_closest_marker("real_config"):
+        return
+    import config
+
+    monkeypatch.setattr(config, "chat_id", lambda: TEST_CHAT_ID)
+    monkeypatch.setattr(config, "alert_chat_id", lambda: TEST_CHAT_ID)
+
+
+# The chat id the suite runs as, unless a test says otherwise.
+TEST_CHAT_ID = "123456"
+
+
 @pytest.fixture(autouse=True)
 def _no_outbound_http(monkeypatch):
     """Block every outbound HTTP call for the whole suite.

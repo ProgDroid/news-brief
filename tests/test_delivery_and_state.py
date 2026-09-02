@@ -3,6 +3,7 @@
 import json
 
 import brief
+import config
 
 
 # ── sanitise_html ─────────────────────────────────────────────────────────────
@@ -112,7 +113,7 @@ def _capture_sends(monkeypatch):
 
 def test_handle_update_escapes_user_echo(monkeypatch):
     sent = _capture_sends(monkeypatch)
-    monkeypatch.setattr(brief, "TELEGRAM_CHAT_ID", "123")
+    monkeypatch.setattr(config, "chat_id", lambda: "123")
     fb = {"focus": [], "mute": [], "notes": []}
     update = {"message": {"text": "/note watch JPY <155", "chat": {"id": 123}}}
     fb = brief._handle_telegram_update(update, fb)
@@ -123,7 +124,7 @@ def test_handle_update_escapes_user_echo(monkeypatch):
 
 def test_handle_update_ignores_foreign_chat(monkeypatch):
     sent = _capture_sends(monkeypatch)
-    monkeypatch.setattr(brief, "TELEGRAM_CHAT_ID", "123")
+    monkeypatch.setattr(config, "chat_id", lambda: "123")
     fb = {"focus": [], "mute": [], "notes": []}
     update = {"message": {"text": "/reset", "chat": {"id": 999}}}
     assert brief._handle_telegram_update(update, fb) == fb
@@ -133,7 +134,7 @@ def test_handle_update_ignores_foreign_chat(monkeypatch):
 def test_poison_message_does_not_jam_offset(monkeypatch, tmp_path):
     """One crashing command must not block later ones nor the offset save."""
     sent = _capture_sends(monkeypatch)
-    monkeypatch.setattr(brief, "TELEGRAM_CHAT_ID", "123")
+    monkeypatch.setattr(config, "chat_id", lambda: "123")
     monkeypatch.setattr(brief, "STATE_FILE", tmp_path / "state.json")
     monkeypatch.setattr(brief, "FEEDBACK_FILE", tmp_path / "feedback.json")
     # fb without a "focus" key makes /focus raise KeyError — the poison
@@ -153,7 +154,7 @@ def test_poison_message_does_not_jam_offset(monkeypatch, tmp_path):
 def test_offset_saved_without_clobbering_other_state(monkeypatch, tmp_path):
     """The offset save must merge into existing state, not overwrite it."""
     _capture_sends(monkeypatch)
-    monkeypatch.setattr(brief, "TELEGRAM_CHAT_ID", "123")
+    monkeypatch.setattr(config, "chat_id", lambda: "123")
     state_file = tmp_path / "state.json"
     monkeypatch.setattr(brief, "STATE_FILE", state_file)
     monkeypatch.setattr(brief, "FEEDBACK_FILE", tmp_path / "feedback.json")

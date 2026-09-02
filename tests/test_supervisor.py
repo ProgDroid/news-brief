@@ -8,6 +8,7 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 
+import config
 import supervisor
 
 
@@ -499,6 +500,9 @@ def test_startup_seeds_the_first_boot(monkeypatch):
     monkeypatch.setattr(
         supervisor, "seed_first_boot", lambda c: calls.append(("seed", c))
     )
+    monkeypatch.setattr(
+        config, "ensure_seeded", lambda c: calls.append(("operator", c))
+    )
 
     state = supervisor.startup(
         migrate=lambda c: calls.append("migrate"), connect=lambda: conn
@@ -508,6 +512,14 @@ def test_startup_seeds_the_first_boot(monkeypatch):
     assert ("seed", conn) in calls, "startup must seed, on the connection it migrated"
     assert calls.index("migrate") < calls.index(("seed", conn)), (
         "seeding reads the table migrate creates"
+    )
+    # The operator seed is pinned here for the same reason and against the same
+    # failure: unpinned, it could be deleted or reordered ahead of `migrate`
+    # with the suite still green, and the first boot after that would leave
+    # every delivering job with no target to resolve.
+    assert ("operator", conn) in calls
+    assert calls.index("migrate") < calls.index(("operator", conn)), (
+        "the operator seed writes to the table migrate creates"
     )
 
 
@@ -523,11 +535,37 @@ def test_a_failed_seed_disables_jobs(monkeypatch):
 
     monkeypatch.setattr(supervisor, "reclaim_orphans", lambda c: None)
     monkeypatch.setattr(supervisor, "seed_first_boot", boom)
+    monkeypatch.setattr(config, "ensure_seeded", lambda c: False)
     monkeypatch.setattr(supervisor, "telegram_alert", lambda m: None)
 
     state = supervisor.startup(migrate=lambda c: None, connect=lambda: object())
     assert state.jobs_enabled is False
     assert "job_runs is gone" in state.reason
+
+
+def test_a_failed_operator_seed_disables_jobs(monkeypatch):
+    """Identity is fail-closed too, and for a sharper reason than the run ledger.
+
+    Without an operator row every delivering job resolves its target and fails —
+    separately, later, and one alert at a time. Failing the boot instead reports
+    it once, in the place that knows why.
+    """
+
+    def boom(conn):
+        raise RuntimeError("TELEGRAM_CHAT_ID is unset")
+
+    alerts = []
+    monkeypatch.setattr(supervisor, "reclaim_orphans", lambda c: None)
+    monkeypatch.setattr(supervisor, "seed_first_boot", lambda c: [])
+    monkeypatch.setattr(config, "ensure_seeded", boom)
+    monkeypatch.setattr(supervisor, "telegram_alert", alerts.append)
+
+    state = supervisor.startup(migrate=lambda c: None, connect=lambda: object())
+    assert state.jobs_enabled is False
+    assert "TELEGRAM_CHAT_ID is unset" in state.reason
+    # Fail-open on the bot: the operator has to be able to hear about this.
+    assert state.residents_enabled is True
+    assert alerts and "TELEGRAM_CHAT_ID is unset" in alerts[0]
 
 
 # ── Manual runs: the queue /run writes and the tick claims ───────────────────
