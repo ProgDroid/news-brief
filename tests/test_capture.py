@@ -131,3 +131,93 @@ def test_an_empty_feed_is_reported_as_empty_not_malformed(monkeypatch):
     empty = b'<?xml version="1.0"?><rss version="2.0"><channel/></rss>'
     monkeypatch.setattr(brief.requests, "get", lambda *a, **k: _Resp(empty))
     assert brief.fetch_feed_entries(FEED).failure == "empty"
+
+
+def test_outlet_defaults_to_the_feed_name():
+    assert brief.outlet_for({"name": "TASS", "url": "u", "category": "geo"}) == "TASS"
+
+
+def test_an_explicit_outlet_key_wins():
+    feed = {
+        "name": "Reuters Markets",
+        "url": "u",
+        "category": "macro",
+        "outlet": "Reuters",
+    }
+    assert brief.outlet_for(feed) == "Reuters"
+
+
+def test_both_reuters_feeds_resolve_to_one_outlet():
+    named = {f["name"]: f for f in brief.RSS_FEEDS}
+    assert brief.outlet_for(named["Reuters Markets"]) == "Reuters"
+    assert brief.outlet_for(named["Reuters World"]) == "Reuters"
+
+
+def test_jacob_shapiro_publishes_under_one_outlet_across_two_media():
+    """jashap.substack.com and the @jacobshap Nitter feed are the same author.
+    Left unmapped they become two outlets, and one take reaching both reads as
+    two independent sources corroborating each other."""
+    named = {f["name"]: f for f in brief.RSS_FEEDS}
+    assert brief.outlet_for(named["Intersubjectively Transmissible"]) == "Jacob Shapiro"
+    assert brief.outlet_for(named["Jacob Shapiro (@jacobshap)"]) == "Jacob Shapiro"
+
+
+def test_no_feed_ships_a_product_name_as_an_outlet():
+    """outlets.name is UNIQUE(lower(name)) and is the corroboration dimension,
+    so a feed-product name in it invents a publisher that does not exist."""
+    product_names = {
+        "ISW Daily Assessment",
+        "BOJ Statements",
+        "EIA Today in Energy",
+        "Reuters Markets",
+        "Reuters World",
+        "Marko Papic (@geo_papic)",
+        "Jacob Shapiro (@jacobshap)",
+        "Intersubjectively Transmissible",
+    }
+    for feed in brief.RSS_FEEDS:
+        if feed["name"] in product_names:
+            assert brief.outlet_for(feed) != feed["name"], (
+                f"{feed['name']} is a product name and needs an explicit outlet"
+            )
+
+
+def test_feeds_sharing_an_outlet_agree_on_its_metadata():
+    """A developer error caught here rather than at runtime: outlets carries
+    kind/perspective/state_funded, and two feeds mapping to one outlet cannot
+    disagree about them. `category` is deliberately excluded — it is a property
+    of the reader's slicing, not of the publisher, and outlets has no such
+    column."""
+    by_outlet: dict[str, list[dict]] = {}
+    for feed in brief.RSS_FEEDS:
+        by_outlet.setdefault(brief.outlet_for(feed), []).append(feed)
+    for outlet, feeds in by_outlet.items():
+        shapes = {
+            (
+                f.get("kind", "regional"),
+                f.get("perspective"),
+                bool(f.get("state_funded", False)),
+            )
+            for f in feeds
+        }
+        assert len(shapes) == 1, f"{outlet} has feeds disagreeing on metadata: {shapes}"
+
+
+def test_load_temp_sources_carries_the_outlet_key(monkeypatch):
+    """load_temp_sources rebuilds each entry from a fixed field list, so a key it
+    does not name is silently dropped — and the mapping would then work for
+    baked-in feeds and fail invisibly for user sources."""
+    monkeypatch.setattr(
+        brief.config,
+        "sources",
+        lambda: [
+            {
+                "name": "Reuters Tech",
+                "url": "https://x/y",
+                "category": "macro",
+                "outlet": "Reuters",
+            }
+        ],
+    )
+    loaded = brief.load_temp_sources()
+    assert loaded[0]["outlet"] == "Reuters"

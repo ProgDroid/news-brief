@@ -161,12 +161,14 @@ RSS_FEEDS = [
         "url": "https://news.google.com/rss/search?q=when:2d+site%3Areuters.com%2Fmarkets&hl=en-US&gl=US&ceid=US%3Aen",
         "category": "macro",
         "kind": "wire",
+        "outlet": "Reuters",
     },
     {
         "name": "Reuters World",
         "url": "https://news.google.com/rss/search?q=when:2d+site%3Areuters.com%2Fworld&hl=en-US&gl=US&ceid=US%3Aen",
         "category": "geo",
         "kind": "wire",
+        "outlet": "Reuters",
     },
     {
         "name": "Sinica Podcast",
@@ -197,6 +199,7 @@ RSS_FEEDS = [
         "url": "https://jashap.substack.com/feed",
         "category": "macro",
         "kind": "analyst",
+        "outlet": "Jacob Shapiro",
     },
     {
         "name": "Marko Papic (@geo_papic)",
@@ -205,12 +208,14 @@ RSS_FEEDS = [
         "url": f"{NITTER_BASE_URL}/geo_papic/rss",
         "category": "geo",
         "kind": "analyst",
+        "outlet": "Marko Papic",
     },
     {
         "name": "Jacob Shapiro (@jacobshap)",
         "url": f"{NITTER_BASE_URL}/jacobshap/rss",
         "category": "geo",
         "kind": "analyst",
+        "outlet": "Jacob Shapiro",
     },
     # ── Region-native / primary sources (added 2026-06-14) ────────────────────
     {
@@ -236,6 +241,7 @@ RSS_FEEDS = [
         "url": "https://news.google.com/rss/search?q=when:2d+site%3Aunderstandingwar.org&hl=en-US&gl=US&ceid=US%3Aen",
         "category": "ukraine",
         "kind": "primary",
+        "outlet": "Institute for the Study of War",
     },
     {
         "name": "Yonhap (English)",
@@ -268,6 +274,7 @@ RSS_FEEDS = [
         "url": "https://news.google.com/rss/search?q=when:7d+site%3Aboj.or.jp&hl=en-US&gl=US&ceid=US%3Aen",
         "category": "japan",
         "kind": "primary",
+        "outlet": "Bank of Japan",
     },
     {
         "name": "SCMP",
@@ -354,6 +361,7 @@ RSS_FEEDS = [
         "url": "https://www.eia.gov/rss/todayinenergy.xml",
         "category": "commodities",
         "kind": "primary",
+        "outlet": "U.S. Energy Information Administration",
     },
     {
         "name": "Mining.com",
@@ -476,6 +484,9 @@ def load_temp_sources() -> list[dict]:
         perspective = entry.get("perspective")
         if perspective in VALID_PERSPECTIVES:
             loaded["perspective"] = perspective
+        outlet = entry.get("outlet")
+        if outlet:
+            loaded["outlet"] = str(outlet)
         out.append(loaded)
     return out
 
@@ -483,6 +494,17 @@ def load_temp_sources() -> list[dict]:
 def all_sources() -> list[dict]:
     """The full source universe: always-on RSS_FEEDS plus volume temp sources."""
     return RSS_FEEDS + load_temp_sources()
+
+
+def outlet_for(feed: dict) -> str:
+    """The publisher behind a feed. Declared per feed, never derived from the URL.
+
+    Most feed names ARE publisher names — including the Google News proxies,
+    which are named for the publisher they proxy (`Kyiv Independent`, `NHK
+    World`) rather than for Google. Seven are not, and those carry an explicit
+    `outlet`.
+    """
+    return feed.get("outlet") or feed["name"]
 
 
 def _source_tag_index() -> dict[str, dict]:
