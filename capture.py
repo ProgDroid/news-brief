@@ -80,18 +80,25 @@ def resolve_outlet(conn, feed: dict, *, strict: bool = False) -> int | None:
     ).fetchone()[0]
 
 
-def store_items(conn, outlet_id: int, entries: list[dict]) -> tuple[int, int]:
-    """Write entries for one outlet. Returns (written, already_present).
+def store_items(conn, outlet_id: int, entries: list[dict]) -> tuple[int, int, int]:
+    """Write entries for one outlet. Returns (written, already_present, failed).
 
-    Each entry gets its own savepoint (`conn.transaction()`). That guards
-    against two different failures, and both must leave the entries around
-    them intact: a duplicate hash resolves via `ON CONFLICT DO NOTHING`, and an
-    entry Postgres itself rejects -- a NUL byte in the title, say, past
-    whatever the Python guard above catches -- is caught here so it costs one
-    skipped entry rather than the whole pass, and rolls back only its own
-    savepoint rather than poisoning the transaction the caller is still using.
+    Three outcomes, not two: written is a new row, already_present is a
+    duplicate hash resolved via `ON CONFLICT DO NOTHING`, and failed is an
+    entry the database itself rejected -- a NUL byte in the title, say, past
+    whatever the Python guard above catches. Folding `failed` into
+    `already_present` would make that bucket mean two different things, and an
+    operator reading "N already held" would have no way to tell some of those
+    N actually failed.
+
+    Each entry gets its own savepoint (`conn.transaction()`), so neither a
+    duplicate nor a rejected entry can lose the entries around it: a duplicate
+    just returns no row, and a rejection is caught here rather than left to
+    propagate, so it costs one failed entry rather than the whole pass, and
+    rolls back only its own savepoint rather than poisoning the transaction
+    the caller is still using.
     """
-    written = already = 0
+    written = already = failed = 0
     for entry in entries:
         if not entry.get("title") or not entry.get("url"):
             log.warning(
@@ -118,10 +125,10 @@ def store_items(conn, outlet_id: int, entries: list[dict]) -> tuple[int, int]:
                 f"Capture: entry rejected by the database, skipped: {str(entry)[:120]}",
                 exc_info=True,
             )
-            already += 1
+            failed += 1
             continue
         if row:
             written += 1
         else:
             already += 1
-    return written, already
+    return written, already, failed
