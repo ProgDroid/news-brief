@@ -156,7 +156,7 @@ RSS_FEEDS = [
         # Reuters discontinued public RSS (June 2020); proxy via Google News.
         # `site:` is stable (unlike allinurl:); `when:2d` is a freshness guardrail
         # so a quiet section never feeds the LLM stale headlines as news. Only the
-        # 5 newest items are used (fetch_rss max_items), so the window isn't a
+        # 25 newest items are used (fetch_rss max_items), so the window isn't a
         # volume control — markets still returns 100 items inside 2d.
         "url": "https://news.google.com/rss/search?q=when:2d+site%3Areuters.com%2Fmarkets&hl=en-US&gl=US&ceid=US%3Aen",
         "category": "macro",
@@ -3901,15 +3901,42 @@ def mode_monitor():
         log.warning(f"Live exit sweep failed: {e}")
 
 
+def mode_capture():
+    """Poll every feed source into the knowledge base. Reads nothing back.
+
+    Takes no arguments: run_job calls fn() with none (brief.py:3906).
+    `capture.run` owns its own commit boundaries -- see the note below.
+    """
+    import capture
+
+    with db.connect() as conn:
+        capture.run(conn)
+
+
+# Module level, not inside __main__, so a test can assert JOB_MODES is covered.
+# A mode in JOB_MODES but missing here is not a quiet no-op: the supervisor
+# spawns it, gets exit 1 from the usage branch, and alerts on every fire time.
+MODES = {
+    "submit": mode_submit,
+    "collect": mode_collect,
+    "weekly": mode_weekly,
+    "commands": mode_commands,
+    "paper": mode_paper,
+    "monitor": mode_monitor,
+    "backup": mode_backup,
+    "pgdiag": mode_pgdiag,
+    "capture": mode_capture,
+}
+
+
 # ── Job entry ─────────────────────────────────────────────────────────────────
 # Modes that mutate shared state and must never run twice concurrently. The
 # guard lives HERE and not in the supervisor: the supervisor is not the only
 # caller — `docker compose run --rm newsbrief collect` is a documented debug
 # path (spec section 3.6), and a guard the bypass path skips is not a guard.
-# `capture` is NOT here: mode_capture does not exist yet (Epic 2, spec 7.2).
-# `paper` is NOT here either — see the note above; the book is already guarded
+# `paper` is NOT here — see the note above; the book is already guarded
 # by file_lock at the resource level, which is the right grain for it.
-JOB_MODES = frozenset({"submit", "collect", "weekly", "monitor", "backup"})
+JOB_MODES = frozenset({"submit", "collect", "weekly", "monitor", "backup", "capture"})
 
 # EX_ALREADY_RUNNING is imported from common (see Step 3a): the supervisor needs
 # it too, and `supervisor` importing `brief` would be circular — brief imports
@@ -4026,17 +4053,7 @@ if __name__ == "__main__":
             telegram_alert(f"Operator seed failed: {type(e).__name__}: {e}")
             sys.exit(1)
 
-    dispatch = {
-        "submit": mode_submit,
-        "collect": mode_collect,
-        "weekly": mode_weekly,
-        "commands": mode_commands,
-        "paper": mode_paper,
-        "monitor": mode_monitor,
-        "backup": mode_backup,
-        "pgdiag": mode_pgdiag,
-    }
-    fn = dispatch.get(mode)
+    fn = MODES.get(mode)
     if not fn:
         if mode == "serve":
             try:
@@ -4053,7 +4070,7 @@ if __name__ == "__main__":
             sys.exit(supervisor.serve())
         print(
             "Usage: brief.py "
-            "[serve|submit|collect|weekly|paper|commands|monitor|backup|pgdiag]"
+            "[serve|submit|collect|weekly|paper|commands|monitor|backup|pgdiag|capture]"
         )
         sys.exit(1)
 

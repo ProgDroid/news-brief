@@ -63,11 +63,11 @@ RESIDENT_STABLE_SECONDS = CRASH_LOOP_WINDOW_SECONDS
 #     25  this budget           children exit after the broadcast
 #   +  2  SHUTDOWN_DRAIN        final output of whichever children did exit
 #   +  5  DB_CONNECT_TIMEOUT    opening the one connection the rows close on
-#   +  5  DB_STATEMENT_TIMEOUT  5 schedules x 2 statements x 0.5s
+#   +  6  DB_STATEMENT_TIMEOUT  6 schedules x 2 statements x 0.5s
 #   +  2  SHUTDOWN_DRAIN again  reaping whatever had to be SIGKILLed
 #   ----
-#     39  plus up to 5s for a tick-path connect already in flight when the
-#         signal arrived, so ~44s
+#     40  plus up to 5s for a tick-path connect already in flight when the
+#         signal arrived, so ~45s
 #
 # This row scales with len(scheduler.SCHEDULES) and is the ONLY line here
 # that does. Adding a schedule costs 1s of worst case; the 60s grace

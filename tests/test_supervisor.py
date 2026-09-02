@@ -4,6 +4,7 @@ Real modes need an API key, a network and hours; none of that tests spawn,
 reap, drain, backoff or fail-open startup, which is all this module does.
 """
 
+import pathlib
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -798,3 +799,18 @@ def test_a_manual_run_waits_rather_than_racing_a_job_already_running(monkeypatch
     assert [op[0] for op in ops] == ["spawn"], (
         f"collect was already running, so the queued row must not be claimed; got {ops}"
     )
+
+
+def test_the_shutdown_budget_comment_matches_the_schedule_count():
+    """supervisor.py:60-78 hand-computes a budget term as "<N> schedules x 2
+    statements x 0.5s". Nothing computes that N. The comment names its own
+    fragility and cannot enforce it; this is the enforcement."""
+    import re
+
+    import scheduler
+    import supervisor
+
+    source = pathlib.Path(supervisor.__file__).read_text(encoding="utf-8")
+    documented = re.search(r"(\d+) schedules x 2 statements", source)
+    assert documented, "the budget comment's schedule term is missing or reworded"
+    assert int(documented.group(1)) == len(scheduler.SCHEDULES)

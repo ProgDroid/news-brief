@@ -134,6 +134,7 @@ x-newsbrief: &newsbrief
     - ENRICHMENT_MAX_THEMES=${ENRICHMENT_MAX_THEMES:-}
     - ENRICHMENT_HTTP_TIMEOUT=${ENRICHMENT_HTTP_TIMEOUT:-}
     - BIGDATA_BASE_URL=${BIGDATA_BASE_URL:-}
+    - NEWSBRIEF_CAPTURE_ENABLED=${NEWSBRIEF_CAPTURE_ENABLED:-}
     # Postgres holds the run ledger, the advisory locks that interlock the entry
     # paths, and the scheduler's state. These MUST be declared here: compose
     # passes through only what this block names, so setting them on the host or

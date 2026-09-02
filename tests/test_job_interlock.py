@@ -351,8 +351,8 @@ def test_a_first_boot_inside_a_grace_window_runs_nothing(clean_db):
         for spec in scheduler.SCHEDULES
         if scheduler.decide(spec, now, None).action == "run"
     }
-    assert would_run == {"collect", "monitor"}, (
-        "an empty ledger runs both immediately; if that stops being true the "
+    assert would_run == {"collect", "monitor", "capture"}, (
+        "an empty ledger runs all three immediately; if that stops being true the "
         "seed is guarding nothing and this fixture time is wrong"
     )
 

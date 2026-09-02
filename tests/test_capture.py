@@ -3,6 +3,7 @@
 import brief
 import capture
 import common
+import scheduler
 
 
 FEED = {
@@ -311,3 +312,36 @@ def test_a_pass_stops_at_its_deadline_and_records_what_it_skipped(monkeypatch):
     assert len(recorded) == 5, "every feed gets a poll row, reached or not"
     assert all(failure == "deadline" for _, failure in recorded)
     assert tally.feeds_failed == 5
+
+
+def test_capture_is_a_job_mode():
+    """A JOB_MODES entry is what gives capture the advisory lock and its
+    job_runs row through the mode dispatch — the rule that every entry path to a
+    job, including `docker compose run`, records itself."""
+    assert "capture" in brief.JOB_MODES
+
+
+def test_every_job_mode_has_a_dispatch_entry():
+    """JOB_MODES membership alone is not enough: the dispatch lookup runs FIRST,
+    so a job mode with no MODES entry prints usage and exits 1 — and the
+    supervisor turns that into a Telegram alert on every fire time, 48 a day for
+    capture. This assertion is the reason MODES is module-level."""
+    assert brief.JOB_MODES <= set(brief.MODES)
+
+
+def test_capture_has_a_schedule_whose_grace_clears_one_tick():
+    spec = next(s for s in scheduler.SCHEDULES if s.job == "capture")
+    assert spec.kind == "interval"
+    assert spec.every_minutes == 30
+    assert spec.grace_minutes * 60 > scheduler.TICK_SECONDS
+
+
+def test_the_pass_deadline_is_shorter_than_the_interval():
+    """A pass that outlives its fire time trips supervisor.py's overlap
+    telegram_alert, 48 chances a day."""
+    spec = next(s for s in scheduler.SCHEDULES if s.job == "capture")
+    assert capture.DEADLINE_SECONDS < spec.every_minutes * 60
+
+
+def test_the_capture_knob_defaults_off():
+    assert common.KNOBS["CAPTURE_ENABLED"].default is False
