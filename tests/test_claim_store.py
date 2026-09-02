@@ -182,3 +182,30 @@ def test_the_sql_severity_order_matches_the_python_rank(store):
             (name,),
         ).fetchone()[0]
         assert got == rank, f"{name}: SQL says {got}, Python says {rank}"
+
+
+def test_next_ledger_num_counts_retired_rows(store):
+    """The collision this exists to prevent is SILENT. load_ledger hides retired
+    rows, so _max_id_num(prior)+1 would reissue c-0050, and an upsert keyed
+    ON CONFLICT (ledger_id) resolves to the retired row and OVERWRITES it --
+    handing a brand-new claim the retired one's first_seen and history."""
+    _insert(store, ledger_id="c-0049")
+    _insert(store, ledger_id="c-0050", retired_on="2026-06-20")
+    assert claim_store.next_ledger_num(store) == 51
+
+
+def test_next_ledger_num_on_an_empty_table_is_one(store):
+    """ledger_id is TEXT NULL (0006:159), so a bare MAX() returns NULL here and
+    f"c-{None:04d}" raises. COALESCE is load-bearing, not decoration."""
+    assert claim_store.next_ledger_num(store) == 1
+
+
+def test_next_ledger_num_ignores_rows_without_a_ledger_id(store):
+    """bqa.4b will write KB-native claims with no ledger_id at all."""
+    _insert(store, ledger_id="c-0007")
+    store.execute(
+        "INSERT INTO claims (claim, first_seen, last_reaffirmed) "
+        "VALUES ('kb-native', '2026-06-01', '2026-06-01')"
+    )
+    store.commit()
+    assert claim_store.next_ledger_num(store) == 8

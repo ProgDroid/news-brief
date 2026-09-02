@@ -76,3 +76,18 @@ def load_ledger(conn) -> dict:
         f"ORDER BY {_SEVERITY_ORDER_SQL} DESC, last_reaffirmed DESC, ledger_id"
     ).fetchall()
     return {"version": 1, "claims": [_row_to_claim(r) for r in rows]}
+
+
+def next_ledger_num(conn) -> int:
+    """The next `c-NNNN` number, counted across ALL rows including retired ones.
+
+    There is no WHERE clause on purpose. load_ledger hides retired rows, so an
+    id computed from what it returns would reissue a retired claim's ledger_id,
+    and the upsert would then resolve ON CONFLICT to that row and overwrite it.
+    COALESCE covers an empty table and one holding only KB-native rows, where
+    MAX() over a nullable TEXT column returns NULL.
+    """
+    return conn.execute(
+        "SELECT COALESCE(MAX(SUBSTRING(ledger_id FROM 'c-(\\d+)')::int), 0) + 1 "
+        "FROM claims"
+    ).fetchone()[0]

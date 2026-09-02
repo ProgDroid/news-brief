@@ -284,9 +284,10 @@ def merge_ledger(
     retire_after_days: int = RETIRE_AFTER_DAYS,
     extractor_model: str = RECONCILE_MODEL,
     prompt_version: int = PROMPT_VERSION,
+    next_num: int | None = None,
 ) -> dict:
     by_id = {c["id"]: c for c in prior.get("claims", []) if "id" in c}
-    next_num = _max_id_num(prior) + 1
+    next_num = _max_id_num(prior) + 1 if next_num is None else next_num
     returned = set()
     result = []
     for mc in model_claims:
@@ -783,7 +784,13 @@ def _messages_call(system: str, user: str) -> str:
 
 
 def reconcile_ledger(
-    prior: dict, brief_text: str, today: str, *, call=None, source_index: str = ""
+    prior: dict,
+    brief_text: str,
+    today: str,
+    *,
+    call=None,
+    source_index: str = "",
+    next_num: int | None = None,
 ) -> dict:
     caller = call or _messages_call
     try:
@@ -791,7 +798,9 @@ def reconcile_ledger(
             _RECONCILE_SYSTEM,
             build_reconcile_prompt(prior, brief_text, source_index),
         )
-        return merge_ledger(prior, parse_reconcile_response(text), today)
+        return merge_ledger(
+            prior, parse_reconcile_response(text), today, next_num=next_num
+        )
     except Exception as e:
         log.warning(f"Brief-memory reconcile failed; keeping prior ledger: {e}")
         return prior

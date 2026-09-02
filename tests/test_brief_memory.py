@@ -2313,3 +2313,32 @@ def test_a_challenged_claim_can_still_return_to_standing():
         "2026-06-24",
     )
     assert out["claims"][0]["status"] == "standing"
+
+
+def test_merge_accepts_an_externally_allocated_next_num():
+    """After the cutover, ids are allocated against the whole table including
+    retired rows, so the caller supplies the number."""
+    prior = {"version": 1, "claims": []}
+    out = bm.merge_ledger(prior, [{"claim": "a new fact"}], "2026-06-24", next_num=51)
+    assert out["claims"][0]["id"] == "c-0051"
+
+
+def test_merge_still_allocates_from_prior_when_not_told():
+    prior = {"version": 1, "claims": [_mk_claim("c-0003")]}
+    out = bm.merge_ledger(prior, [{"claim": "a new fact"}], "2026-06-24")
+    assert {c["id"] for c in out["claims"]} == {"c-0003", "c-0004"}
+
+
+def test_reconcile_passes_next_num_through_to_merge():
+    """Production does not call merge_ledger -- brief.py calls reconcile_ledger,
+    which called merge_ledger with no kwargs. Adding the parameter to
+    merge_ledger alone would leave it UNREACHABLE from the only call site that
+    matters, and the collision would happen with every test passing."""
+    out = bm.reconcile_ledger(
+        {"version": 1, "claims": []},
+        "a brief",
+        "2026-06-24",
+        call=lambda system, prompt: '[{"claim": "a new fact"}]',
+        next_num=77,
+    )
+    assert out["claims"][0]["id"] == "c-0077"
