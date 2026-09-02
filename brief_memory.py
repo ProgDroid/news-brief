@@ -25,14 +25,30 @@ HIGH_SEVERITY_BONUS_DAYS = 7  # extra retention days a "high" claim earns (=> 14
 _SEVERITY_RANK = {"low": 0, "normal": 1, "high": 2}  # working-set ordering
 _VALID_SEVERITY = frozenset(_SEVERITY_RANK)
 _DEFAULT_SEVERITY = "normal"
-# Claim lifecycle. QUARANTINED: written on every row, read by nothing. Rendering,
-# TTL retirement and working-set ordering all ignore it deliberately, because the
-# 2026-08-29 replay measured contradiction detection at ~61% precision and the
-# restatement guard that lifts it (news-brief-93u) is gated on the gold set
-# (news-brief-jx9.7). Detections accumulate as evidence meanwhile; nothing acts on
-# them. news-brief-jx9.5 and news-brief-jx9.6 are the first readers.
-_VALID_STATUS = frozenset({"standing", "challenged", "broken"})
+# Claim lifecycle. The write-then-quarantine LIFTED at news-brief-jx9.5/jx9.6,
+# which earned it across five gold-set runs measuring `broken` at ~100% precision.
+# Three predicates read it now: the TTL filter, select_working_set's exclusion and
+# its ordering. The six values are exactly the CHECK on claims.status in migration
+# 0006 (news-brief-bqa.9, spec section 6 item 1); tests/test_kb_schema.py asserts
+# this set against the live constraint so the two layers cannot drift in silence.
+# Only the first three are ever proposed by a model — confirmed/expired/withdrawn
+# are written by the propagation rules (news-brief-bqa.5), which is why the
+# extraction prompt still offers three.
+_VALID_STATUS = frozenset(
+    {"standing", "challenged", "broken", "confirmed", "expired", "withdrawn"}
+)
 _DEFAULT_STATUS = "standing"
+# Settled: the claim's lifecycle is over and its text and status are both frozen.
+# Exactly the tuple in migration 0006's claims_freeze_claim_text() trigger, which
+# RAISEs on any transition out of one. 'challenged' is deliberately absent — spec
+# 2.3 says a challenge can be answered, so standing -> challenged -> standing has
+# to keep working.
+_TERMINAL_STATUS = frozenset({"broken", "confirmed", "expired", "withdrawn"})
+# TTL exemption is the WIDER set, and the two are not interchangeable: writing the
+# retention predicate against _TERMINAL_STATUS would age challenged rows out, and
+# a challenge that leaves storage can never resolve (the jx9.6 failure). Its
+# complement, {standing, challenged}, is exactly 0006's partial index for rule 4.
+_TTL_EXEMPT_STATUS = _VALID_STATUS - {_DEFAULT_STATUS}
 # Where a claim came from (spec 4.1). 'extracted' is source-grounded and is the
 # only kind a propagation rule, thesis or calibration aggregate may ever read;
 # 'authored' is the brief's own interpretation, persisted and scorable but never
@@ -339,15 +355,16 @@ def merge_ledger(
     for c in prior.get("claims", []):
         if c.get("id") not in returned:
             result.append(dict(c))
-    # Non-standing claims are exempt from the TTL (news-brief-jx9.6). A broken
-    # claim is the accountability record — spec 3.3: the original claim is what
-    # accountability is measured against — and a challenged one is still waiting
-    # to resolve. Ordinary silence still ages a STANDING claim out, which is what
-    # keeps storage from growing without bound.
+    # Non-standing claims are exempt from the TTL (news-brief-jx9.6). Every
+    # terminal status is the accountability record — spec 3.3: the original claim
+    # is what accountability is measured against — and a challenged one is still
+    # waiting to resolve. Ordinary silence still ages a STANDING claim out, which
+    # is what keeps storage from growing without bound (news-brief-6wc revisits
+    # whether that bound is enough).
     result = [
         c
         for c in result
-        if (_coerce_status(c.get("status")) or _DEFAULT_STATUS) != _DEFAULT_STATUS
+        if (_coerce_status(c.get("status")) or _DEFAULT_STATUS) in _TTL_EXEMPT_STATUS
         or _days_between(c["last_reaffirmed"], today) - _ttl_bonus(c.get("severity"))
         <= retire_after_days
     ]
@@ -367,13 +384,14 @@ def select_working_set(ledger: dict, limit: int = WORKING_SET_SIZE) -> list[dict
     outside it stays in storage untouched — merge_ledger keeps any claim the
     model did not return.
 
-    The two non-standing statuses get opposite treatment (news-brief-jx9.6).
-    BROKEN claims are resolved: they belong in storage for measurement and are
-    dropped from this window entirely, because rendering one under "previous
-    briefs already reported these" states a fact the ledger knows to be false.
-    CHALLENGED claims are live: they rank first so they are never what gets
-    crowded out, since a challenge that leaves the window can never resolve —
-    the mechanism the 2026-08-29 replay showed losing 54 of 68 claims.
+    The non-standing statuses get opposite treatment (news-brief-jx9.6), and the
+    split is _TERMINAL_STATUS, not `!= standing`. TERMINAL claims are settled:
+    they belong in storage for measurement and are dropped from this window
+    entirely, because rendering one under "previous briefs already reported
+    these" states as live a fact the ledger knows to be resolved. CHALLENGED
+    claims are live: they rank first so they are never what gets crowded out,
+    since a challenge that leaves the window can never resolve — the mechanism
+    the 2026-08-29 replay showed losing 54 of 68 claims.
 
     Note the exemption is PRIORITY, not extra slots: the cap is a prompt budget
     (~2,400 output tokens) and growing the window would risk the truncation this
@@ -382,7 +400,7 @@ def select_working_set(ledger: dict, limit: int = WORKING_SET_SIZE) -> list[dict
     claims = [
         c
         for c in ledger.get("claims", [])
-        if (_coerce_status(c.get("status")) or _DEFAULT_STATUS) != "broken"
+        if (_coerce_status(c.get("status")) or _DEFAULT_STATUS) not in _TERMINAL_STATUS
     ]
     claims.sort(
         key=lambda c: (
@@ -578,9 +596,11 @@ def _coerce_severity(v) -> str | None:
 
 
 def _coerce_status(v) -> str | None:
-    """Canonical claim status ('standing'/'challenged'/'broken'), or None to leave
-    the row's existing status alone. Case-insensitive; anything non-string or
-    outside the enum returns None."""
+    """One of the six values in _VALID_STATUS, or None to leave the row's existing
+    status alone. Case-insensitive; anything non-string or outside the enum
+    returns None — and that None is why the set has to match claims.status
+    exactly: every caller falls back to _DEFAULT_STATUS, so a status this does
+    not recognise silently becomes 'standing' (news-brief-bqa.9)."""
     if isinstance(v, str):
         s = v.strip().lower()
         if s in _VALID_STATUS:
@@ -645,11 +665,25 @@ def _apply_status(row: dict, proposed, broken_by, today: str) -> None:
     """Write status/broke_on/broken_by onto a claim row.
 
     broke_on is stamped on the first transition out of 'standing' and never
-    rewritten: it records when the ledger learned the claim had failed, which a
-    later reaffirmation must not move. An unrecognised or absent status leaves
-    whatever the row already had (new rows default to 'standing')."""
+    rewritten: it records when the ledger RESOLVED the claim — not necessarily
+    when it failed, since three of the six statuses are not breaks, which is why
+    the KB column is named resolved_on (spec 5.1). A later reaffirmation must not
+    move it. An unrecognised or absent status leaves whatever the row already had
+    (new rows default to 'standing').
+
+    A terminal status is refused rather than overwritten. Migration 0006 names
+    brief_memory the PRIMARY enforcement and claims_freeze_claim_text() defence in
+    depth, so without this the write path hands Postgres a row it will RAISE on,
+    turning a logged refusal into a crash."""
     prior = _coerce_status(row.get("status")) or _DEFAULT_STATUS
-    row["status"] = _coerce_status(proposed) or prior
+    status = _coerce_status(proposed) or prior
+    if prior in _TERMINAL_STATUS and status != prior:
+        log.info(
+            f"Brief-memory: refused to move {row.get('id')} off '{prior}', which "
+            f"is terminal — proposed '{status}'"
+        )
+        status = prior
+    row["status"] = status
     if row["status"] != _DEFAULT_STATUS and not row.get("broke_on"):
         row["broke_on"] = today
         # How much of the claim's own horizon it survived. Recorded only when a

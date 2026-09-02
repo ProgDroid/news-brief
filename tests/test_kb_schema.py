@@ -847,14 +847,33 @@ PROVISIONAL_TABLES = {
     "links",
 }
 
-SCHEMA_STATUSES = {
-    "standing",
-    "challenged",
-    "broken",
-    "confirmed",
-    "expired",
-    "withdrawn",
-}
+
+def status_check_values(kb):
+    """The values claims.status actually permits, read off the live constraint.
+
+    A hardcoded copy of the enum here would be a THIRD list beside the DDL and
+    brief_memory._VALID_STATUS, and three hardcoded lists drift together in
+    silence -- the failure mode is that everything agrees and everything is
+    wrong. Postgres renders `CHECK (status IN (...))` as `status = ANY
+    (ARRAY['standing'::text, ...])`, which is what the filter below keys on;
+    the table's other status CHECKs (resolved_on, broken_by) use `status =` and
+    `status <>` and are excluded by it.
+    """
+    defs = [
+        r[0]
+        for r in kb.execute(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+            "WHERE conrelid = 'claims'::regclass AND contype = 'c'"
+        ).fetchall()
+    ]
+    enum = [d for d in defs if "status = ANY" in d]
+    assert len(enum) == 1, f"expected exactly one status enum CHECK, got {enum}"
+    values = set(re.findall(r"'([a-z_]+)'::text", enum[0]))
+    # Prove the probe can return something before any test believes an answer
+    # from it: an empty or one-element parse would make every comparison below
+    # pass for the wrong reason.
+    assert len(values) > 1, f"parsed no enum values out of {enum[0]!r}"
+    return values
 
 
 def test_every_ledger_key_has_a_claims_column(kb):
@@ -879,32 +898,42 @@ def test_every_ledger_key_has_a_claims_column(kb):
     assert not missing, f"ledger keys with no claims column: {missing}"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="news-brief-bqa.9: _VALID_STATUS still knows three of the six states. "
-    "Remove this marker when bqa.4 widens it.",
-)
-def test_every_status_the_schema_permits_survives_the_incumbent_coercer():
+def test_every_status_the_schema_permits_survives_the_coercer(kb):
     """Spec section 6 item 1, the READ direction -- and the one that matters.
 
-    brief_memory._VALID_STATUS knows three values; claims.status permits six.
-    _coerce_status returns None for the other three, every caller falls back to
-    'standing', and then the TTL filter deletes them after 7 days while
-    select_working_set renders them as live fact.
+    _coerce_status returns None outside _VALID_STATUS and every caller falls
+    back to 'standing', so a status the coercer does not know is not merely
+    ignored: the TTL filter deletes it after 7 days and select_working_set
+    renders it as live fact. A write-direction map alone is
+    the-probe-measured-the-wrong-layer, and it is exactly what let this defect
+    through two spec reviews.
 
-    A write-direction map alone is the-probe-measured-the-wrong-layer, and it
-    is exactly what let this defect through two spec reviews.
-
-    strict=True: when bqa.4 fixes _VALID_STATUS this test starts passing, the
-    strict xfail turns that into a FAILURE, and whoever sees it removes the
-    marker. A plain xfail would go quiet and rot in place.
+    This carried a strict xfail until news-brief-bqa.9 widened the frozenset.
     """
-    degrades = {s for s in SCHEMA_STATUSES if brief_memory._coerce_status(s) != s}
+    degrades = {
+        s for s in status_check_values(kb) if brief_memory._coerce_status(s) != s
+    }
     assert not degrades, (
         f"these statuses coerce away and will be TTL-deleted: {sorted(degrades)}. "
         "Widen brief_memory._VALID_STATUS and split the TTL and render predicates "
         "from '!= standing' to an explicit terminal set (news-brief-bqa.9)."
     )
+
+
+def test_the_status_check_and_valid_status_are_the_same_set(kb):
+    """The cross-layer invariant itself, in the only place both sides are
+    visible at once: a Postgres CHECK and a Python frozenset, one I/O boundary
+    apart, that no type checker or constraint can reconcile.
+
+    The coercion test above catches a value the DDL gains and brief_memory does
+    not. This catches the other direction too -- a value brief_memory gains that
+    the DDL will reject on write -- and it is the reason tests/
+    test_brief_memory.py may keep its single hardcoded copy of the six.
+
+    IF THIS FAILS: the enum moved on one side only. Change the other side, or
+    the next migration writes rows the reader silently reclassifies.
+    """
+    assert status_check_values(kb) == set(brief_memory._VALID_STATUS)
 
 
 def test_no_source_file_writes_a_provisional_table():

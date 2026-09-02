@@ -2186,3 +2186,130 @@ def test_a_reaffirmation_does_not_move_an_existing_horizon():
         prior, [{"id": "c-0001", "claim": "c-0001", "horizon_days": 7}], "2026-06-24"
     )
     assert out["claims"][0]["horizon_days"] == 180
+
+
+# ── bqa.9 item 1: the six-value lifecycle (spec section 6, migration 0006) ────
+# `claims.status` permits six values; _VALID_STATUS knew three. Everything
+# outside the three coerced to None, every caller fell back to 'standing', and
+# the two predicates written as `!= standing` then did the damage: the TTL
+# filter deleted a confirmed/expired/withdrawn row after 7 days and
+# select_working_set rendered it as live fact.
+#
+# The fix is two sets, not one, because TTL and render do NOT partition the same
+# way. A challenged claim is LIVE — it must outlive the TTL (a challenge that
+# ages out can never resolve, the jx9.6 failure) but it must stay in the render
+# window. Collapsing both sites onto a single "terminal" set would regress it.
+
+_SCHEMA_STATUSES = frozenset(
+    {"standing", "challenged", "broken", "confirmed", "expired", "withdrawn"}
+)
+
+
+def test_valid_status_covers_every_state_the_kb_schema_permits():
+    """The one hardcoded copy of the enum in this suite. tests/test_kb_schema.py
+    proves this same set equals the live CHECK on claims.status, so the two
+    layers cannot drift apart in silence — which two hardcoded lists would."""
+    assert bm._VALID_STATUS == _SCHEMA_STATUSES
+
+
+def test_the_status_sets_are_the_schemas_own_partitions():
+    """_TERMINAL_STATUS is exactly the tuple in claims_freeze_claim_text(), and
+    its complement is exactly the `WHERE status IN ('standing','challenged')`
+    partial index. Neither set is invented here."""
+    assert bm._TERMINAL_STATUS == {"broken", "confirmed", "expired", "withdrawn"}
+    assert bm._VALID_STATUS - bm._TERMINAL_STATUS == {"standing", "challenged"}
+    # TTL exemption is the wider set: every resolved row PLUS the live-but-
+    # disputed one. Only ordinary silence on a standing claim ages it out.
+    assert bm._TTL_EXEMPT_STATUS == bm._VALID_STATUS - {bm._DEFAULT_STATUS}
+
+
+@pytest.mark.parametrize(
+    "status", sorted({"broken", "confirmed", "expired", "withdrawn"})
+)
+def test_every_terminal_status_is_exempt_from_the_ttl(status):
+    """Spec section 6 item 1, the deletion half. A resolved claim IS the
+    accountability record this epic exists to build; ageing one out destroys the
+    thing being measured."""
+    prior = {
+        "version": 1,
+        "claims": [dict(_mk_claim("c-0001", "2026-06-10"), status=status)],
+    }
+    out = bm.merge_ledger(prior, [], "2026-06-24")  # 14 days > the 7-day TTL
+    assert [c["id"] for c in out["claims"]] == ["c-0001"]
+
+
+@pytest.mark.parametrize(
+    "status", sorted({"broken", "confirmed", "expired", "withdrawn"})
+)
+def test_every_terminal_status_leaves_the_working_set(status):
+    """Spec section 6 item 1, the render half. Rendering a settled claim under
+    "previous briefs already reported these" states as live a fact the ledger
+    knows to be resolved. Only `broken` was excluded before."""
+    ledger = {
+        "version": 1,
+        "claims": [
+            dict(_mk_claim("c-0001"), status=status),
+            _mk_claim("c-0002"),
+        ],
+    }
+    assert [c["id"] for c in bm.select_working_set(ledger)] == ["c-0002"]
+
+
+def test_a_confirmed_claim_cannot_be_reworded():
+    """The jx9.5 text freeze reads `was == now == standing`, so it was already
+    written for six values — but a stored 'confirmed' coerced to None, fell back
+    to 'standing', and walked straight through it. Widening the set closes a
+    second Patriot-shaped hole that item 1 does not name."""
+    prior = {
+        "version": 1,
+        "claims": [
+            dict(_mk_claim("c-0001", claim="the original wording"), status="confirmed")
+        ],
+    }
+    out = bm.merge_ledger(
+        prior, [{"id": "c-0001", "claim": "a rewrite of its own outcome"}], "2026-06-24"
+    )
+    assert out["claims"][0]["claim"] == "the original wording"
+    assert out["claims"][0]["status"] == "confirmed"
+
+
+@pytest.mark.parametrize(
+    "status", sorted({"broken", "confirmed", "expired", "withdrawn"})
+)
+def test_a_terminal_status_survives_a_reply_that_omits_status(status):
+    """_apply_status computes `prior` by coercing the row's OWN stored status.
+    With a three-value set that coercion returned None for three of the six and
+    reset the row to 'standing' before the model's value was even considered —
+    an interlock the reader can defeat by omission is not an interlock."""
+    prior = {"version": 1, "claims": [dict(_mk_claim("c-0001"), status=status)]}
+    out = bm.merge_ledger(prior, [{"id": "c-0001", "claim": "c-0001"}], "2026-06-24")
+    assert out["claims"][0]["status"] == status
+
+
+@pytest.mark.parametrize(
+    "status", sorted({"broken", "confirmed", "expired", "withdrawn"})
+)
+def test_a_terminal_claim_refuses_a_proposed_transition(status):
+    """Mirrors claims_freeze_claim_text()'s first RAISE in Python, where the
+    migration says the PRIMARY enforcement belongs. Without this the write path
+    hands Postgres a row it will reject, turning a logged refusal into a crash."""
+    prior = {"version": 1, "claims": [dict(_mk_claim("c-0001"), status=status)]}
+    out = bm.merge_ledger(
+        prior,
+        [{"id": "c-0001", "claim": "c-0001", "status": "standing"}],
+        "2026-06-24",
+    )
+    assert out["claims"][0]["status"] == status
+
+
+def test_a_challenged_claim_can_still_return_to_standing():
+    """Spec 2.3: a challenge can be answered. 'challenged' is deliberately
+    excluded from the terminal set, so standing -> challenged -> standing must
+    keep working — the refusal above must not swallow it."""
+    prior = {"version": 1, "claims": [dict(_mk_claim("c-0001"), status="challenged")]}
+    out = bm.merge_ledger(
+        prior,
+        [{"id": "c-0001", "claim": "c-0001", "status": "standing"}],
+        "2026-06-24",
+    )
+    assert out["claims"][0]["status"] == "standing"

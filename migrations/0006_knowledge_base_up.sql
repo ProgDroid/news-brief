@@ -162,10 +162,13 @@ CREATE TABLE claims (
     topic              TEXT    NULL,
     -- ONE lifecycle in ONE column.
     --
-    -- WARNING for bqa.4: brief_memory._VALID_STATUS knows only the first
-    -- three. Until it is widened, confirmed/expired/withdrawn coerce back to
-    -- 'standing', the TTL deletes them after 7 days, and select_working_set
-    -- renders them as live fact. See news-brief-bqa.9 and spec section 6.
+    -- These six ARE brief_memory._VALID_STATUS, and tests/test_kb_schema.py
+    -- asserts the two sets equal by reading this CHECK back off pg_constraint.
+    -- The reader knew only the first three until news-brief-bqa.9 (spec section
+    -- 6 item 1): confirmed/expired/withdrawn coerced back to 'standing', the TTL
+    -- deleted them after 7 days, and select_working_set rendered them as live
+    -- fact. Adding a value here without adding it there restores that bug, which
+    -- is why the equality is a test and not a comment.
     status             TEXT    NOT NULL DEFAULT 'standing'
                        CHECK (status IN ('standing', 'challenged', 'broken',
                                          'confirmed', 'expired', 'withdrawn')),
@@ -244,16 +247,16 @@ CREATE UNIQUE INDEX claim_evidence_unique
 -- 2026-08-29 Patriot mechanism this exists to stop.
 -- A terminal status must be a property of the schema, not a belief held by
 -- whatever last wrote it -- an interlock the reader can defeat by omission is
--- not an interlock. brief_memory._apply_status (:644-652) resets a terminal
--- row back to 'standing' when a model reply omits status: it computes `prior`
--- by coercing the row's OWN stored status through _coerce_status, whose
--- _VALID_STATUS only recognises three of the six values (news-brief-bqa.9), so
--- a stored 'confirmed'/'expired'/'withdrawn' coerces to None and falls back to
--- _DEFAULT_STATUS = 'standing' before the model's proposed value is even
--- considered. Until bqa.4 widens _VALID_STATUS, this clause is the only thing
--- stopping that reset from reaching Postgres. 'challenged' is deliberately
--- excluded: spec 2.3 says a challenge can be answered, so
--- standing -> challenged -> standing must keep working.
+-- not an interlock. This clause was the ONLY enforcement until
+-- news-brief-bqa.9: _apply_status computed `prior` by coercing the row's own
+-- stored status through _coerce_status, whose _VALID_STATUS recognised three of
+-- the six values, so a stored 'confirmed'/'expired'/'withdrawn' fell back to
+-- _DEFAULT_STATUS = 'standing' before the model's proposed value was even
+-- considered. bqa.9 widened the set and gave _apply_status a matching refusal,
+-- so this is now the defence in depth it was always described as -- and it
+-- still catches any writer that is not brief_memory. 'challenged' is
+-- deliberately excluded on both sides: spec 2.3 says a challenge can be
+-- answered, so standing -> challenged -> standing must keep working.
 CREATE OR REPLACE FUNCTION claims_freeze_claim_text() RETURNS trigger AS $$
 BEGIN
     IF OLD.status IN ('broken', 'confirmed', 'expired', 'withdrawn')
