@@ -255,3 +255,115 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER claims_freeze_claim_text_trg
     BEFORE UPDATE ON claims
     FOR EACH ROW EXECUTE FUNCTION claims_freeze_claim_text();
+
+-- The six tables below are PROVISIONAL (spec 1.2): empty, read by nothing, and
+-- reshapeable without ceremony until bqa.4 writes them. theses and
+-- thesis_claims have no consumer at all before Epic 6 -- they are here because
+-- the schema was scoped to all ten objects, not because anything needs them.
+
+CREATE TABLE theses (
+    id              BIGSERIAL PRIMARY KEY,
+    text            TEXT    NOT NULL,
+    -- Ordinal, NO numeric scoring: Bayesian-looking arithmetic over ordinal
+    -- judgments manufactures precision the inputs do not contain. Advances
+    -- ONLY on RESOLVED supporting claims, never on their count.
+    confidence      TEXT    NOT NULL DEFAULT 'speculative'
+                    CHECK (confidence IN ('speculative', 'tentative',
+                                          'supported', 'established')),
+    horizon_days    INTEGER NULL CHECK (horizon_days IS NULL
+                                        OR horizon_days BETWEEN 1 AND 3650),
+    triggers        TEXT[]  NOT NULL DEFAULT '{}',
+    -- Provenance but NOT origin: provenance says which model wrote the row,
+    -- which drift detection needs. origin says whether a rule may read it as
+    -- evidence, and for a thesis the answer is always no -- so the column
+    -- would be uniform, which 12.2 rates worse than missing.
+    extractor_model TEXT    NULL,
+    prompt_version  INTEGER NULL,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE thesis_claims (
+    thesis_id  BIGINT NOT NULL REFERENCES theses(id) ON DELETE CASCADE,
+    claim_id   BIGINT NOT NULL REFERENCES claims(id) ON DELETE CASCADE,
+    -- One table, not two: supporting and undermining are the same edge with
+    -- opposite sign, and the PK stops a claim being both.
+    role       TEXT   NOT NULL CHECK (role IN ('supporting', 'undermining')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (thesis_id, claim_id)
+);
+
+CREATE TABLE stories (
+    id                   BIGSERIAL PRIMARY KEY,
+    name                 TEXT NOT NULL,
+    -- Structural stories outlive their parent topics: arms sovereignty
+    -- survives the war's end. No hierarchy -- reality does not fit a tree.
+    scope                TEXT NOT NULL CHECK (scope IN ('episodic', 'structural')),
+    -- NULL last_material_change means "created, no members yet" and reads
+    -- 'active'; the state must be defined at the default. Silence is
+    -- 'dormant', never 'closed' -- only a review action closes a story.
+    state                TEXT NOT NULL DEFAULT 'active'
+                         CHECK (state IN ('active', 'dormant', 'closed')),
+    last_material_change TIMESTAMPTZ NULL,
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX stories_name ON stories (lower(name));
+
+CREATE TABLE story_members (
+    id         BIGSERIAL PRIMARY KEY,
+    story_id   BIGINT NOT NULL REFERENCES stories(id) ON DELETE CASCADE,
+    -- RESTRICT: 3.5 forbids rebuilding the member list, so a cascade would be
+    -- a silent retcon of it -- the Day 3 failure mechanism.
+    -- Member STATUS is deliberately NOT a column: it is derivable by join
+    -- (superseded_by set, or the claim broken/expired/withdrawn), and a stored
+    -- copy could go stale.
+    event_id   BIGINT NULL REFERENCES events(id) ON DELETE RESTRICT,
+    claim_id   BIGINT NULL REFERENCES claims(id) ON DELETE RESTRICT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK (num_nonnulls(event_id, claim_id) = 1)
+);
+CREATE UNIQUE INDEX story_members_unique
+    ON story_members (story_id, event_id, claim_id) NULLS NOT DISTINCT;
+
+CREATE TABLE open_questions (
+    id         BIGSERIAL PRIMARY KEY,
+    story_id   BIGINT NOT NULL REFERENCES stories(id) ON DELETE CASCADE,
+    text       TEXT   NOT NULL,
+    due_date   DATE   NULL,
+    status     TEXT   NOT NULL DEFAULT 'open'
+               CHECK (status IN ('open', 'answered', 'dropped')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX open_questions_due ON open_questions (due_date) WHERE status = 'open';
+
+CREATE TABLE links (
+    id                   BIGSERIAL PRIMARY KEY,
+    -- event -> observation only. Event -> event links are out of scope:
+    -- nothing in 3.4 or the five rules needs them, and rule 2 ("an Observation
+    -- with no explaining Link") is a clean LEFT JOIN under this shape.
+    event_id             BIGINT  NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+    observation_id       BIGINT  NOT NULL REFERENCES observations(id) ON DELETE CASCADE,
+    mechanism            TEXT    NOT NULL,
+    -- How long the event keeps explaining the move. Confusing a re_rating
+    -- driver with flow produced three contradictory chip verdicts in 72 hours.
+    effect_kind          TEXT    NOT NULL
+                         CHECK (effect_kind IN ('re_rating', 'risk_premium',
+                                                'flow', 'fundamental_revision')),
+    expected_persistence TEXT    NOT NULL
+                         CHECK (expected_persistence IN ('session', 'days',
+                                                         'weeks', 'structural')),
+    -- NOT NULL, derived at write time from expected_persistence. A nullable
+    -- decay date leaves a link 'unchecked' forever and never in rule 5.
+    decay_check_date     DATE    NOT NULL,
+    falsifier            TEXT    NULL,
+    -- 'unchecked' does NOT become 'decayed' through the passage of time, or
+    -- the persistence priors learn from measurements that never happened.
+    status               TEXT    NOT NULL DEFAULT 'unchecked'
+                         CHECK (status IN ('unchecked', 'active', 'decayed', 'refuted')),
+    origin               TEXT    NOT NULL DEFAULT 'extracted'
+                         CHECK (origin IN ('extracted', 'authored')),
+    extractor_model      TEXT    NULL,
+    prompt_version       INTEGER NULL,
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX links_observation ON links (observation_id);
+CREATE INDEX links_decay_due ON links (decay_check_date) WHERE status = 'unchecked';

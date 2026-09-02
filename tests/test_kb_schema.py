@@ -510,3 +510,140 @@ def test_the_status_may_change_without_touching_the_text(kb):
         kb.execute("SELECT claim FROM claims WHERE id = %s", (claim_id,)).fetchone()[0]
         == "original"
     )
+
+
+KB_TABLES = {
+    "outlets",
+    "items",
+    "entities",
+    "entity_instruments",
+    "events",
+    "event_entities",
+    "assertions",
+    "observations",
+    "claims",
+    "claim_evidence",
+    "theses",
+    "thesis_claims",
+    "stories",
+    "story_members",
+    "open_questions",
+    "links",
+}
+
+
+def _story(conn, name="Hormuz", scope="structural"):
+    return conn.execute(
+        "INSERT INTO stories (name, scope) VALUES (%s, %s) RETURNING id", (name, scope)
+    ).fetchone()[0]
+
+
+def _thesis(conn, text="t"):
+    return conn.execute(
+        "INSERT INTO theses (text) VALUES (%s) RETURNING id", (text,)
+    ).fetchone()[0]
+
+
+def test_0006_creates_all_sixteen_kb_tables(kb):
+    assert KB_TABLES <= _tables(kb)
+
+
+def test_confidence_defaults_to_speculative(kb):
+    """Spec 2.3: speculative means NO supporting claims at all. An earlier
+    draft said "none resolved", which overlapped tentative completely and left
+    the ladder undetermined at the value every thesis starts on."""
+    _thesis(kb)
+    assert kb.execute("SELECT confidence FROM theses").fetchone()[0] == "speculative"
+
+
+def test_a_claim_supports_or_undermines_a_thesis_but_not_both(kb):
+    thesis_id, claim_id = _thesis(kb), _claim(kb, "c")
+    kb.execute(
+        "INSERT INTO thesis_claims (thesis_id, claim_id, role) "
+        "VALUES (%s, %s, 'supporting')",
+        (thesis_id, claim_id),
+    )
+    with rejects(kb, psycopg.errors.UniqueViolation):
+        kb.execute(
+            "INSERT INTO thesis_claims (thesis_id, claim_id, role) "
+            "VALUES (%s, %s, 'undermining')",
+            (thesis_id, claim_id),
+        )
+
+
+def test_a_new_story_is_active_with_no_material_change(kb):
+    """Spec 2.3: the state must be defined at the default. NULL
+    last_material_change means "created, no members yet" and reads active --
+    the same hole that made the old confidence ladder undetermined."""
+    _story(kb)
+    assert kb.execute("SELECT state, last_material_change FROM stories").fetchone() == (
+        "active",
+        None,
+    )
+
+
+def test_story_scope_rejects_an_unknown_value(kb):
+    with rejects(kb, psycopg.errors.CheckViolation):
+        _story(kb, "X", "ongoing")
+
+
+def test_a_story_cannot_hold_the_same_event_twice(kb):
+    """3.5 forbids rebuilding the member list, so a duplicate row renders as a
+    duplicate line in the brief with no read-time dedup to catch it."""
+    story_id, event_id = _story(kb, "S", "episodic"), _event(kb)
+    kb.execute(
+        "INSERT INTO story_members (story_id, event_id) VALUES (%s, %s)",
+        (story_id, event_id),
+    )
+    with rejects(kb, psycopg.errors.UniqueViolation):
+        kb.execute(
+            "INSERT INTO story_members (story_id, event_id) VALUES (%s, %s)",
+            (story_id, event_id),
+        )
+
+
+def test_deleting_an_event_cannot_retcon_a_member_list(kb):
+    """A cascade here is a silent retcon of the stored list -- the Day 3
+    failure mechanism."""
+    story_id, event_id = _story(kb, "S", "episodic"), _event(kb)
+    kb.execute(
+        "INSERT INTO story_members (story_id, event_id) VALUES (%s, %s)",
+        (story_id, event_id),
+    )
+    with rejects(kb, psycopg.errors.RestrictViolation):
+        kb.execute("DELETE FROM events WHERE id = %s", (event_id,))
+
+
+def test_a_link_must_carry_a_decay_check_date(kb):
+    """NOT NULL, derived from expected_persistence at write time. A nullable
+    decay date leaves a link 'unchecked' forever, never entering rule 5 -- and
+    2.3's negative case makes that permanent rather than eventually-noticed."""
+    observation_id = _observation(kb, _entity(kb, "Brent", "instrument"))
+    with rejects(kb, psycopg.errors.NotNullViolation):
+        kb.execute(
+            "INSERT INTO links (event_id, observation_id, mechanism, effect_kind, "
+            "expected_persistence) VALUES (%s, %s, 'm', 'flow', 'session')",
+            (_event(kb), observation_id),
+        )
+
+
+def test_effect_kind_admits_all_four_decay_behaviours(kb):
+    """Confusing a re_rating driver with flow is what produced three
+    contradictory chip verdicts in 72 hours."""
+    observation_id = _observation(kb, _entity(kb, "Brent", "instrument"))
+    for kind in ("re_rating", "risk_premium", "flow", "fundamental_revision"):
+        kb.execute(
+            "INSERT INTO links (event_id, observation_id, mechanism, effect_kind, "
+            "expected_persistence, decay_check_date) "
+            "VALUES (%s, %s, 'm', %s, 'days', '2026-09-10')",
+            (_event(kb), observation_id, kind),
+        )
+    assert kb.execute("SELECT count(*) FROM links").fetchone()[0] == 4
+
+
+def test_an_open_question_defaults_to_open(kb):
+    story_id = _story(kb, "S", "episodic")
+    kb.execute(
+        "INSERT INTO open_questions (story_id, text) VALUES (%s, 'q')", (story_id,)
+    )
+    assert kb.execute("SELECT status FROM open_questions").fetchone()[0] == "open"
