@@ -113,7 +113,7 @@ declared, not derived.
 **A feed definition gains an optional `outlet` key, defaulting to its `name`.**
 
 A draft claimed only the two Reuters feeds need one, because "every other feed's name already *is*
-its publisher name". That is false for **7 of 26**, and `outlets.name` is `UNIQUE (lower(name))`
+its publisher name". That is false for **8 of 26**, and `outlets.name` is `UNIQUE (lower(name))`
 and is the KB's corroboration dimension — so a feed-product name shipped into it becomes a
 publisher that does not exist.
 
@@ -138,7 +138,7 @@ proxies are named for the publisher they proxy — `Kyiv Independent`, `NHK Worl
 `Yonhap (English)` — never `Google News`. Those need no `outlet` key.
 
 **A test asserts every feed resolves to an outlet whose name is not merely the feed name** for
-these 7, so a future feed added with a product name fails rather than quietly minting an outlet.
+these 8, so a future feed added with a product name fails rather than quietly minting an outlet.
 
 URL-derived outlet resolution was rejected: it makes the Google News query format load-bearing for
 data integrity, and still needs an editorial domain-to-display-name table underneath.

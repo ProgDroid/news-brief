@@ -680,7 +680,7 @@ def outlet_for(feed: dict) -> str:
 
     Most feed names ARE publisher names — including the Google News proxies,
     which are named for the publisher they proxy (`Kyiv Independent`, `NHK
-    World`) rather than for Google. Seven are not, and those carry an explicit
+    World`) rather than for Google. Eight are not, and those carry an explicit
     `outlet`.
     """
     return feed.get("outlet") or feed["name"]
