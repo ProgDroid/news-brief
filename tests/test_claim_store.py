@@ -67,8 +67,12 @@ def test_a_live_index_supports_the_daily_load(store):
 def test_0007_rolls_back_and_reapplies(store):
     """No down migration is trusted until it has been run. The index must come
     BACK on rollback, not merely be dropped -- 0006 owns it, so leaving it
-    missing would corrupt the schema 0006 promises."""
-    db.run_migrations(store, direction="down", steps=1)
+    missing would corrupt the schema 0006 promises.
+
+    steps=2 to revert past 0008 too: `store` is migrated through whatever is
+    newest, and this test is specifically about 0007, not about the top of
+    the stack."""
+    db.run_migrations(store, direction="down", steps=2)
     store.commit()
     cols = store.execute(
         "SELECT 1 FROM information_schema.columns "

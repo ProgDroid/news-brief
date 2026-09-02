@@ -756,19 +756,24 @@ def test_0006_rolls_back_and_reapplies_against_the_real_directory(conn):
     should have been CREATE OR REPLACE. The last one shows only on the second
     up.
 
-    steps=2 rolls back 0007 (retired_on, no tables of its own) as well as
+    steps=3 rolls back 0008 (capture telemetry, no tables of its own that
+    reference the KB) and 0007 (retired_on, no tables of its own) as well as
     0006, since "down" with no steps reverts only the most recent migration
-    and 0007 now sits on top of 0006.
+    and 0008 now sits on top of 0007 which sits on top of 0006.
     """
     db.run_migrations(conn)
     conn.commit()
     assert KB_TABLES <= _tables(conn)
     assert "claims_freeze_claim_text" in _functions(conn)
 
-    reverted = db.run_migrations(conn, direction="down", steps=2)
+    reverted = db.run_migrations(conn, direction="down", steps=3)
     conn.commit()
 
-    assert reverted == ["0007_claim_retirement", "0006_knowledge_base"]
+    assert reverted == [
+        "0008_capture_telemetry",
+        "0007_claim_retirement",
+        "0006_knowledge_base",
+    ]
     assert not (KB_TABLES & _tables(conn)), "a KB table survived the rollback"
     assert "claims_freeze_claim_text" not in _functions(conn), (
         "DROP TABLE does not drop a function; the down migration must drop it"
@@ -779,7 +784,11 @@ def test_0006_rolls_back_and_reapplies_against_the_real_directory(conn):
 
     reapplied = db.run_migrations(conn)
     conn.commit()
-    assert reapplied == ["0006_knowledge_base", "0007_claim_retirement"]
+    assert reapplied == [
+        "0006_knowledge_base",
+        "0007_claim_retirement",
+        "0008_capture_telemetry",
+    ]
     assert KB_TABLES <= _tables(conn)
 
 
@@ -796,8 +805,9 @@ def test_the_rollback_assertion_can_actually_fail(conn, tmp_path, monkeypatch):
     and it leaves a window where an interrupt commits the migration without its
     function drop.
 
-    steps=2 reaches 0006's (stripped) down migration: with no steps, "down"
-    reverts only the most recent migration, and 0007 now sits on top of 0006.
+    steps=3 reaches 0006's (stripped) down migration: with no steps, "down"
+    reverts only the most recent migration, and 0008 now sits on top of 0007
+    which sits on top of 0006.
     """
     tmp = _copy_migrations(tmp_path)
     down = tmp / "0006_knowledge_base_down.sql"
@@ -813,7 +823,7 @@ def test_the_rollback_assertion_can_actually_fail(conn, tmp_path, monkeypatch):
 
     db.run_migrations(conn)
     conn.commit()
-    db.run_migrations(conn, direction="down", steps=2)
+    db.run_migrations(conn, direction="down", steps=3)
     conn.commit()
 
     assert "claims_freeze_claim_text" in _functions(conn), (
