@@ -388,7 +388,8 @@ news-brief/
 ├── newsbrief.log
 ├── debug/                   # Full batch payload dumps, written only on anomalous results (e.g. max_tokens truncation)
 ├── batch_state.json         # Pending batch ID + Telegram update offset
-├── feedback.json            # /focus, /mute, /note overrides
+├── feedback.json            # SUPERSEDED by the `preferences` table — drained on
+│                            # first boot and kept only as the rollback
 ├── theses.json              # /thesis annotations
 ├── briefs/brief-YYYY-MM-DD.md
 ├── weekly/week-YYYY-Www.md

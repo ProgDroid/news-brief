@@ -42,6 +42,7 @@ def test_up_creates_the_expected_tables(conn):
         "0001_runtime_foundation",
         "0002_job_runs_created_at",
         "0003_sources",
+        "0004_preferences",
     ]
     assert {
         "schema_migrations",
@@ -49,6 +50,7 @@ def test_up_creates_the_expected_tables(conn):
         "settings",
         "job_runs",
         "sources",
+        "preferences",
     } <= _tables(conn)
 
 

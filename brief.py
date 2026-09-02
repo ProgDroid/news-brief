@@ -132,7 +132,8 @@ MODAL_PROXY_SECRET = os.environ.get("MODAL_PROXY_SECRET", "").strip()
 MAX_TOKENS = 16384  # whole-turn budget; web-search loop + brief + signals JSON
 
 STATE_FILE = DATA_DIR / "batch_state.json"
-FEEDBACK_FILE = DATA_DIR / "feedback.json"
+# Overrides live in the `preferences` table now, reached through `config`; the
+# file survives only as the importer's input (config.LEGACY_FEEDBACK_FILE).
 BRIEFS_DIR = DATA_DIR / "briefs"
 WEEKLY_DIR = DATA_DIR / "weekly"
 
@@ -594,11 +595,22 @@ TOPICS = [
 
 # ── Feedback / memory ─────────────────────────────────────────────────────────
 def load_feedback() -> dict:
-    return _load_json_or(FEEDBACK_FILE, {"focus": [], "mute": [], "notes": []})
+    """The reader's overrides, as the dict every handler already manipulates.
+
+    Deliberately NOT degrade-on-failure, unlike `load_temp_sources`. A failed
+    source read costs the brief some inputs; a failed feedback read would hand
+    the daemon a dict full of empty lists, and the very next `/focus` would
+    `save_feedback` that dict straight over the reader's real overrides. Losing
+    inputs is recoverable, silently wiping what someone asked for is not, so
+    this one raises and lets the caller's alerting do its job.
+    """
+    fb = {"focus": [], "mute": [], "notes": []}
+    fb.update(config.preferences())
+    return fb
 
 
 def save_feedback(fb: dict):
-    _write_json_atomic(FEEDBACK_FILE, fb)
+    config.save_preferences(fb)
 
 
 def resolved_pins(fb: dict) -> list[str]:
@@ -3905,6 +3917,7 @@ if __name__ == "__main__":
                 config.ensure_seeded(_conn)
                 config.import_settings_from_env(_conn)
                 config.import_sources_from_file(_conn)
+                config.import_preferences_from_file(_conn)
         except Exception as e:
             log.exception("Operator seed failed")
             telegram_alert(f"Operator seed failed: {type(e).__name__}: {e}")

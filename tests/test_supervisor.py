@@ -12,6 +12,31 @@ import config
 import supervisor
 
 
+def _record_boot_steps(monkeypatch) -> list:
+    """Stub every `config` call `startup` makes, recording (name, conn) pairs.
+
+    One helper rather than a stub per test: `startup` has gained a config step
+    per phase-2 child, and each one broke these tests until it was stubbed
+    individually. A test that only cares about `seed_first_boot` should not need
+    editing again when the next importer lands — it should need editing only if
+    the list below is what it is asserting about.
+
+    Individual tests override an entry afterwards to make it raise.
+    """
+    calls: list = []
+    for name in (
+        ("ensure_seeded", "operator"),
+        ("import_settings_from_env", "settings"),
+        ("import_sources_from_file", "sources"),
+        ("import_preferences_from_file", "preferences"),
+    ):
+        attr, label = name
+        monkeypatch.setattr(
+            config, attr, lambda c, _l=label: calls.append((_l, c)) or 0
+        )
+    return calls
+
+
 def _fake(code: int = 0, out: str = "", sleep: float = 0.0):
     """A child command that prints, optionally sleeps, and exits with `code`."""
     script = f"import sys,time; print({out!r}); time.sleep({sleep}); sys.exit({code})"
@@ -491,23 +516,13 @@ def test_startup_seeds_the_first_boot(monkeypatch):
     green — and the first boot after that would run a second `collect` down the
     live trading path.
     """
-    calls = []
     conn = object()
-
+    calls = _record_boot_steps(monkeypatch)
     monkeypatch.setattr(
         supervisor, "reclaim_orphans", lambda c: calls.append("reclaim")
     )
     monkeypatch.setattr(
         supervisor, "seed_first_boot", lambda c: calls.append(("seed", c))
-    )
-    monkeypatch.setattr(
-        config, "ensure_seeded", lambda c: calls.append(("operator", c))
-    )
-    monkeypatch.setattr(
-        config, "import_settings_from_env", lambda c: calls.append(("settings", c))
-    )
-    monkeypatch.setattr(
-        config, "import_sources_from_file", lambda c: calls.append(("sources", c))
     )
 
     state = supervisor.startup(
@@ -527,8 +542,11 @@ def test_startup_seeds_the_first_boot(monkeypatch):
     assert calls.index("migrate") < calls.index(("operator", conn)), (
         "the operator seed writes to the table migrate creates"
     )
-    assert ("settings", conn) in calls, "startup must import settings on first boot"
-    assert ("sources", conn) in calls, "startup must import sources on first boot"
+    # Every first-boot importer is pinned the same way. They are the reason a
+    # cutover keeps the operator's existing configuration instead of coming up
+    # with an empty database that looks like a working one.
+    for step in ("settings", "sources", "preferences"):
+        assert (step, conn) in calls, f"startup must import {step} on first boot"
 
 
 def test_a_failed_seed_disables_jobs(monkeypatch):
@@ -541,11 +559,9 @@ def test_a_failed_seed_disables_jobs(monkeypatch):
     def boom(conn):
         raise RuntimeError("job_runs is gone")
 
+    _record_boot_steps(monkeypatch)
     monkeypatch.setattr(supervisor, "reclaim_orphans", lambda c: None)
     monkeypatch.setattr(supervisor, "seed_first_boot", boom)
-    monkeypatch.setattr(config, "ensure_seeded", lambda c: False)
-    monkeypatch.setattr(config, "import_settings_from_env", lambda c: [])
-    monkeypatch.setattr(config, "import_sources_from_file", lambda c: 0)
     monkeypatch.setattr(supervisor, "telegram_alert", lambda m: None)
 
     state = supervisor.startup(migrate=lambda c: None, connect=lambda: object())
@@ -565,11 +581,10 @@ def test_a_failed_operator_seed_disables_jobs(monkeypatch):
         raise RuntimeError("TELEGRAM_CHAT_ID is unset")
 
     alerts = []
+    _record_boot_steps(monkeypatch)
     monkeypatch.setattr(supervisor, "reclaim_orphans", lambda c: None)
     monkeypatch.setattr(supervisor, "seed_first_boot", lambda c: [])
     monkeypatch.setattr(config, "ensure_seeded", boom)
-    monkeypatch.setattr(config, "import_settings_from_env", lambda c: [])
-    monkeypatch.setattr(config, "import_sources_from_file", lambda c: 0)
     monkeypatch.setattr(supervisor, "telegram_alert", alerts.append)
 
     state = supervisor.startup(migrate=lambda c: None, connect=lambda: object())

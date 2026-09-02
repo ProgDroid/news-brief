@@ -136,7 +136,9 @@ def test_poison_message_does_not_jam_offset(monkeypatch, tmp_path):
     sent = _capture_sends(monkeypatch)
     monkeypatch.setattr(config, "chat_id", lambda: "123")
     monkeypatch.setattr(brief, "STATE_FILE", tmp_path / "state.json")
-    monkeypatch.setattr(brief, "FEEDBACK_FILE", tmp_path / "feedback.json")
+    # Overrides are rows now; these two tests are about the offset, so the
+    # preference write is stubbed rather than isolated to a file.
+    monkeypatch.setattr(config, "save_preferences", lambda fb: None)
     # fb without a "focus" key makes /focus raise KeyError — the poison
     updates = [
         {"update_id": 7, "message": {"text": "/focus boom", "chat": {"id": 123}}},
@@ -157,7 +159,9 @@ def test_offset_saved_without_clobbering_other_state(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "chat_id", lambda: "123")
     state_file = tmp_path / "state.json"
     monkeypatch.setattr(brief, "STATE_FILE", state_file)
-    monkeypatch.setattr(brief, "FEEDBACK_FILE", tmp_path / "feedback.json")
+    # Overrides are rows now; these two tests are about the offset, so the
+    # preference write is stubbed rather than isolated to a file.
+    monkeypatch.setattr(config, "save_preferences", lambda fb: None)
     state_file.write_text(json.dumps({"batch_id": "batch_abc", "tg_offset": 5}))
     updates = [{"update_id": 5, "message": {"text": "/help", "chat": {"id": 123}}}]
     offset = (brief.load_state() or {}).get("tg_offset", 0)

@@ -75,10 +75,12 @@ _SEED_LOCK = "seed_users"
 # and a `docker compose run --rm` can start in the same second.
 _SETTINGS_LOCK = "import_settings"
 _SOURCES_LOCK = "import_sources"
+_PREFERENCES_LOCK = "import_preferences"
 
 # The file the source importer drains, once. It is the pre-phase-2 store and is
 # deliberately left on disk after the import: keeping it IS the rollback.
 LEGACY_SOURCES_FILE = common.DATA_DIR / "sources.json"
+LEGACY_FEEDBACK_FILE = common.DATA_DIR / "feedback.json"
 
 
 def invalidate() -> None:
@@ -251,6 +253,136 @@ def import_settings_from_env(conn) -> list[str]:
             f"Imported {len(imported)} settings from the environment: "
             f"{', '.join(sorted(imported))}"
         )
+    return imported
+
+
+# ── Preferences ──────────────────────────────────────────────────────────────
+
+# The feedback dict's keys, which are also the stored `kind` values.
+PREFERENCE_KINDS = ("focus", "mute", "notes", "pin")
+
+
+def _read_preferences() -> dict[str, list[str]]:
+    """Rebuild the feedback dict from rows.
+
+    A NULL value is the explicit-empty marker: it creates the key with an empty
+    list, which is not the same as the key being absent. `brief.resolved_pins`
+    reads exactly that difference — absent pins mean DEFAULT_PINS, empty pins
+    mean none — so a reader who has muted every pin must not silently get the
+    defaults back on the next brief.
+    """
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT kind, value FROM preferences WHERE user_id = %s "
+            "ORDER BY kind, position",
+            (active_user()["id"],),
+        ).fetchall()
+    out: dict[str, list[str]] = {}
+    for kind, value in rows:
+        entries = out.setdefault(kind, [])
+        if value is not None:
+            entries.append(value)
+    return out
+
+
+def preferences() -> dict[str, list[str]]:
+    """The active user's overrides, cached like everything else."""
+    return _cached("preferences", _read_preferences)
+
+
+def save_preferences(fb: dict) -> None:
+    """Replace the stored overrides with `fb`, in one transaction.
+
+    A whole-set replace rather than a diff, because the caller hands us the
+    whole dict and the handlers have always worked that way. It is safe here in
+    a way it would not be for batch_state: every writer is the commands daemon,
+    which is a single resident process, so there is no second writer whose keys
+    a replace could drop.
+
+    Unknown keys are ignored rather than stored. The dict also carries
+    transient wizard state in some paths, and a schema that accepted anything
+    would turn a passing bug into persisted rows.
+    """
+    user_id = active_user()["id"]
+    with db.connect() as conn:
+        with conn.transaction():
+            conn.execute("DELETE FROM preferences WHERE user_id = %s", (user_id,))
+            for kind in PREFERENCE_KINDS:
+                if kind not in fb:
+                    continue  # absent stays absent — see _read_preferences
+                values = [str(v) for v in (fb.get(kind) or [])]
+                if not values:
+                    conn.execute(
+                        "INSERT INTO preferences (user_id, kind, position, value) "
+                        "VALUES (%s, %s, 0, NULL)",
+                        (user_id, kind),
+                    )
+                    continue
+                for position, value in enumerate(values):
+                    conn.execute(
+                        "INSERT INTO preferences (user_id, kind, position, value) "
+                        "VALUES (%s, %s, %s, %s)",
+                        (user_id, kind, position, value),
+                    )
+        conn.commit()
+    invalidate()
+
+
+def import_preferences_from_file(conn, path=None) -> int:
+    """Copy feedback.json into the table, once, while it is empty.
+
+    Returns the number of values imported. Same emptiness guard, same
+    leave-the-file-behind rollback story as the other importers.
+    """
+    path = path or LEGACY_FEEDBACK_FILE
+    with db.advisory_lock(conn, _PREFERENCES_LOCK) as got:
+        if not got:
+            return 0
+        if conn.execute("SELECT 1 FROM preferences LIMIT 1").fetchone():
+            return 0
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return 0
+        except (OSError, json.JSONDecodeError):
+            log.exception(f"Could not read {path}; importing no preferences")
+            return 0
+        if not isinstance(raw, dict):
+            log.warning(f"{path} is not an object; importing no preferences")
+            return 0
+        row = conn.execute(
+            "SELECT id FROM users WHERE active ORDER BY id LIMIT 1"
+        ).fetchone()
+        if row is None:
+            log.warning("No active user; importing no preferences")
+            return 0
+        imported = 0
+        for kind in PREFERENCE_KINDS:
+            if kind not in raw:
+                continue
+            values = raw.get(kind)
+            if not isinstance(values, list):
+                log.warning(f"{path}: {kind} is not a list; skipped")
+                continue
+            values = [str(v) for v in values]
+            if not values:
+                conn.execute(
+                    "INSERT INTO preferences (user_id, kind, position, value) "
+                    "VALUES (%s, %s, 0, NULL)",
+                    (row[0], kind),
+                )
+                continue
+            for position, value in enumerate(values):
+                conn.execute(
+                    "INSERT INTO preferences (user_id, kind, position, value) "
+                    "VALUES (%s, %s, %s, %s)",
+                    (row[0], kind, position, value),
+                )
+                imported += 1
+        conn.commit()
+    invalidate()
+    if imported:
+        log.info(f"Imported {imported} preference values from {path}")
     return imported
 
 

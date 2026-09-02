@@ -416,3 +416,116 @@ def test_a_missing_or_malformed_file_imports_nothing_and_does_not_raise(
     notalist = tmp_path / "notalist.json"
     notalist.write_text('{"not": "a list"}', encoding="utf-8")
     assert config.import_sources_from_file(seeded, notalist) == 0
+
+
+# ── Preferences ──────────────────────────────────────────────────────────────
+
+
+def test_preferences_round_trip_in_order(seeded):
+    """Order is part of the data: the summary and the prompt both render these
+    lists, and a set would silently reorder them under the reader."""
+    config.save_preferences(
+        {"focus": ["ceasefire", "yen"], "mute": ["korea"], "notes": ["watch JPY"]}
+    )
+    got = config.preferences()
+    assert got["focus"] == ["ceasefire", "yen"]
+    assert got["mute"] == ["korea"]
+    assert got["notes"] == ["watch JPY"]
+
+
+def test_an_absent_pin_key_stays_absent(seeded):
+    """The tri-state that /reset depends on, half one. No pin rows at all means
+    the reader has never customised pins, and brief.resolved_pins turns that
+    into DEFAULT_PINS."""
+    config.save_preferences({"focus": [], "mute": [], "notes": []})
+    assert "pin" not in config.preferences()
+
+
+def test_an_explicitly_empty_pin_set_survives_the_round_trip(seeded):
+    """Half two, and the one a naive column loses. "Pin nothing" must not come
+    back as "never customised", or the next brief silently restores the five
+    default pins the reader just removed."""
+    config.save_preferences({"focus": [], "mute": [], "notes": [], "pin": []})
+    got = config.preferences()
+    assert "pin" in got
+    assert got["pin"] == []
+
+
+def test_saving_replaces_rather_than_accumulates(seeded):
+    config.save_preferences({"focus": ["a", "b"], "mute": [], "notes": []})
+    config.save_preferences({"focus": ["c"], "mute": [], "notes": []})
+    assert config.preferences()["focus"] == ["c"]
+
+
+def test_unknown_keys_are_not_stored(seeded):
+    """The feedback dict carries transient wizard state on some paths. A store
+    that accepted anything would turn a passing bug into persisted rows."""
+    config.save_preferences({"focus": ["a"], "_wizard_step": ["3"]})
+    assert "_wizard_step" not in config.preferences()
+
+
+def test_a_write_is_visible_immediately(seeded):
+    assert config.preferences() == {}
+    config.save_preferences({"focus": ["a"], "mute": [], "notes": []})
+    assert config.preferences()["focus"] == ["a"]
+
+
+def test_preferences_belong_to_their_user(seeded):
+    config.save_preferences({"focus": ["mine"], "mute": [], "notes": []})
+    other = seeded.execute(
+        "INSERT INTO users (display_name, telegram_chat_id) "
+        "VALUES ('other', '999') RETURNING id"
+    ).fetchone()[0]
+    seeded.execute(
+        "INSERT INTO preferences (user_id, kind, position, value) "
+        "VALUES (%s, 'focus', 0, 'theirs')",
+        (other,),
+    )
+    seeded.commit()
+    config.invalidate()
+    assert config.preferences()["focus"] == ["mine"]
+
+
+def test_the_empty_marker_cannot_be_duplicated(seeded):
+    """A second marker would be a duplicate of nothing; the partial unique index
+    is what keeps the sentinel meaning one thing."""
+    user_id = config.active_user()["id"]
+    seeded.execute(
+        "INSERT INTO preferences (user_id, kind, position, value) "
+        "VALUES (%s, 'pin', 0, NULL)",
+        (user_id,),
+    )
+    with pytest.raises(Exception):
+        seeded.execute(
+            "INSERT INTO preferences (user_id, kind, position, value) "
+            "VALUES (%s, 'pin', 1, NULL)",
+            (user_id,),
+        )
+    seeded.rollback()
+
+
+def test_the_preferences_importer_drains_the_file_once(seeded, tmp_path):
+    path = tmp_path / "feedback.json"
+    path.write_text(
+        '{"focus": ["ceasefire"], "mute": ["korea", "japan"], "notes": [],'
+        ' "pin": ["china"]}',
+        encoding="utf-8",
+    )
+    assert config.import_preferences_from_file(seeded, path) == 4
+    assert config.import_preferences_from_file(seeded, path) == 0
+    got = config.preferences()
+    assert got["mute"] == ["korea", "japan"]
+    assert got["notes"] == []  # present and empty, not absent
+    assert got["pin"] == ["china"]
+
+
+def test_the_preferences_importer_tolerates_a_bad_file(seeded, tmp_path):
+    assert config.import_preferences_from_file(seeded, tmp_path / "absent.json") == 0
+
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json", encoding="utf-8")
+    assert config.import_preferences_from_file(seeded, bad) == 0
+
+    wrong = tmp_path / "wrong.json"
+    wrong.write_text('{"focus": "not a list"}', encoding="utf-8")
+    assert config.import_preferences_from_file(seeded, wrong) == 0
