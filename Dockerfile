@@ -36,7 +36,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # image, however present it is in the repo. tests/test_packaging.py walks the
 # import graph and fails when one is missing, because nothing else can -- pytest
 # and CI both run against a full checkout, where the absence is invisible.
-COPY common.py config.py trading.py polygram_live.py validation.py brief.py brief_memory.py claim_store.py claim_verify.py retention.py db.py scheduler.py supervisor.py backup.py .
+COPY common.py config.py trading.py polygram_live.py validation.py brief.py capture.py brief_memory.py claim_store.py claim_verify.py retention.py db.py scheduler.py supervisor.py backup.py .
 COPY migrations/ ./migrations/
 COPY enrichment/ ./enrichment/
 
