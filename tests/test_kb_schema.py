@@ -305,3 +305,110 @@ def test_observations_carry_provider_not_extractor_model(kb):
     }
     assert "provider" in cols
     assert "extractor_model" not in cols
+
+
+def _claim(conn, text="a claim", status="standing", resolved_on=None, **kw):
+    cols = ["claim", "status", "first_seen", "resolved_on"]
+    vals = [text, status, "2026-09-01", resolved_on]
+    for k, v in kw.items():
+        cols.append(k)
+        vals.append(v)
+    placeholders = ", ".join(["%s"] * len(cols))
+    return conn.execute(
+        f"INSERT INTO claims ({', '.join(cols)}) VALUES ({placeholders}) RETURNING id",
+        vals,
+    ).fetchone()[0]
+
+
+def test_status_admits_all_six_states(kb):
+    """Spec 2.1: one lifecycle, one column. resolved_outcome does not exist --
+    two enums with 'broken' in both permitted status='standing' alongside
+    resolved_outcome='broken', and left rule 4's 'stale' homeless."""
+    for status in (
+        "standing",
+        "challenged",
+        "broken",
+        "confirmed",
+        "expired",
+        "withdrawn",
+    ):
+        resolved = None if status == "standing" else "2026-09-02"
+        extra = {"broken_by_note": "n"} if status == "broken" else {}
+        _claim(kb, f"c {status}", status, resolved, **extra)
+    assert kb.execute("SELECT count(*) FROM claims").fetchone()[0] == 6
+
+
+def test_status_rejects_stale_which_is_spelled_expired_here(kb):
+    with rejects(kb, psycopg.errors.CheckViolation):
+        _claim(kb, "c", "stale", "2026-09-02")
+
+
+def test_a_non_standing_claim_must_record_when_it_left_standing(kb):
+    with rejects(kb, psycopg.errors.CheckViolation):
+        _claim(kb, "c", "expired", None)
+
+
+def test_horizon_elapsed_requires_a_resolution(kb):
+    """Elapsed days mean nothing without the resolution they are measured to."""
+    with rejects(kb, psycopg.errors.CheckViolation):
+        _claim(kb, "c", "standing", None, horizon_elapsed=2)
+
+
+def test_a_broken_claim_must_say_what_broke_it(kb):
+    with rejects(kb, psycopg.errors.CheckViolation):
+        _claim(kb, "c", "broken", "2026-09-02")
+
+
+def test_a_broken_claim_accepts_either_a_note_or_an_event(kb):
+    """The incumbent writes free text ('unmarked rewrite: ...'); rule 1 wants
+    the contradicting event. A single BIGINT FK could not hold the existing
+    values, which is why there are two columns."""
+    event_id = _event(kb)
+    _claim(kb, "c1", "broken", "2026-09-02", broken_by_note="unmarked rewrite: x")
+    _claim(kb, "c2", "broken", "2026-09-02", broken_by_event_id=event_id)
+    assert kb.execute("SELECT count(*) FROM claims").fetchone()[0] == 2
+
+
+def test_horizon_days_rejects_zero_negatives_and_over_ten_years(kb):
+    """Matches the 1..3650 range _coerce_horizon_days already enforces
+    (_MAX_HORIZON_DAYS). Without it, resolution_date lands on or before
+    first_seen and rule 4 fires the moment the claim is created.
+
+    Three assertions in one test: this is exactly why `rejects` uses a
+    savepoint. A bare pytest.raises would leave the transaction aborted and the
+    second iteration would raise InFailedSqlTransaction instead.
+    """
+    for bad in (0, -1, 3651):
+        with rejects(kb, psycopg.errors.CheckViolation):
+            _claim(kb, f"c{bad}", horizon_days=bad)
+
+
+def test_horizon_days_null_is_allowed_and_means_unknown(kb):
+    """Spec 2.2: absence is not a short horizon. Never defaulted -- a default
+    would manufacture calibration data."""
+    claim_id = _claim(kb, "c", horizon_days=None)
+    assert (
+        kb.execute(
+            "SELECT horizon_days FROM claims WHERE id = %s", (claim_id,)
+        ).fetchone()[0]
+        is None
+    )
+
+
+def test_claims_without_a_ledger_ancestor_coexist(kb):
+    """ledger_id is UNIQUE but nullable, and NULLs are DISTINCT by default --
+    deliberately, so KB-native claims need no synthetic id."""
+    _claim(kb, "c1")
+    _claim(kb, "c2")
+    assert (
+        kb.execute("SELECT count(*) FROM claims WHERE ledger_id IS NULL").fetchone()[0]
+        == 2
+    )
+
+
+def test_a_ledger_id_cannot_be_reused(kb):
+    """merge_ledger treats an echoed id as authoritative, so two rows claiming
+    c-0001 would make the model's citation ambiguous."""
+    _claim(kb, "c1", ledger_id="c-0001")
+    with rejects(kb, psycopg.errors.UniqueViolation):
+        _claim(kb, "c2", ledger_id="c-0001")

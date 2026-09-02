@@ -149,3 +149,69 @@ CREATE TABLE observations (
     CHECK ((metric = 'return') = (return_window IS NOT NULL))
 );
 CREATE INDEX observations_entity_observed ON observations (entity_id, observed_at DESC);
+
+CREATE TABLE claims (
+    id                 BIGSERIAL PRIMARY KEY,
+    -- Preserves the JSON ledger's string identity, format 'c-0001' per
+    -- merge_ledger and the r"c-(\d+)$" regex in _max_id_num. merge_ledger
+    -- treats an echoed id as authoritative, so a BIGSERIAL alone would
+    -- silently renumber every claim the model can cite.
+    ledger_id          TEXT    NULL,
+    -- Named `claim`, not `text`: that is the ledger's key. Spec 5.1.
+    claim              TEXT    NOT NULL,
+    topic              TEXT    NULL,
+    -- ONE lifecycle in ONE column.
+    --
+    -- WARNING for bqa.4: brief_memory._VALID_STATUS knows only the first
+    -- three. Until it is widened, confirmed/expired/withdrawn coerce back to
+    -- 'standing', the TTL deletes them after 7 days, and select_working_set
+    -- renders them as live fact. See news-brief-bqa.9 and spec section 6.
+    status             TEXT    NOT NULL DEFAULT 'standing'
+                       CHECK (status IN ('standing', 'challenged', 'broken',
+                                         'confirmed', 'expired', 'withdrawn')),
+    origin             TEXT    NOT NULL DEFAULT 'extracted'
+                       CHECK (origin IN ('extracted', 'authored')),
+    -- Measured DEGENERATE (high 25/25) and shipping anyway, because it is
+    -- load-bearing: _ttl_bonus grants 'high' extra retention days and
+    -- _severity_rank orders the working-set prefix. Owes a rubric before any
+    -- NEW consumer reads it (news-brief-bqa.8).
+    severity           TEXT    NOT NULL DEFAULT 'normal'
+                       CHECK (severity IN ('low', 'normal', 'high')),
+    -- 1..3650 matches _MAX_HORIZON_DAYS. NULL means the horizon could not be
+    -- determined and the claim is EXEMPT from rule 4 -- never defaulted.
+    horizon_days       INTEGER NULL CHECK (horizon_days IS NULL
+                                           OR horizon_days BETWEEN 1 AND 3650),
+    resolution_date    DATE    NULL,
+    horizon_elapsed    INTEGER NULL,
+    falsifier          TEXT    NULL,
+    falsifier_kind     TEXT    NULL
+                       CHECK (falsifier_kind IS NULL OR falsifier_kind IN
+                              ('event_triggered', 'review_required')),
+    first_seen         DATE    NOT NULL,
+    last_reaffirmed    DATE    NULL,
+    restate_count      INTEGER NOT NULL DEFAULT 0,
+    source_count       INTEGER NULL,
+    driver             TEXT    NULL,
+    -- The date the claim LEFT 'standing', in either direction. Named
+    -- resolved_on rather than the ledger's broke_on because three of the six
+    -- statuses are not breaks; spec 5.1 maps the key across.
+    resolved_on        DATE    NULL,
+    -- RESTRICT, not CASCADE: deleting the contradicting event must never
+    -- silently un-break a claim.
+    broken_by_note     TEXT    NULL,
+    broken_by_event_id BIGINT  NULL REFERENCES events(id) ON DELETE RESTRICT,
+    extractor_model    TEXT    NULL,
+    prompt_version     INTEGER NULL,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK (status = 'standing' OR resolved_on IS NOT NULL),
+    CHECK (horizon_elapsed IS NULL OR resolved_on IS NOT NULL),
+    CHECK (status <> 'broken'
+           OR num_nonnulls(broken_by_note, broken_by_event_id) >= 1)
+);
+CREATE UNIQUE INDEX claims_ledger_id ON claims (ledger_id);
+-- Rule 4's predicate exactly: a claim that expires LEAVES this index. An
+-- earlier draft indexed WHERE status = 'standing' while rule 4 wrote a
+-- different column, so an expired claim never left and rule 4 re-fired on it
+-- every morning for the life of the row.
+CREATE INDEX claims_open_resolution ON claims (resolution_date)
+    WHERE status IN ('standing', 'challenged');
