@@ -45,6 +45,7 @@ def test_up_creates_the_expected_tables(conn):
         "0004_preferences",
         "0005_runtime_state",
         "0006_knowledge_base",
+        "0007_claim_retirement",
     ]
     assert {
         "schema_migrations",
