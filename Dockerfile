@@ -32,7 +32,7 @@ RUN . /etc/os-release \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY common.py trading.py polygram_live.py validation.py brief.py brief_memory.py claim_verify.py retention.py db.py scheduler.py supervisor.py backup.py .
+COPY common.py trading.py polygram_live.py validation.py brief.py brief_memory.py claim_store.py claim_verify.py retention.py db.py scheduler.py supervisor.py backup.py .
 COPY migrations/ ./migrations/
 COPY enrichment/ ./enrichment/
 
