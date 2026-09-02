@@ -9,7 +9,14 @@ together -- because the reverse edge would be a cycle.
 Spec: docs/superpowers/specs/2026-09-02-claim-ledger-cutover-design.md
 """
 
-from common import log
+import json
+from pathlib import Path
+
+import db
+from common import DATA_DIR, log
+
+LEGACY_LEDGER_FILE = DATA_DIR / "brief_memory.json"
+_IMPORT_LOCK = "claim_ledger_import"
 
 # Ledger key -> claims column. Three renames (DDL spec 5.1); `kind` is absent on
 # purpose, being an admission guard that is never stored.
@@ -169,3 +176,90 @@ def save_ledger(conn, before: dict, after: dict, today: str) -> tuple[int, int]:
             log.exception(f"Claim store: could not retire {cid!r}")
     conn.commit()
     return written, retired
+
+
+def import_legacy(conn, path: Path | None = None) -> int:
+    """Copy brief_memory.json into `claims`, once, while the table is empty.
+
+    Same emptiness guard as the four sibling importers and for the same reason:
+    it makes the import idempotent, so rollback means keeping the FILE rather
+    than restoring a backup. The file is never written to and never deleted.
+
+    The guard reads the TABLE, not the file: this ledger is a dict wrapping a
+    claims list, so an empty list must not be read as "already imported".
+
+    A malformed file imports nothing and logs -- it runs at boot and must not be
+    able to stop one. Rows are validated by the schema and skipped individually,
+    and the counts are compared afterwards so a silent per-row rejection shows
+    up as a number rather than as nothing.
+    """
+    path = path or LEGACY_LEDGER_FILE
+    with db.advisory_lock(conn, _IMPORT_LOCK) as got:
+        if not got:
+            return 0
+        if conn.execute("SELECT 1 FROM claims LIMIT 1").fetchone():
+            return 0
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return 0
+        except (OSError, json.JSONDecodeError):
+            log.exception(f"Could not read {path}; importing no claims")
+            return 0
+        claims = raw.get("claims") if isinstance(raw, dict) else None
+        if not isinstance(claims, list):
+            log.warning(f"{path} has no claims list; importing no claims")
+            return 0
+
+        # Pre-register before writing: what the file says should land.
+        expected = [c for c in claims if isinstance(c, dict) and c.get("id")]
+        for c in claims:
+            if isinstance(c, dict) and not c.get("id"):
+                # merge_ledger re-appends an id-less prior row, so one can
+                # reach the file. It has no ledger_id to upsert against and
+                # would otherwise vanish silently between two counts.
+                log.warning(
+                    "Claim import: skipped a row with no id: "
+                    f"{str(c.get('claim'))[:80]!r}"
+                )
+        coverage = {}
+        for c in expected:
+            for key in c:
+                coverage[key] = coverage.get(key, 0) + 1
+        log.info(
+            f"Claim import: {len(claims)} entries, {len(expected)} with an id; "
+            f"key coverage {dict(sorted(coverage.items()))}"
+        )
+
+        imported = 0
+        for entry in expected:
+            row = dict(entry)
+            # load_ledger treats a NULL last_reaffirmed as a hard error.
+            row.setdefault("last_reaffirmed", row.get("first_seen"))
+            status = row.get("status") or "standing"
+            if status != "standing" and not row.get("broke_on"):
+                # CHECK (status = 'standing' OR resolved_on IS NOT NULL). Rows
+                # predating jx9.x's broke_on stamping would be rejected, and a
+                # per-row skip is silent.
+                row["broke_on"] = row["last_reaffirmed"]
+                log.warning(
+                    f"Claim import: {row['id']} is {status} with no broke_on; "
+                    f"approximating resolved_on as {row['broke_on']}"
+                )
+            try:
+                with conn.transaction():
+                    _write_claim(conn, row)
+                imported += 1
+            except Exception:
+                log.exception(f"Skipped an unimportable claim: {entry.get('id')!r}")
+        conn.commit()
+
+    landed = conn.execute("SELECT count(*) FROM claims").fetchone()[0]
+    if landed != len(expected):
+        log.error(
+            f"Claim import variance: expected {len(expected)} rows, {landed} landed. "
+            "The difference was rejected individually -- see the skip lines above."
+        )
+    if imported:
+        log.info(f"Imported {imported} claims from {path}")
+    return imported

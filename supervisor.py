@@ -21,6 +21,7 @@ import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
+import claim_store
 import config
 import db
 import scheduler
@@ -400,6 +401,7 @@ def startup(*, migrate=None, connect=None) -> StartupState:
         config.import_sources_from_file(conn)
         config.import_preferences_from_file(conn)
         config.import_state_from_file(conn)
+        claim_store.import_legacy(conn)
         try:
             reclaim_orphans(conn)
         except Exception:

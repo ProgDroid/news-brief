@@ -4,6 +4,8 @@ DB-gated for the same reason tests/test_kb_schema.py is: a skip is not a pass,
 and every assertion here is about what Postgres actually does.
 """
 
+import json
+
 import pytest
 
 import brief_memory
@@ -330,3 +332,143 @@ def test_one_rejected_row_does_not_cost_the_others(store):
     )
     assert written == 1
     assert [c["id"] for c in claim_store.load_ledger(store)["claims"]] == ["c-0001"]
+
+
+def _write_ledger(tmp_path, claims):
+    p = tmp_path / "brief_memory.json"
+    p.write_text(json.dumps({"version": 1, "claims": claims}), encoding="utf-8")
+    return p
+
+
+def test_import_accepts_the_eight_key_shape_the_real_ledger_has(store, tmp_path):
+    """Measured against from-server/brief_memory.json: 25 rows, and `status`,
+    `origin`, `driver`, `horizon_days`, `extractor_model` and `prompt_version`
+    absent on ALL of them. The sibling importers' entry["name"] shape would
+    fail on every row."""
+    p = _write_ledger(
+        tmp_path,
+        [
+            {
+                "id": "c-0001",
+                "claim": "a fact",
+                "topic": "x",
+                "first_seen": "2026-06-01",
+                "last_reaffirmed": "2026-06-24",
+                "restate_count": 1,
+                "source_count": 2,
+                "severity": "normal",
+            }
+        ],
+    )
+    assert claim_store.import_legacy(store, p) == 1
+    claim = claim_store.load_ledger(store)["claims"][0]
+    assert claim["status"] == "standing"
+    assert claim["origin"] == "extracted"
+    assert "extractor_model" not in claim
+
+
+def test_import_is_idempotent_because_it_guards_on_the_table(store, tmp_path):
+    p = _write_ledger(
+        tmp_path,
+        [
+            {
+                "id": "c-0001",
+                "claim": "a fact",
+                "first_seen": "2026-06-01",
+                "last_reaffirmed": "2026-06-24",
+            }
+        ],
+    )
+    assert claim_store.import_legacy(store, p) == 1
+    assert claim_store.import_legacy(store, p) == 0
+
+
+def test_an_empty_claims_list_is_not_mistaken_for_already_imported(store, tmp_path):
+    """The guard reads the TABLE, not the file: the ledger is a dict with a
+    claims list, not a bare list, so `{"claims": []}` must import nothing and
+    still leave the table importable later."""
+    assert claim_store.import_legacy(store, _write_ledger(tmp_path, [])) == 0
+    p = _write_ledger(
+        tmp_path,
+        [
+            {
+                "id": "c-0001",
+                "claim": "a fact",
+                "first_seen": "2026-06-01",
+                "last_reaffirmed": "2026-06-24",
+            }
+        ],
+    )
+    assert claim_store.import_legacy(store, p) == 1
+
+
+def test_a_malformed_file_imports_nothing_and_does_not_raise(store, tmp_path):
+    """It runs at boot. It must not be able to stop one."""
+    p = tmp_path / "brief_memory.json"
+    p.write_text("{not json", encoding="utf-8")
+    assert claim_store.import_legacy(store, p) == 0
+
+
+def test_a_missing_file_imports_nothing(store, tmp_path):
+    assert claim_store.import_legacy(store, tmp_path / "nope.json") == 0
+
+
+def test_a_non_standing_row_without_broke_on_gets_an_approximate_date(store, tmp_path):
+    """CHECK (status = 'standing' OR resolved_on IS NOT NULL) (0006:209) would
+    reject it, and a per-row skip is silent. _apply_status only began stamping
+    broke_on when jx9.x shipped, so such rows can exist. An approximate date
+    that is logged beats an invented one, and beats a dropped row."""
+    p = _write_ledger(
+        tmp_path,
+        [
+            {
+                "id": "c-0001",
+                "claim": "a fact",
+                "first_seen": "2026-06-01",
+                "last_reaffirmed": "2026-06-24",
+                "status": "broken",
+                "broken_by": "a reversal",
+            }
+        ],
+    )
+    assert claim_store.import_legacy(store, p) == 1
+    assert claim_store.load_ledger(store)["claims"][0]["broke_on"] == "2026-06-24"
+
+
+def test_a_row_without_an_id_is_rejected_loudly(store, tmp_path):
+    """merge_ledger re-appends an id-less prior row (it is excluded from by_id
+    but caught by the trailing loop), so one can exist in the file. It has no
+    ledger_id to upsert against and would vanish silently in the diff."""
+    p = _write_ledger(
+        tmp_path,
+        [
+            {
+                "claim": "no id",
+                "first_seen": "2026-06-01",
+                "last_reaffirmed": "2026-06-24",
+            },
+            {
+                "id": "c-0002",
+                "claim": "fine",
+                "first_seen": "2026-06-01",
+                "last_reaffirmed": "2026-06-24",
+            },
+        ],
+    )
+    assert claim_store.import_legacy(store, p) == 1
+    assert [c["id"] for c in claim_store.load_ledger(store)["claims"]] == ["c-0002"]
+
+
+def test_import_defaults_a_missing_last_reaffirmed_to_first_seen(store, tmp_path):
+    """load_ledger treats a NULL last_reaffirmed as a hard error, so the import
+    must never create one."""
+    p = _write_ledger(
+        tmp_path,
+        [
+            {"id": "c-0001", "claim": "a fact", "first_seen": "2026-06-01"},
+        ],
+    )
+    assert claim_store.import_legacy(store, p) == 1
+    assert (
+        claim_store.load_ledger(store)["claims"][0]["last_reaffirmed"] == "2026-06-01"
+    )

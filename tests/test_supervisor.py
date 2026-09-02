@@ -8,12 +8,14 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 
+import claim_store
 import config
 import supervisor
 
 
 def _record_boot_steps(monkeypatch) -> list:
-    """Stub every `config` call `startup` makes, recording (name, conn) pairs.
+    """Stub every `config` (and `claim_store`) call `startup` makes, recording
+    (name, conn) pairs.
 
     One helper rather than a stub per test: `startup` has gained a config step
     per phase-2 child, and each one broke these tests until it was stubbed
@@ -35,6 +37,9 @@ def _record_boot_steps(monkeypatch) -> list:
         monkeypatch.setattr(
             config, attr, lambda c, _l=label: calls.append((_l, c)) or 0
         )
+    monkeypatch.setattr(
+        claim_store, "import_legacy", lambda c: calls.append(("claims", c)) or 0
+    )
     return calls
 
 
@@ -546,7 +551,7 @@ def test_startup_seeds_the_first_boot(monkeypatch):
     # Every first-boot importer is pinned the same way. They are the reason a
     # cutover keeps the operator's existing configuration instead of coming up
     # with an empty database that looks like a working one.
-    for step in ("settings", "sources", "preferences", "state"):
+    for step in ("settings", "sources", "preferences", "state", "claims"):
         assert (step, conn) in calls, f"startup must import {step} on first boot"
 
 
