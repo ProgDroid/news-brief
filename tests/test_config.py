@@ -14,6 +14,7 @@ database.
 
 import pytest
 
+import brief
 import common
 import config
 import db
@@ -529,3 +530,110 @@ def test_the_preferences_importer_tolerates_a_bad_file(seeded, tmp_path):
     wrong = tmp_path / "wrong.json"
     wrong.write_text('{"focus": "not a list"}', encoding="utf-8")
     assert config.import_preferences_from_file(seeded, wrong) == 0
+
+
+# ── Runtime state ────────────────────────────────────────────────────────────
+
+
+def test_state_round_trips_types_not_just_strings(conn):
+    """`tg_offset` is incremented as an int and `date` compared as a string. A
+    column that stringified everything would make `offset + 1` a concatenation
+    and the resume-from-offset arithmetic silently wrong."""
+    config.set_runtime_state({"tg_offset": 42, "date": "2026-09-02", "ok": True})
+    got = config.runtime_state()
+    assert got["tg_offset"] == 42 and isinstance(got["tg_offset"], int)
+    assert got["date"] == "2026-09-02"
+    assert got["ok"] is True
+
+
+def test_a_write_never_touches_a_key_it_was_not_given(conn):
+    """The property the file lock existed to provide, now structural.
+
+    submit writes batch_id; the commands daemon writes tg_offset. With a
+    whole-document rewrite either could drop the other's key, and the lock only
+    narrowed the window. A per-key upsert has no window: writers touching
+    different keys never interact.
+    """
+    config.set_runtime_state({"batch_id": "batch_abc", "submitted_at": "t0"})
+    config.set_runtime_state({"tg_offset": 7})
+
+    got = config.runtime_state()
+    assert got["batch_id"] == "batch_abc"
+    assert got["submitted_at"] == "t0"
+    assert got["tg_offset"] == 7
+
+
+def test_writing_the_same_key_replaces_it(conn):
+    config.set_runtime_state({"tg_offset": 1})
+    config.set_runtime_state({"tg_offset": 2})
+    assert config.runtime_state()["tg_offset"] == 2
+
+
+def test_clearing_the_batch_leaves_the_offset_alone(conn):
+    """After a collect the batch keys go, but the daemon's offset must not — it
+    would re-handle every command Telegram still has queued."""
+    config.set_runtime_state(
+        {
+            "batch_id": "b",
+            "submitted_at": "t",
+            "date": "d",
+            "weekly_batch_id": "w",
+            "tg_offset": 9,
+            "cmd_hash": "h",
+        }
+    )
+    config.clear_runtime_state(brief.BATCH_STATE_KEYS)
+
+    assert config.runtime_state() == {"tg_offset": 9, "cmd_hash": "h"}
+
+
+def test_clearing_an_absent_key_is_not_an_error(conn):
+    config.clear_runtime_state(["never_set"])
+    assert config.runtime_state() == {}
+
+
+def test_state_is_never_cached(conn):
+    """Every other reader in this module caches; this one must not. A stale
+    batch_id submits a second batch for a day that already has one."""
+    config.set_runtime_state({"batch_id": "first"})
+    assert config.runtime_state()["batch_id"] == "first"
+
+    conn.execute("UPDATE runtime_state SET value = '\"second\"' WHERE key = 'batch_id'")
+    conn.commit()
+
+    assert config.runtime_state()["batch_id"] == "second", (
+        "no invalidate() was called — a cache here would have served 'first'"
+    )
+
+
+def test_the_state_importer_drains_the_file_once(conn, tmp_path):
+    path = tmp_path / "batch_state.json"
+    path.write_text('{"batch_id": "b1", "tg_offset": 5}', encoding="utf-8")
+
+    assert config.import_state_from_file(conn, path) == 2
+    assert config.import_state_from_file(conn, path) == 0
+    got = config.runtime_state()
+    assert got == {"batch_id": "b1", "tg_offset": 5}
+
+
+def test_the_state_importer_tolerates_a_bad_file(conn, tmp_path):
+    assert config.import_state_from_file(conn, tmp_path / "absent.json") == 0
+
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json", encoding="utf-8")
+    assert config.import_state_from_file(conn, bad) == 0
+
+    wrong = tmp_path / "wrong.json"
+    wrong.write_text("[1, 2, 3]", encoding="utf-8")
+    assert config.import_state_from_file(conn, wrong) == 0
+
+
+def test_an_undecodable_row_is_skipped_not_fatal(conn):
+    """Hand-editing a row is the documented emergency path, so a typo there must
+    cost that key and not the whole read — which every job does at startup."""
+    config.set_runtime_state({"tg_offset": 3})
+    conn.execute("INSERT INTO runtime_state (key, value) VALUES ('junk', 'not json')")
+    conn.commit()
+
+    got = config.runtime_state()
+    assert got == {"tg_offset": 3}

@@ -1,7 +1,5 @@
 """Telegram delivery formatting, atomic persistence, and command isolation."""
 
-import json
-
 import brief
 import config
 
@@ -131,13 +129,12 @@ def test_handle_update_ignores_foreign_chat(monkeypatch):
     assert sent == []
 
 
-def test_poison_message_does_not_jam_offset(monkeypatch, tmp_path):
+def test_poison_message_does_not_jam_offset(monkeypatch, state_store):
     """One crashing command must not block later ones nor the offset save."""
     sent = _capture_sends(monkeypatch)
     monkeypatch.setattr(config, "chat_id", lambda: "123")
-    monkeypatch.setattr(brief, "STATE_FILE", tmp_path / "state.json")
-    # Overrides are rows now; these two tests are about the offset, so the
-    # preference write is stubbed rather than isolated to a file.
+    # Overrides are rows now; this test is about the offset, so the preference
+    # write is stubbed rather than isolated to a file.
     monkeypatch.setattr(config, "save_preferences", lambda fb: None)
     # fb without a "focus" key makes /focus raise KeyError — the poison
     updates = [
@@ -149,28 +146,28 @@ def test_poison_message_does_not_jam_offset(monkeypatch, tmp_path):
 
     assert any("Command failed" in m for m in sent)  # poison reported
     assert brief.HELP_TEXT in sent  # later update still handled
-    state = json.loads((tmp_path / "state.json").read_text())
-    assert state["tg_offset"] == 9  # offset advanced past the poison
+    assert state_store["tg_offset"] == 9  # offset advanced past the poison
 
 
-def test_offset_saved_without_clobbering_other_state(monkeypatch, tmp_path):
-    """The offset save must merge into existing state, not overwrite it."""
+def test_offset_saved_without_clobbering_other_state(monkeypatch, state_store):
+    """The offset save must not disturb a key another writer owns.
+
+    The A2 regression test, carried across the substrate change. It used to
+    check that a read-merge-write under a lock preserved submit's batch_id;
+    now it checks that a per-key upsert never touches it. Same guarantee, one
+    fewer mechanism.
+    """
     _capture_sends(monkeypatch)
     monkeypatch.setattr(config, "chat_id", lambda: "123")
-    state_file = tmp_path / "state.json"
-    monkeypatch.setattr(brief, "STATE_FILE", state_file)
-    # Overrides are rows now; these two tests are about the offset, so the
-    # preference write is stubbed rather than isolated to a file.
     monkeypatch.setattr(config, "save_preferences", lambda fb: None)
-    state_file.write_text(json.dumps({"batch_id": "batch_abc", "tg_offset": 5}))
+    state_store.update({"batch_id": "batch_abc", "tg_offset": 5})
     updates = [{"update_id": 5, "message": {"text": "/help", "chat": {"id": 123}}}]
     offset = (brief.load_state() or {}).get("tg_offset", 0)
 
     brief._drain_update_batch(updates, {"focus": [], "mute": [], "notes": []}, offset)
 
-    state = json.loads(state_file.read_text())
-    assert state["tg_offset"] == 6
-    assert state["batch_id"] == "batch_abc"  # survived — the A2 regression test
+    assert state_store["tg_offset"] == 6
+    assert state_store["batch_id"] == "batch_abc"  # survived
 
 
 # ── t212 auth ─────────────────────────────────────────────────────────────────

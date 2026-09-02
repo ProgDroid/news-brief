@@ -29,6 +29,7 @@ def _record_boot_steps(monkeypatch) -> list:
         ("import_settings_from_env", "settings"),
         ("import_sources_from_file", "sources"),
         ("import_preferences_from_file", "preferences"),
+        ("import_state_from_file", "state"),
     ):
         attr, label = name
         monkeypatch.setattr(
@@ -545,7 +546,7 @@ def test_startup_seeds_the_first_boot(monkeypatch):
     # Every first-boot importer is pinned the same way. They are the reason a
     # cutover keeps the operator's existing configuration instead of coming up
     # with an empty database that looks like a working one.
-    for step in ("settings", "sources", "preferences"):
+    for step in ("settings", "sources", "preferences", "state"):
         assert (step, conn) in calls, f"startup must import {step} on first boot"
 
 

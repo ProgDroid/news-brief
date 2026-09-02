@@ -131,7 +131,8 @@ MODAL_PROXY_SECRET = os.environ.get("MODAL_PROXY_SECRET", "").strip()
 
 MAX_TOKENS = 16384  # whole-turn budget; web-search loop + brief + signals JSON
 
-STATE_FILE = DATA_DIR / "batch_state.json"
+# Coordination state lives in the `runtime_state` table now, reached through
+# `config`; the file survives only as the importer's input.
 # Overrides live in the `preferences` table now, reached through `config`; the
 # file survives only as the importer's input (config.LEGACY_FEEDBACK_FILE).
 BRIEFS_DIR = DATA_DIR / "briefs"
@@ -3000,25 +3001,29 @@ def fetch_batch_results(results_url: str) -> str | None:
 
 
 # ── State ─────────────────────────────────────────────────────────────────────
-def load_state() -> dict | None:
-    return _load_json_or(STATE_FILE, None)
+# The keys that together describe one pending batch, dropped as a set once its
+# result has been collected.
+BATCH_STATE_KEYS = ("batch_id", "submitted_at", "date", "weekly_batch_id")
+
+
+def load_state() -> dict:
+    """Coordination state, read fresh. Never cached — see config.runtime_state."""
+    return config.runtime_state()
 
 
 def save_state(updates: dict):
-    # Lock the whole read-merge-write: a concurrent poller/submit must not
-    # interleave between our load and write and lose the other's keys.
-    with file_lock(STATE_FILE):
-        state = load_state() or {}
-        state.update(updates)
-        _write_json_atomic(STATE_FILE, state, indent=None)
+    """Merge keys into the state.
+
+    This used to lock the whole read-merge-write, because it rewrote the entire
+    document and could otherwise drop a key another process had written since
+    our read. It is a per-key upsert now, so writers touching different keys —
+    the daemon's `tg_offset`, submit's `batch_id` — never interact.
+    """
+    config.set_runtime_state(updates)
 
 
 def clear_batch_state():
-    with file_lock(STATE_FILE):
-        state = load_state() or {}
-        for key in ("batch_id", "submitted_at", "date", "weekly_batch_id"):
-            state.pop(key, None)
-        _write_json_atomic(STATE_FILE, state, indent=None)
+    config.clear_runtime_state(BATCH_STATE_KEYS)
 
 
 # ── Delivery ──────────────────────────────────────────────────────────────────
@@ -3918,6 +3923,7 @@ if __name__ == "__main__":
                 config.import_settings_from_env(_conn)
                 config.import_sources_from_file(_conn)
                 config.import_preferences_from_file(_conn)
+                config.import_state_from_file(_conn)
         except Exception as e:
             log.exception("Operator seed failed")
             telegram_alert(f"Operator seed failed: {type(e).__name__}: {e}")

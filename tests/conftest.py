@@ -83,6 +83,27 @@ def _stubbed_config(request, monkeypatch):
 TEST_CHAT_ID = "123456"
 
 
+@pytest.fixture()
+def state_store(monkeypatch):
+    """An in-memory stand-in for the `runtime_state` table, returned as a dict.
+
+    `dict.update` is precisely the per-key merge the real upsert performs, so a
+    test using this fake sees the same clobber-nothing semantics production has.
+    The SQL is covered in test_config.py against a real database.
+    """
+    import config
+
+    store: dict = {}
+    monkeypatch.setattr(config, "runtime_state", lambda: dict(store))
+    monkeypatch.setattr(config, "set_runtime_state", store.update)
+    monkeypatch.setattr(
+        config,
+        "clear_runtime_state",
+        lambda keys: [store.pop(k, None) for k in keys],
+    )
+    return store
+
+
 @pytest.fixture(autouse=True)
 def _no_outbound_http(monkeypatch):
     """Block every outbound HTTP call for the whole suite.

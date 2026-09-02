@@ -75,22 +75,24 @@ def test_file_lock_derives_lockfile_from_target_path(tmp_path):
 
 
 # ── Wiring: the lock is actually engaged around the read-merge-write spans ──────
-def test_save_state_writes_under_lock(monkeypatch, tmp_path):
-    state_file = tmp_path / "batch_state.json"
-    monkeypatch.setattr(brief, "STATE_FILE", state_file)
-    seen = {}
-    real_write = brief._write_json_atomic
+def test_save_state_updates_only_the_keys_it_was_given(monkeypatch):
+    """What the file lock was protecting, asserted directly.
 
-    def spy(path, data, **kw):
-        seen["lock_held"] = (tmp_path / "batch_state.json.lock").exists()
-        return real_write(path, data, **kw)
+    `save_state` used to rewrite the whole document, so a lock was needed to
+    stop the daemon's `tg_offset` write from dropping a `batch_id` that submit
+    had written since the daemon's read. It is a per-key upsert now: this
+    asserts the property the lock existed to provide, which survives the
+    substrate change, rather than the lock itself, which does not.
+    """
+    written: list[dict] = []
+    monkeypatch.setattr(config, "set_runtime_state", written.append)
 
-    monkeypatch.setattr(brief, "_write_json_atomic", spy)
     brief.save_state({"tg_offset": 7})
 
-    assert seen["lock_held"] is True  # the merge-write happened under the lock
-    assert brief.load_state() == {"tg_offset": 7}
-    assert not (tmp_path / "batch_state.json.lock").exists()  # released on exit
+    assert written == [{"tg_offset": 7}], (
+        "save_state must pass through exactly the keys it was given — a writer "
+        "that also sends back keys it read is how the other process's value is lost"
+    )
 
 
 def test_close_command_writes_book_under_lock(monkeypatch, tmp_path):

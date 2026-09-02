@@ -387,7 +387,8 @@ news-brief/
 /app/logs/                   # Mounted volume — all state + archives
 ├── newsbrief.log
 ├── debug/                   # Full batch payload dumps, written only on anomalous results (e.g. max_tokens truncation)
-├── batch_state.json         # Pending batch ID + Telegram update offset
+├── batch_state.json         # SUPERSEDED by the `runtime_state` table — drained
+│                            # on first boot and kept only as the rollback
 ├── feedback.json            # SUPERSEDED by the `preferences` table — drained on
 │                            # first boot and kept only as the rollback
 ├── theses.json              # /thesis annotations

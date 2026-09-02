@@ -76,11 +76,13 @@ _SEED_LOCK = "seed_users"
 _SETTINGS_LOCK = "import_settings"
 _SOURCES_LOCK = "import_sources"
 _PREFERENCES_LOCK = "import_preferences"
+_STATE_LOCK = "import_state"
 
 # The file the source importer drains, once. It is the pre-phase-2 store and is
 # deliberately left on disk after the import: keeping it IS the rollback.
 LEGACY_SOURCES_FILE = common.DATA_DIR / "sources.json"
 LEGACY_FEEDBACK_FILE = common.DATA_DIR / "feedback.json"
+LEGACY_STATE_FILE = common.DATA_DIR / "batch_state.json"
 
 
 def invalidate() -> None:
@@ -254,6 +256,100 @@ def import_settings_from_env(conn) -> list[str]:
             f"{', '.join(sorted(imported))}"
         )
     return imported
+
+
+# ── Runtime state ────────────────────────────────────────────────────────────
+#
+# Deliberately UNCACHED, unlike everything else in this module. The cache above
+# exists because configuration changes rarely and a minute of staleness is
+# invisible; these values change during a run and are read to decide whether
+# work has already happened. A stale `batch_id` submits a second batch for a day
+# that already has one, and a stale `tg_offset` re-handles commands the daemon
+# has already applied. Read them fresh, every time.
+
+
+def runtime_state() -> dict:
+    """Every coordination key, decoded to the type it was stored as."""
+    with db.connect() as conn:
+        rows = conn.execute("SELECT key, value FROM runtime_state").fetchall()
+    out = {}
+    for key, value in rows:
+        try:
+            out[key] = json.loads(value)
+        except json.JSONDecodeError:
+            log.warning(f"runtime_state[{key}] is not decodable JSON; ignoring it")
+    return out
+
+
+def set_runtime_state(updates: dict) -> None:
+    """Upsert each key independently.
+
+    This is the whole point of the table, and the one place in phase 2 where the
+    database is doing something the file genuinely could not.
+
+    `save_state` used to hold a file lock across read-merge-write because it
+    rewrote the WHOLE document: the daemon saving `tg_offset` would otherwise
+    drop a `batch_id` that submit had written since the daemon's read. The lock
+    made that safe by serialising the two writers, but the hazard was inherent —
+    the writer still had to reproduce everyone else's keys correctly.
+
+    A per-key upsert removes the hazard rather than guarding it. Two writers
+    touching different keys never interact at all, and there is no window in
+    which one holds a stale copy of the other's value, because it never holds a
+    copy.
+    """
+    with db.connect() as conn:
+        with conn.transaction():
+            for key, value in updates.items():
+                conn.execute(
+                    "INSERT INTO runtime_state (key, value) VALUES (%s, %s) "
+                    "ON CONFLICT (key) DO UPDATE SET "
+                    "value = EXCLUDED.value, updated_at = now()",
+                    (key, json.dumps(value)),
+                )
+        conn.commit()
+
+
+def clear_runtime_state(keys) -> None:
+    """Drop the named keys. Absent keys are not an error."""
+    with db.connect() as conn:
+        conn.execute("DELETE FROM runtime_state WHERE key = ANY(%s)", (list(keys),))
+        conn.commit()
+
+
+def import_state_from_file(conn, path=None) -> int:
+    """Copy batch_state.json into the table, once, while it is empty.
+
+    Carrying `tg_offset` across the cutover is what stops the daemon replaying
+    every command Telegram still has queued; carrying `batch_id` is what stops
+    a collect finding no pending batch on the morning of the migration.
+    """
+    path = path or LEGACY_STATE_FILE
+    with db.advisory_lock(conn, _STATE_LOCK) as got:
+        if not got:
+            return 0
+        if conn.execute("SELECT 1 FROM runtime_state LIMIT 1").fetchone():
+            return 0
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return 0
+        except (OSError, json.JSONDecodeError):
+            log.exception(f"Could not read {path}; importing no runtime state")
+            return 0
+        if not isinstance(raw, dict):
+            log.warning(f"{path} is not an object; importing no runtime state")
+            return 0
+        for key, value in raw.items():
+            conn.execute(
+                "INSERT INTO runtime_state (key, value) VALUES (%s, %s) "
+                "ON CONFLICT (key) DO NOTHING",
+                (str(key), json.dumps(value)),
+            )
+        conn.commit()
+    if raw:
+        log.info(f"Imported {len(raw)} runtime-state keys from {path}")
+    return len(raw)
 
 
 # ── Preferences ──────────────────────────────────────────────────────────────

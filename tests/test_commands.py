@@ -809,8 +809,7 @@ def test_handle_update_threads_fb_through_callback(monkeypatch):
 
 
 # ── setMyCommands self-registration ───────────────────────────────────────────
-def test_register_bot_commands_hash_gated(monkeypatch, tmp_path):
-    monkeypatch.setattr(brief, "STATE_FILE", tmp_path / "state.json")
+def test_register_bot_commands_hash_gated(monkeypatch, state_store):
     calls = []
     monkeypatch.setattr(
         brief, "telegram_set_my_commands", lambda cmds: calls.append(cmds) or True
