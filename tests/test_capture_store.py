@@ -97,11 +97,31 @@ def test_the_same_hash_under_two_outlets_both_store(store):
 
 
 def test_an_entry_with_no_title_is_skipped_not_fatal(store):
-    """items.title and items.url are NOT NULL, and one violation inside a shared
-    transaction would abort the whole pass, losing everything captured before it."""
+    """An entry missing title or url is filtered by the Python guard before it
+    ever reaches SQL: it is not counted as written, and it does not stop the
+    entries around it from being captured."""
     outlet_id = capture.resolve_outlet(store, FEED)
     written, _ = capture.store_items(
         store, outlet_id, [_entry(title=""), _entry(url="https://example.com/ok")]
     )
     assert written == 1
     assert store.execute("SELECT count(*) FROM items").fetchone()[0] == 1
+
+
+def test_a_db_error_on_one_entry_does_not_lose_its_neighbor(store):
+    """A NUL byte passes the Python guard (title and url are both non-empty) but
+    Postgres text fields reject it outright -- a real database-level failure the
+    guard cannot see coming. One bad entry must not lose a good neighbor, and the
+    connection must still be usable for the caller's next statement afterward."""
+    outlet_id = capture.resolve_outlet(store, FEED)
+    written, _ = capture.store_items(
+        store,
+        outlet_id,
+        [
+            _entry(title="bad\x00title", url="https://example.com/bad"),
+            _entry(url="https://example.com/ok"),
+        ],
+    )
+    assert written == 1
+    assert store.execute("SELECT count(*) FROM items").fetchone()[0] == 1
+    assert store.execute("SELECT 1").fetchone() == (1,)

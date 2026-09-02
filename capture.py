@@ -83,9 +83,13 @@ def resolve_outlet(conn, feed: dict, *, strict: bool = False) -> int | None:
 def store_items(conn, outlet_id: int, entries: list[dict]) -> tuple[int, int]:
     """Write entries for one outlet. Returns (written, already_present).
 
-    Each entry is its own savepoint: items.title and items.url are NOT NULL, and
-    one bad entry inside a shared transaction would abort the pass and lose
-    everything captured before it.
+    Each entry gets its own savepoint (`conn.transaction()`). That guards
+    against two different failures, and both must leave the entries around
+    them intact: a duplicate hash resolves via `ON CONFLICT DO NOTHING`, and an
+    entry Postgres itself rejects -- a NUL byte in the title, say, past
+    whatever the Python guard above catches -- is caught here so it costs one
+    skipped entry rather than the whole pass, and rolls back only its own
+    savepoint rather than poisoning the transaction the caller is still using.
     """
     written = already = 0
     for entry in entries:
@@ -94,20 +98,28 @@ def store_items(conn, outlet_id: int, entries: list[dict]) -> tuple[int, int]:
                 f"Capture: entry with no title or url skipped: {str(entry)[:120]}"
             )
             continue
-        with conn.transaction():
-            row = conn.execute(
-                "INSERT INTO items (outlet_id, url, title, body, published_at, "
-                "content_hash) VALUES (%s, %s, %s, %s, %s, %s) "
-                "ON CONFLICT (outlet_id, content_hash) DO NOTHING RETURNING id",
-                (
-                    outlet_id,
-                    entry["url"],
-                    entry["title"],
-                    entry.get("summary") or None,
-                    entry.get("published_at"),
-                    content_hash(entry),
-                ),
-            ).fetchone()
+        try:
+            with conn.transaction():
+                row = conn.execute(
+                    "INSERT INTO items (outlet_id, url, title, body, published_at, "
+                    "content_hash) VALUES (%s, %s, %s, %s, %s, %s) "
+                    "ON CONFLICT (outlet_id, content_hash) DO NOTHING RETURNING id",
+                    (
+                        outlet_id,
+                        entry["url"],
+                        entry["title"],
+                        entry.get("summary") or None,
+                        entry.get("published_at"),
+                        content_hash(entry),
+                    ),
+                ).fetchone()
+        except Exception:
+            log.warning(
+                f"Capture: entry rejected by the database, skipped: {str(entry)[:120]}",
+                exc_info=True,
+            )
+            already += 1
+            continue
         if row:
             written += 1
         else:
