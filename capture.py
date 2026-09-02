@@ -12,10 +12,12 @@ Spec: docs/superpowers/specs/2026-09-02-continuous-capture-design.md
 """
 
 import hashlib
+import time
 from dataclasses import dataclass
 from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 
 import brief
+import common
 from common import log
 
 _TRACKING_PREFIXES = ("utm_",)
@@ -218,3 +220,121 @@ def rolled_off(conn, source_name: str) -> list[str]:
         (source_name,),
     ).fetchall()
     return [r[0] for r in rows]
+
+
+DEADLINE_SECONDS = 600
+HOST_GAP_SECONDS = 5
+
+
+def capture_sources() -> list[dict]:
+    """Feeds only. `brief.all_sources()` also returns source_type='page' entries,
+    which are scraped pages with no entry list. RSS_FEEDS carries no source_type
+    key, so its ABSENCE means feed."""
+    temp = [
+        s for s in brief.load_temp_sources() if s.get("source_type", "feed") == "feed"
+    ]
+    return list(brief.RSS_FEEDS) + temp
+
+
+def _host(feed: dict) -> str:
+    return urlsplit(feed["url"]).netloc
+
+
+def order_by_host(feeds: list[dict]) -> list[dict]:
+    """Interleave so no two consecutive fetches hit one host.
+
+    Round-robins across per-host queues, longest queue first, which spreads the
+    heaviest host as widely as the list allows.
+    """
+    queues: dict[str, list[dict]] = {}
+    for feed in feeds:
+        queues.setdefault(_host(feed), []).append(feed)
+    ordered: list[dict] = []
+    while any(queues.values()):
+        candidates = sorted(
+            (h for h, q in queues.items() if q),
+            key=lambda h: (-len(queues[h]), h),
+        )
+        placed = next(
+            (h for h in candidates if not ordered or _host(ordered[-1]) != h),
+            candidates[0],
+        )
+        ordered.append(queues[placed].pop(0))
+    return ordered
+
+
+def run(conn=None) -> Tally:
+    """One full pass. Bounded by DEADLINE_SECONDS so it cannot outlive its own
+    fire time and trip the supervisor's overlap alert.
+
+    COMMIT BOUNDARIES ARE LOAD-BEARING. db.connect() is autocommit=False, so a
+    pass wrapped in one transaction rolls the capture_runs row back on a crash --
+    and a crashed pass then looks exactly like one that never fired, which is the
+    ambiguity that row exists to remove. We commit the run row immediately, then
+    once per feed, then at the end. A crash costs at most one feed's work, which
+    is what "capture is cheap and irreversible" has to mean in practice.
+    """
+    enabled = bool(common.CAPTURE_ENABLED)
+    tally = Tally()
+    run_id = start_run(conn, enabled)
+    conn.commit()
+    if not enabled:
+        log.info("Capture: disabled by CAPTURE_ENABLED; no feeds polled")
+        finish_run(conn, run_id, tally)
+        conn.commit()
+        return tally
+
+    feeds = order_by_host(capture_sources())
+    tally.feeds_total = len(feeds)
+    deadline = time.monotonic() + DEADLINE_SECONDS
+    last_fetch_at: dict[str, float] = {}
+
+    for feed in feeds:
+        if time.monotonic() >= deadline:
+            record_poll(conn, run_id, feed["name"], "deadline", 0)
+            conn.commit()
+            tally.feeds_failed += 1
+            tally.failures["deadline"] = tally.failures.get("deadline", 0) + 1
+            continue
+        host = _host(feed)
+        since = time.monotonic() - last_fetch_at.get(host, 0.0)
+        if host in last_fetch_at and since < HOST_GAP_SECONDS:
+            time.sleep(HOST_GAP_SECONDS - since)
+        last_fetch_at[host] = time.monotonic()
+
+        got = brief.fetch_feed_entries(feed)
+        if got.failure:
+            record_poll(conn, run_id, feed["name"], got.failure, 0)
+            conn.commit()
+            tally.feeds_failed += 1
+            tally.failures[got.failure] = tally.failures.get(got.failure, 0) + 1
+            continue
+
+        outlet_id = resolve_outlet(conn, feed, strict=True)
+        if outlet_id is None:
+            tally.sources_dropped += 1
+            record_poll(conn, run_id, feed["name"], "outlet_conflict", 0)
+            conn.commit()
+            tally.feeds_failed += 1
+            continue
+
+        written, already, failed = store_items(conn, outlet_id, got.entries)
+        record_sightings(conn, feed["name"], got.entries, {})
+        record_poll(conn, run_id, feed["name"], None, len(got.entries))
+        # Items, sightings and this feed's poll row commit together, so the
+        # denominator can never disagree with what was actually stored.
+        conn.commit()
+        tally.feeds_ok += 1
+        tally.items_seen += len(got.entries)
+        tally.items_new += written
+
+    finish_run(conn, run_id, tally)
+    conn.commit()
+    kinds = ", ".join(f"{k} x{v}" for k, v in sorted(tally.failures.items()))
+    log.info(
+        f"Capture: {tally.feeds_total} feeds, {tally.feeds_ok} ok, "
+        f"{tally.feeds_failed} failed ({kinds or 'none'}), "
+        f"{tally.items_seen} items seen, {tally.items_new} new, "
+        f"{tally.sources_dropped} sources dropped"
+    )
+    return tally

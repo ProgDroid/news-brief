@@ -1,6 +1,8 @@
 """Unit tests for continuous capture (news-brief-b42.1). No network, no DB."""
 
 import brief
+import capture
+import common
 
 
 FEED = {
@@ -221,3 +223,91 @@ def test_load_temp_sources_carries_the_outlet_key(monkeypatch):
     )
     loaded = brief.load_temp_sources()
     assert loaded[0]["outlet"] == "Reuters"
+
+
+def test_capture_polls_feeds_and_never_page_sources(monkeypatch):
+    """all_sources() is the wrong entry point: it includes source_type='page'
+    entries, which are scraped pages with no entry list. RSS_FEEDS carries no
+    source_type key at all, so its absence must mean "feed"."""
+    monkeypatch.setattr(
+        brief,
+        "RSS_FEEDS",
+        [{"name": "Baked", "url": "https://a/f", "category": "macro"}],
+    )
+    monkeypatch.setattr(
+        brief,
+        "load_temp_sources",
+        lambda: [
+            {
+                "name": "UserFeed",
+                "url": "https://b/f",
+                "category": "geo",
+                "source_type": "feed",
+            },
+            {
+                "name": "UserPage",
+                "url": "https://c/p",
+                "category": "geo",
+                "source_type": "page",
+            },
+        ],
+    )
+    names = [f["name"] for f in capture.capture_sources()]
+    assert names == ["Baked", "UserFeed"]
+
+
+def test_no_two_consecutive_fetches_share_a_host():
+    """The documented Nitter 429 is an ADJACENCY bug, not a volume one: the two
+    X feeds sit next to each other in RSS_FEEDS, so one 429'd on most runs. At
+    48 passes a day that collision would recur 48 times a day."""
+    feeds = [
+        {"name": "A", "url": "https://nitter.example/a/rss", "category": "geo"},
+        {"name": "B", "url": "https://nitter.example/b/rss", "category": "geo"},
+        {"name": "C", "url": "https://other.example/c", "category": "geo"},
+    ]
+    ordered = capture.order_by_host(feeds)
+    hosts = [f["url"].split("/")[2] for f in ordered]
+    assert len(ordered) == 3
+    assert all(a != b for a, b in zip(hosts, hosts[1:])), hosts
+
+
+def test_the_real_feed_list_never_polls_one_host_back_to_back():
+    """Written against the real RSS_FEEDS as well as a synthetic list, because
+    this is the regression test for a production failure."""
+    ordered = capture.order_by_host(list(brief.RSS_FEEDS))
+    hosts = [f["url"].split("/")[2] for f in ordered]
+    assert len(ordered) == len(brief.RSS_FEEDS)
+    assert all(a != b for a, b in zip(hosts, hosts[1:])), hosts
+
+
+def test_a_pass_stops_at_its_deadline_and_records_what_it_skipped(monkeypatch):
+    """26 feeds x 3 attempts x 20s is ~26 minutes, which outlives the 30-minute
+    interval -- and the supervisor telegram_alerts a job still running at its
+    next fire time, 48 chances a day."""
+    feeds = [
+        {"name": f"F{i}", "url": f"https://h{i}.example/f", "category": "geo"}
+        for i in range(5)
+    ]
+    monkeypatch.setattr(capture, "capture_sources", lambda: feeds)
+    monkeypatch.setattr(capture, "DEADLINE_SECONDS", 0)
+    recorded = []
+    monkeypatch.setattr(
+        capture,
+        "record_poll",
+        lambda conn, run, name, failure, seen: recorded.append((name, failure)),
+    )
+    monkeypatch.setattr(capture, "start_run", lambda conn, enabled: 1)
+    monkeypatch.setattr(capture, "finish_run", lambda conn, run, tally: None)
+    monkeypatch.setattr(common, "CAPTURE_ENABLED", True)
+
+    class _FakeConn:
+        """`run` commits per feed, so a bare object() raises AttributeError
+        before the deadline logic is ever reached."""
+
+        def commit(self):
+            return None
+
+    tally = capture.run(conn=_FakeConn())
+    assert len(recorded) == 5, "every feed gets a poll row, reached or not"
+    assert all(failure == "deadline" for _, failure in recorded)
+    assert tally.feeds_failed == 5

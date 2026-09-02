@@ -258,6 +258,10 @@ KNOBS: dict[str, Knob] = {
     "ENRICHMENT_MAX_THEMES": Knob(int, 8),
     "ENRICHMENT_HTTP_TIMEOUT": Knob(float, 20.0),
     "BIGDATA_BASE_URL": Knob(str, "https://api.bigdata.com"),
+    # Continuous capture (news-brief-b42.1). Default OFF: capture writes to
+    # shared tables and has no consumer yet, so it is switched on deliberately
+    # on the host after a deploy rather than starting on its own.
+    "CAPTURE_ENABLED": Knob(bool, False),
 }
 
 _TRUTHY = {"1", "true", "yes", "on"}
