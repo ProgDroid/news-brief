@@ -97,9 +97,16 @@ Rule 4 would re-fire on every stale claim every morning, over a set that grows w
 meaning of `expired` is preserved; and retired rows are filtered out of the working ledger
 entirely, so nothing can match, resurrect or re-fire on them.
 
-**`0007` also recreates `claims_open_resolution` with `AND retired_on IS NULL`.** Leaving that as
-an obligation on `bqa.5` would be exactly the cross-issue promise that gets forgotten; the schema
-enforces it instead.
+**`0007` also recreates `claims_open_resolution` with `AND retired_on IS NULL`.**
+
+An earlier draft claimed this made the schema *enforce* the exclusion, removing the cross-issue
+promise. **That claim is withdrawn: a partial index restricts what is indexed, it does not
+filter a query.** If `bqa.5`'s rule-4 query omits `retired_on IS NULL`, Postgres simply cannot
+use the index, falls back to a sequential scan, and re-fires on retired rows — the original bug,
+now slower. The index change is still correct and worth making, but **the obligation on `bqa.5`
+stands**, and is recorded on that issue rather than left in this document's prose, because a
+requirement that lives only in a spec another issue is not required to read is not a
+requirement.
 
 ### 2.3 Behaviour is preserved exactly, and the change is two-way
 
@@ -196,10 +203,24 @@ That is not a clash that fails loudly. An upsert keyed `ON CONFLICT (ledger_id)`
 the retired row**, handing an unrelated new claim the retired one's `first_seen`, `restate_count`
 and history — silently rewriting the accountability record this epic exists to build.
 
-**Resolution:** `next_ledger_num(conn)` computes `max(substring(ledger_id from 'c-(\d+)')::int) + 1`
-over **all** rows, retired included (obligation 3). `merge_ledger` gains a keyword-only
-`next_num=None` parameter defaulting to `_max_id_num(prior) + 1`, so every existing call and test
-is unchanged and production passes the store's value. The function stays pure.
+**Resolution:** `next_ledger_num(conn)` computes
+`COALESCE(max(substring(ledger_id from 'c-(\d+)')::int), 0) + 1` over **all** rows, retired
+included (obligation 3). `merge_ledger` gains a keyword-only `next_num=None` parameter
+defaulting to `_max_id_num(prior) + 1`, so every existing call and test is unchanged. The
+function stays pure.
+
+Two details that would each render that parameter useless:
+
+**`reconcile_ledger` must pass it through.** Production does not call `merge_ledger` — it calls
+`reconcile_ledger` (`brief.py:3209`), which calls `merge_ledger(prior, …, today)` with no
+keyword arguments (`brief_memory.py:794`). Adding the parameter to `merge_ledger` alone leaves
+it **unreachable from the only call site that matters**, and the collision it exists to prevent
+would happen anyway while every test passed.
+
+**`COALESCE` is load-bearing, not decoration.** `ledger_id` is `TEXT NULL` (`0006:159`), so an
+empty table — or one holding only KB-native rows from `bqa.4b`, which have no `ledger_id` —
+makes the bare `max(...)` return NULL, and `f"c-{None:04d}"` raises. Python's
+`max(nums, default=0)` is already safe; the SQL has to be made so.
 
 ### 3.3 Deployment
 
@@ -243,6 +264,19 @@ a dict that now comes from Postgres.
 **Write.** `before = load_ledger(conn)`; run the pure merge; `save_ledger(conn, before, after)`
 upserts changed rows and stamps `retired_on` on the difference. Rows the model did not touch and
 the TTL did not drop are never written.
+
+**The call site needs restructuring, not just re-pointing.** `brief.py:3208-3212` currently
+nests the calls — `save_ledger(reconcile_ledger(load_ledger(), …))` — so the prior state is
+never held in a variable and cannot be handed to the diff. It becomes three statements. The
+existing fail-safe wrapper stays; note that `reconcile_ledger` returns `prior` unchanged on
+failure (`brief_memory.py:795-797`), which makes the diff empty and the write a no-op — the
+correct behaviour, for free.
+
+**One row per `ledger_id` before upserting.** A model reply that echoes the same id twice
+produces two rows carrying it: `merge_ledger:294` re-enters the `cid in by_id` branch without
+checking `returned`. In a JSON list that is a harmless duplicate entry; against a unique index
+it is two upserts on one key. `save_ledger` collapses by `ledger_id`, last write winning, so the
+outcome is deterministic rather than order-dependent.
 
 ---
 
