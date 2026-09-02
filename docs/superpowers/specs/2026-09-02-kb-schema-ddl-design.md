@@ -71,8 +71,12 @@ provisional. Reshaping it is therefore an ordinary breaking change, not a free o
 passes: it is referenced only by `open_questions` and `story_members`, both themselves provisional.)
 
 **Detecting the end of the licence.** The obligation to preserve a shape begins when something
-writes the table, and nothing observes first write. §7 test 10 asserts the eight are empty; it runs
-in CI until `bqa.4` lands and then fails loudly, which is the intent.
+writes the table, and nothing observes first write against a live database — a test schema is
+dropped and recreated before every test, so every provisional table is empty by construction on
+every run, and an emptiness assertion against it can never fail. §7 test 10 instead scans the
+repository's own Python sources — the layer that actually moves when the licence expires — for an
+INSERT or UPDATE naming a provisional table. It runs in CI until `bqa.4` (or any other change) adds
+such a write and fails loudly, which is the intent.
 
 **The honest statement this section exists to make:** eight of these sixteen tables have never been
 checked against anything but themselves. `claims` and `entities` were audited against
@@ -957,8 +961,10 @@ Extends `tests/test_db.py`.
    `status` CHECK permits must survive `brief_memory._coerce_status` without degrading. The
    write-direction map alone is `the-probe-measured-the-wrong-layer`; it is what let §6 item 1
    through two reviews.
-10. **The provisional tables are empty.** Asserts §1.2's licence still holds. Expected to fail when
-    `bqa.4` lands, which is the point.
+10. **No source file writes a provisional table.** Asserts §1.2's licence still holds by scanning
+    repository Python sources (repo root and `enrichment/`, excluding `tests/`) for an INSERT or
+    UPDATE naming a provisional table, rather than checking row counts in a test schema that is
+    empty by construction. Expected to fail the commit that adds such a write, which is the point.
 
 Gate before push, with the database up — `pytest` alone reports green with the whole DB layer
 skipped, and a skip is not a pass:

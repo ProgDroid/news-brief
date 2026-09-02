@@ -242,8 +242,24 @@ CREATE UNIQUE INDEX claim_evidence_unique
 -- The predicate reads BOTH tuples. Reading OLD.status alone would permit the
 -- single UPDATE that marks a claim broken AND rewrites it -- precisely the
 -- 2026-08-29 Patriot mechanism this exists to stop.
+-- A terminal status must be a property of the schema, not a belief held by
+-- whatever last wrote it -- an interlock the reader can defeat by omission is
+-- not an interlock. brief_memory._apply_status (:644-652) resets a terminal
+-- row back to 'standing' when a model reply omits status: it computes `prior`
+-- by coercing the row's OWN stored status through _coerce_status, whose
+-- _VALID_STATUS only recognises three of the six values (news-brief-bqa.9), so
+-- a stored 'confirmed'/'expired'/'withdrawn' coerces to None and falls back to
+-- _DEFAULT_STATUS = 'standing' before the model's proposed value is even
+-- considered. Until bqa.4 widens _VALID_STATUS, this clause is the only thing
+-- stopping that reset from reaching Postgres. 'challenged' is deliberately
+-- excluded: spec 2.3 says a challenge can be answered, so
+-- standing -> challenged -> standing must keep working.
 CREATE OR REPLACE FUNCTION claims_freeze_claim_text() RETURNS trigger AS $$
 BEGIN
+    IF OLD.status IN ('broken', 'confirmed', 'expired', 'withdrawn')
+       AND NEW.status IS DISTINCT FROM OLD.status THEN
+        RAISE EXCEPTION 'claim % is %, which is terminal', OLD.id, OLD.status;
+    END IF;
     IF (OLD.status <> 'standing' OR NEW.status <> 'standing')
        AND NEW.claim IS DISTINCT FROM OLD.claim THEN
         RAISE EXCEPTION 'claim text is immutable once status leaves standing (id %)', OLD.id;

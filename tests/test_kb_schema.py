@@ -7,6 +7,7 @@ true of a constraint nothing exercises.
 """
 
 import contextlib
+import re
 
 import psycopg
 import pytest
@@ -101,6 +102,47 @@ def test_perspective_null_is_allowed_and_a_bad_value_is_not(kb):
 def test_entity_type_rejects_an_unknown_value(kb):
     with rejects(kb, psycopg.errors.CheckViolation):
         kb.execute("INSERT INTO entities (name, type) VALUES ('X', 'thing')")
+
+
+def test_an_outlet_name_cannot_be_reused(kb):
+    _outlet(kb, "Reuters")
+    with rejects(kb, psycopg.errors.UniqueViolation):
+        _outlet(kb, "Reuters")
+
+
+def test_an_outlet_name_collides_case_insensitively(kb):
+    """outlets_name is UNIQUE (lower(name)), not (name): Reuters and reuters
+    must be the same outlet, or per-outlet corroboration -- the entire reason
+    outlets was split out of sources, spec 3.1 -- double-counts a single
+    outlet as two."""
+    _outlet(kb, "Reuters")
+    with rejects(kb, psycopg.errors.UniqueViolation):
+        _outlet(kb, "reuters")
+
+
+def test_an_entity_name_and_type_cannot_be_reused(kb):
+    _entity(kb, "Apple", "company")
+    with rejects(kb, psycopg.errors.UniqueViolation):
+        _entity(kb, "Apple", "company")
+
+
+def test_an_entity_name_collides_case_insensitively_within_a_type(kb):
+    """entities_name_type is UNIQUE (lower(name), type), not (name, type):
+    Apple and apple must not become two entities, or per-entity aggregates
+    split -- the "Links double and per-entity aggregates split" failure spec
+    2.2 names."""
+    _entity(kb, "Apple", "company")
+    with rejects(kb, psycopg.errors.UniqueViolation):
+        _entity(kb, "apple", "company")
+
+
+def test_the_same_name_under_a_different_type_is_a_different_entity(kb):
+    """Spec 2.2: this key does NOT enforce one-entity-per-company -- putting
+    `type` in the key means the same name is deliberately two rows when the
+    type differs, e.g. a country and the institution that governs it."""
+    _entity(kb, "Turkey", "country")
+    _entity(kb, "Turkey", "institution")
+    assert kb.execute("SELECT count(*) FROM entities").fetchone()[0] == 2
 
 
 def test_the_same_text_from_two_outlets_is_two_items(kb):
@@ -513,6 +555,47 @@ def test_the_status_may_change_without_touching_the_text(kb):
     )
 
 
+def test_a_broken_claim_cannot_be_moved_back_to_standing(kb):
+    """The terminality spec 2.3 and 6 assert: broken/confirmed/expired/
+    withdrawn are terminal 'in this schema'. Before this clause, neither CHECK
+    nor the text-freeze trigger stopped this UPDATE -- the first CHECK
+    short-circuits true on 'status = standing', the second short-circuits true
+    because the new status is not 'broken', and the trigger only fires when
+    claim text changes, which this statement does not touch."""
+    claim_id = _claim(kb, "original", "broken", "2026-09-02", broken_by_note="n")
+    with rejects(kb, psycopg.errors.RaiseException):
+        kb.execute("UPDATE claims SET status = 'standing' WHERE id = %s", (claim_id,))
+
+
+def test_a_challenged_claim_can_still_be_moved_back_to_standing(kb):
+    """Negative control for the test above: 'challenged' is deliberately NOT
+    terminal, spec 2.3's 'standing -> challenged -> standing is permitted,
+    matching _apply_status'. If this fails, the terminal-status clause is too
+    broad."""
+    claim_id = _claim(kb, "original", "challenged", "2026-09-02")
+    kb.execute("UPDATE claims SET status = 'standing' WHERE id = %s", (claim_id,))
+    assert (
+        kb.execute("SELECT status FROM claims WHERE id = %s", (claim_id,)).fetchone()[0]
+        == "standing"
+    )
+
+
+def test_a_terminal_claim_still_accepts_a_non_status_update(kb):
+    """The terminal-status clause guards the status COLUMN, not the row.
+    Provenance stamping and similar non-status writes to an already-broken
+    claim must keep working."""
+    claim_id = _claim(kb, "original", "broken", "2026-09-02", broken_by_note="n")
+    kb.execute(
+        "UPDATE claims SET extractor_model = 'sonnet-5' WHERE id = %s", (claim_id,)
+    )
+    assert (
+        kb.execute(
+            "SELECT extractor_model FROM claims WHERE id = %s", (claim_id,)
+        ).fetchone()[0]
+        == "sonnet-5"
+    )
+
+
 KB_TABLES = {
     "outlets",
     "items",
@@ -775,12 +858,15 @@ SCHEMA_STATUSES = {
 
 
 def test_every_ledger_key_has_a_claims_column(kb):
-    """Spec 5.1, the WRITE direction. Fails the day a ledger field is added
-    without its column -- the drift that would otherwise surface halfway
-    through bqa.4.
+    """Spec 5.1, the WRITE direction. LEDGER_KEY_TO_COLUMN is a hand-written
+    constant, not derived from brief_memory, so this cannot catch a ledger key
+    ADDED without a column -- there is nothing here to diff a new key against.
+    What it does catch is a claims column dropped or renamed out from under
+    the map, which would otherwise surface halfway through bqa.4 as a column
+    that no longer exists.
 
-    IF THIS FAILS: a key was added to brief_memory's claim row. Add the column
-    to a new migration and extend this map. Do not delete the entry.
+    IF THIS FAILS: a mapped claims column was dropped or renamed. Either
+    restore it or update the map to the new name. Do not delete the entry.
     """
     columns = {
         r[0]
@@ -821,17 +907,37 @@ def test_every_status_the_schema_permits_survives_the_incumbent_coercer():
     )
 
 
-def test_the_provisional_tables_are_still_empty(kb):
-    """Spec 1.2's licence: a provisional table may be reshaped without ceremony
-    only while nothing writes it. Nothing observes first write, so this does.
+def test_no_source_file_writes_a_provisional_table():
+    """Spec 1.2's reshaping licence lasts only until something WRITES a
+    provisional table, and nothing observes first write against a live
+    database -- the `conn` fixture drops and recreates the schema for every
+    test, so every provisional table is empty BY CONSTRUCTION on every run.
+    An emptiness assertion against that fixture is true of the fixture, not
+    of the world, and can never fail.
 
-    IF THIS FAILS: bqa.4 has started writing one of these. That is expected and
-    good -- go re-read spec 1.2, decide whether the shape is now frozen, and
-    narrow PROVISIONAL_TABLES. Do not delete the test.
+    This scans the repository's own Python sources instead -- the layer that
+    actually moves when the licence expires -- for an INSERT or UPDATE naming
+    a provisional table, at the repo root and under enrichment/ (application
+    code lives there; tests/ is excluded because the fixtures above legitimately
+    write these tables).
+
+    IF THIS FAILS: application code has started writing one of
+    PROVISIONAL_TABLES, which is expected and good -- go re-read spec 1.2,
+    decide whether the shape just written is now frozen, and narrow
+    PROVISIONAL_TABLES to drop the table that gained a writer. Do not delete
+    this test.
     """
-    non_empty = [
-        t
-        for t in sorted(PROVISIONAL_TABLES)
-        if kb.execute(f"SELECT EXISTS (SELECT 1 FROM {t})").fetchone()[0]
-    ]
-    assert not non_empty, f"no longer provisional: {non_empty}"
+    root = db.MIGRATIONS_DIR.parent
+    sources = list(root.glob("*.py"))
+    enrichment_dir = root / "enrichment"
+    if enrichment_dir.is_dir():
+        sources += [
+            p for p in enrichment_dir.rglob("*.py") if "__pycache__" not in p.parts
+        ]
+    offenders = []
+    for path in sources:
+        text = path.read_text(encoding="utf-8")
+        for table in PROVISIONAL_TABLES:
+            if re.search(rf"\b(insert\s+into|update)\s+{table}\b", text, re.IGNORECASE):
+                offenders.append(f"{path.relative_to(root)}: {table}")
+    assert not offenders, f"provisional table written by application code: {offenders}"
