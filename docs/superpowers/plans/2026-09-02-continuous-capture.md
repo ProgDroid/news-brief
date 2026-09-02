@@ -734,7 +734,7 @@ Expected suite total: **1375 passed** (1368 + 7).
 
 **Interfaces:**
 - Consumes: `brief.outlet_for`, `brief.FeedFetch`, `db.connect`.
-- Produces: `capture.content_hash(entry) -> str`; `capture.resolve_outlet(conn, feed) -> int | None`; `capture.store_items(conn, outlet_id, entries) -> tuple[int, int]` returning `(written, already_present)`.
+- Produces: `capture.content_hash(entry) -> str`; `capture.resolve_outlet(conn, feed) -> int | None`; `capture.store_items(conn, outlet_id, entries) -> tuple[int, int, int]` returning `(written, already_present, failed)`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -872,21 +872,16 @@ Spec: docs/superpowers/specs/2026-09-02-continuous-capture-design.md
 """
 
 import hashlib
-import time
-from dataclasses import dataclass
 from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 
 import brief
-import common
 from common import log
 
-# EVERY import this module will ever need is declared here, in Tasks 4 through
-# 6. There is no ruff config in this repo, so defaults apply and E402
-# (module-level import not at top of file) is selected: appending an import
-# further down fails `ruff check .` before a single test runs. `common` is
-# imported as a module AND `log` by name on purpose -- a knob must be read as
-# `common.CAPTURE_ENABLED`, since a from-import copy freezes at import time and
-# defeats both host toggles and monkeypatch.
+# Import only what THIS task uses. Tasks 5 and 6 add `dataclass`, `time` and
+# `common` to this block when they need them -- ruff's default rule set has both
+# E402 (import not at top of file) and F401 (unused import) on, so neither
+# appending imports later nor declaring them early passes the gate. Editing this
+# block is the move that satisfies both.
 
 _TRACKING_PREFIXES = ("utm_",)
 _TRACKING_KEYS = {"fbclid", "gclid", "mc_cid", "mc_eid"}
@@ -951,8 +946,8 @@ def resolve_outlet(conn, feed: dict, *, strict: bool = False) -> int | None:
     ).fetchone()[0]
 
 
-def store_items(conn, outlet_id: int, entries: list[dict]) -> tuple[int, int]:
-    """Write entries for one outlet. Returns (written, already_present).
+def store_items(conn, outlet_id: int, entries: list[dict]) -> tuple[int, int, int]:
+    """Write entries for one outlet. Returns (written, already_present, failed).
 
     Each entry is its own savepoint: items.title and items.url are NOT NULL, and
     one bad entry inside a shared transaction would abort the pass and lose
@@ -1149,7 +1144,7 @@ Expected: FAIL — `capture.record_sightings` does not exist.
 
 - [ ] **Step 3: Implement**
 
-Append to `capture.py`. **Add no import lines** — `dataclass` is already in Task 4's header, and a new import here is an `E402` failure:
+Append to `capture.py`. You need `from dataclasses import dataclass` — **add it to the file's TOP import block**, not above this code. E402 constrains an import's POSITION, not when it is added, so editing the top block is correct while appending is not.
 
 ```python
 @dataclass
@@ -1351,7 +1346,7 @@ Expected: FAIL — `capture.capture_sources` does not exist.
 
 - [ ] **Step 3: Implement the pass**
 
-Append to `capture.py`. **Add no import lines** — `time`, `urlsplit` and `common` are all in Task 4's header. Re-importing `urlsplit` here is an `F811` redefinition as well as an `E402`:
+Append to `capture.py`. You need `import time` and `import common` — **add both to the file's TOP import block**, not above this code. `urlsplit` is already imported there from Task 4; do NOT re-import it (F811).
 
 ```python
 DEADLINE_SECONDS = 600
@@ -1450,7 +1445,7 @@ def run(conn=None) -> Tally:
             tally.feeds_failed += 1
             continue
 
-        written, already = store_items(conn, outlet_id, got.entries)
+        written, already, failed = store_items(conn, outlet_id, got.entries)
         record_sightings(conn, feed["name"], got.entries, {})
         record_poll(conn, run_id, feed["name"], None, len(got.entries))
         # Items, sightings and this feed's poll row commit together, so the
