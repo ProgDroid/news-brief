@@ -10,6 +10,7 @@ on:
       - 'claim_verify.py'
       - 'retention.py'
       - 'common.py'
+      - 'config.py'
       - 'trading.py'
       - 'polygram_live.py'
       - 'validation.py'
@@ -69,8 +70,8 @@ jobs:
 
       - name: Lint
         run: |
-          ruff check brief.py brief_memory.py claim_store.py claim_verify.py retention.py common.py trading.py polygram_live.py validation.py db.py scheduler.py supervisor.py backup.py enrichment scripts tests
-          ruff format --check brief.py brief_memory.py claim_store.py claim_verify.py retention.py common.py trading.py polygram_live.py validation.py db.py scheduler.py supervisor.py backup.py enrichment scripts tests
+          ruff check brief.py brief_memory.py claim_store.py claim_verify.py retention.py common.py config.py trading.py polygram_live.py validation.py db.py scheduler.py supervisor.py backup.py enrichment scripts tests
+          ruff format --check brief.py brief_memory.py claim_store.py claim_verify.py retention.py common.py config.py trading.py polygram_live.py validation.py db.py scheduler.py supervisor.py backup.py enrichment scripts tests
 
       - name: Test
         env:
