@@ -98,6 +98,11 @@ x-newsbrief: &newsbrief
     - PG_THESIS_GRACE_DAYS=${PG_THESIS_GRACE_DAYS:-}
     # Self-hosted Nitter on the shared network (Twitter/X feeds). Defaults to the
     # service named `nitter` on Nitter's internal port 8080; override if it differs.
+    #
+    # NOT a seed value — one of the few real runtime variables left. It names a
+    # service on this network and is interpolated into brief.py's RSS_FEEDS at
+    # import, so it cannot change without this file changing, which is exactly
+    # why it stayed out of the settings table. See the carve-out in common.KNOBS.
     - NITTER_BASE_URL=${NITTER_BASE_URL:-http://nitter:8080}
     # How many daily pg_dump files the backup job keeps (default 14; <=0
     # keeps them all and prunes nothing). Declared here because compose
@@ -106,6 +111,29 @@ x-newsbrief: &newsbrief
     # and the default silently stands, which is the exact bug class the
     # discrete POSTGRES_* block above exists to retire.
     - NEWSBRIEF_BACKUP_RETENTION_DAYS=${NEWSBRIEF_BACKUP_RETENTION_DAYS:-}
+    # The knobs that lived in other modules' os.environ calls until 0q0.7.6, and
+    # which this anchor had never named. Until now that was invisible rather than
+    # broken: the modules read the environment inside the container, found
+    # nothing passed through, and used their code defaults. These lines are what
+    # let a value an operator has in .env become the seeded row rather than being
+    # dropped at the container boundary a second time.
+    #
+    # Seed values, like every knob above: read once, when `settings` is empty.
+    - BRIEF_MEMORY_ENABLED=${BRIEF_MEMORY_ENABLED:-}
+    - CLAIM_VERIFY_ENABLED=${CLAIM_VERIFY_ENABLED:-}
+    - NEWSBRIEF_RETENTION_DAYS=${NEWSBRIEF_RETENTION_DAYS:-}
+    - CHROMA_MCP_URL=${CHROMA_MCP_URL:-}
+    # Empty means "follow NEWSBRIEF_MODEL". Set one only to pin that single
+    # post-generation call to a different model from the brief itself.
+    - NEWSBRIEF_SIGNALS_MODEL=${NEWSBRIEF_SIGNALS_MODEL:-}
+    - NEWSBRIEF_CLAIM_VERIFY_MODEL=${NEWSBRIEF_CLAIM_VERIFY_MODEL:-}
+    - ENRICHMENT_ENABLED=${ENRICHMENT_ENABLED:-}
+    - ENRICHMENT_PROVIDER=${ENRICHMENT_PROVIDER:-}
+    - ENRICHMENT_THEMES_ENABLED=${ENRICHMENT_THEMES_ENABLED:-}
+    - ENRICHMENT_MAX_SYMBOLS=${ENRICHMENT_MAX_SYMBOLS:-}
+    - ENRICHMENT_MAX_THEMES=${ENRICHMENT_MAX_THEMES:-}
+    - ENRICHMENT_HTTP_TIMEOUT=${ENRICHMENT_HTTP_TIMEOUT:-}
+    - BIGDATA_BASE_URL=${BIGDATA_BASE_URL:-}
     # Postgres holds the run ledger, the advisory locks that interlock the entry
     # paths, and the scheduler's state. These MUST be declared here: compose
     # passes through only what this block names, so setting them on the host or
@@ -138,7 +166,6 @@ x-newsbrief: &newsbrief
     # either way — the bundled postgres service below still starts and still
     # demands one.
     - DATABASE_URL=${DATABASE_URL:-}
-    # - CHROMA_MCP_URL=${CHROMA_MCP_URL}   # optional: override the default podcast MCP endpoint
   volumes:
     - "${APPDATA_DIR:-./appdata}/news-brief:/app/logs"
   restart: "no"

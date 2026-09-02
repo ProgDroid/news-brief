@@ -1,4 +1,5 @@
 import claim_verify as cv
+import common
 
 
 def test_build_source_evidence_keeps_summaries_and_labels():
@@ -37,10 +38,25 @@ def test_build_source_evidence_handles_empty_placeholders():
 
 
 def test_is_enabled_off_by_default(monkeypatch):
-    monkeypatch.delenv("CLAIM_VERIFY_ENABLED", raising=False)
     assert cv.is_enabled() is False
-    monkeypatch.setenv("CLAIM_VERIFY_ENABLED", "1")
+    monkeypatch.setattr(common, "CLAIM_VERIFY_ENABLED", True)
     assert cv.is_enabled() is True
+
+
+def test_the_environment_no_longer_enables_verification(monkeypatch):
+    """The flag is a `settings` row now; the variable on the host is bootstrap
+    input for the importer and nothing else."""
+    monkeypatch.setenv("CLAIM_VERIFY_ENABLED", "1")
+    assert cv.is_enabled() is False
+
+
+def test_the_verify_model_follows_the_main_model_unless_pinned(monkeypatch):
+    """An unset `CLAIM_VERIFY_MODEL` means "whatever the brief is using", so a
+    model bump moves this call with it. Duplicating the literal would leave the
+    judge on the old model with nothing to say so."""
+    assert cv._model() == common.MODEL
+    monkeypatch.setattr(common, "CLAIM_VERIFY_MODEL", "claude-haiku-4-5-20251001")
+    assert cv._model() == "claude-haiku-4-5-20251001"
 
 
 def test_save_and_load_evidence_roundtrip(tmp_path, monkeypatch):
@@ -110,7 +126,7 @@ def _tool_resp(claims):
 
 def test_build_verify_request_forces_the_tool():
     req = cv.build_verify_request("<b>🌍 TOP STORIES</b>\n- x", "SOURCE: R\n- x")
-    assert req["model"] == cv.VERIFY_MODEL
+    assert req["model"] == cv._model()
     # Adaptive thinking enabled (grounding judge benefits from reasoning) with a
     # raised budget so thinking + the forced tool call both fit.
     assert req["thinking"] == {"type": "adaptive"}
@@ -174,7 +190,7 @@ def test_verification_record_counts_verdicts():
     ]
     rec = cv._verification_record("2026-06-26", True, claims)
     assert rec["date"] == "2026-06-26"
-    assert rec["model"] == cv.VERIFY_MODEL
+    assert rec["model"] == cv._model()
     assert rec["top_stories_present"] is True
     assert rec["n_claims"] == 3
     assert rec["counts_by_verdict"]["supported"] == 1

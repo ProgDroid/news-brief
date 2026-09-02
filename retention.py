@@ -15,9 +15,6 @@ from pathlib import Path
 import common
 from common import DATA_DIR, load_thesis_log, log, save_thesis_log
 
-DEFAULT_RETENTION_DAYS = 90
-RETENTION_DAYS_ENV = "NEWSBRIEF_RETENTION_DAYS"
-
 _DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 
 
@@ -48,18 +45,10 @@ def _file_date(name: str):
 
 
 def _resolve_days(days):
-    if days is not None:
-        return days
-    raw = os.environ.get(RETENTION_DAYS_ENV)
-    if raw is None:
-        return DEFAULT_RETENTION_DAYS
-    try:
-        return int(raw)
-    except (TypeError, ValueError):
-        log.warning(
-            f"Invalid {RETENTION_DAYS_ENV}={raw!r}; using {DEFAULT_RETENTION_DAYS}"
-        )
-        return DEFAULT_RETENTION_DAYS
+    """The window, unless the caller names one. A malformed row is coerced back
+    to the default by `common.coerce_knob`, which is why there is no parse-and-
+    warn branch here any more."""
+    return common.RETENTION_DAYS if days is None else days
 
 
 def _cutoff(today: str, days: int):

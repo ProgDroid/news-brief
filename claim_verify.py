@@ -5,14 +5,13 @@ trading. Gated by CLAIM_VERIFY_ENABLED; fail-safe (any error leaves the brief
 unaffected). Idea reimplemented from the Pharos verify pattern (AGPL); no code lifted."""
 
 import json
-import os
 from pathlib import Path
 
 import requests
 
+import common
 from common import ANTHROPIC_HEADERS, DATA_DIR, _write_json_atomic, log
 
-VERIFY_MODEL = os.environ.get("NEWSBRIEF_MODEL", "claude-sonnet-5")
 VERIFY_TIMEOUT = (
     90  # generous: runs AFTER delivery, so latency is free (lesson e255436)
 )
@@ -31,7 +30,14 @@ _FLAG_VERDICTS = ("unsupported", "contradicted", "overstated")
 
 
 def is_enabled() -> bool:
-    return os.environ.get("CLAIM_VERIFY_ENABLED", "0") == "1"
+    return common.CLAIM_VERIFY_ENABLED
+
+
+def _model() -> str:
+    """The model this judge runs on. An unset `CLAIM_VERIFY_MODEL` means "follow
+    the brief", so a model bump carries this call with it; pin the row only to
+    hold the judge on a different model deliberately."""
+    return common.CLAIM_VERIFY_MODEL or common.MODEL
 
 
 def build_source_evidence(feed_content: str, web_content: str) -> str:
@@ -184,7 +190,7 @@ SOURCE MATERIAL:
 
 def build_verify_request(top_stories: str, evidence: str) -> dict:
     return {
-        "model": VERIFY_MODEL,
+        "model": _model(),
         "max_tokens": VERIFY_MAX_TOKENS,
         # A grounding judge ("is each claim supported by the provided sources?") is
         # the one call where step-by-step reasoning genuinely helps, so enable
@@ -269,7 +275,7 @@ def _verification_record(
         counts[c["verdict"]] = counts.get(c["verdict"], 0) + 1
     return {
         "date": today,
-        "model": VERIFY_MODEL,
+        "model": _model(),
         "top_stories_present": top_stories_present,
         "n_claims": len(claims),
         "counts_by_verdict": counts,

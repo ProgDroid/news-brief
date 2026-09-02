@@ -165,3 +165,17 @@ def test_fetch_batch_results_still_skips_non_text_blocks(monkeypatch):
     monkeypatch.setattr(brief, "_dump_raw_batch_result", lambda *a, **k: None)
 
     assert brief.fetch_batch_results("http://example.invalid/results") == "kept"
+
+
+def test_query_chroma_reads_its_endpoint_from_the_knob(monkeypatch):
+    """The MCP endpoint is a `settings` row now, so pointing the brief at a
+    local MCP server is a row edit rather than a redeploy."""
+    import common
+
+    cap = {}
+    monkeypatch.setattr(common, "CHROMA_MCP_URL", "http://localhost:9999/mcp")
+    monkeypatch.setattr(
+        brief.requests, "post", _capturing_post(cap, {"result": {"content": []}})
+    )
+    brief.query_chroma("q")
+    assert cap["url"] == "http://localhost:9999/mcp"

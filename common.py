@@ -144,6 +144,17 @@ POLYGRAM_PASSWORD = os.environ.get("POLYGRAM_PASSWORD")
 # Credentials are deliberately NOT here. A missing API key fails loudly at its
 # first call, so it was never the silent-passthrough bug class this retires, and
 # a settings row would be written to the appdata volume by every pg_dump.
+#
+# Nor is anything DEPLOY-SCOPED, and that boundary is drawn on purpose so a third
+# mechanism does not appear later:
+#   * NITTER_BASE_URL names a service on the compose network, and is interpolated
+#     into RSS_FEEDS at import. It cannot change without the compose file
+#     changing, so "takes effect without recreating a container" is not a
+#     property it can have.
+#   * NEWSBRIEF_DATA_DIR and NEWSBRIEF_LOG_FILE are read before a database
+#     connection can exist — they decide where this module logs.
+#   * NEWSBRIEF_SCHEDULED_FOR, NEWSBRIEF_TRIGGER and NEWSBRIEF_RUN_ID are set per
+#     invocation by the supervisor. They describe one run, not configuration.
 
 
 class Knob(NamedTuple):
@@ -215,6 +226,38 @@ KNOBS: dict[str, Knob] = {
     "VOL_FLOOR_EQUITY": Knob(float, 0.0),
     "VOL_FLOOR_CRYPTO": Knob(float, 0.0),
     "VOL_FLOOR_PREDICTION": Knob(float, 0.0),
+    # ── Knobs that lived in other modules until 0q0.7.6 ───────────────────────
+    # Feature flags for the two post-delivery passes. Both default OFF and both
+    # fail safe, so a row that is missing costs a feature, never a brief.
+    "BRIEF_MEMORY_ENABLED": Knob(bool, False),
+    "CLAIM_VERIFY_ENABLED": Knob(bool, False),
+    # Two retention windows, deliberately distinct: the 90-day one prunes dated
+    # artifacts, the 14-day one prunes pg_dump files. Folding the dumps into the
+    # artifact window would silently give them 90 days.
+    "RETENTION_DAYS": Knob(int, 90, env="NEWSBRIEF_RETENTION_DAYS"),
+    "BACKUP_RETENTION_DAYS": Knob(int, 14, env="NEWSBRIEF_BACKUP_RETENTION_DAYS"),
+    # Podcast MCP endpoint (JSON-RPC 2.0 over HTTP POST). A row points the brief
+    # at a local MCP server without a redeploy; the proxy-auth pair beside it in
+    # brief.py stays in the environment, being a credential.
+    "CHROMA_MCP_URL": Knob(
+        str, "https://progdroid--podcast-mcp-server-mcp-server.modal.run/mcp"
+    ),
+    # Per-call-site model overrides for the two post-generation calls. EMPTY
+    # means "follow MODEL", which is why the default is "" and not a model id:
+    # a duplicated literal would leave these two calls behind on the next model
+    # bump, with nothing to say so. Set one only to pin it deliberately.
+    "SIGNALS_MODEL": Knob(str, "", env="NEWSBRIEF_SIGNALS_MODEL"),
+    "CLAIM_VERIFY_MODEL": Knob(str, "", env="NEWSBRIEF_CLAIM_VERIFY_MODEL"),
+    # Enrichment subsystem. Read through `enrichment.config`, which forwards
+    # here, so its ~10 call sites are unchanged. BIGDATA_API_KEY is absent for
+    # the same reason as every other credential.
+    "ENRICHMENT_ENABLED": Knob(bool, False),
+    "ENRICHMENT_PROVIDER": Knob(str, ""),  # "null" | "fixture" | "bigdata"; "" = auto
+    "ENRICHMENT_THEMES_ENABLED": Knob(bool, True),  # the ~10x-cost search path
+    "ENRICHMENT_MAX_SYMBOLS": Knob(int, 20),  # ceilings on query fan-out
+    "ENRICHMENT_MAX_THEMES": Knob(int, 8),
+    "ENRICHMENT_HTTP_TIMEOUT": Knob(float, 20.0),
+    "BIGDATA_BASE_URL": Knob(str, "https://api.bigdata.com"),
 }
 
 _TRUTHY = {"1", "true", "yes", "on"}

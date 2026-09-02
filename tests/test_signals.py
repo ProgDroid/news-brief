@@ -606,3 +606,15 @@ def test_fetch_rss_still_honours_an_explicit_max_items(monkeypatch):
 
     feed = {"name": "Test Wire", "url": "http://x", "category": "geo"}
     assert brief.fetch_rss(feed, max_items=3).count("Headline ") == 3
+
+
+def test_the_signals_model_follows_the_main_model_unless_pinned(monkeypatch):
+    """`NEWSBRIEF_SIGNALS_MODEL` unset means "whatever the brief is using", so a
+    model bump carries the post-gen extraction with it rather than leaving it
+    pinned to a literal nobody remembers to update."""
+    import common
+
+    assert brief.build_signals_request("BRIEF", sources=[])["model"] == common.MODEL
+    monkeypatch.setattr(common, "SIGNALS_MODEL", "claude-haiku-4-5-20251001")
+    req = brief.build_signals_request("BRIEF", sources=[])
+    assert req["model"] == "claude-haiku-4-5-20251001"

@@ -20,24 +20,34 @@ def test_file_date_undateable_returns_none():
     assert rt._file_date("brief-2026-13-99.md") is None  # invalid calendar date
 
 
-def test_resolve_days_default(monkeypatch):
-    monkeypatch.delenv("NEWSBRIEF_RETENTION_DAYS", raising=False)
+def test_resolve_days_default():
     assert rt._resolve_days(None) == 90
 
 
-def test_resolve_days_env_override(monkeypatch):
-    monkeypatch.setenv("NEWSBRIEF_RETENTION_DAYS", "30")
+def test_resolve_days_knob_override(monkeypatch):
+    monkeypatch.setattr(common, "RETENTION_DAYS", 30)
     assert rt._resolve_days(None) == 30
 
 
 def test_resolve_days_invalid_falls_back(monkeypatch):
-    monkeypatch.setenv("NEWSBRIEF_RETENTION_DAYS", "abc")
+    """A malformed row is coerced back to the default by `common.coerce_knob`,
+    so the module no longer carries its own parse-and-warn branch."""
+    monkeypatch.setattr(
+        common,
+        "RETENTION_DAYS",
+        common.coerce_knob(common.KNOBS["RETENTION_DAYS"], "abc"),
+    )
     assert rt._resolve_days(None) == 90
 
 
 def test_resolve_days_explicit_arg_wins(monkeypatch):
-    monkeypatch.setenv("NEWSBRIEF_RETENTION_DAYS", "30")
+    monkeypatch.setattr(common, "RETENTION_DAYS", 30)
     assert rt._resolve_days(5) == 5
+
+
+def test_the_environment_no_longer_sets_the_window(monkeypatch):
+    monkeypatch.setenv("NEWSBRIEF_RETENTION_DAYS", "30")
+    assert rt._resolve_days(None) == 90
 
 
 def test_prune_deletes_old_keeps_recent_undateable_and_boundary(tmp_path, monkeypatch):

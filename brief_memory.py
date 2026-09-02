@@ -4,13 +4,13 @@ affects trading. Flag-gated by BRIEF_MEMORY_ENABLED; fail-safe (any error leaves
 the brief unaffected and the prior ledger intact)."""
 
 import json
-import os
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import requests
 
+import common
 from common import ANTHROPIC_HEADERS, DATA_DIR, _write_json_atomic, log
 
 BRIEF_MEMORY_FILE = DATA_DIR / "brief_memory.json"
@@ -100,7 +100,7 @@ RECONCILE_MAX_TOKENS = 8192
 
 
 def is_enabled() -> bool:
-    return os.environ.get("BRIEF_MEMORY_ENABLED", "0") == "1"
+    return common.BRIEF_MEMORY_ENABLED
 
 
 def empty_ledger() -> dict:

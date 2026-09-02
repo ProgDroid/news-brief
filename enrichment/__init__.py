@@ -6,8 +6,8 @@ evidence into the daily brief as READ-ONLY context behind a vendor-neutral
 provider seam. The bundle types here are the future digest<->trading seam.
 """
 
+from . import config
 from .build import build_enrichment
-from .config import ENRICHMENT_ENABLED as _ENABLED
 from .models import (
     EnrichmentBundles,
     EvidenceDoc,
@@ -21,7 +21,9 @@ from .universe import Universe, build_universe, latest_signal_tickers
 
 
 def is_enabled() -> bool:
-    return _ENABLED
+    # Read at CALL time, through the forwarding seam. This was a from-import
+    # copy, frozen at import, which no host toggle could move.
+    return config.ENRICHMENT_ENABLED
 
 
 __all__ = [

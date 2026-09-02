@@ -64,6 +64,14 @@ def _stubbed_config(request, monkeypatch):
     for name in common.KNOBS:
         common.__dict__.pop(name, None)
 
+    # `enrichment.config` forwards its knobs to `common` through the same PEP 562
+    # mechanism, and its call sites are patched with setattr all over
+    # test_enrichment_*.py — so it leaks the same way and needs the same sweep.
+    from enrichment import config as enrichment_config
+
+    for name in enrichment_config._FORWARDED:
+        enrichment_config.__dict__.pop(name, None)
+
     # Not an early `return`: this is a generator fixture, and a path that skips
     # the yield fails at setup with "did not yield a value" — invisibly, until
     # someone runs the DB-backed module that carries the marker.

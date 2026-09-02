@@ -65,9 +65,11 @@ class FixtureProvider:
 
 def get_provider() -> Provider:
     """Select a provider from config. Only meaningful when ENRICHMENT_ENABLED."""
-    name = config.ENRICHMENT_PROVIDER or (
-        "bigdata" if config.BIGDATA_API_KEY else "null"
-    )
+    # Lowered here rather than at read time: the value is a hand-editable
+    # `settings` row now, and "Fixture" must not quietly select null.
+    name = (
+        config.ENRICHMENT_PROVIDER or ("bigdata" if config.BIGDATA_API_KEY else "null")
+    ).lower()
     if name == "fixture":
         if not config.FIXTURE_DIR:
             log.warning(

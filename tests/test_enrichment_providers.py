@@ -237,3 +237,12 @@ def test_bigdata_symbol_empty_series_yields_none_sentiment(monkeypatch):
     sb = p.symbol_bundle("AAPL")
     assert sb.rp_entity_id == "D8442A"
     assert sb.sentiment is None
+
+
+def test_get_provider_normalises_the_case_of_the_provider_name(monkeypatch):
+    """The name used to be lowered as it was read out of the environment. It is
+    a hand-editable `settings` row now, so the normalisation has to happen where
+    the value is compared or "Fixture" silently selects the null provider."""
+    monkeypatch.setattr(config, "ENRICHMENT_PROVIDER", "Fixture")
+    monkeypatch.setattr(config, "FIXTURE_DIR", FIX)
+    assert get_provider().name == "fixture"

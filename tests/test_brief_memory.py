@@ -4,13 +4,21 @@ import logging
 import pytest
 
 import brief_memory as bm
+import common
 
 
-def test_is_enabled_reads_env(monkeypatch):
-    monkeypatch.delenv("BRIEF_MEMORY_ENABLED", raising=False)
+def test_is_enabled_reads_the_knob(monkeypatch):
     assert bm.is_enabled() is False
-    monkeypatch.setenv("BRIEF_MEMORY_ENABLED", "1")
+    monkeypatch.setattr(common, "BRIEF_MEMORY_ENABLED", True)
     assert bm.is_enabled() is True
+
+
+def test_the_environment_no_longer_enables_the_ledger(monkeypatch):
+    """The flag is a `settings` row now. A host that still exports the variable
+    must not get a second, competing switch — that split is the bug class
+    phase 2 exists to retire."""
+    monkeypatch.setenv("BRIEF_MEMORY_ENABLED", "1")
+    assert bm.is_enabled() is False
 
 
 def test_empty_ledger_shape():

@@ -637,3 +637,34 @@ def test_an_undecodable_row_is_skipped_not_fatal(conn):
 
     got = config.runtime_state()
     assert got == {"tg_offset": 3}
+
+
+def test_a_host_with_only_the_main_model_set_keeps_every_call_on_it(conn, monkeypatch):
+    """The 0q0.7.6 deploy must be a no-op for the two post-generation calls.
+
+    The host exports NEWSBRIEF_MODEL and neither per-call-site variable, so the
+    importer writes one row and the two empty knobs fall through to it. A
+    duplicated literal default would instead strand both calls on
+    `claude-sonnet-5` the moment the operator moved the main model.
+    """
+    import claim_verify
+
+    monkeypatch.setenv("NEWSBRIEF_MODEL", "claude-opus-5")
+    config.import_settings_from_env(conn)
+    stored = _settings(conn)
+    assert "NEWSBRIEF_SIGNALS_MODEL" not in stored
+    assert "NEWSBRIEF_CLAIM_VERIFY_MODEL" not in stored
+    assert claim_verify._model() == "claude-opus-5"
+    assert brief._signals_model() == "claude-opus-5"
+
+
+def test_pinning_one_call_site_leaves_the_others_alone(conn, monkeypatch):
+    """And the axis is real: a row on one post-generation call moves only it."""
+    import claim_verify
+
+    monkeypatch.setenv("NEWSBRIEF_MODEL", "claude-opus-5")
+    monkeypatch.setenv("NEWSBRIEF_CLAIM_VERIFY_MODEL", "claude-haiku-4-5-20251001")
+    config.import_settings_from_env(conn)
+    assert claim_verify._model() == "claude-haiku-4-5-20251001"
+    assert brief._signals_model() == "claude-opus-5"
+    assert common.MODEL == "claude-opus-5"

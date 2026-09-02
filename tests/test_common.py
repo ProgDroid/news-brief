@@ -188,3 +188,50 @@ def test_a_bool_knob_never_falls_back():
     stored value is gibberish must read OFF, and `PG_LIVE_ENABLED` defaulting to
     False is not something to rely on if the default ever changes."""
     assert common.coerce_knob(common.Knob(bool, True), "banana") is False
+
+
+@pytest.mark.parametrize(
+    "name, expected",
+    [
+        ("BRIEF_MEMORY_ENABLED", False),
+        ("CLAIM_VERIFY_ENABLED", False),
+        ("RETENTION_DAYS", 90),
+        ("BACKUP_RETENTION_DAYS", 14),
+        (
+            "CHROMA_MCP_URL",
+            "https://progdroid--podcast-mcp-server-mcp-server.modal.run/mcp",
+        ),
+        ("SIGNALS_MODEL", ""),
+        ("CLAIM_VERIFY_MODEL", ""),
+        ("ENRICHMENT_ENABLED", False),
+        ("ENRICHMENT_PROVIDER", ""),
+        ("ENRICHMENT_THEMES_ENABLED", True),
+        ("ENRICHMENT_MAX_SYMBOLS", 20),
+        ("ENRICHMENT_MAX_THEMES", 8),
+        ("ENRICHMENT_HTTP_TIMEOUT", 20.0),
+        ("BIGDATA_BASE_URL", "https://api.bigdata.com"),
+    ],
+)
+def test_a_relocated_knob_resolves_its_declared_default(name, expected):
+    """The knobs that lived in other modules' `os.environ.get` calls until
+    0q0.7.6. Each default is the one its old call site carried, so a host with
+    no row for it behaves exactly as it did before the move."""
+    assert getattr(common, name) == expected
+
+
+@pytest.mark.parametrize(
+    "name, key",
+    [
+        ("RETENTION_DAYS", "NEWSBRIEF_RETENTION_DAYS"),
+        ("BACKUP_RETENTION_DAYS", "NEWSBRIEF_BACKUP_RETENTION_DAYS"),
+        ("SIGNALS_MODEL", "NEWSBRIEF_SIGNALS_MODEL"),
+        ("CLAIM_VERIFY_MODEL", "NEWSBRIEF_CLAIM_VERIFY_MODEL"),
+    ],
+)
+def test_a_relocated_knob_keeps_its_operator_facing_name(name, key):
+    """`key()` is what the importer reads and what the `settings` row is named,
+    and it is deliberately NOT the attribute name here: the two retention
+    windows are distinct variables an operator may already have set, and the
+    per-call-site model knobs are new names that must not collide with
+    `NEWSBRIEF_MODEL`."""
+    assert common.KNOBS[name].key(name) == key

@@ -116,12 +116,9 @@ from retention import run_retention
 
 
 # Chroma MCP HTTP endpoint
-# NOTE: This endpoint is called via HTTP POST with JSON-RPC 2.0 format.
-# If you are running the MCP server locally or via a different transport,
-# update CHROMA_MCP_URL in your .env accordingly.
-CHROMA_MCP_URL = os.environ.get(
-    "CHROMA_MCP_URL", "https://progdroid--podcast-mcp-server-mcp-server.modal.run/mcp"
-)
+# NOTE: This endpoint is called via HTTP POST with JSON-RPC 2.0 format. It is a
+# settings row now (`common.CHROMA_MCP_URL`), so pointing the brief at a local
+# MCP server or a different transport is a row edit rather than a redeploy.
 
 # Modal proxy auth. The MCP endpoint is deployed with requires_proxy_auth=True,
 # so Modal rejects unauthenticated calls at its edge before a container starts.
@@ -141,6 +138,10 @@ WEEKLY_DIR = DATA_DIR / "weekly"
 # Self-hosted Nitter (Twitter/X mirror) reachable on the container's Docker network.
 # Default targets a service named `nitter` on Nitter's default internal port 8080;
 # override NITTER_BASE_URL if your instance listens on a different host/port.
+# DELIBERATELY still an environment variable rather than a settings row: it names
+# a service on the compose network and is interpolated into RSS_FEEDS at import,
+# so it cannot change without the compose file changing. See the deploy-scoped
+# carve-out in common.KNOBS.
 NITTER_BASE_URL = (
     os.environ.get("NITTER_BASE_URL", "http://nitter:8080").strip().rstrip("/")
 )
@@ -2105,7 +2106,7 @@ def _chroma_call(payload: dict, log_label: str) -> list[str]:
         )
     try:
         resp = requests.post(
-            CHROMA_MCP_URL,
+            common.CHROMA_MCP_URL,
             json=payload,
             headers=headers,
             # Modal serverless cold-starts can exceed 20s on the first call of a run.
@@ -2615,7 +2616,14 @@ def annotate_signal_sources(signals: list[dict]) -> list[dict]:
 # Sonnet call reads the finished brief and emits signals via a forced tool, so
 # the JSON is schema-guaranteed (no delimiter to mangle, no shared token budget
 # to truncate). Mirrors brief_memory.reconcile_ledger.
-SIGNALS_MODEL = os.environ.get("NEWSBRIEF_MODEL", "claude-sonnet-5")
+
+
+def _signals_model() -> str:
+    """The model this extraction runs on. An unset `SIGNALS_MODEL` means "follow
+    the brief", so a model bump carries the post-gen call with it rather than
+    leaving it pinned to a literal nobody remembers to update."""
+    return common.SIGNALS_MODEL or common.MODEL
+
 
 _EMIT_SIGNALS_TOOL = {
     "name": "emit_signals",
@@ -2728,7 +2736,7 @@ def build_signals_request(brief_text: str, sources: list[dict] | None = None) ->
         sources = all_sources()
     source_names = "\n".join(f"- {s['name']}" for s in sources) or "(none)"
     return {
-        "model": SIGNALS_MODEL,
+        "model": _signals_model(),
         "max_tokens": SIGNALS_MAX_TOKENS,
         # Forced-tool extraction against a closed source set — the schema does the
         # work. Disable thinking (default is adaptive on Sonnet 5) so it can't eat

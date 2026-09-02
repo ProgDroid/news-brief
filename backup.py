@@ -35,11 +35,9 @@ from pathlib import Path
 
 from psycopg.conninfo import conninfo_to_dict
 
+import common
 import db
 from common import DATA_DIR, log
-
-DEFAULT_RETENTION_DAYS = 14
-RETENTION_DAYS_ENV = "NEWSBRIEF_BACKUP_RETENTION_DAYS"
 
 BACKUP_DIR_NAME = "backups"
 DUMP_PREFIX = "newsbrief-"
@@ -208,18 +206,10 @@ def create_dump(parts: dict, target: Path, *, runner=None) -> int:
 
 
 def _resolve_days(explicit: int | None) -> int:
-    if explicit is not None:
-        return explicit
-    raw = os.environ.get(RETENTION_DAYS_ENV)
-    if raw is None or raw == "":
-        return DEFAULT_RETENTION_DAYS
-    try:
-        return int(raw)
-    except ValueError:
-        log.warning(
-            f"Invalid {RETENTION_DAYS_ENV}={raw!r}; using {DEFAULT_RETENTION_DAYS}"
-        )
-        return DEFAULT_RETENTION_DAYS
+    """The dump window, unless the caller names one. A malformed row is coerced
+    back to the default by `common.coerce_knob`, which is why there is no
+    parse-and-warn branch here any more."""
+    return common.BACKUP_RETENTION_DAYS if explicit is None else explicit
 
 
 def _file_date(name: str):

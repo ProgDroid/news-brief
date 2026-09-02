@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 import backup as bk
+import common
 
 
 def _touch(p):
@@ -119,24 +120,36 @@ def test_dump_env_omits_pgpassword_when_no_password():
 # ── retention window ──────────────────────────────────────────────────────────
 
 
-def test_resolve_days_default(monkeypatch):
-    monkeypatch.delenv(bk.RETENTION_DAYS_ENV, raising=False)
-    assert bk._resolve_days(None) == bk.DEFAULT_RETENTION_DAYS == 14
+def test_resolve_days_default():
+    assert bk._resolve_days(None) == 14
 
 
-def test_resolve_days_env_override(monkeypatch):
-    monkeypatch.setenv(bk.RETENTION_DAYS_ENV, "30")
+def test_resolve_days_knob_override(monkeypatch):
+    monkeypatch.setattr(common, "BACKUP_RETENTION_DAYS", 30)
     assert bk._resolve_days(None) == 30
 
 
 def test_resolve_days_invalid_falls_back(monkeypatch):
-    monkeypatch.setenv(bk.RETENTION_DAYS_ENV, "not-a-number")
+    """A malformed row is coerced back to the default by `common.coerce_knob`,
+    so the module no longer carries its own parse-and-warn branch."""
+    knob = common.KNOBS["BACKUP_RETENTION_DAYS"]
+    monkeypatch.setattr(
+        common, "BACKUP_RETENTION_DAYS", common.coerce_knob(knob, "not-a-number")
+    )
     assert bk._resolve_days(None) == 14
 
 
 def test_resolve_days_explicit_arg_wins(monkeypatch):
-    monkeypatch.setenv(bk.RETENTION_DAYS_ENV, "30")
+    monkeypatch.setattr(common, "BACKUP_RETENTION_DAYS", 30)
     assert bk._resolve_days(3) == 3
+
+
+def test_the_environment_no_longer_sets_the_backup_window(monkeypatch):
+    """The dump window is its own `settings` row, distinct from the 90-day
+    artifact window in `retention.py` — two knobs, two keys, neither in the
+    environment."""
+    monkeypatch.setenv("NEWSBRIEF_BACKUP_RETENTION_DAYS", "30")
+    assert bk._resolve_days(None) == 14
 
 
 def test_prune_deletes_old_keeps_recent_boundary_and_foreign(tmp_path, monkeypatch):
