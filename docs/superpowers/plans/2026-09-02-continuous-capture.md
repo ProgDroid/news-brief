@@ -1266,12 +1266,9 @@ Expected suite total: **1392 passed** (1384 + 8).
 
 - [ ] **Step 1: Write the failing tests**
 
-Append to `tests/test_capture.py`:
+Append to `tests/test_capture.py`. **Put `import capture` and `import common` in the file's TOP import block, not above the appended tests** — `tests/` is inside `ruff check .`, so a mid-file import is `E402` and fails the gate before any test runs. This rule holds for every later task that needs a new import in an existing test file.
 
 ```python
-import capture
-
-
 def test_capture_polls_feeds_and_never_page_sources(monkeypatch):
     """all_sources() is the wrong entry point: it includes source_type='page'
     entries, which are scraped pages with no entry list. RSS_FEEDS carries no
@@ -1332,7 +1329,16 @@ def test_a_pass_stops_at_its_deadline_and_records_what_it_skipped(monkeypatch):
     )
     monkeypatch.setattr(capture, "start_run", lambda conn, enabled: 1)
     monkeypatch.setattr(capture, "finish_run", lambda conn, run, tally: None)
-    tally = capture.run(conn=object())
+    monkeypatch.setattr(common, "CAPTURE_ENABLED", True)
+
+    class _FakeConn:
+        """`run` commits per feed, so a bare object() raises AttributeError
+        before the deadline logic is ever reached."""
+
+        def commit(self):
+            return None
+
+    tally = capture.run(conn=_FakeConn())
     assert len(recorded) == 5, "every feed gets a poll row, reached or not"
     assert all(failure == "deadline" for _, failure in recorded)
     assert tally.feeds_failed == 5
@@ -1510,12 +1516,9 @@ Expected suite total: **1396 passed** (1392 + 4).
 
 - [ ] **Step 1: Write the failing tests**
 
-Append to `tests/test_capture.py`:
+Append to `tests/test_capture.py`. Add `import scheduler` to the file's **top import block**, not here (`E402`).
 
 ```python
-import scheduler
-
-
 def test_capture_is_a_job_mode():
     """A JOB_MODES entry is what gives capture the advisory lock and its
     job_runs row through the mode dispatch — the rule that every entry path to a
