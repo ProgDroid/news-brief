@@ -503,6 +503,9 @@ def test_startup_seeds_the_first_boot(monkeypatch):
     monkeypatch.setattr(
         config, "ensure_seeded", lambda c: calls.append(("operator", c))
     )
+    monkeypatch.setattr(
+        config, "import_settings_from_env", lambda c: calls.append(("settings", c))
+    )
 
     state = supervisor.startup(
         migrate=lambda c: calls.append("migrate"), connect=lambda: conn
@@ -521,6 +524,7 @@ def test_startup_seeds_the_first_boot(monkeypatch):
     assert calls.index("migrate") < calls.index(("operator", conn)), (
         "the operator seed writes to the table migrate creates"
     )
+    assert ("settings", conn) in calls, "startup must import settings on first boot"
 
 
 def test_a_failed_seed_disables_jobs(monkeypatch):
@@ -536,6 +540,7 @@ def test_a_failed_seed_disables_jobs(monkeypatch):
     monkeypatch.setattr(supervisor, "reclaim_orphans", lambda c: None)
     monkeypatch.setattr(supervisor, "seed_first_boot", boom)
     monkeypatch.setattr(config, "ensure_seeded", lambda c: False)
+    monkeypatch.setattr(config, "import_settings_from_env", lambda c: [])
     monkeypatch.setattr(supervisor, "telegram_alert", lambda m: None)
 
     state = supervisor.startup(migrate=lambda c: None, connect=lambda: object())
@@ -558,6 +563,7 @@ def test_a_failed_operator_seed_disables_jobs(monkeypatch):
     monkeypatch.setattr(supervisor, "reclaim_orphans", lambda c: None)
     monkeypatch.setattr(supervisor, "seed_first_boot", lambda c: [])
     monkeypatch.setattr(config, "ensure_seeded", boom)
+    monkeypatch.setattr(config, "import_settings_from_env", lambda c: [])
     monkeypatch.setattr(supervisor, "telegram_alert", alerts.append)
 
     state = supervisor.startup(migrate=lambda c: None, connect=lambda: object())

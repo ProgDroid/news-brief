@@ -2,6 +2,8 @@
 
 import importlib
 
+import pytest
+
 import common
 
 
@@ -20,17 +22,23 @@ def test_model_defaults_to_sonnet_5():
     assert common.MODEL == "claude-sonnet-5"
 
 
-def test_model_honours_newsbrief_model_override(monkeypatch):
-    # Constants are read at import time, so overriding requires a reload. Restore
-    # the default afterwards so a mutated global doesn't leak into other tests.
+def test_the_environment_no_longer_overrides_a_knob_at_import(monkeypatch):
+    """NEWSBRIEF_MODEL used to be read into a constant at import, so overriding
+    it needed a reload. It is bootstrap input for the settings importer now and
+    nothing else, so a reload with the variable set must NOT change the value —
+    otherwise the environment would still be a second, competing source of truth
+    and the bug class this phase retires would only be half gone.
+
+    The row-backed override is covered in test_config.py, against a real
+    database, which is the only place it can be tested honestly.
+    """
     monkeypatch.setenv("NEWSBRIEF_MODEL", "claude-opus-4-8")
     try:
         importlib.reload(common)
-        assert common.MODEL == "claude-opus-4-8"
+        assert common.MODEL == "claude-sonnet-5"
     finally:
         monkeypatch.delenv("NEWSBRIEF_MODEL", raising=False)
         importlib.reload(common)
-    assert common.MODEL == "claude-sonnet-5"
 
 
 def test_load_json_or_roundtrip(tmp_path):
@@ -128,3 +136,55 @@ def test_append_thesis_persists(tmp_path, monkeypatch):
 def test_load_thesis_log_missing_is_empty(tmp_path, monkeypatch):
     monkeypatch.setattr(common, "THESIS_LOG_FILE", tmp_path / "nope.json")
     assert common.load_thesis_log() == []
+
+
+# ── Knobs: coercion and the __getattr__ seam ─────────────────────────────────
+# These need no database. `conftest` pins the settings map to empty, so every
+# knob resolves through the real coercion path to its declared default — which
+# is exactly what a first boot with no rows does.
+
+
+def test_every_knob_resolves_to_its_declared_default():
+    for name, spec in common.KNOBS.items():
+        assert getattr(common, name) == spec.default, name
+
+
+def test_an_unknown_knob_raises_rather_than_resolving():
+    """The registry is what makes a typo loud. Without it `common.PG_A_ENABLD`
+    would be a lookup that misses and returns a default, and the sleeve would
+    read as disabled for a reason nobody could see."""
+    with pytest.raises(AttributeError, match="PG_A_ENABLD"):
+        common.PG_A_ENABLD
+
+
+@pytest.mark.parametrize(
+    "kind, raw, expected",
+    [
+        (bool, "1", True),
+        (bool, "true", True),
+        (bool, " ON ", True),
+        (bool, "0", False),
+        (bool, "", False),
+        (bool, "no", False),
+        (int, "21", 21),
+        (int, "21.0", 21),  # a float-looking edit of an int knob still reads
+        (float, "0.75", 0.75),
+        (str, " claude-opus-5 ", "claude-opus-5"),
+    ],
+)
+def test_coercion(kind, raw, expected):
+    assert common.coerce_knob(common.Knob(kind, "SENTINEL"), raw) == expected
+
+
+@pytest.mark.parametrize("kind, raw", [(int, "abc"), (float, "1,5"), (int, "")])
+def test_a_malformed_value_falls_back_to_the_default(kind, raw):
+    """A fat-fingered row must not be able to take down a job: every knob has a
+    safe default by construction, so the default is the honest answer."""
+    assert common.coerce_knob(common.Knob(kind, 7), raw) == 7
+
+
+def test_a_bool_knob_never_falls_back():
+    """Anything unrecognised is False, not the default. A live-money flag whose
+    stored value is gibberish must read OFF, and `PG_LIVE_ENABLED` defaulting to
+    False is not something to rely on if the default ever changes."""
+    assert common.coerce_knob(common.Knob(bool, True), "banana") is False

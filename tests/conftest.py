@@ -35,22 +35,48 @@ def pytest_configure(config):
 
 
 @pytest.fixture(autouse=True)
-def _stubbed_chat_id(request, monkeypatch):
-    """Resolve the delivery chat id without a database, suite-wide.
+def _stubbed_config(request, monkeypatch):
+    """Resolve identity and knobs without a database, suite-wide.
 
-    From phase 2 the chat id is a row in `users` rather than an environment
-    variable, and production hard-requires Postgres for it. Substituting at the
-    accessor — the seam, not a fallback inside it — is what keeps the ~400 tests
-    that merely need *a* chat id infra-free. The handful that care which chat id
-    override this by patching `config.chat_id` themselves, and `test_config.py`
-    opts out entirely with the `real_config` marker.
+    From phase 2 both the chat id and every knob are rows, and production
+    hard-requires Postgres for them. Substituting at the seam — the two readers,
+    not a fallback inside them — is what keeps the ~1100 tests that merely need
+    *a* chat id and default knobs infra-free.
+
+    `_read_settings` returns empty rather than a canned map on purpose: no rows
+    means every knob resolves to its declared default through the real coercion
+    path, which is both the production first-boot state and the value the suite
+    has always asserted against. Tests that want a different knob still patch
+    `common.<NAME>` exactly as they did before.
+
+    `test_config.py` opts out entirely with the `real_config` marker.
     """
-    if request.node.get_closest_marker("real_config"):
-        return
+    import common
     import config
 
-    monkeypatch.setattr(config, "chat_id", lambda: TEST_CHAT_ID)
-    monkeypatch.setattr(config, "alert_chat_id", lambda: TEST_CHAT_ID)
+    # Knobs resolve through common.__getattr__, which Python consults ONLY for
+    # names absent from the module. `monkeypatch.setattr(common, "PG_A_ENABLED",
+    # True)` works, but its undo restores the resolved value as a REAL
+    # attribute — which then shadows __getattr__ for the rest of the process and
+    # quietly freezes that knob for every later test. Clearing the leak here, at
+    # setup, rather than in teardown: monkeypatch is torn down after us, so a
+    # teardown cleanup would be undone immediately by the very thing it fixes.
+    for name in common.KNOBS:
+        common.__dict__.pop(name, None)
+
+    # Not an early `return`: this is a generator fixture, and a path that skips
+    # the yield fails at setup with "did not yield a value" — invisibly, until
+    # someone runs the DB-backed module that carries the marker.
+    if not request.node.get_closest_marker("real_config"):
+        config.invalidate()
+        monkeypatch.setattr(config, "chat_id", lambda: TEST_CHAT_ID)
+        monkeypatch.setattr(config, "alert_chat_id", lambda: TEST_CHAT_ID)
+        monkeypatch.setattr(config, "_read_settings", dict)
+    yield
+    # The stub is cached like any other read, so it must not outlive the test
+    # that installed it — a `real_config` test running next would otherwise see
+    # an empty settings map it never asked for.
+    config.invalidate()
 
 
 # The chat id the suite runs as, unless a test says otherwise.

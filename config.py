@@ -18,6 +18,7 @@ import threading
 import time
 from typing import NamedTuple
 
+import common
 import db
 from common import log
 
@@ -68,6 +69,10 @@ _USER_SELECT = ", ".join(_USER_COLUMNS)
 # between the supervisor's startup and a `docker compose run --rm` issued in the
 # same second, and the loser inserts a second operator.
 _SEED_LOCK = "seed_users"
+
+# Its counterpart for the settings importer, for the same reason: the supervisor
+# and a `docker compose run --rm` can start in the same second.
+_SETTINGS_LOCK = "import_settings"
 
 
 def invalidate() -> None:
@@ -161,6 +166,86 @@ def alert_chat_id() -> str:
         return chat_id()
     except Exception:
         return os.environ.get("TELEGRAM_CHAT_ID", "")
+
+
+# ── Knobs ────────────────────────────────────────────────────────────────────
+
+
+def _read_settings() -> dict[str, str]:
+    """Every global setting, in one query.
+
+    One query per TTL for all of them rather than one per knob: a single brief
+    reads a couple of dozen, and `settings` is a table of tens of rows, so
+    fetching the lot is cheaper than being clever about it.
+
+    Global scope only (`user_id IS NULL`). Per-user knobs are what the
+    `preferences` table is for; a knob that becomes per-user gets a reader that
+    knows whose it is, rather than this one quietly changing meaning.
+    """
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT key, value FROM settings WHERE user_id IS NULL"
+        ).fetchall()
+    return {key: value for key, value in rows}
+
+
+def settings() -> dict[str, str]:
+    """The cached global settings map, refreshed on the same terms as identity."""
+    return _cached("settings", _read_settings)
+
+
+def knob(name: str):
+    """Resolve one knob by its `common.KNOBS` name. Called by common.__getattr__.
+
+    An absent row means the code default, NOT a lookup in the environment. That
+    is the hard-require decision: the importer reads the environment exactly
+    once, on first boot, and after that a knob's value is a row or a default.
+    Falling back to the environment at read time would recreate the bug this
+    phase exists to retire — a knob set on the host, invisible in the container,
+    silently no-op — only now with a database making it look deliberate.
+    """
+    spec = common.KNOBS[name]
+    raw = settings().get(spec.key(name))
+    return spec.default if raw is None else common.coerce_knob(spec, raw)
+
+
+def import_settings_from_env(conn) -> list[str]:
+    """Copy knobs set in the environment into `settings`, once, when it is empty.
+
+    Emptiness is the idempotence guard (spec section 7.3), which is also what
+    makes rollback cheap: the compose anchor still carries the variables, so
+    reverting the code is enough — there is nothing to restore.
+
+    Only knobs actually PRESENT in the environment are written. Writing every
+    knob would freeze today's defaults into rows, and a later change to a
+    default in code would then be silently overridden by a row nobody chose.
+    """
+    with db.advisory_lock(conn, _SETTINGS_LOCK) as got:
+        if not got:
+            return []
+        if conn.execute(
+            "SELECT 1 FROM settings WHERE user_id IS NULL LIMIT 1"
+        ).fetchone():
+            return []
+        imported = []
+        for name, spec in common.KNOBS.items():
+            key = spec.key(name)
+            raw = os.environ.get(key)
+            if raw is None or not raw.strip():
+                continue
+            conn.execute(
+                "INSERT INTO settings (key, user_id, value) VALUES (%s, NULL, %s)",
+                (key, raw.strip()),
+            )
+            imported.append(key)
+        conn.commit()
+    invalidate()
+    if imported:
+        log.info(
+            f"Imported {len(imported)} settings from the environment: "
+            f"{', '.join(sorted(imported))}"
+        )
+    return imported
 
 
 def ensure_seeded(conn) -> bool:

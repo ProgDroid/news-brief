@@ -211,6 +211,27 @@ cp .env.example .env
 # Edit .env
 ```
 
+**Most of the tuning knobs below are seed values, not live configuration.** As of
+phase 2 the non-secret knobs — `MODEL`/`NEWSBRIEF_MODEL`, `T212_BASE_URL`,
+`APCA_DATA_URL`, and the whole `PG_*`, `HAIRCUT_BPS_*`, `GATE_*` and `VOL_*`
+families — live in the `settings` table and are read from there at runtime,
+through a cache of about a minute. These variables are copied into rows **once**,
+on the first boot where `settings` is empty, and are inert afterwards: editing one
+and recreating the container changes nothing. To change a knob on a running
+deployment, change the row:
+
+```bash
+docker compose exec -T postgres psql -U newsbrief -d newsbrief \
+  -c "INSERT INTO settings (key, user_id, value) VALUES ('PG_A_ENABLED', NULL, '1')
+      ON CONFLICT (key) WHERE user_id IS NULL DO UPDATE SET value = EXCLUDED.value"
+```
+
+What stays in the environment: credentials, the database connection, and the
+bootstrap values (`TELEGRAM_CHAT_ID`, `NEWSBRIEF_DATA_DIR`). Credentials stay put
+deliberately — a missing API key fails loudly at its first call, so it was never
+the silent-passthrough problem the move exists to fix, and a settings row would be
+written into every `pg_dump` on the appdata volume.
+
 | Variable | Required | Purpose |
 |----------|----------|---------|
 | `ANTHROPIC_API_KEY` | yes | Claude Batch + Messages API |

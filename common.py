@@ -14,6 +14,7 @@ from logging.handlers import RotatingFileHandler
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import NamedTuple
 
 # ── Config ────────────────────────────────────────────────────────────────────
 # Required at runtime — validated in __main__ before dispatch. Read with .get()
@@ -102,14 +103,7 @@ ANTHROPIC_HEADERS = {
     "content-type": "application/json",
 }
 
-# Default Sonnet model for the brief/trading synthesis calls. Override on the
-# host with NEWSBRIEF_MODEL (single knob — also read by brief.SIGNALS_MODEL and
-# claim_verify.VERIFY_MODEL) to swap models without a code change or redeploy.
-# NOTE: brief.py declares the web_search_20260209 server tool, which requires
-# Opus 4.6+ or Sonnet 4.6+. Setting this knob to Haiku 4.5 (or any older model)
-# would 400 every call that browses — the tool version is a constraint on what
-# this override may be set to.
-MODEL = os.environ.get("NEWSBRIEF_MODEL", "claude-sonnet-5")
+# MODEL, T212_BASE_URL and ALPACA_DATA_URL are knobs now — see KNOBS below.
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 SIGNALS_DIR = DATA_DIR / "signals"
@@ -121,13 +115,11 @@ THESIS_LOG_FILE = DATA_DIR / "thesis_log.json"
 # Docker secret — T212 rejects a malformed Authorization value with 401.
 T212_API_KEY_ID = os.environ.get("T212_API_KEY_ID", "").strip()
 T212_API_KEY = os.environ.get("T212_API_KEY", "").strip()
-T212_BASE_URL = os.environ.get("T212_BASE_URL", "https://live.trading212.com").strip()
 
 # Alpaca market-data credentials (optional, like T212). Free signup gives a
 # paper account with full Basic/IEX data access — no funding required.
 ALPACA_API_KEY_ID = os.environ.get("APCA_API_KEY_ID", "").strip()
 ALPACA_API_SECRET = os.environ.get("APCA_API_SECRET_KEY", "").strip()
-ALPACA_DATA_URL = os.environ.get("APCA_DATA_URL", "https://data.alpaca.markets").strip()
 
 
 # PolyGram (prediction markets) credentials — optional, like T212. Login is
@@ -136,73 +128,145 @@ POLYGRAM_EMAIL = os.environ.get("POLYGRAM_EMAIL")
 POLYGRAM_PASSWORD = os.environ.get("POLYGRAM_PASSWORD")
 
 
-def _env_flag(name: str) -> bool:
-    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+# ── Runtime knobs ─────────────────────────────────────────────────────────────
+# Every non-secret setting, resolved from the `settings` table rather than the
+# environment. `common.PG_A_ENABLED` still reads exactly as it always did — the
+# module `__getattr__` at the foot of this section resolves the name through
+# `config`, with a short TTL cache — so the documented rule stands unchanged and
+# is now more true than before: read a knob as `common.X`, because a
+# `from common import X` copy freezes at import and will not see a change.
+#
+# This table is the single source of truth for three separate things: what
+# `common.<NAME>` resolves to, what the first-boot importer copies out of the
+# environment, and what a typo is checked against — an unknown name raises
+# AttributeError instead of quietly resolving to None.
+#
+# Credentials are deliberately NOT here. A missing API key fails loudly at its
+# first call, so it was never the silent-passthrough bug class this retires, and
+# a settings row would be written to the appdata volume by every pg_dump.
 
 
-def _env_float(name: str, default: float) -> float:
+class Knob(NamedTuple):
+    """A settings-backed value: how to coerce it, and what it is without a row.
+
+    `env` is the variable the importer reads and the key stored in `settings`.
+    It differs from the attribute name only where history left them apart —
+    `MODEL` has always been set with `NEWSBRIEF_MODEL`, and renaming the
+    operator-facing knob is not this change's business.
+    """
+
+    kind: type
+    default: object
+    env: str = ""
+
+    def key(self, name: str) -> str:
+        return self.env or name
+
+
+KNOBS: dict[str, Knob] = {
+    # Default Sonnet model for the brief/trading synthesis calls.
+    # NOTE: brief.py declares the web_search_20260209 server tool, which requires
+    # Opus 4.6+ or Sonnet 4.6+. Setting this to Haiku 4.5 (or any older model)
+    # would 400 every call that browses — the tool version is a constraint on
+    # what this override may be set to.
+    "MODEL": Knob(str, "claude-sonnet-5", env="NEWSBRIEF_MODEL"),
+    # Service endpoints. Non-secret, unlike the credentials they are used with.
+    "T212_BASE_URL": Knob(str, "https://live.trading212.com"),
+    "ALPACA_DATA_URL": Knob(str, "https://data.alpaca.markets", env="APCA_DATA_URL"),
+    # Live prediction trading (real money). Default OFF; funded/enabled per host.
+    "PG_LIVE_ENABLED": Knob(bool, False),
+    "PG_LIVE_TOTAL_CAP": Knob(float, 50.0),  # max USD across all live rows
+    "PG_LIVE_PER_TRADE_CAP": Knob(float, 5.0),  # max USD per order
+    # Sleeve A — systematic favorite-fade (real money). Default OFF.
+    "PG_A_ENABLED": Knob(bool, False),
+    "PG_A_STAKE": Knob(float, 2.0),  # USD per fade
+    "PG_A_BAND_LO": Knob(float, 0.75),  # favorite-side entry band
+    "PG_A_BAND_HI": Knob(float, 0.92),
+    "PG_A_SPREAD_GATE": Knob(float, 0.03),  # max half-spread (fraction of mid)
+    "PG_A_TAKE": Knob(float, 0.97),  # take-profit: held price repriced to ceiling
+    "PG_A_STOP": Knob(float, 0.15),  # stop: absolute adverse drop from entry price
+    "PG_A_TIME_STOP_DAYS": Knob(int, 21),
+    "PG_A_NEAR_DAYS": Knob(int, 10),  # ≤ this to settlement ⇒ hold, no time-stop
+    # Sleeve B — discretionary conviction holds.
+    "PG_B_ENABLED": Knob(bool, False),
+    "PG_B_POS_CAP": Knob(float, 10.0),  # per conviction bet (money-you-can-zero)
+    "PG_B_TOTAL_CAP": Knob(float, 40.0),  # across all open Sleeve-B rows
+    "PG_THESIS_GRACE_DAYS": Knob(int, 14),
+    # Round-trip cost haircut (basis points) applied to gross return at close, by
+    # asset class. Prediction uses the real orderbook half-spread when available
+    # (see trading._fetch_pg_half_spread); this is the fallback/momentum-exit cost.
+    "HAIRCUT_BPS_EQUITY": Knob(int, 10),
+    "HAIRCUT_BPS_CRYPTO": Knob(int, 26),
+    "HAIRCUT_BPS_PREDICTION": Knob(int, 200),
+    # Go-live readiness gate (per asset class). Informational — nothing
+    # auto-enables live.
+    "GATE_MIN_TRADES": Knob(int, 30),
+    "GATE_MIN_HIT_RATE": Knob(float, 0.55),
+    "GATE_SUSTAINED_EVALS": Knob(int, 2),
+    # Volume monitor. Anomaly = current-period volume / trailing-mean >=
+    # VOL_SPIKE_MULT, gated by an optional absolute per-asset floor and a minimum
+    # trailing-sample warm-up. A per-instrument cooldown suppresses re-alerting
+    # (daily equity volume fires once; intraday crypto can re-fire after the
+    # window).
+    "VOL_SPIKE_MULT": Knob(float, 2.5),
+    "VOL_TRAILING_N": Knob(int, 20),
+    "VOL_MIN_SAMPLES": Knob(int, 5),
+    "VOL_ALERT_COOLDOWN_HRS": Knob(float, 12.0),
+    "VOL_FLOOR_EQUITY": Knob(float, 0.0),
+    "VOL_FLOOR_CRYPTO": Knob(float, 0.0),
+    "VOL_FLOOR_PREDICTION": Knob(float, 0.0),
+}
+
+_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def coerce_knob(knob: Knob, raw: str):
+    """Turn a stored string into the knob's type, falling back to its default.
+
+    Every value in `settings` is TEXT — typed columns would need a discriminator
+    plus a cast per read, and each of these arrived from the environment as a
+    string anyway. A value that will not convert yields the default rather than
+    raising: a fat-fingered row must not be able to take down a job, and the
+    knob it belongs to has a safe value by construction.
+    """
+    text = raw.strip()
+    if knob.kind is bool:
+        return text.lower() in _TRUTHY
+    if not text:
+        return knob.default
     try:
-        return float(os.environ.get(name, "") or default)
-    except ValueError:
-        return default
+        # int() rejects "21.0", which is what a float-typed edit of an int knob
+        # looks like; go through float first so that reads as 21 rather than
+        # silently reverting to the default.
+        return knob.kind(float(text)) if knob.kind in (int, float) else knob.kind(text)
+    except (TypeError, ValueError):
+        log.warning(
+            f"Setting {knob.env or '?'} = {raw!r} is not a {knob.kind.__name__}; using {knob.default!r}"
+        )
+        return knob.default
 
 
-# Live prediction trading (real money). Default OFF; funded/enabled per host.
-PG_LIVE_ENABLED = _env_flag("PG_LIVE_ENABLED")
-PG_LIVE_TOTAL_CAP = _env_float(
-    "PG_LIVE_TOTAL_CAP", 50.0
-)  # max USD across all live rows
-PG_LIVE_PER_TRADE_CAP = _env_float("PG_LIVE_PER_TRADE_CAP", 5.0)  # max USD per order
+def __getattr__(name: str):
+    """Resolve a knob on attribute access (PEP 562).
 
-# Sleeve A — systematic favorite-fade (real money). Default OFF.
-PG_A_ENABLED = _env_flag("PG_A_ENABLED")
-PG_A_STAKE = _env_float("PG_A_STAKE", 2.0)  # USD per fade
-PG_A_BAND_LO = _env_float("PG_A_BAND_LO", 0.75)  # favorite-side entry band
-PG_A_BAND_HI = _env_float("PG_A_BAND_HI", 0.92)
-PG_A_SPREAD_GATE = _env_float(
-    "PG_A_SPREAD_GATE", 0.03
-)  # max half-spread (fraction of mid)
-PG_A_TAKE = _env_float("PG_A_TAKE", 0.97)  # take-profit: held price repriced to ceiling
-PG_A_STOP = _env_float(
-    "PG_A_STOP", 0.15
-)  # stop: absolute adverse drop from entry price
-PG_A_TIME_STOP_DAYS = int(_env_float("PG_A_TIME_STOP_DAYS", 21))
-PG_A_NEAR_DAYS = int(
-    _env_float("PG_A_NEAR_DAYS", 10)
-)  # ≤ this to settlement ⇒ hold, no time-stop
+    Python calls this only for names not already in the module, so the knobs are
+    absent as constants on purpose — that absence is what makes every existing
+    `common.X` read go through the settings cache and become live, with no call
+    site changed.
 
-# ── Sleeve B: discretionary conviction holds ──────────────────────────────────
-PG_B_ENABLED = _env_flag("PG_B_ENABLED")
-PG_B_POS_CAP = _env_float(
-    "PG_B_POS_CAP", 10.0
-)  # per conviction bet (money-you-can-zero)
-PG_B_TOTAL_CAP = _env_float("PG_B_TOTAL_CAP", 40.0)  # across all open Sleeve-B rows
-PG_THESIS_GRACE_DAYS = int(_env_float("PG_THESIS_GRACE_DAYS", 14))
+    One interaction worth knowing: `monkeypatch.setattr(common, "PG_A_ENABLED",
+    True)` still works, because the lookup it checks against succeeds here. Undo
+    then restores the resolved value as a REAL attribute, which shadows this
+    function for the rest of the process. Harmless in tests, where the suite
+    pins settings to their defaults anyway, and it never happens in production
+    because nothing there assigns to these names.
+    """
+    knob = KNOBS.get(name)
+    if knob is None:
+        raise AttributeError(f"module 'common' has no attribute '{name}'")
+    import config
 
-# ── Phase 4: validation / performance ─────────────────────────────────────────
-# Round-trip cost haircut (basis points) applied to gross return at close, by asset
-# class. Prediction uses the real orderbook half-spread when available (see trading
-# ._fetch_pg_half_spread); this is the fallback / momentum-exit cost.
-HAIRCUT_BPS_EQUITY = int(os.environ.get("HAIRCUT_BPS_EQUITY", "10"))
-HAIRCUT_BPS_CRYPTO = int(os.environ.get("HAIRCUT_BPS_CRYPTO", "26"))
-HAIRCUT_BPS_PREDICTION = int(os.environ.get("HAIRCUT_BPS_PREDICTION", "200"))
-# Go-live readiness gate (per asset class). Informational — nothing auto-enables live.
-GATE_MIN_TRADES = int(os.environ.get("GATE_MIN_TRADES", "30"))
-GATE_MIN_HIT_RATE = float(os.environ.get("GATE_MIN_HIT_RATE", "0.55"))
-GATE_SUSTAINED_EVALS = int(os.environ.get("GATE_SUSTAINED_EVALS", "2"))
-
-# ── Volume monitor (Phase 5) ──────────────────────────────────────────────────
-# Anomaly = current-period volume / trailing-mean >= VOL_SPIKE_MULT, gated by an
-# optional absolute per-asset floor and a minimum trailing-sample warm-up. A
-# per-instrument cooldown suppresses re-alerting (daily equity volume fires once;
-# intraday crypto can re-fire after the window).
-VOL_SPIKE_MULT = float(os.environ.get("VOL_SPIKE_MULT", "2.5"))
-VOL_TRAILING_N = int(os.environ.get("VOL_TRAILING_N", "20"))
-VOL_MIN_SAMPLES = int(os.environ.get("VOL_MIN_SAMPLES", "5"))
-VOL_ALERT_COOLDOWN_HRS = float(os.environ.get("VOL_ALERT_COOLDOWN_HRS", "12"))
-VOL_FLOOR_EQUITY = float(os.environ.get("VOL_FLOOR_EQUITY", "0"))
-VOL_FLOOR_CRYPTO = float(os.environ.get("VOL_FLOOR_CRYPTO", "0"))
-VOL_FLOOR_PREDICTION = float(os.environ.get("VOL_FLOOR_PREDICTION", "0"))
+    return config.knob(name)
 
 
 def t212_auth_header() -> str:

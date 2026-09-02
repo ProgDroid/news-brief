@@ -2,6 +2,7 @@
 
 import pytest
 
+import common
 import trading
 
 
@@ -130,7 +131,7 @@ def test_stamp_close_metrics_equity_with_benchmark(monkeypatch):
     monkeypatch.setattr(trading, "fetch_benchmark_level", lambda ac: 104.0)
     p = _closed_equity()
     trading._stamp_close_metrics(p, "2026-06-14")
-    assert p["haircut"] == trading.HAIRCUT_BPS_EQUITY / 10_000
+    assert p["haircut"] == common.HAIRCUT_BPS_EQUITY / 10_000
     assert abs(p["net_return"] - (0.10 - 0.0010)) < 1e-9
     assert abs(p["benchmark_return"] - 0.04) < 1e-9  # (104-100)/100
     assert abs(p["edge"] - (p["net_return"] - 0.04)) < 1e-9
@@ -192,7 +193,7 @@ def test_stamp_close_metrics_prediction_momentum_fallback():
         "benchmark_entry": None,
     }
     trading._stamp_close_metrics(p, "2026-06-14")
-    bps = trading.HAIRCUT_BPS_PREDICTION / 10_000
+    bps = common.HAIRCUT_BPS_PREDICTION / 10_000
     assert abs(p["haircut"] - 2 * bps) < 1e-9  # entry fallback + exit bps
     assert abs(p["net_return"] - (0.10 - 2 * bps)) < 1e-9
 

@@ -14,6 +14,7 @@ database.
 
 import pytest
 
+import common
 import config
 import db
 
@@ -175,3 +176,114 @@ def test_alert_chat_id_falls_back_to_the_environment(monkeypatch):
 
 def _boom():
     raise RuntimeError("postgres is gone")
+
+
+# ── Settings: the importer and the knob read path ────────────────────────────
+
+
+def _settings(conn) -> dict:
+    return {
+        k: v
+        for k, v in conn.execute(
+            "SELECT key, value FROM settings WHERE user_id IS NULL"
+        ).fetchall()
+    }
+
+
+def test_imports_only_the_knobs_the_environment_actually_sets(conn, monkeypatch):
+    """Writing every knob would freeze today's defaults into rows, and a later
+    change to a default in code would then be overridden by a row nobody chose."""
+    monkeypatch.setenv("PG_A_ENABLED", "1")
+    monkeypatch.setenv("VOL_SPIKE_MULT", "3.5")
+    monkeypatch.delenv("PG_B_ENABLED", raising=False)
+
+    imported = config.import_settings_from_env(conn)
+
+    assert set(imported) >= {"PG_A_ENABLED", "VOL_SPIKE_MULT"}
+    assert "PG_B_ENABLED" not in _settings(conn)
+
+
+def test_the_importer_runs_only_while_settings_is_empty(conn, monkeypatch):
+    """Emptiness is the idempotence guard, which is what makes rollback mean
+    'keep the compose anchor' rather than 'restore a backup'."""
+    monkeypatch.setenv("PG_A_ENABLED", "1")
+    config.import_settings_from_env(conn)
+
+    monkeypatch.setenv("PG_A_STAKE", "9.0")
+    assert config.import_settings_from_env(conn) == []
+    assert "PG_A_STAKE" not in _settings(conn)
+
+
+def test_a_knob_reads_from_its_row(conn, monkeypatch):
+    monkeypatch.setenv("PG_A_STAKE", "7.5")
+    config.import_settings_from_env(conn)
+    assert config.knob("PG_A_STAKE") == 7.5
+
+
+def test_a_knob_with_no_row_is_its_default_not_the_environment(conn, monkeypatch):
+    """The hard-require decision, stated as a test. If an absent row fell back to
+    os.environ, a knob set on the host but never declared in the compose anchor
+    would go on being silently invisible — the exact bug this phase retires,
+    only now with a database making it look deliberate."""
+    config.import_settings_from_env(conn)  # empty environment: imports nothing
+    monkeypatch.setenv("PG_A_STAKE", "99.0")
+    config.invalidate()
+    assert config.knob("PG_A_STAKE") == common.KNOBS["PG_A_STAKE"].default
+
+
+def test_the_env_name_is_the_stored_key_where_they_differ(conn, monkeypatch):
+    """MODEL has always been set with NEWSBRIEF_MODEL. The operator-facing name
+    is what goes in the row; renaming it is not this change's business."""
+    monkeypatch.setenv("NEWSBRIEF_MODEL", "claude-opus-5")
+    config.import_settings_from_env(conn)
+    assert _settings(conn)["NEWSBRIEF_MODEL"] == "claude-opus-5"
+    assert config.knob("MODEL") == "claude-opus-5"
+
+
+def test_a_changed_setting_lands_without_a_restart(conn, monkeypatch):
+    """Success criterion 8, for knobs rather than identity."""
+    monkeypatch.setenv("PG_A_STAKE", "2.0")
+    config.import_settings_from_env(conn)
+    assert config.knob("PG_A_STAKE") == 2.0
+
+    conn.execute("UPDATE settings SET value = '4.0' WHERE key = 'PG_A_STAKE'")
+    conn.commit()
+    monkeypatch.setattr(config, "TTL_SECONDS", 0)
+    assert config.knob("PG_A_STAKE") == 4.0
+
+
+def test_per_user_rows_are_not_read_as_global(conn, monkeypatch):
+    """`settings` is scoped, and the global reader must stay global: a per-user
+    row leaking into it would apply one reader's preference to every job."""
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "555")
+    config.ensure_seeded(conn)
+    user_id = conn.execute("SELECT id FROM users").fetchone()[0]
+    conn.execute(
+        "INSERT INTO settings (key, user_id, value) VALUES ('PG_A_STAKE', %s, '99')",
+        (user_id,),
+    )
+    conn.commit()
+    config.invalidate()
+    assert config.knob("PG_A_STAKE") == common.KNOBS["PG_A_STAKE"].default
+
+
+def test_the_documented_upsert_command_works(conn, monkeypatch):
+    """The README tells the operator to change a knob with this exact statement.
+
+    `ON CONFLICT (key) WHERE user_id IS NULL` infers the partial unique index
+    from migration 0001, and a partial index needs that predicate spelled out —
+    without it Postgres cannot tell which of the two indexes is meant and the
+    command fails. Pinned here because documentation that has never been run is
+    a belief, and this one is the answer to "how do I turn a sleeve on".
+    """
+    upsert = (
+        "INSERT INTO settings (key, user_id, value) VALUES ('PG_A_ENABLED', NULL, %s) "
+        "ON CONFLICT (key) WHERE user_id IS NULL DO UPDATE SET value = EXCLUDED.value"
+    )
+    conn.execute(upsert, ("1",))
+    conn.execute(upsert, ("0",))
+    conn.commit()
+
+    assert _settings(conn) == {"PG_A_ENABLED": "0"}
+    config.invalidate()
+    assert config.knob("PG_A_ENABLED") is False

@@ -20,22 +20,10 @@ from common import (
     file_lock,
     T212_API_KEY_ID,
     T212_API_KEY,
-    T212_BASE_URL,
     t212_auth_header,
-    MODEL,
     ANTHROPIC_HEADERS,
     POLYGRAM_EMAIL,
     POLYGRAM_PASSWORD,
-    HAIRCUT_BPS_EQUITY,
-    HAIRCUT_BPS_CRYPTO,
-    HAIRCUT_BPS_PREDICTION,
-    VOL_SPIKE_MULT,
-    VOL_TRAILING_N,
-    VOL_MIN_SAMPLES,
-    VOL_ALERT_COOLDOWN_HRS,
-    VOL_FLOOR_EQUITY,
-    VOL_FLOOR_CRYPTO,
-    VOL_FLOOR_PREDICTION,
 )
 
 PAPER_DIR = DATA_DIR / "paper"
@@ -690,13 +678,13 @@ def _haircut_fraction(p: dict) -> float:
     if ac == "prediction":
         entry = p.get("entry_spread")
         if entry is None:
-            entry = HAIRCUT_BPS_PREDICTION / 10_000
+            entry = common.HAIRCUT_BPS_PREDICTION / 10_000
         if p.get("play_type") == "momentum":
-            return entry + HAIRCUT_BPS_PREDICTION / 10_000
+            return entry + common.HAIRCUT_BPS_PREDICTION / 10_000
         return entry
     if ac == "crypto":
-        return HAIRCUT_BPS_CRYPTO / 10_000
-    return HAIRCUT_BPS_EQUITY / 10_000
+        return common.HAIRCUT_BPS_CRYPTO / 10_000
+    return common.HAIRCUT_BPS_EQUITY / 10_000
 
 
 def _stamp_close_metrics(p: dict, day: str) -> None:
@@ -1000,7 +988,7 @@ def run_prediction_matcher(signals: list, candidates: list) -> list:
     if not candidates:
         return []
     payload = {
-        "model": MODEL,
+        "model": common.MODEL,
         "max_tokens": 2048,
         # Raw-JSON extraction on a tight 2048 budget; disable thinking (adaptive is
         # the Sonnet 5 default) so it can't crowd out the JSON array and truncate it.
@@ -1127,7 +1115,7 @@ def refresh_instruments_cache(max_age_days: int = 14, force: bool = False) -> di
 
     try:
         resp = requests.get(
-            f"{T212_BASE_URL}/api/v0/equity/metadata/instruments",
+            f"{common.T212_BASE_URL}/api/v0/equity/metadata/instruments",
             headers={"Authorization": auth_header},
             timeout=30,
         )
@@ -1493,13 +1481,13 @@ def _volume_anomaly(prior: list, current: float, floor: float) -> tuple[bool, fl
     positive baseline all gate the ratio test, so a cold start or a thin instrument
     never alerts.
     """
-    if len(prior) < VOL_MIN_SAMPLES or current < floor:
+    if len(prior) < common.VOL_MIN_SAMPLES or current < floor:
         return (False, 0.0)
     baseline = sum(prior) / len(prior)
     if baseline <= 0:
         return (False, 0.0)
     ratio = current / baseline
-    return (ratio >= VOL_SPIKE_MULT, ratio)
+    return (ratio >= common.VOL_SPIKE_MULT, ratio)
 
 
 def _append_sample(samples: list, current: float) -> list:
@@ -1508,7 +1496,7 @@ def _append_sample(samples: list, current: float) -> list:
     capped at VOL_TRAILING_N most-recent samples."""
     if samples and samples[-1] == current:
         return samples
-    return (samples + [current])[-VOL_TRAILING_N:]
+    return (samples + [current])[-common.VOL_TRAILING_N :]
 
 
 def _in_cooldown(last_alert_ts: str | None, now: datetime) -> bool:
@@ -1521,14 +1509,14 @@ def _in_cooldown(last_alert_ts: str | None, now: datetime) -> bool:
         return False
     if last.tzinfo is None:
         last = last.replace(tzinfo=timezone.utc)
-    return (now - last) < timedelta(hours=VOL_ALERT_COOLDOWN_HRS)
+    return (now - last) < timedelta(hours=common.VOL_ALERT_COOLDOWN_HRS)
 
 
 def _floor_for(asset_class: str) -> float:
     return {
-        "equity": VOL_FLOOR_EQUITY,
-        "crypto": VOL_FLOOR_CRYPTO,
-        "prediction": VOL_FLOOR_PREDICTION,
+        "equity": common.VOL_FLOOR_EQUITY,
+        "crypto": common.VOL_FLOOR_CRYPTO,
+        "prediction": common.VOL_FLOOR_PREDICTION,
     }.get(asset_class, 0.0)
 
 

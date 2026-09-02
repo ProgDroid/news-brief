@@ -14,14 +14,34 @@ def test_live_config_defaults_off(monkeypatch):
     assert common.PG_LIVE_PER_TRADE_CAP == 5.0
 
 
-def test_live_config_reads_env(monkeypatch):
+def test_live_config_comes_from_settings_not_the_environment(monkeypatch):
+    """The live-money caps are rows now, not import-time constants.
+
+    Both halves matter. The environment must no longer decide whether real money
+    trades — it seeds the rows once and is then inert — and the rows must arrive
+    coerced to the right types, because a cap read as a string would compare
+    wrongly against an order size rather than fail.
+    """
+    import config
+
     monkeypatch.setenv("PG_LIVE_ENABLED", "1")
-    monkeypatch.setenv("PG_LIVE_TOTAL_CAP", "120")
-    monkeypatch.setenv("PG_LIVE_PER_TRADE_CAP", "3")
     importlib.reload(common)
+    assert common.PG_LIVE_ENABLED is False, "the environment is not a runtime source"
+
+    monkeypatch.setattr(
+        config,
+        "_read_settings",
+        lambda: {
+            "PG_LIVE_ENABLED": "1",
+            "PG_LIVE_TOTAL_CAP": "120",
+            "PG_LIVE_PER_TRADE_CAP": "3",
+        },
+    )
+    config.invalidate()
     assert common.PG_LIVE_ENABLED is True
     assert common.PG_LIVE_TOTAL_CAP == 120.0
     assert common.PG_LIVE_PER_TRADE_CAP == 3.0
+
     monkeypatch.delenv("PG_LIVE_ENABLED", raising=False)
     importlib.reload(common)
 

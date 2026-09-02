@@ -68,9 +68,18 @@ x-newsbrief: &newsbrief
     - MODAL_PROXY_SECRET=${MODAL_PROXY_SECRET:-}
     # Live prediction trading (REAL MONEY). All default to off/empty, and an empty
     # value keeps common.py's built-in default — so omitting them from your .env is
-    # exactly as safe as not having these lines at all. Compose passes through ONLY
-    # what is declared here: setting PG_LIVE_ENABLED on the host or in .env without
-    # a line below leaves it unset INSIDE the container, and every sleeve no-ops.
+    # exactly as safe as not having these lines at all.
+    #
+    # SEED VALUES ONLY, as of phase 2. Every knob below lives in the `settings`
+    # table now and is read from there at runtime, through a ~60s cache. These
+    # lines are copied into rows once, on the first boot where `settings` is
+    # empty, and are inert afterwards: editing one and recreating the container
+    # changes NOTHING. To change a knob on a running deployment, change the row.
+    #
+    # That is the point of the move. The old failure — set it on the host, forget
+    # the line here, watch a fail-closed flag silently no-op — is not possible
+    # against a table, because a row cannot be invisible the way a variable that
+    # was never passed through can.
     - PG_LIVE_ENABLED=${PG_LIVE_ENABLED:-}
     - PG_LIVE_TOTAL_CAP=${PG_LIVE_TOTAL_CAP:-}
     - PG_LIVE_PER_TRADE_CAP=${PG_LIVE_PER_TRADE_CAP:-}

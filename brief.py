@@ -46,10 +46,8 @@ from common import (
     SIGNALS_DIR,
     log,
     ANTHROPIC_HEADERS,
-    MODEL,
     T212_API_KEY_ID,
     T212_API_KEY,
-    T212_BASE_URL,
     t212_auth_header,
     _write_json_atomic,
     _load_json_or,
@@ -1732,7 +1730,7 @@ def run_dig(query: str, since: str | None = None) -> str:
     since_note = f" Focus on developments since {since}." if since else ""
 
     payload = {
-        "model": MODEL,
+        "model": common.MODEL,
         "max_tokens": 2048,
         # Tight 2048 budget; disable thinking (adaptive is the Sonnet 5 default) so
         # thinking blocks can't crowd out the answer and truncate it.
@@ -2197,7 +2195,7 @@ def fetch_portfolio_weights() -> str:
 
     try:
         resp = requests.get(
-            f"{T212_BASE_URL}/api/v0/equity/positions",
+            f"{common.T212_BASE_URL}/api/v0/equity/positions",
             headers={"Authorization": auth_header},
             timeout=20,
         )
@@ -2854,7 +2852,7 @@ def submit_batch(
     """Submit a single-request Anthropic batch job. `web_search=False` drops the
     web_search tool (used for the weekly summary, which must not browse)."""
     params = {
-        "model": MODEL,
+        "model": common.MODEL,
         "max_tokens": MAX_TOKENS,
         # Adaptive thinking helps the synthesis reason about what matters and how
         # to structure the brief. Budget headroom is ample now that signals moved
@@ -3908,6 +3906,7 @@ if __name__ == "__main__":
         try:
             with db.connect() as _conn:
                 config.ensure_seeded(_conn)
+                config.import_settings_from_env(_conn)
         except Exception as e:
             log.exception("Operator seed failed")
             telegram_alert(f"Operator seed failed: {type(e).__name__}: {e}")
