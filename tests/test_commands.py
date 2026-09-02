@@ -1,6 +1,5 @@
 """Phase 5 Telegram command handlers: /watch /unwatch /positions /performance."""
 
-import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -237,8 +236,40 @@ def test_feedback_summary_shows_default_pins_when_absent():
 
 
 # ── Temporary sources: store ──────────────────────────────────────────────────
-def _isolate_sources(monkeypatch, tmp_path):
-    monkeypatch.setattr(brief, "TEMP_SOURCES_FILE", tmp_path / "sources.json")
+def _isolate_sources(monkeypatch, tmp_path=None):
+    """Swap the source store for an in-memory one, returning it.
+
+    Sources are rows now. These tests are about brief's validation and the
+    /addsource wizard, not about SQL, so they substitute at exactly the seam
+    production uses. The SQL — the upsert's dedup, the atomic delete, the
+    importer — is covered in test_config.py against a real database, where it
+    can be tested honestly.
+
+    The fake mirrors the unique index: adding a URL that is already present
+    replaces it rather than appending a second row.
+    """
+    store: list[dict] = []
+
+    def _add(entry):
+        store[:] = [s for s in store if s.get("url") != entry["url"]]
+        store.append(dict(entry))
+
+    def _delete(url):
+        for i, s in enumerate(store):
+            if s.get("url") == url:
+                return store.pop(i)
+        return None
+
+    # Non-dict entries pass through unchanged: the loader's job is to drop them,
+    # so the fake must be able to hand it one.
+    monkeypatch.setattr(
+        config,
+        "sources",
+        lambda: [dict(s) if isinstance(s, dict) else s for s in store],
+    )
+    monkeypatch.setattr(config, "add_source", _add)
+    monkeypatch.setattr(config, "delete_source", _delete)
+    return store
 
 
 def test_load_temp_sources_missing_file_is_empty(monkeypatch, tmp_path):
@@ -248,27 +279,40 @@ def test_load_temp_sources_missing_file_is_empty(monkeypatch, tmp_path):
 
 def test_load_temp_sources_non_list_ignored(monkeypatch, tmp_path):
     _isolate_sources(monkeypatch, tmp_path)
-    (tmp_path / "sources.json").write_text('{"not": "a list"}', encoding="utf-8")
+    monkeypatch.setattr(config, "sources", lambda: {"not": "a list"})
     assert brief.load_temp_sources() == []  # degrades, does not raise
 
 
-def test_load_temp_sources_drops_invalid_entries(monkeypatch, tmp_path):
+def test_load_temp_sources_survives_an_unreadable_store(monkeypatch, tmp_path):
+    """The file version of this contract was "one bad hand-edit must not take
+    down the morning brief". Its database equivalent is a store that raises —
+    Postgres unreachable, or the table not there yet. The brief still ships on
+    the always-on RSS_FEEDS baseline; source configuration is never load-bearing
+    for delivery."""
     _isolate_sources(monkeypatch, tmp_path)
-    (tmp_path / "sources.json").write_text(
-        json.dumps(
-            [
-                {"name": "Good", "url": "https://x/feed", "category": "Iran"},
-                {"name": "NoUrl", "category": "iran"},  # missing url → dropped
-                "garbage",  # not a dict → dropped
-                {
-                    "name": "BadKind",
-                    "url": "https://y/feed",
-                    "category": "geo",
-                    "kind": "weird",
-                },
-            ]
-        ),
-        encoding="utf-8",
+
+    def _boom():
+        raise RuntimeError("postgres is gone")
+
+    monkeypatch.setattr(config, "sources", _boom)
+    assert brief.load_temp_sources() == []
+    assert brief.all_sources() == brief.RSS_FEEDS
+
+
+def test_load_temp_sources_drops_invalid_entries(monkeypatch, tmp_path):
+    store = _isolate_sources(monkeypatch, tmp_path)
+    store.extend(
+        [
+            {"name": "Good", "url": "https://x/feed", "category": "Iran"},
+            {"name": "NoUrl", "category": "iran"},  # missing url → dropped
+            "garbage",  # not a dict → dropped
+            {
+                "name": "BadKind",
+                "url": "https://y/feed",
+                "category": "geo",
+                "kind": "weird",
+            },
+        ]
     )
     out = brief.load_temp_sources()
     assert [s["name"] for s in out] == ["Good", "BadKind"]
@@ -278,35 +322,29 @@ def test_load_temp_sources_drops_invalid_entries(monkeypatch, tmp_path):
 
 
 def test_load_temp_sources_defaults_source_type_to_feed(monkeypatch, tmp_path):
-    _isolate_sources(monkeypatch, tmp_path)
-    (tmp_path / "sources.json").write_text(
-        json.dumps([{"name": "NoType", "url": "https://x/feed", "category": "iran"}]),
-        encoding="utf-8",
-    )
+    store = _isolate_sources(monkeypatch, tmp_path)
+    store.append({"name": "NoType", "url": "https://x/feed", "category": "iran"})
     out = brief.load_temp_sources()
     assert out[0]["source_type"] == "feed"  # absent → default
 
 
 def test_load_temp_sources_accepts_and_normalizes_source_type(monkeypatch, tmp_path):
-    _isolate_sources(monkeypatch, tmp_path)
-    (tmp_path / "sources.json").write_text(
-        json.dumps(
-            [
-                {
-                    "name": "Page",
-                    "url": "https://x/dash",
-                    "category": "us",
-                    "source_type": "page",
-                },
-                {
-                    "name": "Bad",
-                    "url": "https://y/dash",
-                    "category": "us",
-                    "source_type": "weird",
-                },
-            ]
-        ),
-        encoding="utf-8",
+    store = _isolate_sources(monkeypatch, tmp_path)
+    store.extend(
+        [
+            {
+                "name": "Page",
+                "url": "https://x/dash",
+                "category": "us",
+                "source_type": "page",
+            },
+            {
+                "name": "Bad",
+                "url": "https://y/dash",
+                "category": "us",
+                "source_type": "weird",
+            },
+        ]
     )
     out = brief.load_temp_sources()
     assert out[0]["source_type"] == "page"  # valid kept
@@ -314,27 +352,24 @@ def test_load_temp_sources_accepts_and_normalizes_source_type(monkeypatch, tmp_p
 
 
 def test_load_temp_sources_state_funded_and_perspective(monkeypatch, tmp_path):
-    _isolate_sources(monkeypatch, tmp_path)
-    (tmp_path / "sources.json").write_text(
-        json.dumps(
-            [
-                {
-                    "name": "Tagged",
-                    "url": "https://a/feed",
-                    "category": "geo",
-                    "state_funded": True,
-                    "perspective": "ARAB",
-                },
-                {
-                    "name": "BadPersp",
-                    "url": "https://b/feed",
-                    "category": "geo",
-                    "perspective": "MARTIAN",  # not in VALID_PERSPECTIVES → dropped
-                },
-                {"name": "Plain", "url": "https://c/feed", "category": "geo"},
-            ]
-        ),
-        encoding="utf-8",
+    store = _isolate_sources(monkeypatch, tmp_path)
+    store.extend(
+        [
+            {
+                "name": "Tagged",
+                "url": "https://a/feed",
+                "category": "geo",
+                "state_funded": True,
+                "perspective": "ARAB",
+            },
+            {
+                "name": "BadPersp",
+                "url": "https://b/feed",
+                "category": "geo",
+                "perspective": "MARTIAN",  # not in VALID_PERSPECTIVES → dropped
+            },
+            {"name": "Plain", "url": "https://c/feed", "category": "geo"},
+        ]
     )
     out = brief.load_temp_sources()
     assert out[0]["state_funded"] is True and out[0]["perspective"] == "ARAB"

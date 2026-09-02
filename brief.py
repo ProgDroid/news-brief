@@ -383,7 +383,9 @@ MAULDIN_TWIE_URL = f"{MAULDIN_HOST}/the-world-isnt-ending"
 # WITHOUT rebuilding the image or restarting anything — the next submit run reads
 # the file fresh and appends them to RSS_FEEDS. A malformed file degrades to "no
 # temp sources" with a logged warning; it can never break the always-on feeds.
-TEMP_SOURCES_FILE = DATA_DIR / "sources.json"
+# Sources live in the `sources` table now, keyed by user_id, and are reached
+# through `config`. The file survives only as the importer's input — see
+# config.LEGACY_SOURCES_FILE — and keeping it on the volume is the rollback.
 VALID_KINDS = ("wire", "analyst", "regional", "primary")
 VALID_SOURCE_TYPES = ("feed", "page")
 # National/bloc vantage a source speaks from. OPTIONAL and sparse: set only
@@ -432,9 +434,17 @@ def load_temp_sources() -> list[dict]:
     """Read + validate the temp-source file, returning feed dicts shaped exactly
     like RSS_FEEDS entries. Invalid entries are dropped with a warning rather than
     raised: one bad hand-edit must not take down the morning brief."""
-    raw = _load_json_or(TEMP_SOURCES_FILE, [])
+    try:
+        raw = config.sources()
+    except Exception:
+        # Same contract the file had, in database terms: a store this process
+        # cannot read degrades to "no temp sources" with a warning. The brief
+        # still ships, on the always-on RSS_FEEDS baseline, rather than the
+        # source configuration being able to take the morning delivery down.
+        log.exception("Could not read the source store — ignoring all temp sources")
+        return []
     if not isinstance(raw, list):
-        log.warning("sources.json is not a list — ignoring all temp sources")
+        log.warning("the source store did not return a list — ignoring temp sources")
         return []
     out: list[dict] = []
     for entry in raw:
@@ -509,41 +519,28 @@ def resolve_source_tags(source_id: str | None, index: dict) -> dict:
 
 
 def add_temp_source(entry: dict) -> None:
-    """Append a source (deduped by URL) under a lock so a concurrent edit can't
-    lose it. `entry` must already be a valid {name,url,category,kind} dict."""
-    with file_lock(TEMP_SOURCES_FILE):
-        srcs = _load_json_or(TEMP_SOURCES_FILE, [])
-        if not isinstance(srcs, list):
-            srcs = []
-        srcs = [
-            s
-            for s in srcs
-            if not (isinstance(s, dict) and s.get("url") == entry["url"])
-        ]
-        srcs.append(entry)
-        _write_json_atomic(TEMP_SOURCES_FILE, srcs)
+    """Store a source, deduped by URL. `entry` must already be a valid
+    {name,url,category,kind} dict.
+
+    The dedup used to be a read-filter-append-write under a file lock; it is a
+    unique index and an upsert now, so the rule lives in the store and a
+    concurrent write cannot lose the other's row."""
+    config.add_source(entry)
 
 
 def remove_temp_source(source_id: str) -> dict | None:
     """Remove the source whose id matches; return the removed dict, or None if no
-    match. Locked read-modify-write, same as add."""
-    with file_lock(TEMP_SOURCES_FILE):
-        srcs = _load_json_or(TEMP_SOURCES_FILE, [])
-        if not isinstance(srcs, list):
-            return None
-        removed, kept = None, []
-        for s in srcs:
-            if (
-                removed is None
-                and isinstance(s, dict)
-                and _source_id(str(s.get("url", ""))) == source_id
-            ):
-                removed = s
-            else:
-                kept.append(s)
-        if removed is not None:
-            _write_json_atomic(TEMP_SOURCES_FILE, kept)
-        return removed
+    match.
+
+    `source_id` is a hash of the URL (callback_data is capped at 64 bytes, so a
+    long URL cannot be embedded in a button), which is why this resolves the id
+    against the current list before deleting by URL. The delete itself is atomic
+    and returns what it removed, so two concurrent removals cannot both report
+    success."""
+    for src in load_temp_sources():
+        if _source_id(str(src.get("url", ""))) == source_id:
+            return config.delete_source(src["url"])
+    return None
 
 
 def _split_temp_sources(temp_sources: list[dict]) -> tuple[list[dict], list[dict]]:
@@ -3907,6 +3904,7 @@ if __name__ == "__main__":
             with db.connect() as _conn:
                 config.ensure_seeded(_conn)
                 config.import_settings_from_env(_conn)
+                config.import_sources_from_file(_conn)
         except Exception as e:
             log.exception("Operator seed failed")
             telegram_alert(f"Operator seed failed: {type(e).__name__}: {e}")

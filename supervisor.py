@@ -397,6 +397,7 @@ def startup(*, migrate=None, connect=None) -> StartupState:
         # work and fail-open on the bot, exactly like a failed migration.
         config.ensure_seeded(conn)
         config.import_settings_from_env(conn)
+        config.import_sources_from_file(conn)
         try:
             reclaim_orphans(conn)
         except Exception:

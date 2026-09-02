@@ -287,3 +287,132 @@ def test_the_documented_upsert_command_works(conn, monkeypatch):
     assert _settings(conn) == {"PG_A_ENABLED": "0"}
     config.invalidate()
     assert config.knob("PG_A_ENABLED") is False
+
+
+# ── Sources ──────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture()
+def seeded(conn, monkeypatch):
+    """A migrated database with the operator row present."""
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "555")
+    config.ensure_seeded(conn)
+    return conn
+
+
+def _entry(url="https://x/feed", **over):
+    base = {"name": "X", "url": url, "category": "geo", "kind": "regional"}
+    base.update(over)
+    return base
+
+
+def test_add_source_round_trips(seeded):
+    config.add_source(_entry(perspective="ARAB", state_funded=True))
+    got = config.sources()
+    assert len(got) == 1
+    assert got[0]["name"] == "X"
+    assert got[0]["perspective"] == "ARAB"
+    assert got[0]["state_funded"] is True
+
+
+def test_adding_the_same_url_replaces_rather_than_duplicates(seeded):
+    """The dedup rule /addsource has always had, enforced by the unique index
+    now instead of a read-filter-append-write that could lose a concurrent add."""
+    config.add_source(_entry(name="First"))
+    config.add_source(_entry(name="Second", category="iran"))
+    got = config.sources()
+    assert len(got) == 1
+    assert got[0]["name"] == "Second"
+    assert got[0]["category"] == "iran"
+
+
+def test_delete_returns_what_it_removed_and_only_once(seeded):
+    """DELETE ... RETURNING is atomic, so two concurrent removals of the same
+    source cannot both report success — the second gets None."""
+    config.add_source(_entry())
+    assert config.delete_source("https://x/feed")["name"] == "X"
+    assert config.delete_source("https://x/feed") is None
+    assert config.sources() == []
+
+
+def test_a_write_is_visible_immediately_despite_the_cache(seeded):
+    """/addsource must not need a TTL to expire before /sources shows it."""
+    assert config.sources() == []
+    config.add_source(_entry())
+    assert len(config.sources()) == 1
+
+
+def test_sources_belong_to_their_user(seeded):
+    """The scoping the KB tables deliberately do not have. A second reader's
+    feeds must not appear in this one's brief."""
+    config.add_source(_entry())
+    other = seeded.execute(
+        "INSERT INTO users (display_name, telegram_chat_id) "
+        "VALUES ('other', '999') RETURNING id"
+    ).fetchone()[0]
+    seeded.execute(
+        "INSERT INTO sources (user_id, name, url, category) "
+        "VALUES (%s, 'Theirs', 'https://other/feed', 'geo')",
+        (other,),
+    )
+    seeded.commit()
+    config.invalidate()
+    assert [s["name"] for s in config.sources()] == ["X"]
+
+
+def test_the_schema_rejects_an_invalid_kind(seeded):
+    """The CHECK stops a bad value being written at all, which is a loud failure
+    at the point of the mistake rather than a quiet coercion three hours later
+    in a brief nobody is watching."""
+    with pytest.raises(Exception):
+        seeded.execute(
+            "INSERT INTO sources (user_id, name, url, category, kind) "
+            "VALUES (%s, 'Bad', 'https://b/f', 'geo', 'weird')",
+            (config.active_user()["id"],),
+        )
+    seeded.rollback()
+
+
+def test_the_importer_drains_the_file_once(seeded, tmp_path):
+    path = tmp_path / "sources.json"
+    path.write_text(
+        '[{"name": "A", "url": "https://a/f", "category": "GEO"},'
+        ' {"name": "B", "url": "https://b/f", "category": "iran"}]',
+        encoding="utf-8",
+    )
+    assert config.import_sources_from_file(seeded, path) == 2
+    assert config.import_sources_from_file(seeded, path) == 0, "emptiness guards it"
+    assert sorted(s["name"] for s in config.sources()) == ["A", "B"]
+    assert config.sources()[0]["category"] == "geo", "categories are lower-cased"
+
+
+def test_one_bad_entry_does_not_cost_the_others(seeded, tmp_path):
+    """A single hand-edited entry the schema rejects must not abort the import
+    and leave the operator with none of their sources."""
+    path = tmp_path / "sources.json"
+    path.write_text(
+        '[{"name": "Good", "url": "https://a/f", "category": "geo"},'
+        ' {"name": "NoUrl", "category": "geo"},'
+        ' "garbage",'
+        ' {"name": "BadKind", "url": "https://c/f", "category": "geo",'
+        '  "kind": "weird"},'
+        ' {"name": "AlsoGood", "url": "https://d/f", "category": "geo"}]',
+        encoding="utf-8",
+    )
+    assert config.import_sources_from_file(seeded, path) == 2
+    assert sorted(s["name"] for s in config.sources()) == ["AlsoGood", "Good"]
+
+
+def test_a_missing_or_malformed_file_imports_nothing_and_does_not_raise(
+    seeded, tmp_path
+):
+    """The importer runs at boot, so it must never be able to stop one."""
+    assert config.import_sources_from_file(seeded, tmp_path / "absent.json") == 0
+
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json", encoding="utf-8")
+    assert config.import_sources_from_file(seeded, bad) == 0
+
+    notalist = tmp_path / "notalist.json"
+    notalist.write_text('{"not": "a list"}', encoding="utf-8")
+    assert config.import_sources_from_file(seeded, notalist) == 0

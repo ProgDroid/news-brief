@@ -104,11 +104,20 @@ no `scheduled_for`, so they can never consume a scheduled fire time.
 ### News sources: always-on vs. temporary
 
 The always-on feed list (`RSS_FEEDS` in `brief.py`) is baked into the image. **Temporary**
-sources live in `sources.json` on the persistent volume (`${APPDATA_DIR}/news-brief/sources.json`)
-and are merged into every `submit` run — so you can add or drop a source for a flaring story
-**without rebuilding the image or restarting anything**: the next brief reads the file fresh.
+sources are rows in the `sources` table, carried per reader, and are merged into every
+`submit` run — so you can add or drop a source for a flaring story **without rebuilding the
+image or restarting anything**: the next brief reads them fresh, and the resident bot sees a
+change within about a minute.
 
-Manage them from chat with `/addsource` / `/sources`, or hand-edit the file in an emergency.
+They used to live in `sources.json` on the persistent volume. That file is drained into the
+table on the first boot where the table is empty, and then left alone — keeping it is the
+rollback. Nothing reads it afterwards, so editing it has no effect.
+
+Manage them from chat with `/addsource` / `/sources`, or in an emergency with SQL:
+
+```bash
+docker compose exec -T postgres psql -U newsbrief -d newsbrief -c "TABLE sources;"
+```
 A bare domain (e.g. `timesofisrael.com`) is expanded to a Google News `site:` feed; a full
 URL is used as-is. Each entry is `{name, url, category, kind}` where `kind` ∈
 `wire|analyst|regional|primary`. A malformed file degrades to "no temp sources" with a logged
@@ -405,8 +414,8 @@ Every brief is archived to disk regardless of delivery success, so a Telegram hi
 All of the following live in `brief.py`:
 
 - **Feeds:** edit `RSS_FEEDS` (any RSS/Substack/RSSHub source). For a direct
-  page, add a temp source with `"source_type": "page"` (via `/addsource` →
-  "Page to scrape", or by hand-editing `sources.json`); it is fetched with
+  page, add a temp source with `source_type = 'page'` (via `/addsource` →
+  "Page to scrape", or a row in `sources`); it is fetched with
   `fetch_web_source` (meta description, or first 800 chars). `WEB_SOURCES` is
   the always-on page baseline and is empty by default.
 - **Topics:** `TOPICS` drives both the web-search queries and the Chroma podcast queries per region.

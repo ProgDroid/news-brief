@@ -36,10 +36,20 @@ def _tables(conn) -> set[str]:
     return {r[0] for r in rows}
 
 
-def test_up_creates_the_four_tables(conn):
+def test_up_creates_the_expected_tables(conn):
     applied = db.run_migrations(conn)
-    assert applied == ["0001_runtime_foundation", "0002_job_runs_created_at"]
-    assert {"schema_migrations", "users", "settings", "job_runs"} <= _tables(conn)
+    assert applied == [
+        "0001_runtime_foundation",
+        "0002_job_runs_created_at",
+        "0003_sources",
+    ]
+    assert {
+        "schema_migrations",
+        "users",
+        "settings",
+        "job_runs",
+        "sources",
+    } <= _tables(conn)
 
 
 def test_0002_gives_job_runs_the_created_at_a_queued_row_is_aged_by(conn):

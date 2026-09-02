@@ -13,6 +13,7 @@ without closing a cycle. The senders in `common.py` import it inside the
 function instead — one place, one comment, rather than four.
 """
 
+import json
 import os
 import threading
 import time
@@ -73,6 +74,11 @@ _SEED_LOCK = "seed_users"
 # Its counterpart for the settings importer, for the same reason: the supervisor
 # and a `docker compose run --rm` can start in the same second.
 _SETTINGS_LOCK = "import_settings"
+_SOURCES_LOCK = "import_sources"
+
+# The file the source importer drains, once. It is the pre-phase-2 store and is
+# deliberately left on disk after the import: keeping it IS the rollback.
+LEGACY_SOURCES_FILE = common.DATA_DIR / "sources.json"
 
 
 def invalidate() -> None:
@@ -245,6 +251,155 @@ def import_settings_from_env(conn) -> list[str]:
             f"Imported {len(imported)} settings from the environment: "
             f"{', '.join(sorted(imported))}"
         )
+    return imported
+
+
+# ── Sources ──────────────────────────────────────────────────────────────────
+
+_SOURCE_COLUMNS = (
+    "name",
+    "url",
+    "category",
+    "kind",
+    "source_type",
+    "perspective",
+    "state_funded",
+)
+_SOURCE_SELECT = ", ".join(_SOURCE_COLUMNS)
+
+
+def _read_sources() -> list[dict]:
+    with db.connect() as conn:
+        rows = conn.execute(
+            f"SELECT {_SOURCE_SELECT} FROM sources WHERE user_id = %s ORDER BY id",
+            (active_user()["id"],),
+        ).fetchall()
+    return [dict(zip(_SOURCE_COLUMNS, row)) for row in rows]
+
+
+def sources() -> list[dict]:
+    """The active user's Telegram-managed sources, cached like everything else.
+
+    Cached because a submit calls this several times — once to build the fetch
+    list, once to index kinds and perspectives for attribution — and because the
+    resident daemon must see an /addsource land without a restart.
+    """
+    return _cached("sources", _read_sources)
+
+
+def add_source(entry: dict) -> None:
+    """Insert or replace a source, deduped on URL by the unique index.
+
+    `add_temp_source` used to read the whole file, filter out a matching URL,
+    append, and write it back under a lock. The upsert is that rule expressed
+    where it belongs — in the store — and it cannot lose a concurrent write the
+    way a read-modify-write can.
+    """
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO sources (user_id, name, url, category, kind, source_type, "
+            "perspective, state_funded) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
+            "ON CONFLICT (user_id, url) DO UPDATE SET "
+            "name = EXCLUDED.name, category = EXCLUDED.category, "
+            "kind = EXCLUDED.kind, source_type = EXCLUDED.source_type, "
+            "perspective = EXCLUDED.perspective, "
+            "state_funded = EXCLUDED.state_funded",
+            (
+                active_user()["id"],
+                entry["name"],
+                entry["url"],
+                entry["category"],
+                entry.get("kind", "regional"),
+                entry.get("source_type", "feed"),
+                entry.get("perspective"),
+                bool(entry.get("state_funded", False)),
+            ),
+        )
+        conn.commit()
+    invalidate()
+
+
+def delete_source(url: str) -> dict | None:
+    """Delete by URL; return the deleted row, or None if it was not there.
+
+    DELETE ... RETURNING is atomic, so the read-modify-write race the file lock
+    existed to prevent is simply gone: two concurrent removals of the same
+    source cannot both claim to have removed it.
+    """
+    with db.connect() as conn:
+        row = conn.execute(
+            f"DELETE FROM sources WHERE user_id = %s AND url = %s "
+            f"RETURNING {_SOURCE_SELECT}",
+            (active_user()["id"], url),
+        ).fetchone()
+        conn.commit()
+    invalidate()
+    return dict(zip(_SOURCE_COLUMNS, row)) if row else None
+
+
+def import_sources_from_file(conn, path=None) -> int:
+    """Copy sources.json into the table, once, while it is empty.
+
+    Same emptiness guard as the settings importer and for the same reason: it
+    makes the import idempotent, so rollback means keeping the file rather than
+    restoring a backup.
+
+    A malformed file imports nothing and logs — it must not be able to stop a
+    boot. The rows it writes are validated by the schema, and anything the
+    schema rejects is skipped individually, so one bad hand-edited entry cannot
+    cost the operator the other twenty.
+    """
+    path = path or LEGACY_SOURCES_FILE
+    with db.advisory_lock(conn, _SOURCES_LOCK) as got:
+        if not got:
+            return 0
+        if conn.execute("SELECT 1 FROM sources LIMIT 1").fetchone():
+            return 0
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return 0
+        except (OSError, json.JSONDecodeError):
+            log.exception(f"Could not read {path}; importing no sources")
+            return 0
+        if not isinstance(raw, list):
+            log.warning(f"{path} is not a list; importing no sources")
+            return 0
+        user_id = conn.execute(
+            "SELECT id FROM users WHERE active ORDER BY id LIMIT 1"
+        ).fetchone()
+        if user_id is None:
+            log.warning("No active user; importing no sources")
+            return 0
+        imported = 0
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                with conn.transaction():
+                    conn.execute(
+                        "INSERT INTO sources (user_id, name, url, category, kind, "
+                        "source_type, perspective, state_funded) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
+                        "ON CONFLICT (user_id, url) DO NOTHING",
+                        (
+                            user_id[0],
+                            entry["name"],
+                            entry["url"],
+                            str(entry["category"]).lower(),
+                            entry.get("kind", "regional"),
+                            entry.get("source_type", "feed"),
+                            entry.get("perspective"),
+                            bool(entry.get("state_funded", False)),
+                        ),
+                    )
+                imported += 1
+            except Exception:
+                log.exception(f"Skipped an unimportable source: {entry!r}")
+        conn.commit()
+    invalidate()
+    if imported:
+        log.info(f"Imported {imported} sources from {path}")
     return imported
 
 
