@@ -72,3 +72,56 @@ CREATE TABLE entity_instruments (
 -- default semantics would let the same mapping insert twice.
 CREATE UNIQUE INDEX entity_instruments_symbol
     ON entity_instruments (symbol, market, entity_id) NULLS NOT DISTINCT;
+
+CREATE TABLE events (
+    id               BIGSERIAL PRIMARY KEY,
+    summary          TEXT        NOT NULL,
+    occurred_at      TIMESTAMPTZ NULL,
+    -- Three orthogonal fields, spec 3.2. "Trump declared the ceasefire over"
+    -- is statement/intended/official; whether the ceasefire IS over is a
+    -- separate Claim with its own standing. Conflating them is what the Day 1
+    -- brief did.
+    type             TEXT        NOT NULL
+                     CHECK (type IN ('action', 'statement', 'disclosure')),
+    commitment_state TEXT        NOT NULL
+                     CHECK (commitment_state IN ('in_force', 'committed',
+                                                 'intended', 'proposed')),
+    -- Presence IS the superseded state; rule 1 writes it.
+    superseded_by    BIGINT      NULL REFERENCES events(id),
+    extractor_model  TEXT        NULL,
+    prompt_version   INTEGER     NULL,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- NULLS LAST: occurred_at is nullable and DESC defaults to NULLS FIRST, which
+-- would put every undated event at the head of rule 1's most-recent scan.
+CREATE INDEX events_occurred ON events (occurred_at DESC NULLS LAST);
+
+CREATE TABLE event_entities (
+    event_id   BIGINT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+    entity_id  BIGINT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (event_id, entity_id)
+);
+CREATE INDEX event_entities_entity ON event_entities (entity_id);
+
+CREATE TABLE assertions (
+    id                  BIGSERIAL PRIMARY KEY,
+    item_id             BIGINT      NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    event_id            BIGINT      NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+    -- Per assertion, not per event: two sources can assert the same event with
+    -- very different weight.
+    standing            TEXT        NOT NULL
+                        CHECK (standing IN ('verified', 'official', 'reported',
+                                            'attributed', 'alleged')),
+    -- Nullable, NO default. The only extracted enum with no worked example
+    -- anywhere in the parent spec -- severity's exact provenance. NULL means
+    -- "not labelled", NOT "independent". news-brief-bqa.8 measures it.
+    source_relationship TEXT        NULL
+                        CHECK (source_relationship IS NULL OR source_relationship IN
+                               ('party', 'aligned', 'independent', 'adversarial')),
+    asserted_at         TIMESTAMPTZ NULL,
+    extractor_model     TEXT        NULL,
+    prompt_version      INTEGER     NULL,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX assertions_item_event ON assertions (item_id, event_id);

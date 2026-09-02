@@ -58,6 +58,9 @@ def test_up_creates_the_expected_tables(conn):
         "items",
         "entities",
         "entity_instruments",
+        "events",
+        "event_entities",
+        "assertions",
     } <= _tables(conn)
 
 

@@ -162,3 +162,93 @@ def test_asset_class_admits_index_not_only_equity_and_crypto(kb):
             (entity_id, f"S{cls}", cls),
         )
     assert kb.execute("SELECT count(*) FROM entity_instruments").fetchone()[0] == 5
+
+
+def _event(conn, type_="action", commitment="in_force"):
+    return conn.execute(
+        "INSERT INTO events (summary, type, commitment_state) "
+        "VALUES ('s', %s, %s) RETURNING id",
+        (type_, commitment),
+    ).fetchone()[0]
+
+
+def _item(conn, outlet_id, content_hash="H"):
+    return conn.execute(
+        "INSERT INTO items (outlet_id, url, title, content_hash) "
+        "VALUES (%s, 'u', 't', %s) RETURNING id",
+        (outlet_id, content_hash),
+    ).fetchone()[0]
+
+
+def test_type_and_commitment_state_vary_independently(kb):
+    """Spec 3.2: three orthogonal fields, because geopolitical reporting mixes
+    things that happened, things people said, and things people claim
+    happened, and one field cannot carry that."""
+    for type_ in ("action", "statement", "disclosure"):
+        for commitment in ("in_force", "committed", "intended", "proposed"):
+            _event(kb, type_, commitment)
+    assert kb.execute("SELECT count(*) FROM events").fetchone()[0] == 12
+
+
+def test_event_type_rejects_an_unknown_value(kb):
+    with rejects(kb, psycopg.errors.CheckViolation):
+        _event(kb, "rumour")
+
+
+def test_commitment_state_rejects_an_unknown_value(kb):
+    with rejects(kb, psycopg.errors.CheckViolation):
+        _event(kb, "action", "mooted")
+
+
+def test_an_event_can_supersede_another(kb):
+    """Rule 1 marks the contradicted event superseded. Presence of the FK IS
+    the state -- no status enum, so a single writer cannot make it degenerate."""
+    old, new = _event(kb), _event(kb)
+    kb.execute("UPDATE events SET superseded_by = %s WHERE id = %s", (new, old))
+    assert (
+        kb.execute("SELECT superseded_by FROM events WHERE id = %s", (old,)).fetchone()[
+            0
+        ]
+        == new
+    )
+
+
+def test_standing_rejects_an_unknown_value(kb):
+    item_id, event_id = _item(kb, _outlet(kb)), _event(kb)
+    with rejects(kb, psycopg.errors.CheckViolation):
+        kb.execute(
+            "INSERT INTO assertions (item_id, event_id, standing) "
+            "VALUES (%s, %s, 'rumoured')",
+            (item_id, event_id),
+        )
+
+
+def test_source_relationship_is_nullable_with_no_default(kb):
+    """Spec 2.1: the one extracted enum with no anchor gets NO default -- a
+    NOT NULL DEFAULT is the fastest route to the degenerate outcome 12.2 rates
+    worse than a missing field. Absent means "not labelled", never
+    "independent"."""
+    item_id, event_id = _item(kb, _outlet(kb)), _event(kb)
+    kb.execute(
+        "INSERT INTO assertions (item_id, event_id, standing) "
+        "VALUES (%s, %s, 'reported')",
+        (item_id, event_id),
+    )
+    assert (
+        kb.execute("SELECT source_relationship FROM assertions").fetchone()[0] is None
+    )
+
+
+def test_one_item_asserts_one_event_once(kb):
+    item_id, event_id = _item(kb, _outlet(kb)), _event(kb)
+    kb.execute(
+        "INSERT INTO assertions (item_id, event_id, standing) "
+        "VALUES (%s, %s, 'reported')",
+        (item_id, event_id),
+    )
+    with rejects(kb, psycopg.errors.UniqueViolation):
+        kb.execute(
+            "INSERT INTO assertions (item_id, event_id, standing) "
+            "VALUES (%s, %s, 'official')",
+            (item_id, event_id),
+        )
