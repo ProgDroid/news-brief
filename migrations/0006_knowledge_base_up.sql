@@ -232,3 +232,26 @@ CREATE TABLE claim_evidence (
 -- no separate FK index is created.
 CREATE UNIQUE INDEX claim_evidence_unique
     ON claim_evidence (claim_id, event_id, observation_id) NULLS NOT DISTINCT;
+
+-- Defence in depth. The PRIMARY enforcement is brief_memory._reaffirm, which
+-- also catches the case no constraint can see: an unmarked rewrite that keeps
+-- status 'standing' while editing the text to match new facts. Three gold-set
+-- runs measured the model doing exactly that on every true break it scored
+-- standing.
+--
+-- The predicate reads BOTH tuples. Reading OLD.status alone would permit the
+-- single UPDATE that marks a claim broken AND rewrites it -- precisely the
+-- 2026-08-29 Patriot mechanism this exists to stop.
+CREATE OR REPLACE FUNCTION claims_freeze_claim_text() RETURNS trigger AS $$
+BEGIN
+    IF (OLD.status <> 'standing' OR NEW.status <> 'standing')
+       AND NEW.claim IS DISTINCT FROM OLD.claim THEN
+        RAISE EXCEPTION 'claim text is immutable once status leaves standing (id %)', OLD.id;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER claims_freeze_claim_text_trg
+    BEFORE UPDATE ON claims
+    FOR EACH ROW EXECUTE FUNCTION claims_freeze_claim_text();

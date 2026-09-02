@@ -458,3 +458,55 @@ def test_deleting_an_event_cannot_silently_lower_the_evidence_floor(kb):
     )
     with rejects(kb, psycopg.errors.RestrictViolation):
         kb.execute("DELETE FROM events WHERE id = %s", (event_id,))
+
+
+def test_a_standing_claim_may_still_be_refined(kb):
+    """Negative control: rewording stays correct for a claim that is, and
+    remains, standing. Expected to pass BEFORE the trigger exists too."""
+    claim_id = _claim(kb, "original")
+    kb.execute("UPDATE claims SET claim = 'refined' WHERE id = %s", (claim_id,))
+    assert (
+        kb.execute("SELECT claim FROM claims WHERE id = %s", (claim_id,)).fetchone()[0]
+        == "refined"
+    )
+
+
+def test_an_already_broken_claim_cannot_be_reworded(kb):
+    claim_id = _claim(kb, "original", "broken", "2026-09-02", broken_by_note="n")
+    with rejects(kb, psycopg.errors.RaiseException):
+        kb.execute("UPDATE claims SET claim = 'rewritten' WHERE id = %s", (claim_id,))
+
+
+def test_breaking_and_rewriting_in_one_statement_is_rejected(kb):
+    """THE Patriot mechanism. One reply marked the claim broken AND rewrote it
+    into a description of its own reversal, so the ledger read back as though
+    the reversal had itself been reversed.
+
+    A predicate reading OLD.status alone lets this through, because OLD.status
+    is still 'standing' at that moment. This test is why the trigger reads both
+    tuples, and it is the one a test written to the constraint rather than to
+    the failure would miss.
+    """
+    claim_id = _claim(kb, "Trump agreed to license Patriot production")
+    with rejects(kb, psycopg.errors.RaiseException):
+        kb.execute(
+            "UPDATE claims SET status = 'broken', resolved_on = '2026-09-02', "
+            "broken_by_note = 'reversed', claim = 'Trump reversed course' "
+            "WHERE id = %s",
+            (claim_id,),
+        )
+
+
+def test_the_status_may_change_without_touching_the_text(kb):
+    """Breaking a claim is normal; only rewriting it is forbidden. The reversal
+    belongs in broken_by, not in the claim text."""
+    claim_id = _claim(kb, "original")
+    kb.execute(
+        "UPDATE claims SET status = 'broken', resolved_on = '2026-09-02', "
+        "broken_by_note = 'n' WHERE id = %s",
+        (claim_id,),
+    )
+    assert (
+        kb.execute("SELECT claim FROM claims WHERE id = %s", (claim_id,)).fetchone()[0]
+        == "original"
+    )

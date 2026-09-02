@@ -10,3 +10,4 @@ DROP TABLE entity_instruments;
 DROP TABLE entities;
 DROP TABLE items;
 DROP TABLE outlets;
+DROP FUNCTION claims_freeze_claim_text();
