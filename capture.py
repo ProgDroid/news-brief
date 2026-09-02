@@ -316,6 +316,9 @@ def run(conn=None) -> Tally:
             record_poll(conn, run_id, feed["name"], "outlet_conflict", 0)
             conn.commit()
             tally.feeds_failed += 1
+            tally.failures["outlet_conflict"] = (
+                tally.failures.get("outlet_conflict", 0) + 1
+            )
             continue
 
         written, already, failed = store_items(conn, outlet_id, got.entries)

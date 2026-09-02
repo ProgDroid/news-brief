@@ -3,6 +3,7 @@
 import pytest
 
 import capture
+import common
 import db
 
 pytestmark = pytest.mark.skipif(
@@ -244,3 +245,22 @@ def test_the_run_row_survives_a_crash_mid_pass(store):
     ).fetchone()
     assert row is not None, "the run row was rolled back with the crash"
     assert row[1] is None, "an unfinished run must keep a NULL finished_at"
+
+
+def test_a_disabled_pass_polls_nothing_but_still_finishes(store, monkeypatch):
+    """capture.run's early-return path when CAPTURE_ENABLED is false, exercised
+    end to end rather than just at start_run/finish_run: a disabled pass must
+    still leave a finished capture_runs row (distinguishable from a crash), but
+    write zero feed_polls rows and report feeds_total == 0 -- the only thing
+    that tells "disabled, so polled nothing" apart from "enabled but every feed
+    failed"."""
+    monkeypatch.setattr(common, "CAPTURE_ENABLED", False)
+    tally = capture.run(store)
+    row = store.execute(
+        "SELECT enabled, finished_at FROM capture_runs ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row[0] is False
+    assert row[1] is not None
+    polls = store.execute("SELECT count(*) FROM feed_polls").fetchone()[0]
+    assert polls == 0
+    assert tally.feeds_total == 0
