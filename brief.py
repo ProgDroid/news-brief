@@ -35,6 +35,7 @@ import requests
 import feedparser
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from typing import NamedTuple
 from urllib.parse import quote_plus, urlsplit
 
 import config
@@ -1840,7 +1841,21 @@ def _rss_retry_wait(resp, attempt: int) -> float:
     return max(0.0, min(wait, RSS_MAX_BACKOFF))
 
 
-def fetch_rss(feed: dict, max_items: int = 25) -> str:
+class FeedFetch(NamedTuple):
+    """Entries plus WHY there are none, because those are different facts.
+
+    `fetch_rss` collapsed every failure to `return ""`, so an empty result was
+    ambiguous across 403, timeout, malformed and genuinely quiet. Capture's
+    tally and its roll-off denominator both need the distinction: a 403 read as
+    "quiet" records a window that emptied when the fetch never happened.
+    """
+
+    entries: list[dict]
+    failure: str | None = None
+
+
+def fetch_feed_entries(feed: dict) -> FeedFetch:
+    """Fetch and parse one feed. All the HTTP scars live here, once."""
     try:
         # Fetch with requests rather than letting feedparser fetch: feedparser
         # uses no socket timeout, so one hung feed (a wedged Nitter, not a dead
@@ -1853,9 +1868,7 @@ def fetch_rss(feed: dict, max_items: int = 25) -> str:
         # the brief. A dropped feed looks identical to a quiet one downstream.
         for attempt in range(1, RSS_MAX_ATTEMPTS + 1):
             resp = requests.get(
-                feed["url"],
-                timeout=20,
-                headers={"User-Agent": SOURCE_USER_AGENT},
+                feed["url"], timeout=20, headers={"User-Agent": SOURCE_USER_AGENT}
             )
             if resp.status_code not in RSS_RETRY_STATUSES:
                 break
@@ -1864,7 +1877,7 @@ def fetch_rss(feed: dict, max_items: int = 25) -> str:
                     f"RSS gave up on {feed['name']}: {resp.status_code} after "
                     f"{attempt} attempts"
                 )
-                return ""
+                return FeedFetch([], _failure_for_status(resp.status_code))
             wait = _rss_retry_wait(resp, attempt)
             log.info(
                 f"RSS retry {attempt}/{RSS_MAX_ATTEMPTS - 1} for {feed['name']}: "
@@ -1872,34 +1885,73 @@ def fetch_rss(feed: dict, max_items: int = 25) -> str:
                 f"(Retry-After={(resp.headers or {}).get('Retry-After')})"
             )
             time.sleep(wait)
-        resp.raise_for_status()
+        try:
+            resp.raise_for_status()
+        except requests.HTTPError as e:
+            log.warning(f"RSS failed {feed['name']}: {e}")
+            return FeedFetch([], _failure_for_status(resp.status_code))
         parsed = feedparser.parse(resp.content)
         if not parsed.entries:
             bozo_exc = getattr(parsed, "bozo_exception", None)
             log.warning(f"No entries: {feed['name']} ({bozo_exc or 'empty feed'})")
-            return ""
-        lines = [
-            _source_header(
-                feed["name"],
-                feed.get("kind", "wire"),
-                feed["category"],
-                feed.get("perspective"),
-                feed.get("state_funded", False),
-            )
-        ]
-        for entry in parsed.entries[:max_items]:
-            title = entry.get("title", "").strip()
-            summary = re.sub(
-                r"<[^>]+>",
-                "",
-                entry.get("summary", entry.get("description", "")).strip(),
-            )[:400]
-            pub = entry.get("published", "")
-            lines.append(f"- {title} ({pub})\n  {summary}")
-        return "\n".join(lines)
+            return FeedFetch([], "malformed" if bozo_exc else "empty")
+        return FeedFetch([_entry_from(e) for e in parsed.entries])
+    except requests.Timeout as e:
+        log.warning(f"RSS failed {feed['name']}: {e}")
+        return FeedFetch([], "timeout")
     except Exception as e:
         log.warning(f"RSS failed {feed['name']}: {e}")
+        return FeedFetch([], _failure_for_exception(e))
+
+
+def _failure_for_status(status: int) -> str:
+    return {403: "http_403", 429: "http_429"}.get(status, "http_5xx")
+
+
+def _failure_for_exception(exc) -> str:
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    return _failure_for_status(status) if status else "malformed"
+
+
+def _entry_from(entry) -> dict:
+    """One feedparser entry, normalized. `summary` is the FULL stripped text —
+    the 400-char cap is a prompt-budget concern and stays in the renderer."""
+    summary = re.sub(
+        r"<[^>]+>", "", entry.get("summary", entry.get("description", "")).strip()
+    )
+    parsed_date = entry.get("published_parsed")
+    published_at = (
+        datetime(*parsed_date[:6], tzinfo=timezone.utc) if parsed_date else None
+    )
+    return {
+        "title": entry.get("title", "").strip(),
+        "url": entry.get("link", ""),
+        "summary": summary,
+        "published_raw": entry.get("published", ""),
+        "published_at": published_at,
+        "guid": entry.get("id") or None,
+    }
+
+
+def fetch_rss(feed: dict, max_items: int = 25) -> str:
+    """Render a feed for the prompt. Output is unchanged by the b42.1 split."""
+    got = fetch_feed_entries(feed)
+    if got.failure:
         return ""
+    lines = [
+        _source_header(
+            feed["name"],
+            feed.get("kind", "wire"),
+            feed["category"],
+            feed.get("perspective"),
+            feed.get("state_funded", False),
+        )
+    ]
+    for entry in got.entries[:max_items]:
+        lines.append(
+            f"- {entry['title']} ({entry['published_raw']})\n  {entry['summary'][:400]}"
+        )
+    return "\n".join(lines)
 
 
 def fetch_web_source(source: dict) -> str:
