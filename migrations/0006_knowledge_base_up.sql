@@ -125,3 +125,27 @@ CREATE TABLE assertions (
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE UNIQUE INDEX assertions_item_event ON assertions (item_id, event_id);
+
+CREATE TABLE observations (
+    id            BIGSERIAL PRIMARY KEY,
+    entity_id     BIGINT      NOT NULL REFERENCES entities(id),
+    -- The symbol ACTUALLY queried at the provider, stored beside the result it
+    -- produced. Deliberate duplication with entity_instruments: the AVAV_
+    -- double-underscore bug was invisible precisely because the queried symbol
+    -- was never recorded next to its result.
+    symbol        TEXT        NOT NULL,
+    -- No default: an observation without a metric is unusable, and a default
+    -- would silently mislabel rows rather than reject them.
+    metric        TEXT        NOT NULL
+                  CHECK (metric IN ('price', 'return', 'yield', 'volume', 'spread')),
+    value         NUMERIC     NOT NULL,
+    return_window TEXT        NULL,
+    observed_at   TIMESTAMPTZ NOT NULL,
+    -- NOT extractor_model: these rows are fetched, not extracted. Spec 3.5.
+    provider      TEXT        NOT NULL,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- Biconditional, both directions. metric is NOT NULL so neither side can
+    -- be NULL and there is no three-valued-logic hole.
+    CHECK ((metric = 'return') = (return_window IS NOT NULL))
+);
+CREATE INDEX observations_entity_observed ON observations (entity_id, observed_at DESC);

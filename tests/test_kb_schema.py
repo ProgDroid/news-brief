@@ -252,3 +252,56 @@ def test_one_item_asserts_one_event_once(kb):
             "VALUES (%s, %s, 'official')",
             (item_id, event_id),
         )
+
+
+def _observation(conn, entity_id, metric="price", value=100, window=None):
+    return conn.execute(
+        "INSERT INTO observations (entity_id, symbol, metric, value, return_window, "
+        "observed_at, provider) VALUES (%s, 'S', %s, %s, %s, now(), 'yahoo') RETURNING id",
+        (entity_id, metric, value, window),
+    ).fetchone()[0]
+
+
+def test_a_return_without_a_window_is_rejected(kb):
+    """Spec 2.2: a return without a period is not a number."""
+    entity_id = _entity(kb, "SK Hynix")
+    with rejects(kb, psycopg.errors.CheckViolation):
+        _observation(kb, entity_id, "return", 0.13, None)
+
+
+def test_a_price_with_a_window_is_rejected(kb):
+    """The biconditional runs both ways: a level has no window."""
+    entity_id = _entity(kb, "SK Hynix")
+    with rejects(kb, psycopg.errors.CheckViolation):
+        _observation(kb, entity_id, "price", 100, "1d")
+
+
+def test_a_return_and_a_price_are_two_separate_rows(kb):
+    """The replay's "SK Hynix +13%" is a return row; the level it moved from is
+    a separate price row. Conflating them is how a one-day bounce became
+    confirmation of a multi-quarter thesis."""
+    entity_id = _entity(kb, "SK Hynix")
+    _observation(kb, entity_id, "return", 0.13, "1d")
+    _observation(kb, entity_id, "price", 100)
+    assert kb.execute("SELECT count(*) FROM observations").fetchone()[0] == 2
+
+
+def test_metric_rejects_an_unknown_value(kb):
+    entity_id = _entity(kb, "SK Hynix")
+    with rejects(kb, psycopg.errors.CheckViolation):
+        _observation(kb, entity_id, "sentiment")
+
+
+def test_observations_carry_provider_not_extractor_model(kb):
+    """Spec 3.5: observations are FETCHED, not extracted. A column named
+    extractor_model holding 'yahoo' would be a lie in the one field that exists
+    to make silent model drift detectable."""
+    cols = {
+        r[0]
+        for r in kb.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'observations'"
+        ).fetchall()
+    }
+    assert "provider" in cols
+    assert "extractor_model" not in cols
