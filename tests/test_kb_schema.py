@@ -11,6 +11,7 @@ import contextlib
 import psycopg
 import pytest
 
+import brief_memory
 import db
 
 pytestmark = pytest.mark.skipif(
@@ -729,3 +730,108 @@ def test_the_rollback_assertion_can_actually_fail(conn, tmp_path, monkeypatch):
         "stripping DROP FUNCTION should leave the function behind; if it does "
         "not, the assertion in the test above cannot fail and proves nothing"
     )
+
+
+LEDGER_KEY_TO_COLUMN = {
+    "id": "ledger_id",
+    "claim": "claim",
+    "topic": "topic",
+    "first_seen": "first_seen",
+    "last_reaffirmed": "last_reaffirmed",
+    "restate_count": "restate_count",
+    "source_count": "source_count",
+    "severity": "severity",
+    "origin": "origin",
+    "driver": "driver",
+    "horizon_days": "horizon_days",
+    "resolution_date": "resolution_date",
+    "horizon_elapsed": "horizon_elapsed",
+    "status": "status",
+    "broke_on": "resolved_on",
+    "broken_by": "broken_by_note",
+    "extractor_model": "extractor_model",
+    "prompt_version": "prompt_version",
+}
+
+PROVISIONAL_TABLES = {
+    "theses",
+    "thesis_claims",
+    "stories",
+    "story_members",
+    "open_questions",
+    "observations",
+    "entity_instruments",
+    "links",
+}
+
+SCHEMA_STATUSES = {
+    "standing",
+    "challenged",
+    "broken",
+    "confirmed",
+    "expired",
+    "withdrawn",
+}
+
+
+def test_every_ledger_key_has_a_claims_column(kb):
+    """Spec 5.1, the WRITE direction. Fails the day a ledger field is added
+    without its column -- the drift that would otherwise surface halfway
+    through bqa.4.
+
+    IF THIS FAILS: a key was added to brief_memory's claim row. Add the column
+    to a new migration and extend this map. Do not delete the entry.
+    """
+    columns = {
+        r[0]
+        for r in kb.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'claims'"
+        ).fetchall()
+    }
+    missing = {k: c for k, c in LEDGER_KEY_TO_COLUMN.items() if c not in columns}
+    assert not missing, f"ledger keys with no claims column: {missing}"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="news-brief-bqa.9: _VALID_STATUS still knows three of the six states. "
+    "Remove this marker when bqa.4 widens it.",
+)
+def test_every_status_the_schema_permits_survives_the_incumbent_coercer():
+    """Spec section 6 item 1, the READ direction -- and the one that matters.
+
+    brief_memory._VALID_STATUS knows three values; claims.status permits six.
+    _coerce_status returns None for the other three, every caller falls back to
+    'standing', and then the TTL filter deletes them after 7 days while
+    select_working_set renders them as live fact.
+
+    A write-direction map alone is the-probe-measured-the-wrong-layer, and it
+    is exactly what let this defect through two spec reviews.
+
+    strict=True: when bqa.4 fixes _VALID_STATUS this test starts passing, the
+    strict xfail turns that into a FAILURE, and whoever sees it removes the
+    marker. A plain xfail would go quiet and rot in place.
+    """
+    degrades = {s for s in SCHEMA_STATUSES if brief_memory._coerce_status(s) != s}
+    assert not degrades, (
+        f"these statuses coerce away and will be TTL-deleted: {sorted(degrades)}. "
+        "Widen brief_memory._VALID_STATUS and split the TTL and render predicates "
+        "from '!= standing' to an explicit terminal set (news-brief-bqa.9)."
+    )
+
+
+def test_the_provisional_tables_are_still_empty(kb):
+    """Spec 1.2's licence: a provisional table may be reshaped without ceremony
+    only while nothing writes it. Nothing observes first write, so this does.
+
+    IF THIS FAILS: bqa.4 has started writing one of these. That is expected and
+    good -- go re-read spec 1.2, decide whether the shape is now frozen, and
+    narrow PROVISIONAL_TABLES. Do not delete the test.
+    """
+    non_empty = [
+        t
+        for t in sorted(PROVISIONAL_TABLES)
+        if kb.execute(f"SELECT EXISTS (SELECT 1 FROM {t})").fetchone()[0]
+    ]
+    assert not non_empty, f"no longer provisional: {non_empty}"
