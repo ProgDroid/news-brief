@@ -44,6 +44,7 @@ def test_up_creates_the_expected_tables(conn):
         "0003_sources",
         "0004_preferences",
         "0005_runtime_state",
+        "0006_knowledge_base",
     ]
     assert {
         "schema_migrations",
@@ -53,6 +54,10 @@ def test_up_creates_the_expected_tables(conn):
         "sources",
         "preferences",
         "runtime_state",
+        "outlets",
+        "items",
+        "entities",
+        "entity_instruments",
     } <= _tables(conn)
 
 
