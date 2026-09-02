@@ -12,6 +12,7 @@ Spec: docs/superpowers/specs/2026-09-02-continuous-capture-design.md
 """
 
 import hashlib
+from dataclasses import dataclass
 from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 
 import brief
@@ -132,3 +133,88 @@ def store_items(conn, outlet_id: int, entries: list[dict]) -> tuple[int, int, in
         else:
             already += 1
     return written, already, failed
+
+
+@dataclass
+class Tally:
+    """What one pass did. Returned AND persisted, because a bare count is
+    unattributable: 0 new items is ambiguous across "nothing published", "every
+    fetch failed" and "the store refused everything"."""
+
+    feeds_total: int = 0
+    feeds_ok: int = 0
+    feeds_failed: int = 0
+    items_seen: int = 0
+    items_new: int = 0
+    sources_dropped: int = 0
+    failures: dict | None = None
+
+    def __post_init__(self):
+        if self.failures is None:
+            self.failures = {}
+
+
+def start_run(conn, enabled: bool) -> int:
+    return conn.execute(
+        "INSERT INTO capture_runs (enabled) VALUES (%s) RETURNING id", (enabled,)
+    ).fetchone()[0]
+
+
+def finish_run(conn, run_id: int, tally: "Tally") -> None:
+    conn.execute(
+        "UPDATE capture_runs SET finished_at = now(), feeds_total = %s, "
+        "feeds_ok = %s, feeds_failed = %s, items_seen = %s, items_new = %s, "
+        "sources_dropped = %s WHERE id = %s",
+        (
+            tally.feeds_total,
+            tally.feeds_ok,
+            tally.feeds_failed,
+            tally.items_seen,
+            tally.items_new,
+            tally.sources_dropped,
+            run_id,
+        ),
+    )
+
+
+def record_poll(conn, run_id: int, source_name: str, failure, entries_seen: int):
+    conn.execute(
+        "INSERT INTO feed_polls (capture_run_id, source_name, failure, entries_seen) "
+        "VALUES (%s, %s, %s, %s)",
+        (run_id, source_name, failure, entries_seen),
+    )
+
+
+def record_sightings(conn, source_name: str, entries: list[dict], item_ids: dict):
+    """Advance last_seen_at for everything this feed showed.
+
+    first_seen_at is never touched on conflict: it is the left edge of dwell
+    time. A failed poll calls this with nothing, so no timestamp moves --
+    nothing was observed, so nothing is asserted.
+    """
+    for position, entry in enumerate(entries, start=1):
+        digest = content_hash(entry)
+        conn.execute(
+            "INSERT INTO feed_sightings (source_name, content_hash, item_id, position) "
+            "VALUES (%s, %s, %s, %s) "
+            "ON CONFLICT (source_name, content_hash) DO UPDATE "
+            "SET last_seen_at = now(), position = EXCLUDED.position",
+            (source_name, digest, item_ids.get(digest), position),
+        )
+
+
+def rolled_off(conn, source_name: str) -> list[str]:
+    """Hashes this feed has stopped serving, judged ONLY against polls that ran.
+
+    The predicate must name `failure IS NULL` explicitly. A query that omits it
+    counts a 403 as evidence of absence and reports a large, clean, entirely
+    fictitious roll-off.
+    """
+    rows = conn.execute(
+        "SELECT s.content_hash FROM feed_sightings s "
+        "WHERE s.source_name = %s AND EXISTS ("
+        "  SELECT 1 FROM feed_polls p WHERE p.source_name = s.source_name "
+        "  AND p.failure IS NULL AND p.polled_at > s.last_seen_at)",
+        (source_name,),
+    ).fetchall()
+    return [r[0] for r in rows]
