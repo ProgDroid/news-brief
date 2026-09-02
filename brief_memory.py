@@ -42,6 +42,15 @@ _DEFAULT_STATUS = "standing"
 # 2.3 says a challenge can be answered, so standing -> challenged -> standing has
 # to keep working.
 _TERMINAL_STATUS = frozenset({"broken", "confirmed", "expired", "withdrawn"})
+# What broken_by says when the model marked a claim broken and named nothing.
+# Migration 0006 requires a broken row to carry one of broken_by_note or
+# broken_by_event_id, so an absent value is not "no citation" but a REFUSED ROW
+# — see _apply_status. Worded so an auditor can tell a placeholder from a real
+# citation at a glance, and so it never reads as evidence of anything.
+UNATTRIBUTED_BREAK = (
+    "unattributed: the extractor marked this claim broken without naming what "
+    "contradicted it"
+)
 # TTL exemption is the WIDER set, and the two are not interchangeable: writing the
 # retention predicate against _TERMINAL_STATUS would age challenged rows out, and
 # a challenge that leaves storage can never resolve (the jx9.6 failure). Its
@@ -657,7 +666,10 @@ def _apply_status(row: dict, proposed, broken_by, today: str) -> None:
     A terminal status is refused rather than overwritten. Migration 0006 names
     brief_memory the PRIMARY enforcement and claims_freeze_claim_text() defence in
     depth, so without this the write path hands Postgres a row it will RAISE on,
-    turning a logged refusal into a crash."""
+    turning a logged refusal into a crash.
+
+    A 'broken' row always leaves here carrying a non-empty broken_by, supplied or
+    placeholder, for the same reason."""
     prior = _coerce_status(row.get("status")) or _DEFAULT_STATUS
     status = _coerce_status(proposed) or prior
     if prior in _TERMINAL_STATUS and status != prior:
@@ -677,6 +689,20 @@ def _apply_status(row: dict, proposed, broken_by, today: str) -> None:
             row["horizon_elapsed"] = _days_between(row.get("first_seen", today), today)
     if isinstance(broken_by, str) and broken_by.strip():
         row["broken_by"] = broken_by.strip()
+    elif row["status"] == "broken":
+        # A broken row with no broken_by is REFUSED by the store, not merely
+        # uncited: 0006:211-212 CHECKs that a broken claim names what broke it,
+        # claim_store omits broken_by_note when the key is absent, and
+        # save_ledger's per-row `except` swallows the violation — so the stored
+        # row stays 'standing' and the brief renders a fact it knows to be
+        # broken as established, every day, indefinitely. The prompt asks for
+        # broken_by (:456, :495) and nothing makes the model supply it. A
+        # placeholder must therefore be a real non-empty string; None or "" send
+        # NULL and the CHECK fires identically. Never overwrites a supplied
+        # value — the branch above wins — nor an existing one on the row.
+        existing = row.get("broken_by")
+        if not (isinstance(existing, str) and existing.strip()):
+            row["broken_by"] = UNATTRIBUTED_BREAK
 
 
 def _ttl_bonus(severity) -> int:

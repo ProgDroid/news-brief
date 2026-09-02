@@ -249,7 +249,7 @@ def test_save_writes_only_the_rows_that_changed(store):
     before = claim_store.load_ledger(store)
     after = {"version": 1, "claims": [dict(c) for c in before["claims"]]}
     after["claims"][0]["topic"] = "changed"
-    written, retired = claim_store.save_ledger(store, before, after, "2026-06-25")
+    written, retired, _ = claim_store.save_ledger(store, before, after, "2026-06-25")
     assert (written, retired) == (1, 0)
 
 
@@ -258,7 +258,7 @@ def test_a_row_the_merge_dropped_is_retired_not_deleted(store):
     _insert(store, ledger_id="c-0002")
     before = claim_store.load_ledger(store)
     after = {"version": 1, "claims": [before["claims"][0]]}
-    written, retired = claim_store.save_ledger(store, before, after, "2026-06-25")
+    written, retired, _ = claim_store.save_ledger(store, before, after, "2026-06-25")
     assert (written, retired) == (0, 1)
     row = store.execute(
         "SELECT retired_on FROM claims WHERE ledger_id = 'c-0002'"
@@ -283,7 +283,7 @@ def test_an_id_echoed_twice_in_one_reply_becomes_one_row(store):
     twin = dict(before["claims"][0])
     twin["topic"] = "second"
     after = {"version": 1, "claims": [before["claims"][0], twin]}
-    written, retired = claim_store.save_ledger(store, before, after, "2026-06-25")
+    written, retired, _ = claim_store.save_ledger(store, before, after, "2026-06-25")
     assert (written, retired) == (1, 0)
     assert claim_store.load_ledger(store)["claims"][0]["topic"] == "second"
 
@@ -298,7 +298,7 @@ def test_an_ordinary_reaffirm_does_not_trip_the_immutability_trigger(store):
         "version": 1,
         "claims": [dict(before["claims"][0], last_reaffirmed="2026-06-25")],
     }
-    written, _ = claim_store.save_ledger(store, before, after, "2026-06-25")
+    written, _, _ = claim_store.save_ledger(store, before, after, "2026-06-25")
     assert written == 1
 
 
@@ -316,7 +316,7 @@ def test_rewriting_a_broken_claim_is_refused_by_the_trigger(store):
     )
     before = claim_store.load_ledger(store)
     after = {"version": 1, "claims": [dict(before["claims"][0], claim="rewritten")]}
-    written, _ = claim_store.save_ledger(store, before, after, "2026-06-25")
+    written, _, _ = claim_store.save_ledger(store, before, after, "2026-06-25")
     assert written == 0
     assert claim_store.load_ledger(store)["claims"][0]["claim"] == "a durable fact"
 
@@ -327,11 +327,77 @@ def test_one_rejected_row_does_not_cost_the_others(store):
     good = dict(_ALL_KEYS)
     bad = dict(_ALL_KEYS, id="c-0002", status="broken", broke_on=None, broken_by=None)
     after = {"version": 1, "claims": [good, bad]}
-    written, _ = claim_store.save_ledger(
+    written, _, _ = claim_store.save_ledger(
         store, {"version": 1, "claims": []}, after, "2026-06-24"
     )
     assert written == 1
     assert [c["id"] for c in claim_store.load_ledger(store)["claims"]] == ["c-0001"]
+
+
+def test_a_row_the_schema_refuses_is_counted_as_skipped(store):
+    """(0, 0) says nothing about whether the day was quiet or the day bounced.
+    A fail-closed path has to name the gate that fired, with a number."""
+    bad = dict(_ALL_KEYS, status="broken", broke_on=None, broken_by=None)
+    counts = claim_store.save_ledger(
+        store,
+        {"version": 1, "claims": []},
+        {"version": 1, "claims": [bad]},
+        "2026-06-24",
+    )
+    assert counts == (0, 0, 1)
+    assert claim_store.load_ledger(store)["claims"] == []
+
+
+def test_an_unattributed_break_survives_the_round_trip_as_broken(store):
+    """The whole failure end to end: the model marks a claim broken and names
+    nothing, the CHECK rejects the row, the per-row `except` swallows it, and
+    the ledger reads back 'standing' forever. Nothing between merge_ledger and
+    Postgres is stubbed here, because every layer in that chain reported
+    success while the fact was being lost."""
+    _insert(store, ledger_id="c-0001", status="standing")
+    before = claim_store.load_ledger(store)
+    after = brief_memory.merge_ledger(
+        before,
+        [{"id": "c-0001", "claim": "a durable fact", "status": "broken"}],
+        "2026-06-25",
+    )
+    written, _, skipped = claim_store.save_ledger(store, before, after, "2026-06-25")
+    assert (written, skipped) == (1, 0)
+    stored = claim_store.load_ledger(store)["claims"][0]
+    assert stored["status"] == "broken"
+    assert stored["broken_by"] == brief_memory.UNATTRIBUTED_BREAK
+
+
+def test_load_excludes_a_kb_native_claim_that_has_no_ledger_id(store):
+    """bqa.4b writes claims with no ledger_id. One would arrive with no `id`:
+    it takes a working-set slot, is invisible to save_ledger's diff, and -- as
+    the second row here has -- a NULL last_reaffirmed then raises out of
+    _row_to_claim and takes the whole feature down."""
+    _insert(store, ledger_id="c-0001")
+    store.execute(
+        "INSERT INTO claims (claim, first_seen, last_reaffirmed) "
+        "VALUES ('kb-native', '2026-06-01', '2026-06-02')"
+    )
+    store.execute(
+        "INSERT INTO claims (claim, first_seen) VALUES ('kb-native, undated', '2026-06-01')"
+    )
+    store.commit()
+    assert [c["id"] for c in claim_store.load_ledger(store)["claims"]] == ["c-0001"]
+
+
+def test_retiring_a_row_that_is_already_retired_is_not_counted(store):
+    """The UPDATE carries `AND retired_on IS NULL`, so a stale `before` matches
+    zero rows. Counting it anyway reports a retirement that did not happen."""
+    _insert(store, ledger_id="c-0001")
+    before = claim_store.load_ledger(store)
+    store.execute("UPDATE claims SET retired_on = '2026-06-24'")
+    store.commit()
+    counts = claim_store.save_ledger(
+        store, before, {"version": 1, "claims": []}, "2026-06-25"
+    )
+    assert counts == (0, 0, 0)
+    row = store.execute("SELECT retired_on FROM claims").fetchone()
+    assert row[0].strftime("%Y-%m-%d") == "2026-06-24"
 
 
 def _write_ledger(tmp_path, claims):

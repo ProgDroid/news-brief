@@ -78,10 +78,18 @@ def load_ledger(conn) -> dict:
     elements -- so ties break by input order. Reproducing the order
     merge_ledger last wrote keeps that deterministic instead of leaving it to
     the planner.
+
+    A KB-native claim (bqa.4b) has no ledger_id, and the ledger is not equipped
+    to carry one: it would arrive with no `id`, take a render slot in
+    select_working_set, be invisible to save_ledger's diff -- which keys on `id`
+    -- and, if its last_reaffirmed were also NULL, take the whole feature down
+    through _row_to_claim. This WHERE clause is what keeps the two populations
+    apart until something is built to merge them.
     """
     columns = ", ".join(_KEY_TO_COLUMN.values())
     rows = conn.execute(
-        f"SELECT {columns} FROM claims WHERE retired_on IS NULL "
+        f"SELECT {columns} FROM claims "
+        f"WHERE retired_on IS NULL AND ledger_id IS NOT NULL "
         f"ORDER BY {_SEVERITY_ORDER_SQL} DESC, last_reaffirmed DESC, ledger_id"
     ).fetchall()
     return {"version": 1, "claims": [_row_to_claim(r) for r in rows]}
@@ -135,8 +143,15 @@ def _write_claim(conn, claim: dict) -> None:
     conn.execute(_upsert_sql(keys), tuple(claim[k] for k in keys))
 
 
-def save_ledger(conn, before: dict, after: dict, today: str) -> tuple[int, int]:
-    """Persist the merge's result. Returns (rows written, rows retired).
+def save_ledger(conn, before: dict, after: dict, today: str) -> tuple[int, int, int]:
+    """Persist the merge's result. Returns (written, retired, skipped).
+
+    `skipped` is the third number because the first two cannot tell a quiet run
+    from a refused one: a row the schema rejects goes into log.exception and,
+    without a counter, nowhere else, so "0 written" reads identically whether
+    nothing changed or every row bounced. A fail-closed path has to say WHICH
+    gate fired and with what numbers. It counts refusals on both loops -- a
+    retirement that raises is exactly as invisible as a write that does.
 
     `before` is the ledger as loaded; `after` is what merge_ledger returned.
     A row present in `before` and absent from `after` was dropped by the TTL --
@@ -152,6 +167,7 @@ def save_ledger(conn, before: dict, after: dict, today: str) -> tuple[int, int]:
     after_by_id = {c["id"]: c for c in after.get("claims", []) if c.get("id")}
 
     written = 0
+    skipped = 0
     for cid, claim in after_by_id.items():
         if before_by_id.get(cid) == claim:
             continue
@@ -160,22 +176,30 @@ def save_ledger(conn, before: dict, after: dict, today: str) -> tuple[int, int]:
                 _write_claim(conn, claim)
             written += 1
         except Exception:
+            skipped += 1
             log.exception(f"Claim store: skipped an unwritable claim {cid!r}")
 
     retired = 0
     for cid in before_by_id.keys() - after_by_id.keys():
         try:
             with conn.transaction():
-                conn.execute(
+                # rowcount, not an unconditional +1: the UPDATE is guarded by
+                # `retired_on IS NULL`, so a stale `before` -- one naming a row
+                # another writer already retired, or one that is not there at
+                # all -- matches nothing and the count would overstate what
+                # happened. ledger_id is unique, so this is 0 or 1.
+                cur = conn.execute(
                     "UPDATE claims SET retired_on = %s "
                     "WHERE ledger_id = %s AND retired_on IS NULL",
                     (today, cid),
                 )
-            retired += 1
+            if cur.rowcount:
+                retired += 1
         except Exception:
+            skipped += 1
             log.exception(f"Claim store: could not retire {cid!r}")
     conn.commit()
-    return written, retired
+    return written, retired, skipped
 
 
 def import_legacy(conn, path: Path | None = None) -> int:

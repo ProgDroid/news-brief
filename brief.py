@@ -3221,10 +3221,13 @@ def mode_collect():
                         source_index=load_source_index(today),
                         next_num=claim_store.next_ledger_num(ledger_conn),
                     )
-                    written, retired = claim_store.save_ledger(
+                    written, retired, skipped = claim_store.save_ledger(
                         ledger_conn, before, after, today
                     )
-                    log.info(f"Brief-memory: {written} written, {retired} retired")
+                    log.info(
+                        f"Brief-memory: {written} written, {retired} retired, "
+                        f"{skipped} refused by the store"
+                    )
             except Exception as e:
                 log.error(f"Brief-memory reconcile skipped (brief unaffected): {e}")
         if claim_verify_enabled():

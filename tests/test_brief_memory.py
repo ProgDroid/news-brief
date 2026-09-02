@@ -1001,6 +1001,40 @@ def test_merge_records_broken_by():
     assert out["claims"][0]["broken_by"] == "Trump reversed the licence"
 
 
+def test_a_break_the_model_did_not_attribute_still_names_something():
+    """The store CHECKs that a broken claim carries a broken_by (0006:211-212)
+    and save_ledger's per-row `except` swallows the violation, so an
+    unattributed break was silently refused and the stored row stayed
+    'standing' — the brief then rendered a fact it knew to be broken as
+    established, every day, for as long as the row lived. The prompt asks for
+    broken_by; nothing made the model supply it."""
+    prior = {"version": 1, "claims": [_mk_claim("c-0001", "2026-06-20")]}
+    out = bm.merge_ledger(
+        prior,
+        [{"id": "c-0001", "claim": "c-0001", "status": "broken"}],
+        "2026-06-24",
+    )
+    got = out["claims"][0]
+    assert got["status"] == "broken"
+    assert got["broken_by"] == bm.UNATTRIBUTED_BREAK
+    # Not None and not "": either sends NULL and the CHECK fires identically.
+    assert isinstance(got["broken_by"], str) and got["broken_by"].strip()
+    # And it must be legible as a placeholder rather than as a citation.
+    assert "without naming" in got["broken_by"]
+
+
+def test_a_brand_new_claim_born_broken_is_attributed_too():
+    """The new-claim path calls _apply_status as well (merge_ledger:343). Its
+    failure was worse than the reaffirm path's: the row was never persisted at
+    all, so every run burned a fresh ledger_id on a claim that never landed."""
+    out = bm.merge_ledger(
+        {"version": 1, "claims": []},
+        [{"claim": "a fact that arrived already contradicted", "status": "broken"}],
+        "2026-06-24",
+    )
+    assert out["claims"][0]["broken_by"] == bm.UNATTRIBUTED_BREAK
+
+
 def test_merge_marks_a_reaffirmed_claim_challenged():
     prior = {"version": 1, "claims": [_mk_claim("c-0001", "2026-06-20")]}
     out = bm.merge_ledger(
