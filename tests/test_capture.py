@@ -39,6 +39,22 @@ class _Resp:
         return None
 
 
+# Captured from brief.py as of commit b8149bd (the parent of the fetch_rss
+# split), by running the UNMODIFIED fetch_rss against RSS above with the same
+# monkeypatch this test uses, then taking repr() of its return value. This is
+# the equality guard for success criterion 4 -- "the brief's output is
+# byte-identical across the fetch_rss split" -- so it must never be
+# regenerated from the post-split code; that would pin whatever the split
+# produces instead of proving it matches what came before.
+EXPECTED_RENDER = (
+    "\n### Test Wire [WIRE] (MACRO)\n"
+    "- First headline (Tue, 02 Sep 2026 10:00:00 GMT)\n"
+    "  Body of a.\n"
+    "- Second headline (Tue, 02 Sep 2026 11:00:00 GMT)\n"
+    "  Body of b."
+)
+
+
 def test_fetch_rss_output_is_unchanged_by_the_split(monkeypatch):
     """Characterization: pins the rendered string byte-for-byte.
 
@@ -47,6 +63,7 @@ def test_fetch_rss_output_is_unchanged_by_the_split(monkeypatch):
     """
     monkeypatch.setattr(brief.requests, "get", lambda *a, **k: _Resp(RSS))
     out = brief.fetch_rss(FEED)
+    assert out == EXPECTED_RENDER
     assert "First headline" in out
     assert "Second headline" in out
     assert "Body of a." in out
@@ -99,7 +116,10 @@ def test_a_403_is_reported_as_a_kind_not_as_emptiness(monkeypatch):
         status_code = 403
 
         def raise_for_status(self):
-            raise brief.requests.HTTPError("403")
+            # Real requests.Response.raise_for_status() attaches
+            # response=self -- match that here so the double doesn't mislead
+            # a later reader into thinking the exception arrives bare.
+            raise brief.requests.HTTPError("403", response=self)
 
     monkeypatch.setattr(brief.requests, "get", lambda *a, **k: Forbidden(b""))
     got = brief.fetch_feed_entries(FEED)
