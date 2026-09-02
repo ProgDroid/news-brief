@@ -215,3 +215,20 @@ CREATE UNIQUE INDEX claims_ledger_id ON claims (ledger_id);
 -- every morning for the life of the row.
 CREATE INDEX claims_open_resolution ON claims (resolution_date)
     WHERE status IN ('standing', 'challenged');
+CREATE TABLE claim_evidence (
+    id             BIGSERIAL PRIMARY KEY,
+    claim_id       BIGINT NOT NULL REFERENCES claims(id) ON DELETE CASCADE,
+    -- RESTRICT, not CASCADE: rule 3 is a COUNT over these rows, and a floor an
+    -- unrelated delete can silently lower is not a floor.
+    event_id       BIGINT NULL REFERENCES events(id) ON DELETE RESTRICT,
+    observation_id BIGINT NULL REFERENCES observations(id) ON DELETE RESTRICT,
+    span_start     DATE   NULL,
+    span_end       DATE   NULL,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK (num_nonnulls(event_id, observation_id) = 1)
+);
+-- NULLS NOT DISTINCT: without it, (claim, event, NULL) inserts twice and one
+-- piece of evidence counts as two. Also serves the claim_id prefix lookup, so
+-- no separate FK index is created.
+CREATE UNIQUE INDEX claim_evidence_unique
+    ON claim_evidence (claim_id, event_id, observation_id) NULLS NOT DISTINCT;

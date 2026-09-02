@@ -412,3 +412,49 @@ def test_a_ledger_id_cannot_be_reused(kb):
     _claim(kb, "c1", ledger_id="c-0001")
     with rejects(kb, psycopg.errors.UniqueViolation):
         _claim(kb, "c2", ledger_id="c-0001")
+
+
+def test_evidence_pointing_at_neither_is_rejected(kb):
+    claim_id = _claim(kb, "c")
+    with rejects(kb, psycopg.errors.CheckViolation):
+        kb.execute("INSERT INTO claim_evidence (claim_id) VALUES (%s)", (claim_id,))
+
+
+def test_evidence_pointing_at_both_is_rejected(kb):
+    """The both-set case is the one that silently corrupts rule 3's count."""
+    claim_id, event_id = _claim(kb, "c"), _event(kb)
+    observation_id = _observation(kb, _entity(kb, "SK Hynix"))
+    with rejects(kb, psycopg.errors.CheckViolation):
+        kb.execute(
+            "INSERT INTO claim_evidence (claim_id, event_id, observation_id) "
+            "VALUES (%s, %s, %s)",
+            (claim_id, event_id, observation_id),
+        )
+
+
+def test_the_same_evidence_cannot_be_counted_twice(kb):
+    """NULLS NOT DISTINCT. Under default semantics both rows insert, one piece
+    of evidence counts as two, and the evidence floor is cleared by a
+    duplicate -- the chip-whipsaw failure rule 3 exists to prevent."""
+    claim_id, event_id = _claim(kb, "c"), _event(kb)
+    kb.execute(
+        "INSERT INTO claim_evidence (claim_id, event_id) VALUES (%s, %s)",
+        (claim_id, event_id),
+    )
+    with rejects(kb, psycopg.errors.UniqueViolation):
+        kb.execute(
+            "INSERT INTO claim_evidence (claim_id, event_id) VALUES (%s, %s)",
+            (claim_id, event_id),
+        )
+
+
+def test_deleting_an_event_cannot_silently_lower_the_evidence_floor(kb):
+    """RESTRICT, not CASCADE: a floor an unrelated delete can lower is not a
+    floor."""
+    claim_id, event_id = _claim(kb, "c"), _event(kb)
+    kb.execute(
+        "INSERT INTO claim_evidence (claim_id, event_id) VALUES (%s, %s)",
+        (claim_id, event_id),
+    )
+    with rejects(kb, psycopg.errors.RestrictViolation):
+        kb.execute("DELETE FROM events WHERE id = %s", (event_id,))

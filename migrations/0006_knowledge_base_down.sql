@@ -1,5 +1,6 @@
 -- Reverse dependency order. Later tasks PREPEND their drops, which keeps the
 -- order correct automatically: each task's tables depend only on earlier ones.
+DROP TABLE claim_evidence;
 DROP TABLE claims;
 DROP TABLE observations;
 DROP TABLE assertions;

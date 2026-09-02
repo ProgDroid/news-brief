@@ -63,6 +63,7 @@ def test_up_creates_the_expected_tables(conn):
         "assertions",
         "observations",
         "claims",
+        "claim_evidence",
     } <= _tables(conn)
 
 
