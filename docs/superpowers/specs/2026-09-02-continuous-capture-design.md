@@ -374,7 +374,7 @@ Capture iterates `RSS_FEEDS` plus only those temp sources with `source_type == "
 `"feed"` rather than testing the key's presence.
 
 **`load_temp_sources` would silently discard the `outlet` key.** It rebuilds each entry as a new
-dict from a fixed field list (`brief.py:456-470`), so any key it does not name is dropped. §4's
+dict from a fixed field list (`brief.py:467-478`), so any key it does not name is dropped. §4's
 mapping would therefore work for baked-in feeds and fail, without error, for user sources. It must
 carry `outlet` through — and a test must assert it, because the failure is invisible: the source
 still captures, just under the wrong outlet.
@@ -385,9 +385,9 @@ are written per feed in their own transaction, and an entry lacking a title or l
 with a warning and counted, never allowed to take down the pass. This mirrors the contract
 `load_temp_sources` already sets: one bad input degrades itself, not the run.
 
-**`run_job` calls `fn()` with no arguments** (`brief.py:3874`), so `mode_capture` takes none and
+**`run_job` calls `fn()` with no arguments** (`brief.py:3906`), so `mode_capture` takes none and
 opens its own connection. Adding the mode also means updating the `JOB_MODES` comment at
-`brief.py:3838` and the usage string at `brief.py:3982`, neither of which is exercised by any test
+`brief.py:3838` and the usage string at `brief.py:3981`, neither of which is exercised by any test
 and both of which will otherwise go stale immediately.
 
 ---
@@ -525,6 +525,24 @@ passes. Routine success is queryable, never pushed.
 **A swallowed exception is a failed job, not a quiet success.** If the pass itself raises, the mode
 exits non-zero so `job_runs.exit_code` records it, and `capture_runs.finished_at` stays `NULL` —
 which is how a crashed pass is told apart from a completed one.
+
+**That guarantee is a claim about commit boundaries, and it is false unless they are stated.**
+`db.connect()` opens `autocommit=False` (`db.py:112`). A pass wrapped in a single
+`with db.connect() as conn:` therefore rolls back on an exception and takes the `capture_runs` row
+with it — leaving a crashed pass indistinguishable from one that never fired, which is precisely
+the ambiguity `capture_runs.enabled` exists to remove. Verified by execution, not by reading: a
+simulated crash left **0 rows**.
+
+So the pass commits three times over:
+
+1. **Immediately after `start_run`** — the row must outlive the crash that makes it interesting.
+2. **After each feed's writes** — items, sightings and that feed's poll row together. Capture is
+   "cheap and irreversible"; losing 25 feeds' captured items because feed 26 raised would make it
+   neither. A crash costs at most one feed's work.
+3. **After `finish_run`.**
+
+Per-feed commits also mean the `feed_polls` denominator stays consistent with what was actually
+stored: a feed whose items committed always has its poll row committed alongside them.
 
 ---
 
