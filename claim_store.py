@@ -263,3 +263,17 @@ def import_legacy(conn, path: Path | None = None) -> int:
     if imported:
         log.info(f"Imported {imported} claims from {path}")
     return imported
+
+
+def degraded_block() -> str:
+    """What the brief shows when the ledger could not be read.
+
+    An empty string would delete the section, making an outage indistinguishable
+    from an empty ledger. One line costs nothing and is the difference between a
+    visible failure and an invisible one.
+    """
+    return (
+        "## BACKGROUND ALREADY REPORTED\n"
+        "Unavailable this run — the claim store could not be read, so treat "
+        "nothing below as already established.\n"
+    )

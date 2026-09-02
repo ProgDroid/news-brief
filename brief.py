@@ -101,11 +101,11 @@ from enrichment import (
 from enrichment.models import bundles_from_dict
 from brief_memory import (
     is_enabled as brief_memory_enabled,
-    load_ledger,
     reconcile_ledger,
     render_established_block,
-    save_ledger,
 )
+import claim_store
+import db
 from claim_verify import (
     build_source_evidence,
     is_enabled as claim_verify_enabled,
@@ -3106,9 +3106,16 @@ def mode_submit():
     fb = load_feedback()
     chroma_context = build_chroma_context(fb)
     yesterday_brief = load_yesterday_brief()
-    established_block = (
-        render_established_block(load_ledger()) if brief_memory_enabled() else ""
-    )
+    established_block = ""
+    if brief_memory_enabled():
+        try:
+            with db.connect() as ledger_conn:
+                established_block = render_established_block(
+                    claim_store.load_ledger(ledger_conn)
+                )
+        except Exception as e:
+            log.error(f"Brief-memory unreadable; brief continues degraded: {e}")
+            established_block = claim_store.degraded_block()
     weekly_summary = load_last_weekly_summary()
 
     log.info(
@@ -3205,14 +3212,19 @@ def mode_collect():
         save_signals(signals, today, status=status, dropped=dropped)
         if brief_memory_enabled():
             try:
-                save_ledger(
-                    reconcile_ledger(
-                        load_ledger(),
+                with db.connect() as ledger_conn:
+                    before = claim_store.load_ledger(ledger_conn)
+                    after = reconcile_ledger(
+                        before,
                         brief,
                         today,
                         source_index=load_source_index(today),
+                        next_num=claim_store.next_ledger_num(ledger_conn),
                     )
-                )
+                    written, retired = claim_store.save_ledger(
+                        ledger_conn, before, after, today
+                    )
+                    log.info(f"Brief-memory: {written} written, {retired} retired")
             except Exception as e:
                 log.error(f"Brief-memory reconcile skipped (brief unaffected): {e}")
         if claim_verify_enabled():

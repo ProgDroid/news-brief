@@ -6,14 +6,12 @@ the brief unaffected and the prior ledger intact)."""
 import json
 import re
 from datetime import datetime, timedelta
-from pathlib import Path
 
 import requests
 
 import common
-from common import ANTHROPIC_HEADERS, DATA_DIR, _write_json_atomic, log
+from common import ANTHROPIC_HEADERS, log
 
-BRIEF_MEMORY_FILE = DATA_DIR / "brief_memory.json"
 # Size of the WORKING SET — the window of claims sent to the reconcile model and
 # rendered into the brief. It is a PROMPT BUDGET, not a storage limit: storage is
 # unbounded and claims leave only by TTL. The two were the same number until the
@@ -121,22 +119,6 @@ def is_enabled() -> bool:
 
 def empty_ledger() -> dict:
     return {"version": 1, "claims": []}
-
-
-def load_ledger(path: Path = BRIEF_MEMORY_FILE) -> dict:
-    try:
-        if path.exists():
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(data, dict) and isinstance(data.get("claims"), list):
-                return data
-        return empty_ledger()
-    except Exception as e:
-        log.warning(f"Brief-memory ledger unreadable ({path}); starting empty: {e}")
-        return empty_ledger()
-
-
-def save_ledger(ledger: dict, path: Path = BRIEF_MEMORY_FILE) -> None:
-    _write_json_atomic(path, ledger)
 
 
 def _max_id_num(ledger: dict) -> int:

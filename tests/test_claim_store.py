@@ -472,3 +472,13 @@ def test_import_defaults_a_missing_last_reaffirmed_to_first_seen(store, tmp_path
     assert (
         claim_store.load_ledger(store)["claims"][0]["last_reaffirmed"] == "2026-06-01"
     )
+
+
+def test_a_degraded_run_says_so_instead_of_vanishing(store):
+    """render_established_block returns "" when it has nothing, which removes
+    the section entirely -- so a database outage and a genuinely empty ledger
+    are BYTE-IDENTICAL to the reader. The brief silently loses its memory,
+    re-explains yesterday's facts, and nothing says why. The run row tells the
+    operator; this line tells the reader."""
+    assert "unavailable" in claim_store.degraded_block().lower()
+    assert claim_store.degraded_block() != ""
