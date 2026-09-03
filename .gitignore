@@ -21,3 +21,6 @@ backtest/gdelt/out/
 
 # Local gold-set scoring runs (scripts/score_gold_set.py --json)
 .gold_run*.json
+
+# Semgrep plugin auth cache — contains access/refresh tokens. Never commit.
+.semgrep/
