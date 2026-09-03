@@ -2,6 +2,7 @@
 
 import pytest
 
+import brief
 import capture
 import common
 import db
@@ -78,6 +79,22 @@ def test_a_source_conflicting_with_an_existing_outlet_is_refused(store):
     assert got is None, "a user source that disagrees is dropped, not merged silently"
 
 
+def test_two_differently_named_feeds_sharing_an_outlet_key_collapse(store):
+    """The Reuters case: Reuters Markets and Reuters World are two feeds but one
+    outlet. Passing the SAME feed dict twice (as the insert-once test does)
+    only proves idempotence, not collapse -- this proves two different feed
+    names sharing an `outlet` key resolve to one row."""
+    a = capture.resolve_outlet(
+        store, {**FEED, "name": "Reuters Markets", "outlet": "Reuters"}
+    )
+    b = capture.resolve_outlet(
+        store, {**FEED, "name": "Reuters World", "outlet": "Reuters"}
+    )
+    assert a == b
+    n = store.execute("SELECT count(*) FROM outlets").fetchone()[0]
+    assert n == 1
+
+
 def test_the_same_item_captured_twice_writes_one_row(store):
     outlet_id = capture.resolve_outlet(store, FEED)
     first = capture.store_items(store, outlet_id, [_entry()])
@@ -130,6 +147,27 @@ def test_a_db_error_on_one_entry_does_not_lose_its_neighbor(store):
     assert store.execute("SELECT 1").fetchone() == (1,)
 
 
+def test_feed_sightings_item_id_is_populated_after_a_store_pass(store):
+    """FIX 1 regression guard: `record_sightings(conn, name, entries, {})` with
+    an always-empty id map made item_id NULL by construction on every row --
+    `store_items`'s `ON CONFLICT DO NOTHING RETURNING id` returns nothing for
+    the already-present case, which is the majority. item_id is what
+    disambiguates a shared content_hash across outlets; a NULL here is
+    unrecoverable since source_name carries no FK back to `items`."""
+    outlet_id = capture.resolve_outlet(store, FEED)
+    entries = [_entry()]
+    capture.store_items(store, outlet_id, entries)
+    item_ids = capture._lookup_item_ids(store, outlet_id, entries)
+    capture.record_sightings(store, "Test Wire", entries, item_ids)
+    row = store.execute(
+        "SELECT s.item_id, i.id FROM feed_sightings s "
+        "JOIN items i ON i.content_hash = s.content_hash AND i.outlet_id = %s",
+        (outlet_id,),
+    ).fetchone()
+    assert row[0] is not None
+    assert row[0] == row[1]
+
+
 def test_a_sighting_is_created_then_advanced(store):
     entries = [_entry()]
     capture.record_sightings(store, "Test Wire", entries, {})
@@ -139,13 +177,23 @@ def test_a_sighting_is_created_then_advanced(store):
     store.execute(
         "UPDATE feed_sightings SET last_seen_at = last_seen_at - interval '1 hour'"
     )
+    backdated = store.execute("SELECT last_seen_at FROM feed_sightings").fetchone()[0]
     capture.record_sightings(store, "Test Wire", entries, {})
     second = store.execute(
         "SELECT first_seen_at, last_seen_at, position FROM feed_sightings"
     ).fetchone()
     assert store.execute("SELECT count(*) FROM feed_sightings").fetchone()[0] == 1
     assert second[0] == first[0], "first_seen_at must never move"
-    assert second[1] > first[1] - __import__("datetime").timedelta(hours=1)
+    # Postgres's now() is transaction_timestamp(): frozen for the whole
+    # transaction, so the two record_sightings calls above -- both inside
+    # this test's one transaction -- write the SAME last_seen_at as each
+    # other. second[1] can therefore never exceed first[1] here; the only
+    # thing the upsert actually guarantees is an advance from the backdated
+    # value. This same freeze is what makes rolled_off's same-pass exclusion
+    # work: a sighting and the poll that produced it share a transaction
+    # timestamp, so `polled_at > last_seen_at` is false for that pass.
+    assert second[1] > backdated
+    assert second[2] == 1, "position = EXCLUDED.position is part of the upsert"
 
 
 def test_one_item_on_two_feeds_is_two_sightings(store):
@@ -264,3 +312,65 @@ def test_a_disabled_pass_polls_nothing_but_still_finishes(store, monkeypatch):
     polls = store.execute("SELECT count(*) FROM feed_polls").fetchone()[0]
     assert polls == 0
     assert tally.feeds_total == 0
+
+
+def test_run_end_to_end_succeeds_one_feed_and_fails_the_other(store, monkeypatch):
+    """FIX 3: the only test that exercises capture.run's SUCCESS path end to
+    end -- outlet resolution, item storage, and sighting/poll recording,
+    against real Postgres rather than a fake conn. Before this, feeds_ok,
+    items_new, items_seen and tally.failures were asserted nowhere, and the
+    outlet_conflict failure-count fix shipped with no test at all.
+
+    Also the FIX 4 regression guard: rolled_off must read [] for a feed just
+    polled successfully in this same pass, which only holds if record_sightings
+    and record_poll commit in the same transaction (see the comment at the
+    per-feed commit in capture.run)."""
+    ok_feed = {
+        "name": "OK Wire",
+        "url": "https://ok.example/feed",
+        "category": "macro",
+        "kind": "wire",
+    }
+    bad_feed = {
+        "name": "Bad Wire",
+        "url": "https://bad.example/feed",
+        "category": "macro",
+        "kind": "wire",
+    }
+    entries = [
+        _entry(url="https://ok.example/a", guid="g1", title="A"),
+        _entry(url="https://ok.example/b", guid="g2", title="B"),
+    ]
+
+    def fake_fetch(feed):
+        if feed["name"] == "OK Wire":
+            return brief.FeedFetch(entries=list(entries), failure=None)
+        return brief.FeedFetch(entries=[], failure="http_403")
+
+    monkeypatch.setattr(common, "CAPTURE_ENABLED", True)
+    monkeypatch.setattr(capture, "capture_sources", lambda: [ok_feed, bad_feed])
+    monkeypatch.setattr(capture, "HOST_GAP_SECONDS", 0)
+    monkeypatch.setattr(brief, "fetch_feed_entries", fake_fetch)
+
+    tally = capture.run(store)
+
+    assert tally.feeds_ok == 1
+    assert tally.feeds_failed == 1
+    assert tally.failures == {"http_403": 1}
+    assert tally.items_new == len(entries)
+    assert tally.items_seen == len(entries)
+
+    assert store.execute("SELECT count(*) FROM items").fetchone()[0] == len(entries)
+    assert store.execute(
+        "SELECT count(*) FROM feed_sightings WHERE source_name = %s", ("OK Wire",)
+    ).fetchone()[0] == len(entries)
+    ok_failure = store.execute(
+        "SELECT failure FROM feed_polls WHERE source_name = %s", ("OK Wire",)
+    ).fetchone()[0]
+    bad_failure = store.execute(
+        "SELECT failure FROM feed_polls WHERE source_name = %s", ("Bad Wire",)
+    ).fetchone()[0]
+    assert ok_failure is None
+    assert bad_failure == "http_403"
+
+    assert capture.rolled_off(store, "OK Wire") == []

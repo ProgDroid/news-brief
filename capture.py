@@ -59,6 +59,10 @@ def resolve_outlet(conn, feed: dict, *, strict: bool = False) -> int | None:
     """
     name = brief.outlet_for(feed)
     shape = (
+        # Divergent from brief.py's render-path default ("wire") on purpose:
+        # this one matches the `outlets.kind` column default, and every
+        # RSS_FEEDS/load_temp_sources entry sets `kind` explicitly, so the
+        # difference is unreachable today.
         feed.get("kind", "regional"),
         feed.get("perspective"),
         bool(feed.get("state_funded", False)),
@@ -137,6 +141,26 @@ def store_items(conn, outlet_id: int, entries: list[dict]) -> tuple[int, int, in
     return written, already, failed
 
 
+def _lookup_item_ids(conn, outlet_id: int, entries: list[dict]) -> dict[str, int]:
+    """Map content_hash -> items.id for this outlet, one batched query.
+
+    Called after store_items so a just-written row is already visible in the
+    same transaction. store_items cannot supply this itself: `ON CONFLICT DO
+    NOTHING RETURNING id` returns no row for the already-present case, which is
+    the majority, so item_id would otherwise be NULL by construction on every
+    row feed_sightings writes.
+    """
+    hashes = [content_hash(entry) for entry in entries]
+    if not hashes:
+        return {}
+    rows = conn.execute(
+        "SELECT content_hash, id FROM items WHERE outlet_id = %s "
+        "AND content_hash = ANY(%s)",
+        (outlet_id, hashes),
+    ).fetchall()
+    return dict(rows)
+
+
 @dataclass
 class Tally:
     """What one pass did. Returned AND persisted, because a bare count is
@@ -148,6 +172,10 @@ class Tally:
     feeds_failed: int = 0
     items_seen: int = 0
     items_new: int = 0
+    # Not persisted: capture_runs has no items_already/items_failed columns
+    # (migration 0008 is already applied), so these live in the log line only.
+    items_already: int = 0
+    items_failed: int = 0
     sources_dropped: int = 0
     failures: dict | None = None
 
@@ -263,7 +291,7 @@ def order_by_host(feeds: list[dict]) -> list[dict]:
     return ordered
 
 
-def run(conn=None) -> Tally:
+def run(conn) -> Tally:
     """One full pass. Bounded by DEADLINE_SECONDS so it cannot outlive its own
     fire time and trip the supervisor's overlap alert.
 
@@ -322,14 +350,22 @@ def run(conn=None) -> Tally:
             continue
 
         written, already, failed = store_items(conn, outlet_id, got.entries)
-        record_sightings(conn, feed["name"], got.entries, {})
+        item_ids = _lookup_item_ids(conn, outlet_id, got.entries)
+        record_sightings(conn, feed["name"], got.entries, item_ids)
         record_poll(conn, run_id, feed["name"], None, len(got.entries))
-        # Items, sightings and this feed's poll row commit together, so the
-        # denominator can never disagree with what was actually stored.
+        # INVARIANT: record_sightings and this feed's record_poll must commit
+        # in the SAME transaction as each other. rolled_off's whole predicate
+        # rests on Postgres's now() (== transaction_timestamp()) being
+        # identical for a sighting and the poll that produced it, so
+        # `polled_at > last_seen_at` is false for a same-pass poll. Splitting
+        # the commit between them, or swapping now() for clock_timestamp(),
+        # makes every feed's entire window read as rolled off on every pass.
         conn.commit()
         tally.feeds_ok += 1
         tally.items_seen += len(got.entries)
         tally.items_new += written
+        tally.items_already += already
+        tally.items_failed += failed
 
     finish_run(conn, run_id, tally)
     conn.commit()
@@ -338,6 +374,7 @@ def run(conn=None) -> Tally:
         f"Capture: {tally.feeds_total} feeds, {tally.feeds_ok} ok, "
         f"{tally.feeds_failed} failed ({kinds or 'none'}), "
         f"{tally.items_seen} items seen, {tally.items_new} new, "
+        f"{tally.items_already} already held, {tally.items_failed} failed, "
         f"{tally.sources_dropped} sources dropped"
     )
     return tally
