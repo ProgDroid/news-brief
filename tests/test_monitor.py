@@ -399,3 +399,46 @@ def test_mode_monitor_runs_live_exit_and_reconcile(monkeypatch):
     monkeypatch.setattr(brief, "save_book", lambda b: saved.setdefault("b", b))
     brief.mode_monitor()
     assert swept == [True] and reconciled == [True]
+
+
+def test_mode_monitor_runs_the_capture_liveness_check(monkeypatch):
+    """The wiring, which is its own failure: capture.liveness can be perfect and
+    still report to nobody if the monitor never calls it (news-brief-a9q)."""
+    import db
+
+    monkeypatch.setattr(brief, "run_volume_monitor", lambda: [])
+    checked = []
+    monkeypatch.setattr(
+        brief, "capture_liveness_alert", lambda conn, now: checked.append(now)
+    )
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(db, "connect", lambda **kw: _Conn())
+    brief.mode_monitor()
+    assert len(checked) == 1
+
+
+def test_a_capture_check_that_explodes_does_not_kill_the_monitor(monkeypatch):
+    """The presence control for the test above's fail-safe sibling: the volume
+    block runs AFTER the capture block, so an unguarded capture failure would
+    silently cost the alerts the monitor exists for."""
+    import db
+
+    alerts = []
+    monkeypatch.setattr(
+        common, "telegram_send", lambda text: alerts.append(text) or True
+    )
+    monkeypatch.setattr(brief, "run_volume_monitor", lambda: ["📈 something"])
+
+    def explode(**kw):
+        raise RuntimeError("postgres is down")
+
+    monkeypatch.setattr(db, "connect", explode)
+    brief.mode_monitor()
+    assert len(alerts) == 1

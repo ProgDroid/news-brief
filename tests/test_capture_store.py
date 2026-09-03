@@ -1,11 +1,14 @@
 """DB-backed capture storage tests (news-brief-b42.1)."""
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 import brief
 import capture
 import common
 import db
+import scheduler
 
 pytestmark = pytest.mark.skipif(
     not db.is_configured(), reason="No database is configured; export DATABASE_URL"
@@ -374,3 +377,292 @@ def test_run_end_to_end_succeeds_one_feed_and_fails_the_other(store, monkeypatch
     assert bad_failure == "http_403"
 
     assert capture.rolled_off(store, "OK Wire") == []
+
+
+# ── Liveness (news-brief-a9q) ─────────────────────────────────────────────────
+# The half of the capture health question that needs no measured threshold.
+# "Too many feeds failed" is a rate, and inventing one puts a fabricated number
+# on the critical path (news-brief-w3q, deferred to b42.2). "It has stopped
+# firing" and "a pass died" are not rates: they follow from the schedule and
+# from finished_at, both of which are already facts.
+
+NOW = datetime(2026, 9, 3, 12, 0, tzinfo=timezone.utc)
+INTERVAL = next(s.every_minutes for s in scheduler.SCHEDULES if s.job == "capture")
+
+
+def _run(store, *, minutes_ago, finished=True, enabled=True):
+    started = NOW - timedelta(minutes=minutes_ago)
+    return store.execute(
+        "INSERT INTO capture_runs (started_at, finished_at, enabled) "
+        "VALUES (%s, %s, %s) RETURNING id",
+        (started, started + timedelta(minutes=2) if finished else None, enabled),
+    ).fetchone()[0]
+
+
+def test_a_capture_that_fired_this_interval_is_not_flagged(store):
+    _run(store, minutes_ago=5)
+    assert capture.liveness(store, NOW) is None
+
+
+def test_a_capture_that_has_stopped_firing_is_flagged(store):
+    _run(store, minutes_ago=INTERVAL * capture.STALE_AFTER_INTERVALS + 1)
+    verdict = capture.liveness(store, NOW)
+    assert verdict is not None
+    assert verdict[0].startswith("stale:")
+
+
+def test_the_tolerance_follows_the_schedule_rather_than_a_copy_of_it(store):
+    """One interval inside the window is silence; one minute past it speaks. The
+    bound is read from scheduler.SCHEDULES, so retiming capture retimes the
+    alert -- a hardcoded 90 here would keep passing while meaning the wrong
+    thing."""
+    inside = _run(store, minutes_ago=INTERVAL * capture.STALE_AFTER_INTERVALS - 1)
+    assert capture.liveness(store, NOW) is None
+    store.execute("DELETE FROM capture_runs WHERE id = %s", (inside,))
+    _run(store, minutes_ago=INTERVAL * capture.STALE_AFTER_INTERVALS + 1)
+    assert capture.liveness(store, NOW) is not None
+
+
+def test_the_stale_episode_is_named_by_the_run_it_stopped_after(store):
+    """The episode key is what makes one alert per outage rather than one per
+    hour, so two different outages must not share a key."""
+    first = _run(store, minutes_ago=INTERVAL * 10)
+    assert capture.liveness(store, NOW)[0] == f"stale:{first}"
+    second = _run(store, minutes_ago=INTERVAL * 5)
+    assert capture.liveness(store, NOW)[0] == f"stale:{second}"
+
+
+def test_a_disabled_capture_is_quiet_rather_than_stale(store):
+    """A disabled pass still writes its row every fire, so switched-off never
+    reads as dead. This is why capture_runs.enabled exists at all."""
+    _run(store, minutes_ago=5, enabled=False)
+    assert capture.liveness(store, NOW) is None
+
+
+def test_a_pass_that_died_mid_flight_is_flagged(store):
+    """finished_at NULL on a run a later run has overtaken can never be filled
+    in: that pass is gone, and nothing else reports it."""
+    died = _run(store, minutes_ago=INTERVAL * 2, finished=False)
+    _run(store, minutes_ago=5)
+    verdict = capture.liveness(store, NOW)
+    assert verdict is not None
+    assert verdict[0] == f"crashed:{died}"
+
+
+def test_the_newest_run_being_unfinished_is_not_yet_a_crash(store):
+    """The presence control for the test above: a pass in flight has a NULL
+    finished_at too, and calling that a crash would alert on every healthy
+    capture. Only a successor proves it can never finish."""
+    _run(store, minutes_ago=1, finished=False)
+    assert capture.liveness(store, NOW) is None
+
+
+def test_a_capture_that_has_never_run_is_unknown_not_dead(store):
+    """No rows cannot distinguish 'never deployed' from 'broken', and the two
+    want opposite responses. Absence is reported by /capture, not alerted on."""
+    assert capture.liveness(store, NOW) is None
+
+
+# ── One alert per outage (news-brief-a9q) ────────────────────────────────────
+# The dedupe state lives in runtime_state and NOT in a set on the object, the
+# way the supervisor's spawn_alerted does. The supervisor is a resident and can
+# remember; mode_monitor is a fresh job child every hour, so an in-process set
+# forgets between checks and turns one outage into 24 messages a day -- the
+# failure w3q's acceptance criterion names.
+
+
+def _alerts(monkeypatch):
+    sent = []
+    monkeypatch.setattr(brief, "telegram_alert", sent.append)
+    return sent
+
+
+def test_a_healthy_capture_sends_nothing(store, monkeypatch):
+    sent = _alerts(monkeypatch)
+    _run(store, minutes_ago=5)
+    store.commit()
+    brief.capture_liveness_alert(store, NOW)
+    assert sent == []
+
+
+def test_a_stopped_capture_alerts_once_not_once_per_check(store, monkeypatch):
+    sent = _alerts(monkeypatch)
+    _run(store, minutes_ago=INTERVAL * 10)
+    store.commit()
+    for _ in range(4):
+        brief.capture_liveness_alert(store, NOW)
+    assert len(sent) == 1
+    assert "has not run" in sent[0]
+
+
+def test_a_second_outage_after_a_recovery_alerts_again(store, monkeypatch):
+    """The positive control for the test above. Alerting once is trivially
+    satisfied by never alerting a second time for any reason, which would make
+    the first outage the only one this ever reports."""
+    sent = _alerts(monkeypatch)
+    _run(store, minutes_ago=INTERVAL * 10)
+    store.commit()
+    brief.capture_liveness_alert(store, NOW)
+    assert len(sent) == 1
+
+    recovered = _run(store, minutes_ago=5)
+    store.commit()
+    brief.capture_liveness_alert(store, NOW)
+    assert len(sent) == 1, "a recovery must not itself be an alert"
+
+    store.execute(
+        "UPDATE capture_runs SET started_at = %s WHERE id = %s",
+        (NOW - timedelta(minutes=INTERVAL * 10), recovered),
+    )
+    store.commit()
+    brief.capture_liveness_alert(store, NOW)
+    assert len(sent) == 2
+
+
+def test_a_crash_and_a_later_stall_are_different_episodes(store, monkeypatch):
+    """Two outages of DIFFERENT kinds must not silence each other: the stored
+    key is the episode, not the fact that something was once wrong."""
+    sent = _alerts(monkeypatch)
+    _run(store, minutes_ago=INTERVAL * 2, finished=False)
+    _run(store, minutes_ago=5)
+    store.commit()
+    brief.capture_liveness_alert(store, NOW)
+    assert len(sent) == 1
+    assert "died mid-flight" in sent[0]
+
+    store.execute(
+        "UPDATE capture_runs SET started_at = started_at - %s",
+        (timedelta(minutes=INTERVAL * 10),),
+    )
+    store.commit()
+    brief.capture_liveness_alert(store, NOW)
+    assert len(sent) == 2
+    assert "has not run" in sent[1]
+
+
+def test_an_unreadable_capture_table_does_not_break_the_monitor(store, monkeypatch):
+    """The monitor's other work -- volume alerts, the live exit sweep -- must
+    survive a capture check that cannot read. Fail-safe, like every other block
+    in mode_monitor."""
+    sent = _alerts(monkeypatch)
+
+    def explode(*a, **k):
+        raise RuntimeError("connection reset")
+
+    monkeypatch.setattr(capture, "liveness", explode)
+    brief.capture_liveness_alert(store, NOW)
+    assert sent == []
+
+
+# ── What /capture reads (news-brief-a9q) ─────────────────────────────────────
+# The pull half. These queries carry no thresholds at all -- they report, and
+# the operator judges. That is deliberate: the numbers they surface are exactly
+# what b42.2 needs in order to set a threshold that is measured rather than
+# guessed, and a surface that pre-judged them would hide its own evidence.
+
+
+def _poll(store, run_id, source, failure=None, entries=0, minutes_ago=0):
+    store.execute(
+        "INSERT INTO feed_polls (capture_run_id, source_name, polled_at, failure, "
+        "entries_seen) VALUES (%s, %s, %s, %s, %s)",
+        (run_id, source, NOW - timedelta(minutes=minutes_ago), failure, entries),
+    )
+
+
+def test_last_run_is_the_newest_pass(store):
+    _run(store, minutes_ago=INTERVAL * 3)
+    newest = _run(store, minutes_ago=2)
+    assert capture.last_run(store)["id"] == newest
+
+
+def test_last_run_is_none_when_capture_has_never_run(store):
+    assert capture.last_run(store) is None
+
+
+def test_last_run_carries_the_tallies_the_operator_reads(store):
+    run_id = _run(store, minutes_ago=2)
+    store.execute(
+        "UPDATE capture_runs SET feeds_total = 26, feeds_ok = 24, feeds_failed = 2, "
+        "items_seen = 900, items_new = 40 WHERE id = %s",
+        (run_id,),
+    )
+    row = capture.last_run(store)
+    assert (row["feeds_total"], row["feeds_ok"], row["feeds_failed"]) == (26, 24, 2)
+    assert (row["items_seen"], row["items_new"]) == (900, 40)
+    assert row["enabled"] is True
+
+
+def test_the_failure_breakdown_counts_each_kind(store):
+    run_id = _run(store, minutes_ago=2)
+    _poll(store, run_id, "A", failure="http_403")
+    _poll(store, run_id, "B", failure="http_403")
+    _poll(store, run_id, "C", failure="deadline")
+    _poll(store, run_id, "D")
+    assert dict(capture.failure_breakdown(store, runs=1)) == {
+        "http_403": 2,
+        "deadline": 1,
+    }
+
+
+def test_the_failure_breakdown_looks_only_at_recent_passes(store):
+    """Its window is a count of passes, so a feed that broke a week ago and was
+    fixed does not go on being reported as broken. The recent kind must still
+    appear -- an empty result would satisfy 'the old one is gone' for free."""
+    old = _run(store, minutes_ago=INTERVAL * 20)
+    _poll(store, old, "A", failure="ancient_history", minutes_ago=INTERVAL * 20)
+    recent = _run(store, minutes_ago=2)
+    _poll(store, recent, "A", failure="http_403", minutes_ago=2)
+    kinds = dict(capture.failure_breakdown(store, runs=1))
+    assert "ancient_history" not in kinds
+    assert kinds == {"http_403": 1}
+
+
+def test_feed_health_reports_when_each_feed_last_worked(store):
+    run_id = _run(store, minutes_ago=2)
+    _poll(store, run_id, "Reuters", minutes_ago=90)
+    _poll(store, run_id, "Reuters", minutes_ago=30)
+    _poll(store, run_id, "Al Jazeera", minutes_ago=10)
+    health = {row["source_name"]: row for row in capture.feed_health(store)}
+    assert health["Reuters"]["last_ok_at"] == NOW - timedelta(minutes=30)
+    assert health["Al Jazeera"]["last_ok_at"] == NOW - timedelta(minutes=10)
+
+
+def test_a_feed_failing_since_its_last_success_counts_those_failures(store):
+    """The number that makes 'half the feeds are 403ing' visible. It counts only
+    failures AFTER the last success, so a feed that broke once in March and has
+    worked ever since reads as healthy."""
+    run_id = _run(store, minutes_ago=2)
+    _poll(store, run_id, "Reuters", failure="http_403", minutes_ago=200)
+    _poll(store, run_id, "Reuters", minutes_ago=100)
+    _poll(store, run_id, "Reuters", failure="http_403", minutes_ago=60)
+    _poll(store, run_id, "Reuters", failure="http_403", minutes_ago=30)
+    row = next(r for r in capture.feed_health(store) if r["source_name"] == "Reuters")
+    assert row["failures_since"] == 2
+    assert row["last_failure"] == "http_403"
+
+
+def test_a_feed_that_has_never_succeeded_says_so(store):
+    """A NULL last success is not the same as a recent one, and a render that
+    formatted it as an age would print a confident wrong number."""
+    run_id = _run(store, minutes_ago=2)
+    _poll(store, run_id, "Broken Wire", failure="ssl_error", minutes_ago=40)
+    _poll(store, run_id, "Broken Wire", failure="ssl_error", minutes_ago=10)
+    row = next(
+        r for r in capture.feed_health(store) if r["source_name"] == "Broken Wire"
+    )
+    assert row["last_ok_at"] is None
+    assert row["failures_since"] == 2
+
+
+def test_feed_health_puts_the_worst_feeds_first(store):
+    """The operator reads the top of a Telegram message, so ordering is part of
+    the report rather than a detail: never-succeeded, then longest-since."""
+    run_id = _run(store, minutes_ago=2)
+    _poll(store, run_id, "Healthy", minutes_ago=5)
+    _poll(store, run_id, "Stale", minutes_ago=600)
+    _poll(store, run_id, "Never", failure="http_403", minutes_ago=5)
+    assert [r["source_name"] for r in capture.feed_health(store)] == [
+        "Never",
+        "Stale",
+        "Healthy",
+    ]

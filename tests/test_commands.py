@@ -1427,3 +1427,127 @@ def test_the_new_commands_reach_telegram_autocomplete():
     works only for someone who already knows it exists."""
     names = [name for name, _ in brief.BOT_COMMANDS]
     assert "jobs" in names and "run" in names
+
+
+# ── /capture (news-brief-a9q) ────────────────────────────────────────────────
+# The pull half of capture health. Everything the alert deliberately will not
+# judge -- how many feeds failed, whether the item count looks thin -- is shown
+# here as a number for the operator to judge instead.
+
+
+class _FakeConn:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _capture_db(monkeypatch, *, last, breakdown=(), health=()):
+    import capture
+    import db
+
+    monkeypatch.setattr(db, "connect", lambda **kw: _FakeConn())
+    monkeypatch.setattr(capture, "last_run", lambda conn: last)
+    monkeypatch.setattr(
+        capture, "failure_breakdown", lambda conn, **kw: list(breakdown)
+    )
+    monkeypatch.setattr(capture, "feed_health", lambda conn: list(health))
+
+
+def _a_run(**over):
+    row = {
+        "id": 7,
+        "started_at": datetime(2026, 9, 3, 11, 30, tzinfo=timezone.utc),
+        "finished_at": datetime(2026, 9, 3, 11, 34, tzinfo=timezone.utc),
+        "enabled": True,
+        "feeds_total": 26,
+        "feeds_ok": 24,
+        "feeds_failed": 2,
+        "items_seen": 812,
+        "items_new": 41,
+        "sources_dropped": 0,
+    }
+    row.update(over)
+    return row
+
+
+def test_capture_reports_the_last_pass(monkeypatch):
+    sent = _capture(monkeypatch)
+    _capture_db(monkeypatch, last=_a_run(), breakdown=[("http_403", 2)])
+
+    brief._handle_telegram_update(_update("/capture"), _fb())
+
+    assert "24" in sent[0] and "26" in sent[0], "feeds ok out of total"
+    assert "41" in sent[0], "items new"
+    assert "http_403" in sent[0]
+
+
+def test_capture_reports_a_disabled_capture_as_off(monkeypatch):
+    """The presence sibling of the alert's silence on a disabled capture. If the
+    only place switched-off is visible were the alert path, and the alert stays
+    quiet by design, then off and healthy would be indistinguishable everywhere."""
+    sent = _capture(monkeypatch)
+    _capture_db(monkeypatch, last=_a_run(enabled=False, feeds_total=0, feeds_ok=0))
+
+    brief._handle_telegram_update(_update("/capture"), _fb())
+
+    assert "off" in sent[0].lower() or "disabled" in sent[0].lower()
+
+
+def test_capture_says_it_has_never_run_rather_than_showing_zeroes(monkeypatch):
+    """No rows means UNKNOWN. Rendering it as a pass that found nothing would be
+    a confident wrong answer, and the one the operator would act on hardest."""
+    sent = _capture(monkeypatch)
+    _capture_db(monkeypatch, last=None)
+
+    brief._handle_telegram_update(_update("/capture"), _fb())
+
+    assert "never" in sent[0].lower()
+
+
+def test_capture_shows_a_feed_that_has_never_worked_as_never(monkeypatch):
+    sent = _capture(monkeypatch)
+    _capture_db(
+        monkeypatch,
+        last=_a_run(),
+        health=[
+            {
+                "source_name": "Broken Wire",
+                "last_ok_at": None,
+                "failures_since": 12,
+                "last_failure": "ssl_error",
+            }
+        ],
+    )
+
+    brief._handle_telegram_update(_update("/capture"), _fb())
+
+    assert "Broken Wire" in sent[0]
+    assert "ssl_error" in sent[0]
+    assert "never" in sent[0].lower()
+
+
+def test_capture_says_why_it_cannot_read_rather_than_reporting_nothing(monkeypatch):
+    """An unreadable ledger must not render as a capture that has never run --
+    the same rule /jobs already follows, and for the same reason."""
+    sent = _capture(monkeypatch)
+    import db
+
+    def boom(**kwargs):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(db, "connect", boom)
+
+    brief._handle_telegram_update(_update("/capture"), _fb())
+
+    assert "connection refused" in sent[0]
+    assert "never" not in sent[0].lower()
+
+
+def test_capture_reaches_telegram_autocomplete():
+    assert "capture" in [name for name, _ in brief.BOT_COMMANDS]
+
+
+def test_capture_is_documented_in_the_help():
+    assert "/capture" in brief.HELP_TEXT

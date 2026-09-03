@@ -4,9 +4,12 @@ The ONLY module that knows capture SQL, in the way claim_store.py owns claim
 SQL. It writes `outlets` and `items` -- what the world published -- plus three
 telemetry tables recording which of this reader's feeds showed it and when.
 
-Nothing reads these rows yet. That boundary is why a broken capture costs a log
-line rather than a brief; it is ALSO why the schema had to be checked against
-b42.2's question directly, since no consumer exists to fail if it cannot answer.
+Nothing in the BRIEF path reads these rows, and that boundary is what keeps a
+broken capture costing a log line rather than a brief. It is also why the schema
+had to be checked against b42.2's question directly, since no consumer existed
+to fail if it could not answer. Two readers exist now (news-brief-a9q) and both
+are health surfaces, outside that path: `/capture` and the monitor's liveness
+check, at the bottom of this file.
 
 Spec: docs/superpowers/specs/2026-09-02-continuous-capture-design.md
 """
@@ -14,6 +17,7 @@ Spec: docs/superpowers/specs/2026-09-02-continuous-capture-design.md
 import hashlib
 import time
 from dataclasses import dataclass
+from datetime import timedelta
 from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 
 import brief
@@ -378,3 +382,159 @@ def run(conn) -> Tally:
         f"{tally.sources_dropped} sources dropped"
     )
     return tally
+
+
+# ── Reading capture back (news-brief-a9q) ─────────────────────────────────────
+# The threshold-free half of "is capture healthy". A rate -- too many feeds
+# failing, too few new items -- needs a number measured against real traffic,
+# which is news-brief-b42.2's job and news-brief-w3q's blocker. These two do
+# not: "it stopped firing" follows from the schedule, and "a pass died" follows
+# from a finished_at that can never be filled in. Neither invents a constant.
+
+STALE_AFTER_INTERVALS = 3
+
+
+def _interval_minutes() -> int:
+    """Capture's poll interval, read from the schedule rather than copied.
+
+    A constant here would be a knob tracking another knob: retiming capture
+    would leave the tolerance behind, still passing its tests, now meaning
+    something nobody chose.
+    """
+    import scheduler
+
+    return next(s.every_minutes for s in scheduler.SCHEDULES if s.job == "capture")
+
+
+def liveness(conn, now) -> tuple[str, str] | None:
+    """(episode key, message) when capture looks dead, else None.
+
+    The key identifies the OUTAGE, not the check, so a caller that remembers the
+    last key it sent alerts once per episode instead of once per monitor run --
+    the difference between one message and one every hour until someone looks.
+
+    Three deliberate silences:
+      * No rows at all. That cannot tell "never deployed" from "broken", and the
+        two want opposite responses. UNKNOWN is reported by /capture, not paged.
+      * A disabled capture. It still writes a row every fire, so it can never go
+        stale -- which is what capture_runs.enabled is for.
+      * The newest run being unfinished. That is also what a pass in flight
+        looks like; only a successor proves it can never finish.
+    """
+    newest = conn.execute(
+        "SELECT id, started_at FROM capture_runs ORDER BY started_at DESC, id DESC "
+        "LIMIT 1"
+    ).fetchone()
+    if newest is None:
+        return None
+    run_id, started_at = newest
+
+    tolerance = timedelta(minutes=_interval_minutes() * STALE_AFTER_INTERVALS)
+    if now - started_at > tolerance:
+        late = now - started_at
+        return (
+            f"stale:{run_id}",
+            f"Capture has not run for {_duration(late)}. The last pass started "
+            f"{started_at:%Y-%m-%d %H:%M} UTC and nothing has fired since; the "
+            f"schedule is every {_interval_minutes()} minutes.",
+        )
+
+    died = conn.execute(
+        "SELECT id, started_at FROM capture_runs WHERE finished_at IS NULL "
+        "AND id <> %s ORDER BY started_at DESC, id DESC LIMIT 1",
+        (run_id,),
+    ).fetchone()
+    if died is not None:
+        return (
+            f"crashed:{died[0]}",
+            f"A capture pass died mid-flight: run {died[0]}, started "
+            f"{died[1]:%Y-%m-%d %H:%M} UTC, never finished. Later passes have "
+            f"run since, so it cannot complete.",
+        )
+    return None
+
+
+def _duration(delta: timedelta) -> str:
+    hours, seconds = divmod(int(delta.total_seconds()), 3600)
+    return f"{hours}h{seconds // 60:02d}m" if hours else f"{seconds // 60}m"
+
+
+# What /capture shows. No thresholds live here on purpose: these are the very
+# numbers b42.2 needs in order to choose one, and a surface that pre-judged them
+# would be hiding its own evidence.
+
+_RUN_COLUMNS = (
+    "id",
+    "started_at",
+    "finished_at",
+    "enabled",
+    "feeds_total",
+    "feeds_ok",
+    "feeds_failed",
+    "items_seen",
+    "items_new",
+    "sources_dropped",
+)
+
+
+def last_run(conn) -> dict | None:
+    """The newest pass, or None if capture has never run in this deployment."""
+    row = conn.execute(
+        f"SELECT {', '.join(_RUN_COLUMNS)} FROM capture_runs "
+        "ORDER BY started_at DESC, id DESC LIMIT 1"
+    ).fetchone()
+    return None if row is None else dict(zip(_RUN_COLUMNS, row))
+
+
+def failure_breakdown(conn, runs: int = 8) -> list[tuple[str, int]]:
+    """Failure kinds and their counts over the last `runs` passes, worst first.
+
+    Windowed by a COUNT OF PASSES rather than by a time span, so it means the
+    same thing after the poll interval changes -- which is a thing b42.2 exists
+    to change. A time window would quietly halve or double its own sample.
+    """
+    rows = conn.execute(
+        "SELECT failure, count(*) FROM feed_polls "
+        "WHERE failure IS NOT NULL AND capture_run_id IN ("
+        "  SELECT id FROM capture_runs ORDER BY started_at DESC, id DESC LIMIT %s"
+        ") GROUP BY failure ORDER BY count(*) DESC, failure",
+        (runs,),
+    ).fetchall()
+    return [(kind, n) for kind, n in rows]
+
+
+def feed_health(conn) -> list[dict]:
+    """Per feed: when it last worked, and how many times it has failed since.
+
+    `failures_since` counts only failures AFTER the last success, so a feed that
+    broke once and recovered reads as healthy while one that is 403ing now
+    climbs. Ordered worst first -- never-succeeded, then longest-since -- because
+    the operator reads the top of a Telegram message and not the bottom.
+
+    A NULL `last_ok_at` is load-bearing and must survive to the caller: "never
+    worked" and "worked recently" are opposite facts, and a render that turned
+    the NULL into an age would print a confident wrong number.
+    """
+    rows = conn.execute(
+        "WITH ok AS ("
+        "  SELECT source_name, max(polled_at) AS last_ok FROM feed_polls "
+        "  WHERE failure IS NULL GROUP BY source_name"
+        ") "
+        "SELECT p.source_name, o.last_ok, "
+        "  count(*) FILTER (WHERE p.failure IS NOT NULL "
+        "    AND (o.last_ok IS NULL OR p.polled_at > o.last_ok)), "
+        "  (array_agg(p.failure ORDER BY p.polled_at DESC) "
+        "    FILTER (WHERE p.failure IS NOT NULL))[1] "
+        "FROM feed_polls p LEFT JOIN ok o ON o.source_name = p.source_name "
+        "GROUP BY p.source_name, o.last_ok "
+        "ORDER BY o.last_ok ASC NULLS FIRST, p.source_name"
+    ).fetchall()
+    return [
+        {
+            "source_name": name,
+            "last_ok_at": last_ok,
+            "failures_since": failures,
+            "last_failure": kind,
+        }
+        for name, last_ok, failures, kind in rows
+    ]

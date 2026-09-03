@@ -713,6 +713,7 @@ HELP_TEXT = """<b>newsbrief commands</b>
   Run a job now, out of schedule. The supervisor picks it up within 30s.
   e.g. <code>/run collect</code>
 
+/capture — feed capture health: last pass, and which feeds are failing
 /reset — clear all overrides
 /status — show current overrides
 /help — this message
@@ -1566,6 +1567,9 @@ def _handle_telegram_update(update: dict, fb: dict) -> dict:
 
     elif text == "/jobs":
         _jobs_render()
+
+    elif text == "/capture":
+        _capture_render()
 
     elif text == "/run":
         _run_request("")
@@ -3474,6 +3478,100 @@ def _ledger_unreachable(e: Exception) -> str:
     return f"<code>{html.escape(f'{type(e).__name__}: {e}')}</code>"
 
 
+# How many feeds /capture will name before it stops listing them. The message
+# has to stay readable on a phone, and a capture where every feed is failing is
+# already fully described by the first few plus a count.
+CAPTURE_FEEDS_SHOWN = 12
+
+
+def _capture_render() -> None:
+    """Answer "is capture still working, and which feeds are not" without SSH.
+
+    Reports numbers and judges none of them. The threshold that separates a bad
+    morning from a broken feed has not been measured yet (news-brief-b42.2), and
+    these are the very rows that will measure it.
+    """
+    import capture
+
+    try:
+        with db.connect(connect_timeout=JOBS_DB_TIMEOUT_SECONDS) as conn:
+            last = capture.last_run(conn)
+            kinds = capture.failure_breakdown(conn)
+            health = capture.feed_health(conn)
+    except Exception as e:
+        # An unreadable table must not render as a capture that never ran. That
+        # is a confident wrong answer, and the operator would act on it hardest.
+        log.exception("/capture could not read the capture tables")
+        telegram_send(
+            f"\u26a0\ufe0f Could not read the capture tables: {html.escape(str(e))}"
+        )
+        return
+
+    if last is None:
+        telegram_send(
+            "\U0001f4e1 <b>Capture</b>\n\nCapture has <b>never</b> run in this "
+            "deployment. That is not the same as a pass that found nothing: no "
+            "row was written at all."
+        )
+        return
+
+    now = datetime.now(timezone.utc)
+    lines = ["\U0001f4e1 <b>Capture</b>", ""]
+    if not last["enabled"]:
+        lines += [
+            "Capture is <b>off</b> — the pass still runs and writes its row, but "
+            "polls nothing. Set the CAPTURE_ENABLED row to turn it on.",
+            "",
+        ]
+    took = last["finished_at"] and (last["finished_at"] - last["started_at"])
+    lines.append(
+        f"Last pass #{last['id']} · {last['started_at']:%Y-%m-%d %H:%M} UTC "
+        f"({_ago(now - last['started_at'])} ago"
+        + (f", took {_ago(took)})" if took else ", never finished)")
+    )
+    if last["enabled"]:
+        lines.append(
+            f"Feeds: {last['feeds_ok']}/{last['feeds_total']} ok, "
+            f"{last['feeds_failed']} failed, {last['sources_dropped']} dropped"
+        )
+        lines.append(f"Items: {last['items_seen']} seen, {last['items_new']} new")
+    if kinds:
+        broken = ", ".join(f"{html.escape(k)} \u00d7{n}" for k, n in kinds)
+        lines.append(f"Failures (recent passes): {broken}")
+
+    hurting = [f for f in health if f["failures_since"] or f["last_ok_at"] is None]
+    if hurting:
+        lines += ["", "<b>Feeds needing attention</b>"]
+        for feed in hurting[:CAPTURE_FEEDS_SHOWN]:
+            when = (
+                "never succeeded"
+                if feed["last_ok_at"] is None
+                else f"last ok {_ago(now - feed['last_ok_at'])} ago"
+            )
+            kind = feed["last_failure"] or "unknown"
+            lines.append(
+                f"{html.escape(feed['source_name'])} — {when}, "
+                f"{feed['failures_since']} failed since ({html.escape(kind)})"
+            )
+        if len(hurting) > CAPTURE_FEEDS_SHOWN:
+            lines.append(f"…and {len(hurting) - CAPTURE_FEEDS_SHOWN} more")
+    telegram_send_long("\n".join(lines))
+
+
+def _ago(delta) -> str:
+    """A duration a person reads at a glance. Never rounds down to '0m': a pass
+    that finished in seconds should say so, not look like it did not run."""
+    seconds = max(int(delta.total_seconds()), 0)
+    days, rest = divmod(seconds, 86400)
+    hours, rest = divmod(rest, 3600)
+    minutes = rest // 60
+    if days:
+        return f"{days}d{hours:02d}h"
+    if hours:
+        return f"{hours}h{minutes:02d}m"
+    return f"{minutes}m" if minutes else f"{seconds}s"
+
+
 def _jobs_render() -> None:
     """Answer 'did collect run, and did it work' without an SSH session."""
     import db
@@ -3534,6 +3632,7 @@ BOT_COMMANDS = [
     ("help", "Show command help"),
     ("status", "Show current overrides"),
     ("jobs", "Scheduler status: last run, exit code, next due"),
+    ("capture", "Feed capture health: last pass, failing feeds"),
     ("run", "Run a job now (collect, submit, weekly, monitor)"),
     ("addsource", "Add a temporary news source (guided)"),
     ("predict", "Open a conviction prediction bet (guided)"),
@@ -3871,6 +3970,45 @@ def mode_backup():
     backup.run_backup()
 
 
+# The runtime_state key holding the outage this deployment has already spoken
+# about. It is a row and not an attribute for a structural reason: the
+# supervisor can dedupe in memory because it is a resident, but mode_monitor is
+# a fresh process every hour, so anything it remembers has to outlive it.
+CAPTURE_ALERT_KEY = "capture_alert"
+
+
+def capture_liveness_alert(conn, now) -> None:
+    """Say once that capture has stopped, and go quiet until it recovers.
+
+    Deliberately says nothing about QUALITY -- feeds failing, items drying up.
+    Those are rates, and the rate that separates a bad day from a broken feed
+    has not been measured yet (news-brief-b42.2). A guessed one here would be
+    indistinguishable, to the operator, from a measured one.
+
+    Fail-safe like every other block in the monitor: a capture check that cannot
+    read must not cost the volume alerts or the live exit sweep.
+    """
+    import capture
+
+    try:
+        verdict = capture.liveness(conn, now)
+        seen = load_state().get(CAPTURE_ALERT_KEY)
+        if verdict is None:
+            if seen:
+                config.clear_runtime_state([CAPTURE_ALERT_KEY])
+            return
+        key, message = verdict
+        if key == seen:
+            return
+        # Sent BEFORE the key is stored. The other order loses the alert
+        # entirely when Telegram is the thing that is down; this order costs at
+        # most a repeat an hour later.
+        telegram_alert(f"\U0001f4e1 {message}")
+        save_state({CAPTURE_ALERT_KEY: key})
+    except Exception:
+        log.exception("capture liveness check failed")
+
+
 def mode_monitor():
     """Hourly cross-asset volume-anomaly alerts + live-position exit sweep/reconcile.
 
@@ -3879,6 +4017,15 @@ def mode_monitor():
     authoritative (reconcile) — both fail-safe so a live error never breaks the cron.
     """
     log.info("=== MONITOR ===")
+    # First, because it is the block that reports the monitor's own blind spot:
+    # everything below alerts on what the world did, and this alerts on whether
+    # we are still watching. Guarded separately -- an unreachable Postgres must
+    # cost the capture check and nothing else.
+    try:
+        with db.connect(connect_timeout=JOBS_DB_TIMEOUT_SECONDS) as conn:
+            capture_liveness_alert(conn, datetime.now(timezone.utc))
+    except Exception as e:
+        log.warning(f"Capture liveness check could not reach the database: {e}")
     alerts = run_volume_monitor()
     if alerts:
         telegram_send_long("🔔 <b>Volume alerts</b>\n\n" + "\n".join(alerts))
