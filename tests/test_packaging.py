@@ -45,6 +45,26 @@ def _copy_listed_modules() -> set[str]:
     return listed
 
 
+def _copy_listed_packages() -> set[Path]:
+    """The directories the Dockerfile copies wholesale into the image.
+
+    The counterpart to `_copy_listed_modules`: those lines end in a bare `.`
+    and name files, these name a directory and bring their whole contents. Read
+    from the Dockerfile rather than listed here so a new shipped package is
+    covered without an edit -- the same reason every other derivation in this
+    file reads the real artifact.
+    """
+    found: set[Path] = set()
+    for line in DOCKERFILE.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("COPY ") or stripped.endswith(" ."):
+            continue
+        src = stripped.split()[1]
+        if src.endswith("/"):
+            found.add(REPO_ROOT / src.rstrip("/"))
+    return found
+
+
 def _imported_modules(path: Path, candidates: set[str]) -> set[str]:
     """Repo-root modules that `path` imports, at any nesting depth.
 
@@ -183,6 +203,16 @@ def _consumed_variables() -> set[str]:
     no edit here: the settings knobs by their stored key, the direct os.environ
     reads, and db's discrete connection variables, which are held in a table and
     so are invisible to a scan for os.environ literals.
+
+    The os.environ scan covers the shipped PACKAGES as well as the top-level
+    modules. It read only `REPO_ROOT.glob("*.py")` until news-brief-qx4, which
+    made the blind spot load-bearing: BIGDATA_API_KEY is a credential and so is
+    read from the environment rather than held as a settings row, and that read
+    lives in enrichment/config.py. A top-level-only scan cannot see it, so
+    declaring the variable in the anchor -- which is required, or enrichment
+    runs dark -- made the test below report it as read by nothing. An absence
+    test whose evidence-gathering cannot reach part of the image reports a
+    clean negative for the part it cannot see.
     """
     import common
     import db
@@ -190,8 +220,11 @@ def _consumed_variables() -> set[str]:
     reads = re.compile(
         r"os\.(?:environ(?:\.get)?|getenv)\s*[\(\[]\s*[\"']([A-Z0-9_]+)[\"']"
     )
+    sources = list(REPO_ROOT.glob("*.py"))
+    for package in _copy_listed_packages():
+        sources.extend(package.rglob("*.py"))
     direct: set[str] = set()
-    for path in REPO_ROOT.glob("*.py"):
+    for path in sources:
         direct |= set(reads.findall(path.read_text(encoding="utf-8")))
     return (
         {spec.key(name) for name, spec in common.KNOBS.items()}
@@ -209,6 +242,31 @@ def test_the_anchor_parser_sees_a_variable_that_is_read():
     assert "PG_A_ENABLED" in _anchor_variables()
     assert "PG_A_ENABLED" in _consumed_variables()
     assert "ANTHROPIC_API_KEY" in _consumed_variables()
+
+
+def test_the_consumed_scan_reaches_into_shipped_packages():
+    """The second presence control, for the half of the image that is not a
+    top-level module.
+
+    PG_A_ENABLED above proves the scan finds SOMETHING, which a top-level-only
+    glob satisfies. This pins a variable read exclusively from a shipped
+    package -- BIGDATA_API_KEY, read once in enrichment/config.py and held in
+    no settings row because it is a credential. Narrow the glob back to
+    `REPO_ROOT.glob("*.py")` and this fails while PG_A_ENABLED still passes,
+    which is the distinction the earlier control could not draw.
+    """
+    assert _copy_listed_packages(), (
+        "no directory COPY lines found in the Dockerfile; the package scan "
+        "below is then silently equivalent to a top-level-only scan"
+    )
+    assert "BIGDATA_API_KEY" in _anchor_variables(), (
+        "the credential must cross the container boundary, or providers.py "
+        "falls back to the null provider and enrichment runs dark"
+    )
+    assert "BIGDATA_API_KEY" in _consumed_variables(), (
+        "enrichment/config.py reads BIGDATA_API_KEY from the environment; a "
+        "scan that misses it reports a read variable as read by nothing"
+    )
 
 
 def test_every_variable_the_anchor_passes_through_is_read_by_something():

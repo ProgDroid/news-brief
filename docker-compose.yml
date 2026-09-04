@@ -134,6 +134,13 @@ x-newsbrief: &newsbrief
     - ENRICHMENT_MAX_THEMES=${ENRICHMENT_MAX_THEMES:-}
     - ENRICHMENT_HTTP_TIMEOUT=${ENRICHMENT_HTTP_TIMEOUT:-}
     - BIGDATA_BASE_URL=${BIGDATA_BASE_URL:-}
+    # NOT a settings row, unlike every ENRICHMENT_* line above it. A credential
+    # in `settings` lands in every pg_dump, so this one stays an environment
+    # read (enrichment/config.py) and must therefore be declared here to cross
+    # the container boundary at all. Its absence is the fail-closed-and-silent
+    # case: providers.py falls back to the null provider and enrichment runs
+    # dark with no error, because a key nobody has cannot fail to authenticate.
+    - BIGDATA_API_KEY=${BIGDATA_API_KEY:-}
     # Unprefixed, because common.KNOBS names the knob CAPTURE_ENABLED with no
     # env= override, and the importer looks up exactly that. It was declared
     # NEWSBRIEF_CAPTURE_ENABLED here until news-brief-bz1, which crossed the
