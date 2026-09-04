@@ -104,8 +104,25 @@ def test_load_corrupt_quarantines_and_returns_default(tmp_path):
 
 # ── Telegram command handling ─────────────────────────────────────────────────
 def _capture_sends(monkeypatch):
+    """Capture every way a handler can speak, not just the commonest one.
+
+    Patching `brief.telegram_send` alone left two open channels:
+    `telegram_send_buttons`, which is how /reset and every wizard answers, and
+    the `common` namespace, which `telegram_send_long` calls. A send through
+    either escaped this list AND left the process, so an assertion that nothing
+    was sent passed by reaching api.telegram.org for real (news-brief-0q0.13).
+    """
+    import common
+
     sent = []
-    monkeypatch.setattr(brief, "telegram_send", lambda t: sent.append(t) or True)
+
+    def _send(text, *args, **kwargs):
+        sent.append(text)
+        return True
+
+    monkeypatch.setattr(brief, "telegram_send", _send)
+    monkeypatch.setattr(common, "telegram_send", _send)
+    monkeypatch.setattr(brief, "telegram_send_buttons", _send)
     return sent
 
 
@@ -121,12 +138,34 @@ def test_handle_update_escapes_user_echo(monkeypatch):
 
 
 def test_handle_update_ignores_foreign_chat(monkeypatch):
+    """The gate lives in `_handle_update`, not in `_handle_telegram_update`.
+
+    This called the latter -- whose own docstring says "Authorization is NOT
+    done here" -- so it never exercised the gate at all, and /reset ran. It
+    passed because /reset answers through `telegram_send_buttons`, which the
+    capture helper did not patch: the message left the machine and the empty
+    list meant nothing (news-brief-0q0.13).
+    """
     sent = _capture_sends(monkeypatch)
     monkeypatch.setattr(config, "chat_id", lambda: "123")
     fb = {"focus": [], "mute": [], "notes": []}
     update = {"message": {"text": "/reset", "chat": {"id": 999}}}
-    assert brief._handle_telegram_update(update, fb) == fb
+    assert brief._handle_update(update, fb) == fb
     assert sent == []
+
+
+def test_handle_update_answers_the_owning_chat(monkeypatch):
+    """The presence control for the test above. "Nothing was sent" is satisfied
+    for free by a capture helper that misses the channel, or by a command that
+    answers through no channel at all -- which is exactly how the foreign-chat
+    test passed for years while the message reached Telegram."""
+    sent = _capture_sends(monkeypatch)
+    monkeypatch.setattr(config, "chat_id", lambda: "123")
+    fb = {"focus": [], "mute": [], "notes": []}
+    update = {"message": {"text": "/reset", "chat": {"id": 123}}}
+    brief._handle_update(update, fb)
+    assert len(sent) == 1
+    assert "Clear all overrides" in sent[0]
 
 
 def test_poison_message_does_not_jam_offset(monkeypatch, state_store):

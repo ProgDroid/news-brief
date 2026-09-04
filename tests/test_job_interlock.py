@@ -56,7 +56,11 @@ def test_a_second_entry_path_refuses_while_the_job_is_running(clean_db):
     assert _runs(clean_db, "collect") == [], "a refused run writes no running row"
 
 
-def test_a_crashing_job_records_a_nonzero_exit_and_releases_the_lock(clean_db):
+def test_a_crashing_job_records_a_nonzero_exit_and_releases_the_lock(
+    clean_db, monkeypatch
+):
+    monkeypatch.setattr(brief, "telegram_alert", lambda msg: None)
+
     def boom():
         raise RuntimeError("collect exploded")
 
@@ -200,10 +204,16 @@ def test_a_refused_run_is_recorded_as_missed_not_finished(clean_db):
     assert code == brief.EX_ALREADY_RUNNING
 
 
-def test_reclaim_closes_a_run_orphaned_by_a_restart(clean_db):
+def test_reclaim_closes_a_run_orphaned_by_a_restart(clean_db, monkeypatch):
     """A container restart kills the child, so nobody closes its row. Without
     reclaim the run shows 'running' forever and no alert ever fires."""
     import supervisor
+
+    # reclaim_orphans alerts. Unstubbed it POSTed to the real api.telegram.org
+    # and was swallowed, so this test passed while reaching the internet
+    # (news-brief-0q0.13 -- and it is one of the three the network-block
+    # docstring already named).
+    monkeypatch.setattr(supervisor, "telegram_alert", lambda msg: None)
 
     run_id = db.start_run(clean_db, "collect", None, "scheduled")
 
@@ -235,12 +245,14 @@ def test_reclaim_leaves_a_genuinely_running_job_alone(clean_db):
     assert status == "running"
 
 
-def test_a_reclaimed_run_is_not_retried(clean_db):
+def test_a_reclaimed_run_is_not_retried(clean_db, monkeypatch):
     """Deliberate: a collect killed halfway has polled its batch and may have
     opened paper positions, so re-running it blind is worse than not running it.
     The fire time stays consumed; the operator gets an alert instead."""
     import scheduler
     import supervisor
+
+    monkeypatch.setattr(supervisor, "telegram_alert", lambda msg: None)
 
     spec = next(s for s in scheduler.SCHEDULES if s.job == "collect")
     now = datetime(2026, 8, 31, 6, 0, 30, tzinfo=timezone.utc)

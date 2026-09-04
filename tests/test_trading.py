@@ -299,6 +299,7 @@ def test_paper_position_carries_source_tags(monkeypatch, tmp_path):
     monkeypatch.setattr(trading, "refresh_instruments_cache", lambda *a, **k: {})
     monkeypatch.setattr(trading, "resolve_symbol", lambda *a, **k: "shel.us")
     monkeypatch.setattr(trading, "fetch_price", lambda ac, sym: 60.0)
+    monkeypatch.setattr(trading, "fetch_benchmark_level", lambda ac: None)
     # a snapshot signal that has ALREADY been annotated upstream with source tags
     (signals_dir / f"signals-{today}.json").write_text(
         '{"signals": [{"ticker": "SHEL", "asset_class": "equity", '
@@ -452,10 +453,15 @@ def test_prediction_total_loss_cannot_exceed_minus_100pct():
     assert p["net_return"] == -1.0
 
 
-def test_equity_short_may_still_lose_more_than_100pct():
+def test_equity_short_may_still_lose_more_than_100pct(monkeypatch):
     """The B3 floor is for long-only instruments; a short has unbounded loss."""
     import trading
 
+    # _stamp_close_metrics marks against ^GSPC. Unstubbed this fetched Yahoo for
+    # real and returned None when the fetch failed -- which is what the
+    # assertion below has always run against, so None is the faithful stub
+    # rather than a convenient one (news-brief-0q0.13).
+    monkeypatch.setattr(trading, "fetch_benchmark_level", lambda ac: None)
     p = _closed_equity(direction="bearish", realized_return=-1.4)
     trading._stamp_close_metrics(p, "2026-08-16")
     assert p["net_return"] < -1.0

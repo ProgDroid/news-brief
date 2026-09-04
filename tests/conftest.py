@@ -6,6 +6,7 @@ the default is the container volume path /app/logs.
 """
 
 import os
+import socket
 import sys
 import tempfile
 from pathlib import Path
@@ -31,6 +32,10 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers",
         "real_config: do not stub config.chat_id — the module under test is config itself",
+    )
+    config.addinivalue_line(
+        "markers",
+        "allow_blocked_network: this test trips the network block deliberately",
     )
 
 
@@ -130,9 +135,82 @@ def _no_outbound_http(monkeypatch):
     """
 
     def _blocked(self, method, url, *args, **kwargs):
-        raise RuntimeError(
+        # Recorded as well as raised: this fires ABOVE the socket layer, so
+        # without this line a swallowed requests call would leave no trace for
+        # the teardown verdict to find.
+        BLOCKED_ATTEMPTS.append(f"{method} {url}")
+        raise BlockedNetwork(
             f"outbound HTTP is blocked in tests: {method} {url}. "
             "Stub the call instead (monkeypatch the module's `requests`)."
         )
 
     monkeypatch.setattr(requests.sessions.Session, "request", _blocked)
+
+
+# ── The network block (news-brief-0q0.13) ────────────────────────────────────
+# Two separate failures, and the second is the one that hid the first.
+#
+# COVERAGE: the requests-level block below funnels every requests entry point
+# and nothing else. feedparser fetches through urllib, and so do paths in
+# brief.py and backtest/, so "the suite cannot reach the network" was true of
+# one library and simply false for the rest. The guard here sits on
+# socket.socket.connect, which every one of them reaches eventually.
+#
+# SILENCE: raising is not reporting. telegram_alert wraps its send in
+# `except Exception`, so a blocked call left no trace and the test passed --
+# which is exactly how three tests reached api.telegram.org for real without
+# anyone noticing. Every block now RECORDS, and a test that caused one fails at
+# teardown whether or not it swallowed the exception.
+
+
+class BlockedNetwork(RuntimeError):
+    """Raised instead of opening a connection. A distinct type so a test can
+    assert on it without matching on message text."""
+
+
+# Attempts made by the test currently running. Module-level rather than a
+# fixture value because the requests-level block and the socket guard both
+# append to it, and they are separate fixtures.
+BLOCKED_ATTEMPTS: list[str] = []
+
+
+def _is_loopback(host) -> bool:
+    """Loopback stays open: the test Postgres is reached over TCP on localhost,
+    and blocking it would turn every DB-backed test into a skip -- a green suite
+    that had quietly stopped looking at the whole database layer."""
+    import ipaddress
+
+    if host in ("localhost", "localhost.localdomain", ""):
+        return True
+    try:
+        return ipaddress.ip_address(str(host)).is_loopback
+    except ValueError:
+        return False
+
+
+@pytest.fixture(autouse=True)
+def _no_outbound_sockets(request, monkeypatch):
+    """Block every non-loopback connection, and fail the test that caused one."""
+    real_connect = socket.socket.connect
+
+    def guarded(self, address):
+        # A non-tuple address is an AF_UNIX path: local by construction.
+        if isinstance(address, tuple) and not _is_loopback(address[0]):
+            BLOCKED_ATTEMPTS.append(f"socket connect to {address[0]}:{address[1]}")
+            raise BlockedNetwork(
+                f"outbound network is blocked in tests: {address[0]}:{address[1]}. "
+                "Stub the fetch instead of reaching for it."
+            )
+        return real_connect(self, address)
+
+    monkeypatch.setattr(socket.socket, "connect", guarded)
+    BLOCKED_ATTEMPTS.clear()
+    yield
+    attempts, _ = list(BLOCKED_ATTEMPTS), BLOCKED_ATTEMPTS.clear()
+    if attempts and "allow_blocked_network" not in request.keywords:
+        pytest.fail(
+            "this test reached for the network: "
+            + "; ".join(sorted(set(attempts)))
+            + ". Stub the call, or mark the test `allow_blocked_network` if "
+            "tripping the block is the point of it."
+        )

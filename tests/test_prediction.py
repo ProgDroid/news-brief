@@ -284,6 +284,11 @@ def test_mode_paper_opens_prediction_position(tmp_path, monkeypatch):
     monkeypatch.setattr(trading, "LEGACY_PAPER_BOOK_FILE", tmp_path / "paper-book.json")
     monkeypatch.setattr(trading, "POLYGRAM_EMAIL", "e@x.com")
     monkeypatch.setattr(trading, "POLYGRAM_PASSWORD", "pw")
+    # Setting the credentials is exactly what takes polygram_login past its
+    # own guard, so this POSTed to polygram.ink for real and returned None
+    # when that failed. None is what the rest of this test has always seen
+    # (news-brief-0q0.13).
+    monkeypatch.setattr(trading, "polygram_login", lambda: None)
     # A single NEUTRAL signal (no actionable equity/crypto) still drives the matcher.
     (signals_dir / f"signals-{today}.json").write_text(
         '{"signals": [{"ticker": null, "asset_class": "equity", "direction": "neutral", '
@@ -379,6 +384,16 @@ def test_mode_paper_shares_one_matcher_pass(tmp_path, monkeypatch):
     monkeypatch.setattr(trading, "LEGACY_PAPER_BOOK_FILE", tmp_path / "paper-book.json")
     monkeypatch.setattr(trading, "POLYGRAM_EMAIL", "e@x.com")
     monkeypatch.setattr(trading, "POLYGRAM_PASSWORD", "pw")
+    # Setting the credentials is exactly what takes polygram_login past its
+    # own guard, so this POSTed to polygram.ink for real and returned None
+    # when that failed. None is what the rest of this test has always seen
+    # (news-brief-0q0.13).
+    monkeypatch.setattr(trading, "polygram_login", lambda: None)
+    # And on polygram_live, which binds the name with `from trading import
+    # polygram_login` (polygram_live.py:13). A from-import copies the reference,
+    # so patching it on `trading` alone leaves the live path calling the real
+    # one -- and PG_LIVE_ENABLED below is what makes this test take that path.
+    monkeypatch.setattr(polygram_live, "polygram_login", lambda: None)
     monkeypatch.setattr(common, "PG_LIVE_ENABLED", True)
     monkeypatch.setattr(common, "PG_A_ENABLED", True)
     (signals_dir / f"signals-{today}.json").write_text(
