@@ -25,6 +25,7 @@ import claim_store
 import config
 import db
 import scheduler
+import common  # knobs are read as common.X so a host toggle is not frozen
 from common import log, telegram_alert, EX_ALREADY_RUNNING
 
 # Children that stay up. `commands` is the Telegram long-poll daemon and the
@@ -44,6 +45,17 @@ CRASH_LOOP_WINDOW_SECONDS = 600
 # before a real crash loop could ever grow it past CRASH_LOOP_LIMIT, making
 # the backoff ceiling unreachable.
 RESIDENT_STABLE_SECONDS = CRASH_LOOP_WINDOW_SECONDS
+# How often to repeat that a resident is still down (news-brief-0q0.14). The
+# crash-loop alert fires once on ENTERING an episode, and once the backoff
+# ceiling spaces restarts past the crash-loop window the episode ends and can
+# never be re-entered -- so without this, a permanently dead `commands` daemon
+# goes quiet, and quiet is what a healthy one looks like. Matched to the
+# monitor's hour so the deployment has one alert cadence rather than two.
+RESIDENT_DOWN_REMINDER_SECONDS = 3600
+# How long a job child gets to honour SIGTERM before it is killed. Short,
+# because by the time this runs the child has already overrun a cap measured in
+# hours: the question is no longer whether it is stuck but how it dies.
+JOB_KILL_GRACE_SECONDS = 30
 
 # How long every child together gets to exit after the SIGTERM broadcast. It is
 # a SHARED deadline, not a per-child one: terminating four job children serially
@@ -295,11 +307,18 @@ class ResidentPool:
     started_at: dict[str, float] = field(default_factory=dict)
     next_start: dict[str, float] = field(default_factory=dict)
     spawn_alerted: set[str] = field(default_factory=set)
+    # When each resident's current outage began, and when it was last mentioned.
+    # Cleared on STABILITY rather than on a successful spawn: a resident that
+    # comes up and dies again every thirty seconds is still down, and clearing
+    # at spawn would reset the clock on every flap and never remind at all.
+    down_since: dict[str, float] = field(default_factory=dict)
+    last_reminder: dict[str, float] = field(default_factory=dict)
 
     def tick(self, now_mono: float, spawn=None) -> None:
         """One pass over RESIDENT_MODES. `spawn` is injectable for tests."""
         spawn = spawn or Child
         for mode in RESIDENT_MODES:
+            self._remind_if_down(mode, now_mono)
             child = self.children.get(mode)
             if child is not None and child.running:
                 self._note_stability(mode, now_mono)
@@ -347,6 +366,33 @@ class ResidentPool:
         """
         if now_mono - self.started_at.get(mode, now_mono) >= RESIDENT_STABLE_SECONDS:
             self.failures[mode] = 0
+            # The outage is over on the same evidence the failure count trusts.
+            self.down_since.pop(mode, None)
+            self.last_reminder.pop(mode, None)
+
+    def _remind_if_down(self, mode: str, now_mono: float) -> None:
+        """Repeat, on an interval, that a resident has not come back.
+
+        Deliberately NOT conditional on the child being absent at this instant:
+        a resident that respawns and dies within one tick is running about half
+        the time it is looked at, and a check for absence would report it as
+        healthy on every other tick.
+
+        The first reminder is one full interval AFTER the outage starts, so the
+        crash-loop alert and this never describe the same moment twice.
+        """
+        since = self.down_since.get(mode)
+        if since is None:
+            return
+        last = self.last_reminder.get(mode, since)
+        if now_mono - last < RESIDENT_DOWN_REMINDER_SECONDS:
+            return
+        self.last_reminder[mode] = now_mono
+        minutes = int((now_mono - since) // 60)
+        telegram_alert(
+            f"{mode} has been down for {minutes // 60}h{minutes % 60:02d}m and is "
+            f"not staying up. The supervisor is still restarting it."
+        )
 
     def _reap(self, mode: str, child: Child, now_mono: float) -> None:
         code = child.wait(timeout=0)
@@ -356,6 +402,10 @@ class ResidentPool:
         del self.children[mode]
         self.started_at.pop(mode, None)
         self.failures[mode] = self.failures.get(mode, 0) + 1
+        # setdefault, not assignment: the outage is dated from the FIRST death,
+        # so a resident dying every thirty seconds does not keep resetting its
+        # own clock and reporting a two-hour outage as half a minute old.
+        self.down_since.setdefault(mode, now_mono)
         delay = backoff_delay(self.failures[mode])
         self.next_start[mode] = now_mono + delay
         log.warning(f"[{mode}] exited with {code}; restarting in {delay:.0f}s")
@@ -364,6 +414,43 @@ class ResidentPool:
                 f"{mode} has restarted {CRASH_LOOP_LIMIT} times in "
                 f"{CRASH_LOOP_WINDOW_SECONDS // 60} minutes — crash loop"
             )
+
+
+def _enforce_max_runtime(
+    mode: str, child: "Child", started_mono: float, now_mono: float, terminating: dict
+) -> None:
+    """Stop a job child that has outrun its cap. One SIGTERM, then a SIGKILL.
+
+    Until this existed a wedged child ran forever: its job_runs row never
+    closed, latest_scheduled_for went on consuming fire times, and every later
+    fire hit the still-running branch -- which alerts, so the operator heard
+    about it hourly and could do nothing but SSH in.
+
+    `terminating` remembers which children have already been told to stop, so
+    the SIGTERM and the alert happen once rather than once per 30-second tick.
+    The kill is a LATER tick rather than a sleep here: the supervisor's loop is
+    single-threaded, and blocking it for the grace would stall every other
+    child's reap and every resident's restart.
+
+    A limit of zero or less disables the cap, so an operator who cannot yet size
+    it is not forced to choose between a guess and a redeploy.
+    """
+    limit = common.JOB_MAX_RUNTIME_MINUTES * 60
+    if limit <= 0 or now_mono - started_mono < limit:
+        return
+    if mode not in terminating:
+        terminating[mode] = now_mono
+        ran = int((now_mono - started_mono) // 60)
+        log.error(f"[{mode}] has run {ran}m, past its {limit // 60:.0f}m cap; stopping")
+        telegram_alert(
+            f"{mode} has run for {ran} minutes, past its "
+            f"{limit // 60:.0f}-minute cap, and is being stopped. Its fire time "
+            f"is already spent, so it will not be retried until the next one."
+        )
+        child.signal_stop()
+        return
+    if now_mono - terminating[mode] >= JOB_KILL_GRACE_SECONDS:
+        child.kill()
 
 
 @dataclass
@@ -792,6 +879,10 @@ def serve() -> int:
     # hang spanning several of monitor's hours reports each one, and cleared
     # when the job finally exits so it cannot grow without bound.
     skipped_alerts: dict[str, set[str]] = {}
+    # When each job child was spawned, and which have already been told to stop.
+    # Both keyed by job and cleared on reap, so neither can grow without bound.
+    job_started: dict[str, float] = {}
+    terminating: dict[str, float] = {}
 
     while not stopping.is_set():
         now_mono = time.monotonic()
@@ -807,11 +898,16 @@ def serve() -> int:
                 # that time comes out of the container's stop grace.
                 break
             if child.running:
+                _enforce_max_runtime(
+                    mode, child, job_started.get(mode, now_mono), now_mono, terminating
+                )
                 continue
             code = child.wait(timeout=0)
             child.join_reader(timeout=5)
             del jobs[mode]
             skipped_alerts.pop(mode, None)
+            job_started.pop(mode, None)
+            terminating.pop(mode, None)
             _close_run(child.run_id, code)
             if code == EX_ALREADY_RUNNING:
                 log.warning(

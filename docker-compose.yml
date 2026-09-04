@@ -139,6 +139,7 @@ x-newsbrief: &newsbrief
     # NEWSBRIEF_CAPTURE_ENABLED here until news-brief-bz1, which crossed the
     # container boundary correctly and was read by nothing.
     - CAPTURE_ENABLED=${CAPTURE_ENABLED:-}
+    - JOB_MAX_RUNTIME_MINUTES=${JOB_MAX_RUNTIME_MINUTES:-}
     # Postgres holds the run ledger, the advisory locks that interlock the entry
     # paths, and the scheduler's state. These MUST be declared here: compose
     # passes through only what this block names, so setting them on the host or

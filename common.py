@@ -262,6 +262,15 @@ KNOBS: dict[str, Knob] = {
     # shared tables and has no consumer yet, so it is switched on deliberately
     # on the host after a deploy rather than starting on its own.
     "CAPTURE_ENABLED": Knob(bool, False),
+    # How long a job child may run before the supervisor stops it, in minutes;
+    # <= 0 disables the cap entirely (news-brief-0q0.12). A ROW rather than a
+    # constant because the right value is a property of this deployment's real
+    # collect durations, which nobody has measured yet -- and a cap set too low
+    # kills working runs, which is worse than the wedged child it prevents. The
+    # default clears the widest schedule grace -- backup's three hours, not
+    # collect's two -- by a margin, so it can only ever catch a job that is
+    # genuinely stuck. A test pins that relation rather than the number.
+    "JOB_MAX_RUNTIME_MINUTES": Knob(int, 240),
 }
 
 _TRUTHY = {"1", "true", "yes", "on"}

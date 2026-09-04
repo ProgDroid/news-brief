@@ -10,7 +10,9 @@ import time
 from datetime import datetime, timedelta, timezone
 
 import claim_store
+import common
 import config
+import scheduler
 import supervisor
 
 
@@ -103,8 +105,12 @@ def test_restarts_outside_the_window_do_not_trip_the_alert():
     assert tracker.record("commands", now + 200) is False
 
 
-def test_a_failed_migration_blocks_jobs_but_still_starts_residents():
+def test_a_failed_migration_blocks_jobs_but_still_starts_residents(monkeypatch):
     """Fail closed on work, fail open on observability (spec section 8)."""
+    # startup() alerts on the failure. Unstubbed, that POSTed to the real
+    # api.telegram.org and was swallowed by telegram_alert's except Exception,
+    # so the test passed at the cost of a connect timeout (news-brief-0q0.13).
+    monkeypatch.setattr(supervisor, "telegram_alert", lambda msg: None)
 
     def boom(conn):
         raise RuntimeError("relation already exists")
@@ -814,3 +820,201 @@ def test_the_shutdown_budget_comment_matches_the_schedule_count():
     documented = re.search(r"(\d+) schedules x 2 statements", source)
     assert documented, "the budget comment's schedule term is missing or reworded"
     assert int(documented.group(1)) == len(scheduler.SCHEDULES)
+
+
+# ── A dead resident keeps saying so (news-brief-0q0.14) ──────────────────────
+# The residual the fix wave left behind, and the opposite of the defect first
+# reported. RestartTracker.record returns True only on ENTERING an episode, and
+# once the backoff ceiling (300s) spaces restarts past the 600s window the
+# episode ends and can never be re-entered -- so a resident that is permanently
+# dead alerts a few times and then goes silent forever. For `commands`, which is
+# the operator's only control channel, that silence is indistinguishable from
+# health.
+
+
+def _run_dead(pool, spawn, spawned, until, step=30.0):
+    """Drive ticks with every child dying as soon as it is spawned."""
+    t = 0.0
+    while t < until:
+        pool.tick(t, spawn=spawn)
+        for child in spawned:
+            child.alive = False
+        t += step
+    return t
+
+
+def test_a_permanently_dead_resident_is_reported_again_every_hour(monkeypatch):
+    alerts = []
+    monkeypatch.setattr(supervisor, "telegram_alert", alerts.append)
+    spawned = []
+    pool = supervisor.ResidentPool()
+
+    _run_dead(
+        pool,
+        _spawner(spawned),
+        spawned,
+        2.5 * supervisor.RESIDENT_DOWN_REMINDER_SECONDS,
+    )
+
+    reminders = [a for a in alerts if "down for" in a]
+    assert len(reminders) == 2, f"expected a reminder per hour, got {alerts}"
+    assert "commands" in reminders[0]
+
+
+def test_going_down_is_not_itself_a_reminder(monkeypatch):
+    """The crash already alerts through the crash-loop path. A reminder in the
+    same breath would be two messages for one event, and the reminder would stop
+    meaning "this is STILL down"."""
+    alerts = []
+    monkeypatch.setattr(supervisor, "telegram_alert", alerts.append)
+    spawned = []
+    pool = supervisor.ResidentPool()
+
+    _run_dead(
+        pool, _spawner(spawned), spawned, supervisor.RESIDENT_DOWN_REMINDER_SECONDS - 60
+    )
+
+    assert [a for a in alerts if "down for" in a] == []
+
+
+def test_a_resident_that_comes_back_stops_the_reminders(monkeypatch):
+    """The positive control. "Reminds every hour" is satisfied for free by
+    reminding forever, which would page the operator about a resident that has
+    been healthy since breakfast."""
+    alerts = []
+    monkeypatch.setattr(supervisor, "telegram_alert", alerts.append)
+    spawned = []
+    spawn = _spawner(spawned)
+    pool = supervisor.ResidentPool()
+
+    t = _run_dead(pool, spawn, spawned, 1.5 * supervisor.RESIDENT_DOWN_REMINDER_SECONDS)
+    assert len([a for a in alerts if "down for" in a]) == 1
+
+    # It comes back and stays up long enough to count as stable.
+    while t < 3.5 * supervisor.RESIDENT_DOWN_REMINDER_SECONDS:
+        pool.tick(t, spawn=spawn)
+        t += 30.0
+
+    assert len([a for a in alerts if "down for" in a]) == 1, (
+        "a recovered resident must stop reminding"
+    )
+
+
+def test_a_resident_that_restarts_cleanly_never_reminds(monkeypatch):
+    """One crash and a clean recovery is normal operation, not an outage."""
+    alerts = []
+    monkeypatch.setattr(supervisor, "telegram_alert", alerts.append)
+    spawned = []
+    spawn = _spawner(spawned)
+    pool = supervisor.ResidentPool()
+
+    pool.tick(0.0, spawn=spawn)
+    spawned[0].alive = False
+    t = 1.0
+    while t < 2.5 * supervisor.RESIDENT_DOWN_REMINDER_SECONDS:
+        pool.tick(t, spawn=spawn)
+        t += 30.0
+
+    assert [a for a in alerts if "down for" in a] == []
+
+
+# ── A job child cannot run forever (news-brief-0q0.12) ───────────────────────
+# A wedged child held its job_runs row open indefinitely, kept consuming
+# latest_scheduled_for, and made every later fire hit the still-running branch.
+# The earlier fix wave made that branch alert, so the silence is gone -- but
+# nothing reaped the child, so the alert repeated and the job stayed dead.
+#
+# The limit is a knob, not a constant, and its default is deliberately far above
+# anything collect legitimately does. Sizing it against real durations is the
+# job of the job_runs data; until that arrives the cap must not be able to kill
+# a working run, which is the failure that would be worse than the bug.
+
+
+def _limit_seconds():
+    return common.JOB_MAX_RUNTIME_MINUTES * 60
+
+
+def test_a_child_inside_its_limit_is_left_alone(monkeypatch):
+    """The presence control. "Reaps a wedged child" is satisfied for free by
+    reaping every child, which would kill collect halfway through the brief."""
+    alerts = []
+    monkeypatch.setattr(supervisor, "telegram_alert", alerts.append)
+    child = _FakeChild("collect")
+    terminating = {}
+
+    supervisor._enforce_max_runtime(
+        "collect", child, 0.0, _limit_seconds() - 1, terminating
+    )
+
+    assert child.signalled == 0 and child.killed == 0
+    assert alerts == []
+
+
+def test_a_child_past_its_limit_is_signalled_and_reported(monkeypatch):
+    alerts = []
+    monkeypatch.setattr(supervisor, "telegram_alert", alerts.append)
+    child = _FakeChild("collect")
+    terminating = {}
+
+    supervisor._enforce_max_runtime(
+        "collect", child, 0.0, _limit_seconds() + 1, terminating
+    )
+
+    assert child.signalled == 1
+    assert len(alerts) == 1 and "collect" in alerts[0]
+
+
+def test_an_overrunning_child_is_reported_once_not_every_tick(monkeypatch):
+    """The supervisor ticks every 30 seconds. Alerting per tick would produce
+    120 messages an hour for one stuck job, which is the same "trains the
+    operator to stop reading" failure the crash-loop alert already fixed."""
+    alerts = []
+    monkeypatch.setattr(supervisor, "telegram_alert", alerts.append)
+    child = _FakeChild("collect", stubborn=True)
+    terminating = {}
+
+    now = _limit_seconds() + 1
+    for _ in range(5):
+        supervisor._enforce_max_runtime("collect", child, 0.0, now, terminating)
+        now += scheduler.TICK_SECONDS
+
+    assert len(alerts) == 1
+    assert child.signalled == 1, "one SIGTERM, not one per tick"
+
+
+def test_a_child_that_ignores_the_signal_is_killed_after_the_grace(monkeypatch):
+    """SIGTERM is a request. A child wedged in an uninterruptible read will not
+    honour it, and that is precisely the case this bead exists for."""
+    monkeypatch.setattr(supervisor, "telegram_alert", lambda msg: None)
+    child = _FakeChild("collect", stubborn=True)
+    terminating = {}
+    start = _limit_seconds() + 1
+
+    supervisor._enforce_max_runtime("collect", child, 0.0, start, terminating)
+    assert child.killed == 0, "the grace has not elapsed yet"
+
+    supervisor._enforce_max_runtime(
+        "collect", child, 0.0, start + supervisor.JOB_KILL_GRACE_SECONDS, terminating
+    )
+    assert child.killed == 1
+
+
+def test_a_zero_limit_disables_the_cap(monkeypatch):
+    """An operator who cannot yet size the cap must be able to switch it off
+    without redeploying -- the same escape hatch BACKUP_RETENTION_DAYS gives."""
+    monkeypatch.setattr(supervisor, "telegram_alert", lambda msg: None)
+    monkeypatch.setattr(common, "JOB_MAX_RUNTIME_MINUTES", 0)
+    child = _FakeChild("collect")
+    terminating = {}
+
+    supervisor._enforce_max_runtime("collect", child, 0.0, 86_400.0, terminating)
+
+    assert child.signalled == 0 and child.killed == 0
+
+
+def test_the_default_limit_clears_the_longest_job_grace():
+    """collect may legitimately run for many minutes, and its schedule already
+    tolerates being two hours late. A cap under that would be the supervisor
+    disagreeing with its own scheduler about what "still working" means."""
+    widest = max(s.grace_minutes for s in scheduler.SCHEDULES)
+    assert common.JOB_MAX_RUNTIME_MINUTES > widest
