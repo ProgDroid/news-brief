@@ -5,9 +5,18 @@ metadata:
   node_type: memory
   type: project
   originSessionId: 40aa02f5-7c80-41e3-83b3-331d1377553b
+  modified: 2026-09-02T09:52:47.557Z
 ---
 
-2026-07-02 BUILT+PUSHED (e118a76 → origin/main, Docker deploy triggered; 551 tests): the three Sonnet constants moved `claude-sonnet-4-6` → `claude-sonnet-5` (common.MODEL, brief.SIGNALS_MODEL, claim_verify.VERIFY_MODEL). Haiku constants untouched (brief_memory.RECONCILE_MODEL, backtest/scorer_llm.py). Single-knob `NEWSBRIEF_MODEL` env override, default `claude-sonnet-5`, read at IMPORT TIME by all three Sonnet constants — set it on the deploy host to swap models with no code change/redeploy (host-config pattern like [[live-state-on-deploy-host]]).
+2026-07-02 BUILT+PUSHED (e118a76 → origin/main, Docker deploy triggered; 551 tests): the three Sonnet constants moved `claude-sonnet-4-6` → `claude-sonnet-5`. Haiku constants untouched (brief_memory.RECONCILE_MODEL, backtest/scorer_llm.py).
+
+**SUPERSEDED 2026-09-02 — how you SET the model changed; the gotchas below did not.** `brief.SIGNALS_MODEL` and `claim_verify.VERIFY_MODEL` **no longer exist as constants** — do not grep for them. Since `0q0.7.6` all three are `settings` rows read through `common.KNOBS`, so a model swap is a ROW EDIT and takes effect inside ~60s with no redeploy and no container recreate (it used to be an env var read at IMPORT time, needing both):
+
+- `common.MODEL` — key `NEWSBRIEF_MODEL`, default `claude-sonnet-5`. This is the one to change.
+- `brief._signals_model()` — key `NEWSBRIEF_SIGNALS_MODEL`, **default `""` meaning "follow MODEL"**.
+- `claim_verify._model()` — key `NEWSBRIEF_CLAIM_VERIFY_MODEL`, same empty-means-follow rule.
+
+**Why the empty default rather than a copy of the model id:** a duplicated literal strands both post-generation calls on the old model the moment `NEWSBRIEF_MODEL` moves, silently — which is this memory's own lesson turned into a foot-gun. Set a per-call-site row ONLY to pin that one call deliberately (e.g. a cheaper judge). See [[newsbrief-runtime-foundation-phase-1]] for the knob seam.
 
 **Why (the non-obvious gotcha):** on `claude-sonnet-5`, OMITTING `thinking` runs *adaptive thinking* (Sonnet 4.6 ran thinking-OFF when omitted), and thinking tokens count against `max_tokens` → truncation on tight/forced-tool calls (the recurring [[signals-parse-error-is-truncation]] failure). Before this change every call omitted `thinking`, so the model bump silently flipped all of them on.
 

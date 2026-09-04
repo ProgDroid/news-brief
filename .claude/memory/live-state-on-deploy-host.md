@@ -16,3 +16,25 @@ The repo on this dev machine is pure code. ALL mutable runtime state lives on th
 **Best technique — run a read-only probe IN-PLACE on the host (used heavily 2026-06-25 to debug PolyGram + the signals timeout):** instead of exfiltrating JSONs, write a small probe `.py` that imports the project modules, mount it into the deployed image, and run it on the host so it sees the real volume + env (creds, network) live. The user runs it; you author the probe and read the printed output. Exact invocation (the compose stack needs BOTH env-files and the `--file`):
 `docker compose --file ./news-brief.yml --env-file ../global.env --env-file ./news-brief.env run --rm -v "$PWD/probe.py:/app/probe.py" --entrypoint python newsbrief-collect /app/probe.py`
 `--entrypoint python` OVERRIDES the mode-dispatch entrypoint so it runs the probe, NOT a collect — no state mutation. To exercise UNRELEASED code before the CI image rebuilds, `git pull` on the host then ALSO mount the changed module: add `-v "$PWD/trading.py:/app/trading.py"`. CAUTION: the host **re-runs the whole pipeline on every image pull** (a deploy = a fresh collect), so a redeploy regenerates/overwrites today's `signals-*.json` and re-opens paper positions — a broken post-gen call corrupts state on every pull, not just at the 6am cron.
+
+**THE REPO IS PUBLIC, and live output must never be committed (learned 2026-08-29).**
+`gh repo view` reports `ProgDroid/news-brief` as **PUBLIC**. The root `.gitignore` carries a
+standing decision that goes with it: `from-server/` — *"Live state pulled off the deploy host
+for offline analysis — never commit"* — plus `av_data/`, `scratch_av/`, `.gdelt_cache/` and
+`*.log`. So anything derived from real briefs, ledgers or the paper book is publication, not
+just a commit.
+
+**Why:** this bit during the Epic 1 session. The 2026-08-29 replay artifacts (90 briefs of
+generated analysis, the hand-audited break detections) existed only in a session temp
+scratchpad and were at risk of being cleaned. The obvious move — commit them as test fixtures
+so the gold-set harness could run in CI — was **wrong**, and `.gitignore` already said so. They
+went to `from-server/replay-2026-08-29/` instead. Note also that the one existing "gold" fixture,
+`tests/fixtures/enrichment/theme_gold.json`, is **synthetic** (`"FT"`, `example.com`) — there is
+no precedent for committing real derived data, and its synthetic-ness is the precedent.
+
+**How to apply:** before proposing that ANY runtime artifact enter git, read `.gitignore` first
+and remember the repo is public. Credential scanning is necessary but not sufficient — the
+replay files had no secrets at all and still should not be published. To make something durable
+without publishing it, put it under `from-server/`, which survives temp cleanup and stays out of
+git. If a test genuinely needs the data, synthesise a fixture that keeps the structure and drops
+the real text. See [[newsbrief-kb-architecture-2026-08-29]].

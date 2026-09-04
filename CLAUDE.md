@@ -22,12 +22,41 @@ bd close <id>         # Complete work
 - Run `bd prime` for detailed command reference and session close protocol
 - Use `bd` for WORK STATE only: issues, dependencies, what is ready next.
 - **REPOSITORY OVERRIDE (2026-08-27): memory does NOT move to `bd remember` in this repo.**
-  `.claude/memory/` remains the durable memory corpus, hydrated by the hydrate-memory
-  SessionStart hook and carried in git. Rationale: bd cross-machine sync requires a
-  PINNED `dolt` binary on every machine plus `bd bootstrap` per clone, whereas the
-  file corpus already travels with the repo and needs nothing installed. This override
-  is sanctioned by the Beads block itself: explicit repository instructions take
-  precedence over it, and it is task-tracking guidance, not a memory mandate.
+  Rationale: bd cross-machine sync requires a PINNED `dolt` binary on every machine plus
+  `bd bootstrap` per clone. This override is sanctioned by the Beads block itself:
+  explicit repository instructions take precedence over it, and it is task-tracking
+  guidance, not a memory mandate.
+
+## Memory (read this before writing one)
+
+Corrected 2026-09-04 (`news-brief-iad`). The previous version of this file claimed the
+corpus was "hydrated by the hydrate-memory SessionStart hook" and "already travels with
+the repo". **Neither was true when written** — no such hook existed in either scope, and
+the committed copy was an orphaned snapshot five days behind. That is `metadata-is-not-state`:
+this file states intent, never what runs. What follows describes the mechanism that now
+actually exists; verify it in `.claude/settings.json` rather than trusting this paragraph.
+
+There are **two** copies of the corpus, and which one is authoritative depends on the machine:
+
+- `~/.claude/projects/<key>/memory/` — the **live** one. The auto-memory system reads and
+  writes here, and its `MEMORY.md` loads automatically. **Write learnings here.**
+- `.claude/memory/` — the **committed** copy, 68 entries, carried in git.
+
+`.claude/hooks/hydrate-memory.sh` runs at SessionStart. Where the live corpus exists it
+prints **nothing**, because the index is already loaded and a second copy is noise. Where it
+does not — a cloud session, a second machine — it injects the committed `MEMORY.md` and tells
+you to read `.claude/memory/<name>.md` for an entry that looks relevant. It deliberately does
+**not** copy files into the live corpus: the project key is derived from the working
+directory, its form on a Linux host is unverified, and a wrong key writes where nothing reads.
+
+Memories written in a session do **not** reach git on their own. `scripts/flush-memory.sh`
+copies live → committed and then stops, without staging or committing.
+
+**That last part is deliberate, and it is the thing to remember: this repository is PUBLIC.**
+Every memory written here is a publishing candidate. The 2026-09-04 review of 21 files found
+no credentials, but did find an operational map of the deploy host and a behavioural profile
+of the author — material that wants a human glance, not a hook. Review
+`git diff -- .claude/memory/` before committing, and see `live-state-on-deploy-host.md`.
 
 **Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/core-concepts/sync-concepts.md for details and anti-patterns.
 

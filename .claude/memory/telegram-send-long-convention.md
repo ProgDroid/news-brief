@@ -39,3 +39,20 @@ command (which always split) was fine — same string function, two paths, one u
 Distinct from the DEFERRED tag-split 400 in [[newsbrief-deferred-findings]]
 (#2: splitter can cut between an open/close tag → invalid-HTML chunk) — that's
 a different 400 cause, still open, low-prob.
+
+## 2026-09-04 — there is a THIRD channel, and a capture helper that missed it
+
+`telegram_send_buttons` is a separate send path from both `telegram_send` and
+`telegram_send_long`, and it is how `/reset` and every wizard step answers. A test helper that
+patches only `brief.telegram_send` therefore leaves it open.
+
+That is not hypothetical: `_capture_sends` in `tests/test_delivery_and_state.py` patched exactly
+that one name, so `test_handle_update_ignores_foreign_chat` asserted `sent == []` while `/reset`
+actually answered a foreign chat over the real network. The empty list meant nothing. Widened to
+patch `brief.telegram_send`, `common.telegram_send` and `brief.telegram_send_buttons`, and the
+test gained a presence control asserting the OWNING chat does get answered — without which
+"nothing was sent" is satisfied by a helper that simply cannot see the send.
+
+**How to apply:** before writing any "nothing was sent" assertion, enumerate the channels — bare
+send, send_long (resolves in `common`), send_buttons — and patch all of them. A silence assertion
+is only as strong as the narrowest channel it watches.

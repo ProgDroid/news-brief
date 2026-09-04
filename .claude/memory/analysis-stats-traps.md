@@ -1,11 +1,11 @@
 ---
 name: analysis-stats-traps
-description: "Two significance traps that both fired in one session on the paper book — correlated observations, and ties counted as failures in a paired sign test"
+description: "Four measurement traps that produced confident wrong numbers in this repo — correlated observations, ties counted as failures, a one-directional pre-registered gate, and an LLM eval primed with the field it was scoring"
 metadata: 
   node_type: memory
   type: project
   originSessionId: 951b41de-741d-4e04-a8b4-945ab0025650
-  modified: 2026-08-16T11:03:13.135Z
+  modified: 2026-08-29T21:44:14.379Z
 ---
 
 Two statistical traps hit in the 2026-08-16 trading retrospective, both producing a
@@ -38,6 +38,26 @@ both arms equally. Then report the effect size *and* the tie count, and sanity-c
 robustness by dropping the largest contributors (the 17/21 result survived removing
 the two worst chains, all 10+-leg chains, and restricting to 2–4-leg chains).
 
+**3. A one-directional pre-registration is a blind gate (2026-08-29, gold set).** Spec
+§12.3 pre-registered the regression condition as "a run that improves recall while
+dropping precision below baseline". The first real run failed in the **mirror**
+direction — precision 33%→75%, recall 100%→42.9%, losing 4 of 7 true breaks — and the
+gate said nothing, because it only watched one way. Pre-registration protects against
+motivated reading only if it names *both* directions, or states the asymmetric cost
+that makes one worse. Here the cost was already written down elsewhere in the same spec
+(§6.1: a missed break is a permanent integration error, a false break is a synthesis
+error lasting a day) — it simply had not been connected to the gate. **Before accepting
+a pre-registered criterion, ask what result would pass it and still be bad.**
+
+**4. Do not feed the model the label you intend to score.** The gold-set probe handed
+each item's ledger row to the model with `severity` already populated from the seed run,
+then reported severity variance as evidence the field was healthy. It came back
+**unchanged on 21 of 23** — the "variance" was echo, not judgment. Only `status`, which
+the probe left for the model to assign, measured anything. Caught by explicitly
+comparing input to output rather than trusting the distribution. **In any LLM eval,
+list what the prompt already contains of the answer before reading the result.**
+
 Sibling of [[backtest-nonstationarity-check]] — that one is about regime instability
-over time, this one about dependence across observations. Both turn an apparently
-significant result into a null. Context: [[trading-retrospective-2026-08-16]].
+over time, traps 1–2 about dependence across observations, traps 3–4 about the
+measurement design itself letting a wrong number look right. Context:
+[[trading-retrospective-2026-08-16]], [[newsbrief-kb-architecture-2026-08-29]].

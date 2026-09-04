@@ -6,6 +6,10 @@
           {
             "command": "bd prime --stealth --hook-json",
             "type": "command"
+          },
+          {
+            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/hydrate-memory.sh\"",
+            "type": "command"
           }
         ],
         "matcher": ""

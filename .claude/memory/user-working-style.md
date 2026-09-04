@@ -69,3 +69,62 @@ candidate items, he wants them RECORDED AS A PERSISTENT BACKLOG first, then work
 outcome, not a failure. Capture learnings after each. So: write the backlog to memory
 with per-item STATUS, don't try to resolve everything at once, and treat a reasoned skip
 as closing the item. See [[external-geo-dashboards-backlog]].
+
+**Sequences work by CONTEXT BUDGET, and checks disclosure before publication (2026-08-29,
+Epic 1 implementation session).** Two moves worth copying. (1) Mid-session he asked
+*"should we brainstorm instead of TDD? or is the task straightforward?"* — an invitation to
+say which parts were genuinely settled and which were not, rather than a request to switch
+process. Answering honestly ("the mechanism is settled; two decisions inside it are not")
+produced the two design questions that shaped the whole session. (2) At 71% through the epic
+he drew the line himself: *"let's do the cheap ones, then we can end the session before we
+tackle the bigger stuff on fresh context."* He treats remaining context as a resource and
+wants the large, judgement-heavy item started clean — so when work splits into cheap-mechanical
+and large-with-open-questions, SAY SO and let him place the boundary; don't start the big one
+late in a session.
+
+**He will reverse his own approved decision on evidence, immediately and without friction
+(2026-09-02, ledger cutover session).** He had ruled three times in a row — take the heavier
+option on both `bqa.9` extras, "push to the end state" rather than the smallest diff, "ship
+together, documented as one-way". Then a review found that the derived-staleness design he had
+approved on my recommendation recreated a bug migration 0006 was explicitly written to prevent.
+Told plainly that this undermined a decision he had made on my advice, and that the simpler
+alternative now dominated on every axis, he replied with the one-word switch. No defence of the
+prior call, no friction, no asking me to patch around it.
+
+**How to apply:** when new evidence undermines a decision the user already approved, SAY SO
+directly and early — do not defend the earlier ruling because he blessed it, and do not quietly
+engineer around it. Lead with what changed, name which of his prior decisions it invalidates, and
+give the honest recommendation even when it reverses your own design and his own choice. The
+approval is not a commitment he expects you to protect; the evidence is what he actually wants.
+The corollary is that "he already decided this" is never a reason to withhold a finding — and
+re-litigating without new evidence is still off-limits, so the discriminator is whether you are
+bringing a *fact* or an *opinion*.
+
+**And he audits what gets published.** Asked to commit preserved data he replied *"what kind of
+data is in that? anything that can't be public?"* before approving — which surfaced that the
+repo is public and that `.gitignore` already forbade it. **How to apply:** never propose adding
+runtime artifacts to git without stating what is in them and checking repo visibility and
+`.gitignore` first; he will ask, and the honest answer may reverse the recommendation. See
+[[live-state-on-deploy-host]].
+
+## 2026-09-04 — once the direction is set, he wants execution, not further gates
+
+Two corrections in one session, both terse: **"do it now"** after I laid out the next task and
+offered to scope it, and **"continue now"** after I paused mid-task to ask whether fixing nine
+pre-existing test violations was in scope.
+
+**Why:** he is not against being asked — he answered four `AskUserQuestion` prompts promptly and
+picked the *Recommended* option every time, which is what makes the pattern legible. The question
+he wants is the one that CHANGES the work (which surface, how far to go, which of three beads
+first). The one he does not want is confirmation that I should proceed with something he has
+already pointed at.
+
+**How to apply:** ask the branching question up front, in one call, with a defended
+recommendation — then run to completion and report. When something unplanned turns up mid-task
+(the nine network violations, `bz1`), state the finding and the chosen path in a sentence and
+keep going; do not stop and wait unless the finding genuinely changes what he asked for. Reserve
+a blocking stop for outward-facing or hard-to-reverse steps — a push, a host write, publishing
+anything to the public repo — where he has consistently wanted the call to be his.
+
+Consistent with the standing entries: lead with the more thorough option, expect to defend it,
+and treat friction as the master variable — a confirmation gate he did not need IS friction.
