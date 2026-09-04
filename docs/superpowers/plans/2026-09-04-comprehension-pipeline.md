@@ -34,7 +34,11 @@ These apply to **every** task. They are not restated per task.
 - **Use `py`, not `python`.** `py -m pytest -q`, `py -m ruff check .`. The `python` alias is winpty-wrapped and fails with "stdin is not a tty"; `py` is not.
 - **Commit from the Bash tool, never PowerShell** — PowerShell prepends a UTF-8 BOM to the commit subject. Use `git commit -F <file>` or repeated `-m` flags; command substitution in a commit message is denied by `windows-guard.sh`, correctly.
 - **Stage explicit paths.** Never `git add -A`. The user runs concurrent sessions against this repo, and a file may already be dirty from another one *before* you edit it. Check `git status` on a file before editing it, not only after.
-- **The absolute suite count is 1458 at commit `9c647db`.** Every task states the absolute expected count after it, not a delta. If your count disagrees, reconcile it before committing — `py -m pytest --collect-only -q` settles a disagreement; a grep does not.
+- **The absolute suite count is 1458 as of the spec commit.** Every task states the absolute expected count after it, not a delta.
+
+  **Re-baseline before Task 1 rather than trusting that number.** Run the full gate once, on an unmodified tree, and write down what it reports. Other sessions commit to this repo, so the figure may have moved before you start — and a count that is wrong from the beginning makes every later task's check meaningless in the same direction.
+
+  **When a count disagrees:** first assume the prediction was right and the system is wrong, then find out which. `py -m pytest --collect-only -q` settles the arithmetic; a grep does not. Do not adjust the expected number to match what you observed — that converts a failing check into a passing one without learning anything. Two known-legitimate sources of drift: `tests/test_scheduler.py:259` parametrises over `scheduler.SCHEDULES`, so adding a schedule adds cases; and `tests/test_packaging.py` derives from the real Dockerfile and compose file. If neither explains the gap, stop and report it.
 - **Any knob is reached as `common.X`, never `from common import X`.** Knobs are `settings` rows behind a PEP 562 `__getattr__`; a `from`-import binds a copy at import time and the knob can never move.
 - **Every absence assertion needs a presence sibling.** `tests-asserting-less-than-their-name` records seven tests in one build that passed while asserting less than their names claimed, and calls it this repo's dominant defect class. For each test you write, mentally delete the code under test and ask whether it would still pass.
 - **The test suite blocks non-loopback sockets and FAILS any test that caused a blocked call**, swallowed or not. Every model call in these tests must be stubbed. If you see `Failed: this test reached for the network`, that is a missing stub, not a bad test — do not reach for `@pytest.mark.allow_blocked_network`.
@@ -54,10 +58,10 @@ These apply to **every** task. They are not restated per task.
 | `tests/test_comprehend_matcher.py` (create) | Surface-form matcher rules |
 | `tests/test_comprehend_triage.py` (create) | Triage: rules half, model half, sampled arm |
 | `tests/test_comprehend_integration.py` (create) | Candidates, parsing, write path, savepoints |
-| `common.py` (modify) | Six `KNOBS` entries |
+| `common.py` (modify) | Seven `KNOBS` entries |
 | `scheduler.py` (modify) | One `Schedule` entry |
 | `brief.py` (modify) | `mode_comprehend`, `MODES`, `JOB_MODES` |
-| `docker-compose.yml` (modify) | Six anchor lines |
+| `docker-compose.yml` (modify) | Seven anchor lines |
 | `Dockerfile` (modify) | `comprehend.py` on the COPY line |
 | `.github/workflows/docker-publish.yml` (modify) | `paths:` filter and both ruff lists |
 | `tests/test_db.py` (modify) | One line in the migration manifest |
@@ -560,7 +564,7 @@ def pending_triage(conn, version: int, limit: int) -> list[dict]:
     ]
 ```
 
-- [ ] **Step 4: Add the six knobs**
+- [ ] **Step 4: Add the seven knobs**
 
 In `common.py`, immediately after the line `"CAPTURE_ENABLED": Knob(bool, False),`:
 
@@ -570,11 +574,13 @@ In `common.py`, immediately after the line `"CAPTURE_ENABLED": Knob(bool, False)
     "COMPREHEND_INTEGRATE_BATCH": Knob(int, 5),
     "COMPREHEND_MAX_ITEMS": Knob(int, 300),
     "COMPREHEND_SAMPLE_PER_DAY": Knob(int, 20),
-    "NEWSBRIEF_TRIAGE_MODEL": Knob(str, ""),
-    "NEWSBRIEF_INTEGRATE_MODEL": Knob(str, ""),
+    "TRIAGE_MODEL": Knob(str, "", env="NEWSBRIEF_TRIAGE_MODEL"),
+    "INTEGRATE_MODEL": Knob(str, "", env="NEWSBRIEF_INTEGRATE_MODEL"),
 ```
 
-The two model knobs default to `""`, never to a copy of the model id. A duplicated literal strands both calls on the old model the moment `NEWSBRIEF_MODEL` moves, silently.
+**Note the shape of the last two.** The KEY is the attribute name and `env=` carries the prefixed environment variable — matching `"SIGNALS_MODEL": Knob(str, "", env="NEWSBRIEF_SIGNALS_MODEL")` at `common.py:249` and `"MODEL": Knob(str, ..., env="NEWSBRIEF_MODEL")` at `common.py:183`. They are therefore read as `common.TRIAGE_MODEL` and `common.INTEGRATE_MODEL`, **not** `common.TRIAGE_MODEL`. Every reference in Tasks 5, 7 and 10 uses the unprefixed form.
+
+Both default to `""`, never to a copy of the model id. A duplicated literal strands both calls on the old model the moment `NEWSBRIEF_MODEL` moves, silently.
 
 - [ ] **Step 5: Add the compose anchor lines**
 
@@ -765,11 +771,11 @@ Expected: FAIL — `module 'comprehend' has no attribute 'form_matches'`.
 
 - [ ] **Step 3: Implement the matcher**
 
-Add to `comprehend.py`, after `pending_triage`:
+**Add `import re` to the TOP import block of `comprehend.py`**, beside `import time`. Do not append it lower down: ruff's E402 is active (there is no `pyproject.toml` or `ruff.toml` in this repo, so defaults apply), and a mid-file module-level import fails `ruff check .` with exit 1. E402 constrains an import's POSITION, not when it is added — the move that satisfies it is always editing the top block.
+
+Then add to `comprehend.py`, after `pending_triage`:
 
 ```python
-import re
-
 # Surface forms that are also ordinary English words. A form on this list never
 # matches, whatever entity claims it. Short and hand-maintained on purpose: a
 # large stop-list hides a matcher that is too loose.
@@ -896,16 +902,26 @@ Append to `tests/test_comprehend_triage.py`:
 
 ```python
 def _outlet(kb, name="Reuters"):
+    """Get-or-create. `outlets` is UNIQUE (lower(name)) (0006:25), so a helper
+    that always inserts raises UniqueViolation the second time a test calls it
+    -- and several tests below add multiple items."""
+    row = kb.execute(
+        "SELECT id FROM outlets WHERE lower(name) = lower(%s)", (name,)
+    ).fetchone()
+    if row:
+        return row[0]
     return kb.execute(
         "INSERT INTO outlets (name, kind) VALUES (%s, 'wire') RETURNING id", (name,)
     ).fetchone()[0]
 
 
 def _add_item(kb, title, body=None, outlet_id=None, h="H1"):
+    """`items` is UNIQUE (outlet_id, content_hash), so callers adding more than
+    one item to the same outlet must pass distinct `h`."""
     outlet_id = outlet_id or _outlet(kb)
     return kb.execute(
-        "INSERT INTO items (outlet_id, url, title, body, content_hash) "
-        "VALUES (%s, 'u', %s, %s, %s) RETURNING id",
+        "INSERT INTO items (outlet_id, url, title, body, content_hash, published_at) "
+        "VALUES (%s, 'u', %s, %s, %s, now()) RETURNING id",
         (outlet_id, title, body, h),
     ).fetchone()[0]
 
@@ -960,12 +976,20 @@ def test_the_rules_half_reads_the_body_as_well_as_the_title(kb):
 
 
 def test_a_live_claim_topic_is_tracked_but_a_terminal_one_is_not(kb):
+    # first_seen is DATE NOT NULL with no default (0006:193): omitting it
+    # raises NotNullViolation. last_reaffirmed is nullable (0006:194) but is
+    # supplied anyway, because claim_store._row_to_claim treats a NULL there as
+    # a HARD ERROR -- the column's nullability and the loader's contract
+    # disagree, and a fixture that exercises the disagreement will confuse
+    # whoever debugs it next.
     kb.execute(
-        "INSERT INTO claims (claim, topic, status) VALUES ('c', 'Sahel', 'standing')"
+        "INSERT INTO claims (claim, topic, status, first_seen, last_reaffirmed) "
+        "VALUES ('c', 'Sahel', 'standing', CURRENT_DATE, CURRENT_DATE)"
     )
     kb.execute(
-        "INSERT INTO claims (claim, topic, status, resolved_on) "
-        "VALUES ('d', 'Balkans', 'withdrawn', CURRENT_DATE)"
+        "INSERT INTO claims (claim, topic, status, resolved_on, first_seen, "
+        "  last_reaffirmed) "
+        "VALUES ('d', 'Balkans', 'withdrawn', CURRENT_DATE, CURRENT_DATE, CURRENT_DATE)"
     )
     kb.commit()
     index = comprehend.SurfaceIndex.build(kb)
@@ -1179,7 +1203,7 @@ Return a verdict for every id you were given, and no others."""
 
 def _triage_model() -> str:
     """An unset NEWSBRIEF_TRIAGE_MODEL means "follow MODEL"."""
-    return common.NEWSBRIEF_TRIAGE_MODEL or common.MODEL
+    return common.TRIAGE_MODEL or common.MODEL
 
 
 def build_triage_request(items: list[dict]) -> dict:
@@ -1308,12 +1332,24 @@ def select_sampled(conn, version: int, per_day: int) -> list[int]:
     Cheap because it is capped: removing the model triage half entirely and
     integrating by recency was considered and rejected -- it moves integration
     from ~120/day to ~1,200/day in the expensive tier.
+
+    PER DAY, NOT PER RUN. The schedule is hourly, so a bare LIMIT would draw
+    the cap on every fire: 20 becomes 480/day in the EXPENSIVE tier, turning a
+    ~17% control-arm overhead into ~400% -- the same order of cost error as the
+    proposal this arm was chosen over.
     """
+    used = conn.execute(
+        "SELECT count(*) FROM item_triage "
+        "WHERE reason = 'sampled' AND created_at >= date_trunc('day', now())"
+    ).fetchone()[0]
+    remaining = max(0, per_day - used)
+    if remaining == 0:
+        return []
     rows = conn.execute(
         "SELECT item_id FROM item_triage "
         "WHERE triage_prompt_version = %s AND verdict = 'immaterial' "
         "ORDER BY item_id DESC LIMIT %s",
-        (version, per_day),
+        (version, remaining),
     ).fetchall()
     return [r[0] for r in rows]
 ```
@@ -1585,7 +1621,7 @@ _INTEGRATE_TOOL = {
 
 
 def _integrate_model() -> str:
-    return common.NEWSBRIEF_INTEGRATE_MODEL or common.MODEL
+    return common.INTEGRATE_MODEL or common.MODEL
 
 
 def build_integration_request(
@@ -2032,6 +2068,36 @@ def test_an_instrument_entity_shadowing_a_company_is_refused(kb):
     assert tally.instrument_entity_refused == 1
 
 
+def test_an_event_this_pipeline_CREATED_can_be_retrieved_as_a_candidate(kb):
+    """The round-trip, and it is the most important test in this file.
+
+    Every other test here builds its candidate events with a fixture that sets
+    occurred_at explicitly. Production does not: it writes what
+    write_extraction writes. An earlier draft of this plan omitted occurred_at
+    from the INSERT, so every created event had NULL, candidate_events'
+    `occurred_at >= now() - interval` excluded it, events_matched could never
+    leave 0, and the corroboration floor failed BY CONSTRUCTION -- with the
+    whole suite green, because the fixtures built rows production cannot.
+
+    That is tdd-plan-fixtures-drift-from-contracts exactly. Write the row with
+    the real function, then read it back with the real query.
+    """
+    iid = _item(kb)
+    kb.commit()
+    tally = comprehend.Tally()
+    index = comprehend.SurfaceIndex([])
+    assert comprehend.write_extraction(kb, _fresh(iid), index, tally) is True
+    kb.commit()
+
+    entity_id = kb.execute("SELECT id FROM entities").fetchone()[0]
+    candidates = comprehend.candidate_events(kb, [entity_id], comprehend.Tally())
+    assert len(candidates) == 1, (
+        "an event this pipeline just created must be offerable as a candidate, "
+        "or corroboration is impossible no matter how well the matcher works"
+    )
+    assert candidates[0]["summary"] == "Border checks tightened"
+
+
 def test_reprocessing_the_same_item_does_not_duplicate_assertions(kb):
     iid = _item(kb)
     kb.commit()
@@ -2118,11 +2184,24 @@ def write_extraction(conn, extraction: dict, index: SurfaceIndex, tally: Tally) 
                     event_id = ev["candidate_id"]
                     tally.events_matched += 1
                 else:
+                    # occurred_at is NOT optional here, and omitting it is fatal
+                    # rather than untidy. candidate_events filters
+                    # `occurred_at >= now() - interval`, which is FALSE for
+                    # NULL -- so an event created without one can never be
+                    # offered as a candidate, events_matched stays 0, and the
+                    # corroboration floor fails BY CONSTRUCTION while the
+                    # matcher is working perfectly.
+                    #
+                    # It is taken from the item's published_at, an observed fact
+                    # capture already stores, rather than extracted: a model
+                    # guess here would be one more unmeasured field, and article
+                    # publication is a good enough proxy for a 14-day window.
                     event_id = conn.execute(
                         "INSERT INTO events (summary, type, commitment_state, "
-                        "  extractor_model, prompt_version) "
-                        "VALUES (%s, %s, %s, %s, %s) RETURNING id",
+                        "  occurred_at, extractor_model, prompt_version) "
+                        "VALUES (%s, %s, %s, COALESCE(%s, now()), %s, %s) RETURNING id",
                         (ev["summary"], ev["type"], ev["commitment_state"],
+                         extraction.get("published_at"),
                          _integrate_model(), INTEGRATE_PROMPT_VERSION),
                     ).fetchone()[0]
                     tally.events_created += 1
@@ -2167,14 +2246,23 @@ def write_extraction(conn, extraction: dict, index: SurfaceIndex, tally: Tally) 
 
 
 def write_batch(conn, extractions, index: SurfaceIndex, tally: Tally) -> int:
-    """One transaction for the batch, one savepoint per item inside it."""
-    return sum(
-        1 for e in extractions if write_extraction(conn, e, index, tally)
-    )
+    """One transaction for the batch, one savepoint per item inside it.
+
+    The OUTER `conn.transaction()` is load-bearing and must not be removed as
+    redundant. db.connect() sets autocommit=False, so psycopg's
+    `conn.transaction()` is a real transaction when it is the outermost block
+    and a SAVEPOINT only when one is already open. Without this wrapper the
+    behaviour of write_extraction depends on whether the caller happens to have
+    an open transaction -- which differs between a test that just committed and
+    the run loop, which has an open SELECT. A test would then assert semantics
+    production never uses.
+    """
+    with conn.transaction():
+        return sum(1 for e in extractions if write_extraction(conn, e, index, tally))
 ```
 
 - [ ] **Step 4: Run to verify they pass.** 6 new tests.
-- [ ] **Step 5: Full gate.** Expected: **1513 passed** (1507 + 6).
+- [ ] **Step 5: Full gate.** Expected: **1514 passed** (1507 + 7).
 - [ ] **Step 6: Commit**
 
 Subject: `feat(comprehend): a malformed extraction costs one item, not its batch`
@@ -2368,16 +2456,27 @@ def run(conn) -> Tally:
 
     # --- Integration.
     rows = conn.execute(
-        "SELECT i.id, i.title, i.body, i.outlet_id FROM items i "
+        "SELECT i.id, i.title, i.body, i.outlet_id, i.published_at FROM items i "
         "JOIN item_triage t ON t.item_id = i.id "
         "WHERE t.verdict = 'material' AND t.integrate_attempts < 3 "
         "  AND (t.integrated_at IS NULL OR t.integrate_prompt_version < %s) "
         "ORDER BY i.id LIMIT %s",
         (INTEGRATE_PROMPT_VERSION, int(common.COMPREHEND_MAX_ITEMS)),
     ).fetchall()
+    # published_at is carried because write_extraction needs it for
+    # events.occurred_at. Without it every created event is invisible to
+    # candidate_events and corroboration is impossible.
     material_items = [
-        {"id": r[0], "title": r[1], "body": r[2] or "", "outlet_id": r[3]} for r in rows
+        {
+            "id": r[0],
+            "title": r[1],
+            "body": r[2] or "",
+            "outlet_id": r[3],
+            "published_at": r[4],
+        }
+        for r in rows
     ]
+    published = {it["id"]: it["published_at"] for it in material_items}
 
     for batch in _chunk(material_items, int(common.COMPREHEND_INTEGRATE_BATCH)):
         if time.monotonic() >= deadline:
@@ -2421,6 +2520,8 @@ def run(conn) -> Tally:
             conn.commit()
             continue
 
+        for e in extractions:
+            e["published_at"] = published.get(e["item_id"])
         write_batch(conn, extractions, index, tally)
         conn.commit()
 
@@ -2439,7 +2540,7 @@ def run(conn) -> Tally:
 **One thing to watch, and it has bitten this repo before.** `_post_messages` uses `SIGNALS_TIMEOUT` and `SIGNALS_MAX_ATTEMPTS` — sized for the signals extraction. The integration call runs at `max_tokens=8192` against a larger prompt, so it is a materially slower request. `signals-extraction-separate-call-followup` records the exact failure: a 30s timeout copied from a Haiku call was too short for Sonnet, the call timed out, and the day's signals were wiped. If integration calls start failing on read timeouts, that is the cause — raise the timeout for this path rather than shortening the prompt.
 
 - [ ] **Step 4: Run to verify it passes.**
-- [ ] **Step 5: Full gate.** Expected: **1514 passed** (1513 + 1).
+- [ ] **Step 5: Full gate.** Expected: **1515 passed** (1514 + 1).
 - [ ] **Step 6: Commit**
 
 Subject: `feat(comprehend): the pass runs end to end, still reading nothing back`
@@ -2596,7 +2697,7 @@ if __name__ == "__main__":
 Run: `py scripts/score_comprehension.py`
 Expected: exit 1, "no rows" for each enum and "no events to measure". An empty KB must FAIL the gate, not pass it vacuously — that is the whole shape this repo keeps getting wrong.
 
-- [ ] **Step 3: Full gate.** Expected: **1514 passed** (unchanged; the script has no tests of its own because it is a read-only reporting tool whose logic is thresholds).
+- [ ] **Step 3: Full gate.** Expected: **1515 passed** (unchanged; the script has no tests of its own because it is a read-only reporting tool whose logic is thresholds).
 
 - [ ] **Step 4: Commit**
 
@@ -2627,6 +2728,25 @@ Subject: `feat(comprehend): the gate is pre-registered, and an empty KB fails it
 
 **Type consistency:** `Tally` field names in Task 2 match every increment in Tasks 4-10. `SurfaceForm.reason` values match the `item_triage.reason` CHECK in Task 1. `parse_integration_response`'s output shape matches `write_extraction`'s input. `record_triage`'s argument order is identical at all seven call sites.
 
-**Soft spot found by this review and closed:** Task 10 originally called `brief.anthropic_request`, a name inferred from the pattern in `claim_verify.py` and never checked. The real function is `brief._post_messages` at `brief.py:2861`, now verified and cited. The plan also now records that its timeout is sized for the signals call, which is the recorded cause of a previous post-generation failure on a slower model.
-
 **Remaining assumption the first implementer should verify:** `outlets` is read into a dict in Task 10 via `SELECT id, name FROM outlets`. At 26 feeds this is trivially small, but if the outlet table has grown well beyond the feed count on the host, scope that query rather than loading it whole.
+
+---
+
+## Defects found by red-team review, and fixed
+
+Recorded because most of them would have produced a **green suite and a dead pipeline**, which is this plan's own stated worst case.
+
+| Defect | Why it mattered |
+|---|---|
+| **`events.occurred_at` was never written** | Nullable, so every created event had NULL. `candidate_events` filters `occurred_at >= now() - interval`, false for NULL — so no self-created event could ever be a candidate, `events_matched` was pinned at 0, and the corroboration floor failed **by construction**. Every test passed, because the fixtures set `occurred_at` explicitly: rows production cannot make. Textbook `tdd-plan-fixtures-drift-from-contracts`. Now taken from `items.published_at`, with a round-trip test that writes with the real function and reads back with the real query. |
+| **`write_batch` opened no transaction** | `db.connect()` is `autocommit=False`, so `conn.transaction()` is a real transaction when outermost and a SAVEPOINT only when one is open. The test committed first, so it exercised the transaction path; the run loop has an open SELECT, so production takes the savepoint path. The savepoint test asserted semantics production never uses. |
+| **`select_sampled` was per-run, not per-day** | Hourly schedule × 20 = 480/day in the expensive tier, not 20. A ~400% overhead where §5.3 costed ~17% — the same order of cost error as the proposal this control arm was chosen over. |
+| **`_outlet` always INSERTed** | `outlets` is `UNIQUE (lower(name))`; every test adding a second item raised `UniqueViolation`. Now get-or-create. |
+| **`claims` fixture omitted `first_seen`** | `DATE NOT NULL`, no default — `NotNullViolation`. |
+| **Mid-file `import re` and `import pytest as _pytest`** | ruff E402 is active (no ruff config in this repo); both fail `ruff check .` with exit 1. Verified with a live probe. This trap is already written down in `brief-local-run`, and the plan walked into it anyway. |
+| **Knob keys were prefixed** | Convention is key = attribute, `env=` carries the prefix (`common.py:183`, `:249`). The plan would have produced `common.NEWSBRIEF_TRIAGE_MODEL`. |
+| **"six knobs" while listing seven** | Counting error, corrected throughout. |
+
+**One review claim was wrong:** the report stated `HEAD` was `9264278`. That was HEAD at session start; the spec and six other commits have landed since. The underlying advice — verify the baseline rather than trusting a written number — is right regardless, and is now in Global Constraints.
+
+**One review claim was half right:** `first_seen` is `NOT NULL`, but `last_reaffirmed` is nullable (`0006:194`). The fixture supplies both anyway, for the different reason that `claim_store._row_to_claim` treats a NULL `last_reaffirmed` as a hard error — the column's nullability and the loader's contract disagree.
