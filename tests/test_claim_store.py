@@ -10,6 +10,7 @@ import pytest
 
 import brief_memory
 import claim_store
+import conftest
 import db
 
 pytestmark = pytest.mark.skipif(
@@ -69,11 +70,15 @@ def test_0007_rolls_back_and_reapplies(store):
     BACK on rollback, not merely be dropped -- 0006 owns it, so leaving it
     missing would corrupt the schema 0006 promises.
 
-    steps=2 to revert past 0008 too: `store` is migrated through whatever is
-    newest, and this test is specifically about 0007, not about the top of
-    the stack."""
-    db.run_migrations(store, direction="down", steps=2)
+    The step count is derived: `store` is migrated through whatever is newest,
+    and this test is about 0007, not about the top of the stack. Written as a
+    literal it went stale on the next migration (news-brief-5db)."""
+    target = "0007_claim_retirement"
+    reverted = db.run_migrations(
+        store, direction="down", steps=conftest.steps_back_through(store, target)
+    )
     store.commit()
+    assert reverted[-1] == target, f"the rollback must end at {target}"
     cols = store.execute(
         "SELECT 1 FROM information_schema.columns "
         "WHERE table_name = 'claims' AND column_name = 'retired_on'"

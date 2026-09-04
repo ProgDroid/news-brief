@@ -25,6 +25,30 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # means the services block is broken, not that the test is optional.
 
 
+def steps_back_through(conn, version: str) -> int:
+    """Down-steps that revert `version`, as the last migration reverted.
+
+    `run_migrations(direction="down")` counts from the TOP of the stack, so a
+    test about one migration has to know how many newer ones sit above it. Every
+    test that wrote that count as a literal has since been wrong: adding 0007
+    broke two, and adding 0008 broke three more (news-brief-5db). One of them
+    was the negative control for the rollback test, which then reverted the
+    wrong migration and kept PASSING while asserting nothing -- the failure this
+    helper exists to end, because it is silent and the loud ones are not.
+
+    Deriving from `applied_versions` means the count follows the stack: a new
+    migration on top changes the number this returns and needs no test edit.
+    """
+    import db  # local: sys.path is extended above, at module scope
+
+    applied = db.applied_versions(conn)  # ascending
+    assert version in applied, (
+        f"{version} is not applied, so no number of down-steps reaches it; "
+        f"applied: {applied}"
+    )
+    return len(applied) - applied.index(version)
+
+
 def pytest_configure(config):
     # The parameter name is fixed by pytest's hookspec and unfortunately collides
     # with our own `config` module. Harmless: the module is imported inside the

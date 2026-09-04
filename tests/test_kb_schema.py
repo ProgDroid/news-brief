@@ -13,7 +13,13 @@ import psycopg
 import pytest
 
 import brief_memory
+import conftest
 import db
+
+# The migration these rollback tests are ABOUT. Named rather than counted: the
+# count of steps back to it changes with every migration added on top, and the
+# name does not (news-brief-5db).
+TARGET = "0006_knowledge_base"
 
 pytestmark = pytest.mark.skipif(
     not db.is_configured(),
@@ -756,24 +762,27 @@ def test_0006_rolls_back_and_reapplies_against_the_real_directory(conn):
     should have been CREATE OR REPLACE. The last one shows only on the second
     up.
 
-    steps=3 rolls back 0008 (capture telemetry, no tables of its own that
-    reference the KB) and 0007 (retired_on, no tables of its own) as well as
-    0006, since "down" with no steps reverts only the most recent migration
-    and 0008 now sits on top of 0007 which sits on top of 0006.
+    The step count is DERIVED, not written down: "down" with no steps reverts
+    only the newest migration, so reaching 0006 means unwinding everything
+    stacked above it. Every migration added since has broken a literal count
+    here (news-brief-5db), so the number now follows the stack.
     """
     db.run_migrations(conn)
     conn.commit()
     assert KB_TABLES <= _tables(conn)
     assert "claims_freeze_claim_text" in _functions(conn)
 
-    reverted = db.run_migrations(conn, direction="down", steps=3)
+    stack = db.applied_versions(conn)
+    reverted = db.run_migrations(
+        conn, direction="down", steps=conftest.steps_back_through(conn, TARGET)
+    )
     conn.commit()
 
-    assert reverted == [
-        "0008_capture_telemetry",
-        "0007_claim_retirement",
-        "0006_knowledge_base",
-    ]
+    assert reverted[-1] == TARGET, f"the rollback must end at {TARGET}"
+    assert reverted[0] == stack[-1], (
+        "and must start at the top of the stack, unwinding every migration "
+        "layered above it rather than stopping short"
+    )
     assert not (KB_TABLES & _tables(conn)), "a KB table survived the rollback"
     assert "claims_freeze_claim_text" not in _functions(conn), (
         "DROP TABLE does not drop a function; the down migration must drop it"
@@ -784,11 +793,10 @@ def test_0006_rolls_back_and_reapplies_against_the_real_directory(conn):
 
     reapplied = db.run_migrations(conn)
     conn.commit()
-    assert reapplied == [
-        "0006_knowledge_base",
-        "0007_claim_retirement",
-        "0008_capture_telemetry",
-    ]
+    assert reapplied == reverted[::-1], (
+        "the second up must reapply exactly what came down, in reverse order"
+    )
+    assert db.applied_versions(conn) == stack, "the stack must be restored intact"
     assert KB_TABLES <= _tables(conn)
 
 
@@ -805,9 +813,13 @@ def test_the_rollback_assertion_can_actually_fail(conn, tmp_path, monkeypatch):
     and it leaves a window where an interrupt commits the migration without its
     function drop.
 
-    steps=3 reaches 0006's (stripped) down migration: with no steps, "down"
-    reverts only the most recent migration, and 0008 now sits on top of 0007
-    which sits on top of 0006.
+    TWO assertions, not one, and the second is the point. "The function
+    survived" is also true when the rollback never reached 0006 at all -- which
+    is exactly what happened twice (news-brief-5db): a literal step count went
+    stale as migrations landed, the run reverted the top of the stack instead,
+    and this control kept passing while proving nothing. Deriving the count
+    fixes today's staleness; asserting that the KB tables actually went away
+    is what makes the test notice if it ever silently misses 0006 again.
     """
     tmp = _copy_migrations(tmp_path)
     down = tmp / "0006_knowledge_base_down.sql"
@@ -823,9 +835,17 @@ def test_the_rollback_assertion_can_actually_fail(conn, tmp_path, monkeypatch):
 
     db.run_migrations(conn)
     conn.commit()
-    db.run_migrations(conn, direction="down", steps=3)
+    reverted = db.run_migrations(
+        conn, direction="down", steps=conftest.steps_back_through(conn, TARGET)
+    )
     conn.commit()
 
+    assert reverted[-1] == TARGET, f"the rollback must end at {TARGET}"
+    assert not (KB_TABLES & _tables(conn)), (
+        "the presence sibling: 0006's down migration must have RUN, or the "
+        "surviving function below is explained by the rollback never reaching "
+        "0006 rather than by the stripped DROP FUNCTION"
+    )
     assert "claims_freeze_claim_text" in _functions(conn), (
         "stripping DROP FUNCTION should leave the function behind; if it does "
         "not, the assertion in the test above cannot fail and proves nothing"
