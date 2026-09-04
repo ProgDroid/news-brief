@@ -108,6 +108,49 @@ jobs:
             type=raw,value=latest
             type=sha,format=short
 
+      # BUILD, SCAN, THEN PUSH — in that order, and the order is the whole point
+      # (news-brief-7u1).
+      #
+      # This was one `push: true` step followed by the scan, which meant the
+      # scan could only ever be an ALARM. On run 33396669659 it failed the run
+      # while the vulnerable image was already on ghcr.io as :latest — the tag
+      # the deploy tracks — so the gate went red after the thing it was gating
+      # had shipped. A red run that reads as "nothing was published" while
+      # something was published is worse than no scan at all.
+      #
+      # Building twice costs a step, not a rebuild: the first build populates
+      # the gha cache and the second is a cache hit that only pushes. `load:
+      # true` requires a single platform, which is what this image already is
+      # (linux/amd64).
+      - name: Build for scanning
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          push: false
+          load: true
+          tags: newsbrief:scan
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Fails the run on a fixable CRITICAL/HIGH. Now that this runs BEFORE the
+      # push, a failure here means the registry was never touched.
+      #
+      # The image ref is a local tag, which also retires the "Lowercase image
+      # ref" step this replaced: that existed only because trivy was handed the
+      # raw ${{ github.repository }}, which preserves the owner's case
+      # (ProgDroid) and made trivy reject the reference outright.
+      - name: Scan image for vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: newsbrief:scan
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+
+      # Reached only on a clean scan. A cache hit against the build above, so
+      # this publishes the layers that were scanned rather than rebuilding them.
       - name: Build and push
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
@@ -116,26 +159,3 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      # OCI references must be lowercase, but github.repository preserves the
-      # owner's case (e.g. ProgDroid). metadata-action lowercases its tags
-      # internally, so build/push is fine — but trivy gets the raw IMAGE_NAME
-      # and rejects an uppercase ref ("could not parse reference"). Lowercase once.
-      - name: Lowercase image ref
-        id: img
-        run: echo "ref=${REGISTRY}/${IMAGE_NAME,,}:latest" >> "$GITHUB_OUTPUT"
-        env:
-          REGISTRY: ${{ env.REGISTRY }}
-          IMAGE_NAME: ${{ env.IMAGE_NAME }}
-
-      # Scan the published image for OS/library CVEs. Fails the run on a fixable
-      # CRITICAL/HIGH so a vulnerable base image surfaces instead of shipping silently.
-      - name: Scan image for vulnerabilities
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          image-ref: ${{ steps.img.outputs.ref }}
-          format: table
-          exit-code: '1'
-          ignore-unfixed: true
-          severity: CRITICAL,HIGH
