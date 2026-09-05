@@ -40,6 +40,20 @@ COPY common.py config.py trading.py polygram_live.py validation.py brief.py capt
 COPY migrations/ ./migrations/
 COPY enrichment/ ./enrichment/
 
+# TEMPORARY (news-brief-115) — added 2026-09-05 so the pre-registered
+# comprehension gate can be run against production data from inside the
+# container:
+#
+#   docker compose run --rm --entrypoint python newsbrief scripts/score_comprehension.py
+#
+# It is here ONLY for that measurement. `scripts/` is otherwise deliberately
+# absent from this allowlist: nothing in it is runtime code, the supervisor
+# never invokes it, and the three older scripts have always been run from a
+# checkout. Once bqa.4b's gate numbers are recorded, delete this line —
+# news-brief-115 exists to make sure that happens rather than leaving a
+# widened image surface nobody remembers widening.
+COPY scripts/ ./scripts/
+
 # Logs and brief archive persist via volume mount. Run as a real non-root user
 # so a bare `docker run` is unprivileged too — docker-compose's `user:` still
 # overrides this with the host uid:gid that owns the volume.
