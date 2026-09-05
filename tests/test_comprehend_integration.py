@@ -109,3 +109,53 @@ def test_hitting_the_candidate_cap_is_counted(kb):
     got = comprehend.candidate_events(kb, [ent], tally)
     assert len(got) == comprehend.CANDIDATE_EVENT_CAP
     assert tally.candidate_cap_hit == 1
+
+
+def test_candidates_fan_in_across_entities_and_a_shared_event_appears_once(kb):
+    """Pins two things no existing fixture can distinguish: `= ANY(%s)` and
+    `SELECT DISTINCT`.
+
+    Every other test passes a single-element entity list, so an implementation
+    reading `= entity_ids[0]` satisfies all of them. And no other fixture joins
+    one event to two entities, so deleting DISTINCT costs nothing.
+    """
+    a = _entity(kb, "Ukraine")
+    b = _entity(kb, "Russia")
+    only_a = _event(kb, a, summary="A meets", days_ago=1)
+    only_b = _event(kb, b, summary="B meets", days_ago=2)
+    shared = _event(kb, a, summary="A and B meet", days_ago=3)
+    kb.execute(
+        "INSERT INTO event_entities (event_id, entity_id) VALUES (%s, %s)",
+        (shared, b),
+    )
+    kb.commit()
+
+    rows = comprehend.candidate_events(kb, [a, b], comprehend.Tally())
+    ids = [r["id"] for r in rows]
+    assert sorted(ids) == sorted([only_a, only_b, shared]), (
+        "all three must come back: an implementation matching only "
+        "entity_ids[0] drops the event reachable solely through b"
+    )
+    assert len(ids) == len(set(ids)), (
+        "the shared event joins twice; without SELECT DISTINCT it comes back "
+        "twice and the model sees one candidate under two identical ids"
+    )
+
+
+def test_candidates_come_back_newest_first(kb):
+    """ORDER BY occurred_at DESC decides WHICH events survive the cap, and the
+    cap test gives every row the same days_ago, so nothing pins it. Drop the
+    ORDER BY and the cap starts keeping arbitrary events instead of recent
+    ones -- a silent quality loss, because the COUNT stays correct.
+    """
+    e = _entity(kb)
+    oldest = _event(kb, e, summary="oldest", days_ago=10)
+    newest = _event(kb, e, summary="newest", days_ago=1)
+    middle = _event(kb, e, summary="middle", days_ago=5)
+    kb.commit()
+
+    rows = comprehend.candidate_events(kb, [e], comprehend.Tally())
+    assert [r["id"] for r in rows] == [newest, middle, oldest], (
+        "newest first; the insertion order above is deliberately not the "
+        "expected order, so a missing ORDER BY cannot pass by coincidence"
+    )
