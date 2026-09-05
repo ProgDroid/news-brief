@@ -673,3 +673,177 @@ def _validate_item(row, item_ids, entity_ids, event_ids) -> dict | None:
     if not entities or not events:
         return None
     return {"item_id": item_id, "entities": entities, "events": events}
+
+
+def _resolve_entity(conn, spec: dict, tally: Tally) -> int | None:
+    """A candidate id, or an upserted new entity. None means refused."""
+    if "candidate_id" in spec:
+        tally.entities_resolved += 1
+        return spec["candidate_id"]
+
+    name, etype = spec["name"], spec["type"]
+    # bqa.9 item 5, enforced where the code can see it. The prompt states the
+    # rule too, but jx9.5 showed a guard on a model-supplied field gets walked
+    # around by the model choosing the other value.
+    if etype == "instrument":
+        shadowed = conn.execute(
+            "SELECT 1 FROM entity_instruments ei JOIN entities e ON e.id = ei.entity_id "
+            "WHERE lower(ei.symbol) = lower(%s) AND e.type = 'company' LIMIT 1",
+            (name,),
+        ).fetchone()
+        if shadowed:
+            tally.instrument_entity_refused += 1
+            log.warning(
+                f"Comprehend: refused instrument entity {name!r}; a company "
+                f"already maps that symbol (one entity per company)"
+            )
+            return None
+
+    row = conn.execute(
+        "INSERT INTO entities (name, type, aliases, extractor_model, prompt_version) "
+        "VALUES (%s, %s, %s, %s, %s) "
+        "ON CONFLICT (lower(name), type) DO NOTHING RETURNING id",
+        (
+            name,
+            etype,
+            spec.get("aliases") or [],
+            _integrate_model(),
+            INTEGRATE_PROMPT_VERSION,
+        ),
+    ).fetchone()
+    if row:
+        tally.entities_created += 1
+        return row[0]
+    tally.entities_resolved += 1
+    return conn.execute(
+        "SELECT id FROM entities WHERE lower(name) = lower(%s) AND type = %s",
+        (name, etype),
+    ).fetchone()[0]
+
+
+def write_extraction(conn, extraction: dict, index: SurfaceIndex, tally: Tally) -> bool:
+    """Write one item's extraction inside its OWN savepoint.
+
+    capture.store_items already established this pattern and documented why:
+    each entry gets its own savepoint so neither a duplicate nor a rejected
+    entry can lose the entries around it. Here the payload is far more
+    expensive to re-derive, so the argument is stronger, not weaker.
+
+    Returns True if the item was integrated.
+    """
+    item_id = extraction["item_id"]
+    # A new event has no unique key to ON CONFLICT against, so re-running the
+    # same extraction (a retry, a re-queued item) would otherwise mint a
+    # second event and a second assertion every time. integrated_at is the
+    # only signal that this item's writes already landed; treat it as a
+    # no-op rather than re-deriving rows that would fail to dedupe.
+    already = conn.execute(
+        "SELECT 1 FROM item_triage WHERE item_id = %s AND verdict = 'material' "
+        "AND integrated_at IS NOT NULL",
+        (item_id,),
+    ).fetchone()
+    if already:
+        return True
+    try:
+        with conn.transaction():
+            entity_ids = []
+            for spec in extraction["entities"]:
+                eid = _resolve_entity(conn, spec, tally)
+                if eid is not None:
+                    entity_ids.append(eid)
+                    if "name" in spec:
+                        index.add_entity(eid, spec["name"], spec.get("aliases") or [])
+            if not entity_ids:
+                raise ValueError("no entity survived resolution")
+
+            for ev in extraction["events"]:
+                if "candidate_id" in ev:
+                    event_id = ev["candidate_id"]
+                    tally.events_matched += 1
+                else:
+                    # occurred_at is NOT optional here, and omitting it is fatal
+                    # rather than untidy. candidate_events filters
+                    # `occurred_at >= now() - interval`, which is FALSE for
+                    # NULL -- so an event created without one can never be
+                    # offered as a candidate, events_matched stays 0, and the
+                    # corroboration floor fails BY CONSTRUCTION while the
+                    # matcher is working perfectly.
+                    #
+                    # It is taken from the item's published_at, an observed fact
+                    # capture already stores, rather than extracted: a model
+                    # guess here would be one more unmeasured field, and article
+                    # publication is a good enough proxy for a 14-day window.
+                    event_id = conn.execute(
+                        "INSERT INTO events (summary, type, commitment_state, "
+                        "  occurred_at, extractor_model, prompt_version) "
+                        "VALUES (%s, %s, %s, COALESCE(%s, now()), %s, %s) RETURNING id",
+                        (
+                            ev["summary"],
+                            ev["type"],
+                            ev["commitment_state"],
+                            extraction.get("published_at"),
+                            _integrate_model(),
+                            INTEGRATE_PROMPT_VERSION,
+                        ),
+                    ).fetchone()[0]
+                    tally.events_created += 1
+
+                for eid in entity_ids:
+                    conn.execute(
+                        "INSERT INTO event_entities (event_id, entity_id) "
+                        "VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                        (event_id, eid),
+                    )
+                # source_relationship is deliberately NOT written: no rubric
+                # exists for it, and bqa.8 owns its fate.
+                written = conn.execute(
+                    "INSERT INTO assertions (item_id, event_id, standing, "
+                    "  extractor_model, prompt_version) "
+                    "VALUES (%s, %s, %s, %s, %s) "
+                    "ON CONFLICT (item_id, event_id) DO NOTHING RETURNING id",
+                    (
+                        item_id,
+                        event_id,
+                        ev["standing"],
+                        _integrate_model(),
+                        INTEGRATE_PROMPT_VERSION,
+                    ),
+                ).fetchone()
+                if written:
+                    tally.assertions_written += 1
+
+            conn.execute(
+                "UPDATE item_triage SET integrated_at = now(), "
+                "  integrate_prompt_version = %s "
+                "WHERE item_id = %s AND verdict = 'material'",
+                (INTEGRATE_PROMPT_VERSION, item_id),
+            )
+    except Exception:
+        tally.items_lost_to_savepoint += 1
+        tally.failed_integration += 1
+        log.warning(
+            f"Comprehend: item {item_id} rolled back its savepoint", exc_info=True
+        )
+        conn.execute(
+            "UPDATE item_triage SET integrate_attempts = integrate_attempts + 1 "
+            "WHERE item_id = %s",
+            (item_id,),
+        )
+        return False
+    return True
+
+
+def write_batch(conn, extractions, index: SurfaceIndex, tally: Tally) -> int:
+    """One transaction for the batch, one savepoint per item inside it.
+
+    The OUTER `conn.transaction()` is load-bearing and must not be removed as
+    redundant. db.connect() sets autocommit=False, so psycopg's
+    `conn.transaction()` is a real transaction when it is the outermost block
+    and a SAVEPOINT only when one is already open. Without this wrapper the
+    behaviour of write_extraction depends on whether the caller happens to have
+    an open transaction -- which differs between a test that just committed and
+    the run loop, which has an open SELECT. A test would then assert semantics
+    production never uses.
+    """
+    with conn.transaction():
+        return sum(1 for e in extractions if write_extraction(conn, e, index, tally))

@@ -305,3 +305,260 @@ def test_a_row_with_two_good_entities_is_accepted_with_BOTH():
     assert len(got[0]["entities"]) == 2, (
         "both entities must survive -- not just a truthy non-empty check"
     )
+
+
+def _item(kb, title="Ukraine ceasefire", h="H1"):
+    outlet_id = kb.execute(
+        "INSERT INTO outlets (name, kind) VALUES ('Reuters', 'wire') "
+        "ON CONFLICT DO NOTHING RETURNING id"
+    ).fetchone()
+    if outlet_id is None:
+        outlet_id = kb.execute("SELECT id FROM outlets LIMIT 1").fetchone()
+    oid = outlet_id[0]
+    iid = kb.execute(
+        "INSERT INTO items (outlet_id, url, title, content_hash) "
+        "VALUES (%s, 'u', %s, %s) RETURNING id",
+        (oid, title, h),
+    ).fetchone()[0]
+    kb.execute(
+        "INSERT INTO item_triage (item_id, verdict, reason, triage_prompt_version) "
+        "VALUES (%s, 'material', 'topical', 1)",
+        (iid,),
+    )
+    return iid
+
+
+def _fresh(item_id, summary="Border checks tightened", name="Moldova"):
+    return {
+        "item_id": item_id,
+        "entities": [{"name": name, "type": "country", "aliases": []}],
+        "events": [
+            {
+                "summary": summary,
+                "type": "action",
+                "commitment_state": "in_force",
+                "standing": "reported",
+            }
+        ],
+    }
+
+
+def test_writing_an_extraction_creates_the_whole_chain(kb):
+    iid = _item(kb)
+    kb.commit()
+    tally = comprehend.Tally()
+    index = comprehend.SurfaceIndex([])
+
+    assert comprehend.write_extraction(kb, _fresh(iid), index, tally) is True
+    kb.commit()
+
+    assert kb.execute("SELECT count(*) FROM entities").fetchone()[0] == 1
+    assert kb.execute("SELECT count(*) FROM events").fetchone()[0] == 1
+    assert kb.execute("SELECT count(*) FROM event_entities").fetchone()[0] == 1
+    assert kb.execute("SELECT count(*) FROM assertions").fetchone()[0] == 1
+    assert (
+        kb.execute(
+            "SELECT integrated_at IS NOT NULL FROM item_triage WHERE item_id = %s",
+            (iid,),
+        ).fetchone()[0]
+        is True
+    )
+    assert tally.entities_created == 1
+    assert tally.events_created == 1
+    assert tally.assertions_written == 1
+
+
+def test_provenance_is_stamped_on_every_extracted_row(kb):
+    iid = _item(kb)
+    kb.commit()
+    comprehend.write_extraction(
+        kb, _fresh(iid), comprehend.SurfaceIndex([]), comprehend.Tally()
+    )
+    kb.commit()
+    for table in ("entities", "events", "assertions"):
+        row = kb.execute(
+            f"SELECT extractor_model, prompt_version FROM {table}"
+        ).fetchone()
+        assert row[0], f"{table}.extractor_model was not stamped"
+        assert row[1] == comprehend.INTEGRATE_PROMPT_VERSION
+
+
+def test_matching_a_candidate_event_records_corroboration(kb):
+    """Two items, two outlets, one event. This is the property claims cannot
+    represent and the reason this layer exists."""
+    ent = _entity(kb)
+    ev = _event(kb, ent)
+    other = kb.execute(
+        "INSERT INTO outlets (name, kind) VALUES ('Guardian', 'wire') RETURNING id"
+    ).fetchone()[0]
+    iid = kb.execute(
+        "INSERT INTO items (outlet_id, url, title, content_hash) "
+        "VALUES (%s, 'u', 't', 'H9') RETURNING id",
+        (other,),
+    ).fetchone()[0]
+    kb.execute(
+        "INSERT INTO item_triage (item_id, verdict, reason, triage_prompt_version) "
+        "VALUES (%s, 'material', 'topical', 1)",
+        (iid,),
+    )
+    kb.commit()
+
+    tally = comprehend.Tally()
+    extraction = {
+        "item_id": iid,
+        "entities": [{"candidate_id": ent}],
+        "events": [{"candidate_id": ev, "standing": "reported"}],
+    }
+    assert (
+        comprehend.write_extraction(kb, extraction, comprehend.SurfaceIndex([]), tally)
+        is True
+    )
+    kb.commit()
+
+    assert kb.execute("SELECT count(*) FROM events").fetchone()[0] == 1, (
+        "matching a candidate must NOT create a second event row"
+    )
+    assert tally.events_matched == 1
+    assert tally.events_created == 0
+
+
+def test_a_bad_item_does_not_take_its_neighbours_down(kb):
+    """THE savepoint test, and it is two assertions rather than one.
+
+    events.type is NOT NULL with no default, so one malformed extraction raises
+    a CHECK violation. Under a batch-wide transaction that aborts the whole
+    batch and loses all three items -- and an absence-only assertion would pass
+    identically against that broken version. The presence half is what proves
+    the savepoint exists.
+    """
+    good1 = _item(kb, "One", h="Ha")
+    bad = _item(kb, "Two", h="Hb")
+    good2 = _item(kb, "Three", h="Hc")
+    kb.commit()
+
+    batch = [
+        _fresh(good1, summary="A", name="Alpha"),
+        {  # bypasses the parser deliberately: an invalid enum reaching the DB
+            "item_id": bad,
+            "entities": [{"name": "Beta", "type": "country", "aliases": []}],
+            "events": [
+                {
+                    "summary": "B",
+                    "type": "NOT_A_TYPE",
+                    "commitment_state": "in_force",
+                    "standing": "reported",
+                }
+            ],
+        },
+        _fresh(good2, summary="C", name="Gamma"),
+    ]
+    tally = comprehend.Tally()
+    written = comprehend.write_batch(kb, batch, comprehend.SurfaceIndex([]), tally)
+    kb.commit()
+
+    # Absence: the bad item wrote nothing and is not marked done.
+    assert (
+        kb.execute(
+            "SELECT integrated_at FROM item_triage WHERE item_id = %s", (bad,)
+        ).fetchone()[0]
+        is None
+    )
+    assert not kb.execute(
+        "SELECT 1 FROM assertions a JOIN items i ON i.id = a.item_id WHERE i.id = %s",
+        (bad,),
+    ).fetchone()
+    # Presence: its neighbours survived. Without this the test passes against a
+    # batch-wide transaction that lost all three.
+    assert written == 2
+    for good in (good1, good2):
+        assert (
+            kb.execute(
+                "SELECT integrated_at IS NOT NULL FROM item_triage WHERE item_id = %s",
+                (good,),
+            ).fetchone()[0]
+            is True
+        )
+    assert tally.items_lost_to_savepoint == 1
+
+
+def test_an_instrument_entity_shadowing_a_company_is_refused(kb):
+    """bqa.9 item 5, enforced in CODE and not only in the prompt.
+
+    jx9.5 froze claim text on a MODEL-SUPPLIED field and the model simply chose
+    the other value. A guard must test something the code can see for itself.
+    """
+    company = kb.execute(
+        "INSERT INTO entities (name, type) VALUES ('Apple', 'company') RETURNING id"
+    ).fetchone()[0]
+    kb.execute(
+        "INSERT INTO entity_instruments (entity_id, symbol, asset_class) "
+        "VALUES (%s, 'AAPL', 'equity')",
+        (company,),
+    )
+    iid = _item(kb, h="Hd")
+    kb.commit()
+
+    tally = comprehend.Tally()
+    extraction = {
+        "item_id": iid,
+        "entities": [{"name": "AAPL", "type": "instrument", "aliases": []}],
+        "events": [
+            {
+                "summary": "Shares moved",
+                "type": "action",
+                "commitment_state": "in_force",
+                "standing": "reported",
+            }
+        ],
+    }
+    comprehend.write_extraction(kb, extraction, comprehend.SurfaceIndex([]), tally)
+    kb.commit()
+
+    assert (
+        kb.execute(
+            "SELECT count(*) FROM entities WHERE type = 'instrument'"
+        ).fetchone()[0]
+        == 0
+    )
+    assert tally.instrument_entity_refused == 1
+
+
+def test_an_event_this_pipeline_CREATED_can_be_retrieved_as_a_candidate(kb):
+    """The round-trip, and it is the most important test in this file.
+
+    Every other test here builds its candidate events with a fixture that sets
+    occurred_at explicitly. Production does not: it writes what
+    write_extraction writes. An earlier draft of this plan omitted occurred_at
+    from the INSERT, so every created event had NULL, candidate_events'
+    `occurred_at >= now() - interval` excluded it, events_matched could never
+    leave 0, and the corroboration floor failed BY CONSTRUCTION -- with the
+    whole suite green, because the fixtures built rows production cannot.
+
+    That is tdd-plan-fixtures-drift-from-contracts exactly. Write the row with
+    the real function, then read it back with the real query.
+    """
+    iid = _item(kb)
+    kb.commit()
+    tally = comprehend.Tally()
+    index = comprehend.SurfaceIndex([])
+    assert comprehend.write_extraction(kb, _fresh(iid), index, tally) is True
+    kb.commit()
+
+    entity_id = kb.execute("SELECT id FROM entities").fetchone()[0]
+    candidates = comprehend.candidate_events(kb, [entity_id], comprehend.Tally())
+    assert len(candidates) == 1, (
+        "an event this pipeline just created must be offerable as a candidate, "
+        "or corroboration is impossible no matter how well the matcher works"
+    )
+    assert candidates[0]["summary"] == "Border checks tightened"
+
+
+def test_reprocessing_the_same_item_does_not_duplicate_assertions(kb):
+    iid = _item(kb)
+    kb.commit()
+    for _ in range(2):
+        comprehend.write_extraction(
+            kb, _fresh(iid), comprehend.SurfaceIndex([]), comprehend.Tally()
+        )
+        kb.commit()
+    assert kb.execute("SELECT count(*) FROM assertions").fetchone()[0] == 1
