@@ -6,6 +6,7 @@ and every assertion here is about what Postgres actually does.
 
 import pytest
 
+import conftest
 import db
 
 pytestmark = pytest.mark.skipif(
@@ -116,7 +117,18 @@ def test_the_down_migration_removes_all_three(conn):
     """Executed, not assumed: no down migration is trusted until it has run."""
     db.run_migrations(conn)
     conn.commit()
-    db.run_migrations(conn, direction="down")
+    for table in ("capture_runs", "feed_polls", "feed_sightings"):
+        assert _columns(conn, table), (
+            f"{table} was never created; the absence check below would pass vacuously"
+        )
+    # Derived, not literal (news-brief-5db): a bare down-step reverts whatever
+    # sits on top of the stack, so a hardcoded one-step call would silently
+    # retarget this test to whichever migration lands after 0008.
+    db.run_migrations(
+        conn,
+        direction="down",
+        steps=conftest.steps_back_through(conn, "0008_capture_telemetry"),
+    )
     conn.commit()
     for table in ("capture_runs", "feed_polls", "feed_sightings"):
         assert not _columns(conn, table), f"{table} survived the down migration"
