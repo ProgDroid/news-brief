@@ -231,6 +231,17 @@ def test_a_float_entity_candidate_id_is_rejected():
     assert got == [], "a float candidate id must not stand in for the real id 1"
 
 
+def test_a_float_event_candidate_id_is_rejected():
+    """Mirrors the float-entity test on the event arm: `1.0 == 1`, so a float
+    satisfies the membership test there too, and `_is_id` is applied
+    identically at both sites -- fix-1's brief specified boolean-entity,
+    boolean-event and float-entity but no float-event, leaving this arm
+    untested."""
+    bad = dict(ONE, events=[{"candidate_id": 1.0, "standing": "reported"}])
+    got = comprehend.parse_integration_response(_extraction([bad]), {1}, {10}, {1})
+    assert got == [], "a float candidate id must not stand in for the real id 1"
+
+
 def test_an_item_id_that_was_never_sent_is_dropped():
     got = comprehend.parse_integration_response(_extraction([ONE]), {2}, {10}, {20})
     assert got == []
@@ -254,3 +265,43 @@ def test_a_new_entity_and_a_new_event_are_accepted():
     got = comprehend.parse_integration_response(_extraction([fresh]), {1}, set(), set())
     assert got[0]["entities"][0]["name"] == "Moldova"
     assert got[0]["events"][0]["type"] == "action"
+
+
+def test_a_row_with_one_bad_entity_is_rejected_ENTIRELY():
+    """All-or-nothing, and only a multi-entity row can show it.
+
+    Every other rejection test gives the bad row a single entity, where
+    "drop the whole row" and "drop the bad field, then reject if the list
+    is empty" produce the same answer. Here the row also carries a
+    perfectly good entity: all-or-nothing rejects the row, field-skipping
+    would return it holding just the good one.
+    """
+    bad = dict(
+        ONE,
+        entities=[
+            {"name": "Moldova", "type": "country", "aliases": []},
+            {"candidate_id": 999},
+        ],
+    )
+    got = comprehend.parse_integration_response(_extraction([bad]), {1}, {10}, {20})
+    assert got == [], "one bad entity must drop the whole row, not just itself"
+
+
+def test_a_row_with_two_good_entities_is_accepted_with_BOTH():
+    """Presence sibling for the test above. Rejecting a two-entity row is
+    also what a parser that cannot handle multi-entity rows at all would do,
+    and that failure is invisible while every other fixture is single-entity.
+    This proves the rejection above is about the bad entity, not the count.
+    """
+    good = dict(
+        ONE,
+        entities=[
+            {"name": "Moldova", "type": "country", "aliases": []},
+            {"candidate_id": 10},
+        ],
+    )
+    got = comprehend.parse_integration_response(_extraction([good]), {1}, {10}, {20})
+    assert len(got) == 1
+    assert len(got[0]["entities"]) == 2, (
+        "both entities must survive -- not just a truthy non-empty check"
+    )
