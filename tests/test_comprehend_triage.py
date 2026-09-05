@@ -64,3 +64,129 @@ def test_an_enabled_run_sees_the_item(kb, monkeypatch):
 
     assert tally.enabled is True
     assert tally.items_seen == 1
+
+
+def _outlet(kb, name="Reuters"):
+    """Get-or-create. `outlets` is UNIQUE (lower(name)) (0006:25), so a helper
+    that always inserts raises UniqueViolation the second time a test calls it
+    -- and several tests below add multiple items."""
+    row = kb.execute(
+        "SELECT id FROM outlets WHERE lower(name) = lower(%s)", (name,)
+    ).fetchone()
+    if row:
+        return row[0]
+    return kb.execute(
+        "INSERT INTO outlets (name, kind) VALUES (%s, 'wire') RETURNING id", (name,)
+    ).fetchone()[0]
+
+
+def _add_item(kb, title, body=None, outlet_id=None, h="H1"):
+    """`items` is UNIQUE (outlet_id, content_hash), so callers adding more than
+    one item to the same outlet must pass distinct `h`."""
+    outlet_id = outlet_id or _outlet(kb)
+    return kb.execute(
+        "INSERT INTO items (outlet_id, url, title, body, content_hash, published_at) "
+        "VALUES (%s, 'u', %s, %s, %s, now()) RETURNING id",
+        (outlet_id, title, body, h),
+    ).fetchone()[0]
+
+
+def test_a_tracked_entity_makes_an_item_material_with_no_model_call(kb):
+    kb.execute("INSERT INTO entities (name, type) VALUES ('Ukraine', 'country')")
+    item_id = _add_item(kb, "Ukraine signals a ceasefire")
+    kb.commit()
+
+    index = comprehend.SurfaceIndex.build(kb)
+    item = comprehend.pending_triage(kb, comprehend.TRIAGE_PROMPT_VERSION, 10)[0]
+    hit = comprehend.triage_by_rules(item, index)
+
+    assert hit is not None
+    assert hit.reason == "tracked_entity"
+    comprehend.record_triage(
+        kb, item_id, "material", hit.reason, None, comprehend.TRIAGE_PROMPT_VERSION
+    )
+    kb.commit()
+    row = kb.execute(
+        "SELECT verdict, reason, triage_model FROM item_triage WHERE item_id = %s",
+        (item_id,),
+    ).fetchone()
+    assert row == ("material", "tracked_entity", None), (
+        "triage_model must be NULL when no model ran -- a NOT NULL value here "
+        "would make the rules half indistinguishable from the model half"
+    )
+
+
+def test_an_untracked_item_is_not_matched_by_the_rules(kb):
+    """Absence assertion; the test above is its presence sibling."""
+    kb.execute("INSERT INTO entities (name, type) VALUES ('Ukraine', 'country')")
+    item_id = _add_item(kb, "Chip export controls tightened")
+    kb.commit()
+
+    index = comprehend.SurfaceIndex.build(kb)
+    item = comprehend.pending_triage(kb, comprehend.TRIAGE_PROMPT_VERSION, 10)[0]
+    assert comprehend.triage_by_rules(item, index) is None
+    assert item_id  # the item exists; it simply did not match
+
+
+def test_the_rules_half_reads_the_body_as_well_as_the_title(kb):
+    kb.execute("INSERT INTO entities (name, type) VALUES ('Ukraine', 'country')")
+    _add_item(kb, "A ceasefire is signalled", body="Officials in Ukraine confirmed.")
+    kb.commit()
+
+    index = comprehend.SurfaceIndex.build(kb)
+    item = comprehend.pending_triage(kb, comprehend.TRIAGE_PROMPT_VERSION, 10)[0]
+    assert comprehend.triage_by_rules(item, index) is not None
+
+
+def test_a_live_claim_topic_is_tracked_but_a_terminal_one_is_not(kb):
+    # first_seen is DATE NOT NULL with no default (0006:193): omitting it
+    # raises NotNullViolation. last_reaffirmed is nullable (0006:194) but is
+    # supplied anyway, because claim_store._row_to_claim treats a NULL there as
+    # a HARD ERROR -- the column's nullability and the loader's contract
+    # disagree, and a fixture that exercises the disagreement will confuse
+    # whoever debugs it next.
+    kb.execute(
+        "INSERT INTO claims (claim, topic, status, first_seen, last_reaffirmed) "
+        "VALUES ('c', 'Sahel', 'standing', CURRENT_DATE, CURRENT_DATE)"
+    )
+    kb.execute(
+        "INSERT INTO claims (claim, topic, status, resolved_on, first_seen, "
+        "  last_reaffirmed) "
+        "VALUES ('d', 'Balkans', 'withdrawn', CURRENT_DATE, CURRENT_DATE, CURRENT_DATE)"
+    )
+    kb.commit()
+    index = comprehend.SurfaceIndex.build(kb)
+
+    assert [f.reason for f in index.match("Sahel unrest deepens")] == ["tracked_claim"]
+    assert index.match("Balkans unrest deepens") == [], (
+        "a terminal claim's topic must not be tracked, or every settled "
+        "question stays permanently material"
+    )
+
+
+def test_a_triaged_item_is_not_returned_again_at_the_same_version(kb):
+    item_id = _add_item(kb, "Ukraine signals a ceasefire")
+    kb.commit()
+    assert len(comprehend.pending_triage(kb, 1, 10)) == 1
+
+    comprehend.record_triage(kb, item_id, "immaterial", "none", None, 1)
+    kb.commit()
+
+    assert comprehend.pending_triage(kb, 1, 10) == []
+    assert len(comprehend.pending_triage(kb, 2, 10)) == 1, (
+        "but a NEW triage prompt version must see it again"
+    )
+
+
+def test_a_failed_item_is_retried_until_the_ceiling(kb):
+    item_id = _add_item(kb, "Ukraine signals a ceasefire")
+    kb.commit()
+    comprehend.record_triage(kb, item_id, "failed", "error", None, 1)
+    kb.commit()
+    assert len(comprehend.pending_triage(kb, 1, 10)) == 1, "attempts=1 is retryable"
+
+    kb.execute("UPDATE item_triage SET attempts = 3 WHERE item_id = %s", (item_id,))
+    kb.commit()
+    assert comprehend.pending_triage(kb, 1, 10) == [], (
+        "at the ceiling it stops being selected, or it re-pays model cost forever"
+    )

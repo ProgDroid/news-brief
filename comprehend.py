@@ -241,3 +241,34 @@ class SurfaceIndex:
                 seen.add(key)
                 out.append(sf)
         return out
+
+
+def triage_by_rules(item: dict, index: SurfaceIndex) -> SurfaceForm | None:
+    """The tracked half. A database lookup, no model call.
+
+    Reads title AND body. The body is the RSS blurb -- capture.py stores
+    entry.get("summary"), not article text -- so it is short and there is no
+    window to choose.
+    """
+    text = f"{clean(item.get('title'))} {clean(item.get('body'))}"
+    hits = index.match(text)
+    return hits[0] if hits else None
+
+
+def record_triage(conn, item_id, verdict, reason, triage_model, version) -> None:
+    """Insert a verdict, or bump `attempts` on a retry at the same version.
+
+    ON CONFLICT rather than a plain INSERT because a failed row is retried, and
+    the unique key would otherwise make the first failure permanent until
+    someone bumped the prompt version.
+    """
+    conn.execute(
+        "INSERT INTO item_triage "
+        "  (item_id, verdict, reason, triage_model, triage_prompt_version) "
+        "VALUES (%s, %s, %s, %s, %s) "
+        "ON CONFLICT (item_id, triage_prompt_version) DO UPDATE SET "
+        "  verdict = EXCLUDED.verdict, reason = EXCLUDED.reason, "
+        "  triage_model = EXCLUDED.triage_model, "
+        "  attempts = item_triage.attempts + 1",
+        (item_id, verdict, reason, triage_model, version),
+    )
