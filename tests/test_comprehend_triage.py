@@ -295,3 +295,42 @@ def test_a_missing_tool_block_raises():
         comprehend.parse_triage_response(
             {"stop_reason": "end_turn", "content": []}, {1}
         )
+
+
+def test_a_tool_block_without_an_items_list_raises():
+    """The tool can fire with `input` present and no `items` in it. Without
+    this test the isinstance guard is a comment -- nothing enters it, and
+    deleting it turns a clear ValueError at the boundary into a TypeError deep
+    in the row loop, where the message names neither the tool nor the cause."""
+    resp = {
+        "content": [
+            {"type": "tool_use", "name": "emit_triage", "input": {"verdicts": []}}
+        ]
+    }
+    with pytest.raises(ValueError, match="items"):
+        comprehend.parse_triage_response(resp, {1})
+
+
+def test_a_malformed_row_is_dropped_without_losing_its_neighbours():
+    """Rows are filtered one at a time, not validated as a batch: a single bad
+    row must not discard the good ones alongside it. Asserts BOTH halves in one
+    equality -- the malformed rows are absent AND the well-formed row survives.
+    An `== {}` assertion would pass for a parser that dropped everything, which
+    is the failure this shape is meant to exclude."""
+    resp = {
+        "content": [
+            {
+                "type": "tool_use",
+                "name": "emit_triage",
+                "input": {
+                    "items": [
+                        {"id": "7", "material": True},  # id is a string
+                        {"id": 8, "material": "yes"},  # material is a string
+                        {"id": 9, "material": True},  # the only well-formed row
+                        "not even a dict",
+                    ]
+                },
+            }
+        ]
+    }
+    assert comprehend.parse_triage_response(resp, {7, 8, 9}) == {9: True}
