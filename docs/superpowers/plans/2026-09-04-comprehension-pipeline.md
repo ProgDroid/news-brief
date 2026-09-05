@@ -835,7 +835,13 @@ def form_matches(form: str, text: str) -> bool:
     form = (form or "").strip()
     if not form or not text:
         return False
-    if form.lower() in STOP_FORMS:
+    # The stop-list check is CASE-SENSITIVE for short forms, and that is not a
+    # detail. STOP_FORMS holds lowercase words, and a short form already relies
+    # on case to disambiguate -- so lowercasing before the lookup would stop
+    # `US` (the country) because `us` (the pronoun) is on the list, and the same
+    # for EU, UN and every other acronym that is also a common word. The short
+    # form `us` is still stopped; the entity `US` is not.
+    if (form if len(form) < _CASE_SENSITIVE_BELOW else form.lower()) in STOP_FORMS:
         return False
     flags = 0 if len(form) < _CASE_SENSITIVE_BELOW else re.IGNORECASE
     return re.search(rf"(?<!\w){re.escape(form)}(?!\w)", text, flags) is not None
@@ -1134,9 +1140,6 @@ Subject: `feat(comprehend): the tracked half is a lookup, so it costs no tokens`
 Append to `tests/test_comprehend_triage.py`:
 
 ```python
-import pytest as _pytest  # noqa: F811  (already imported; kept for clarity)
-
-
 def _tool_use(items):
     return {
         "stop_reason": "tool_use",
@@ -1167,7 +1170,7 @@ def test_a_truncated_response_raises_rather_than_being_parsed():
     a truncation being misdiagnosed as a broken parser."""
     resp = _tool_use([{"id": 1, "material": True}])
     resp["stop_reason"] = "max_tokens"
-    with _pytest.raises(ValueError, match="truncated"):
+    with pytest.raises(ValueError, match="truncated"):
         comprehend.parse_triage_response(resp, {1})
 
 
@@ -1186,7 +1189,7 @@ def test_an_id_that_was_never_offered_is_dropped():
 
 
 def test_a_missing_tool_block_raises():
-    with _pytest.raises(ValueError, match="emit_triage"):
+    with pytest.raises(ValueError, match="emit_triage"):
         comprehend.parse_triage_response({"stop_reason": "end_turn", "content": []}, {1})
 ```
 
