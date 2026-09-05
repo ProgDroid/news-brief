@@ -734,13 +734,19 @@ def write_extraction(conn, extraction: dict, index: SurfaceIndex, tally: Tally) 
     item_id = extraction["item_id"]
     # A new event has no unique key to ON CONFLICT against, so re-running the
     # same extraction (a retry, a re-queued item) would otherwise mint a
-    # second event and a second assertion every time. integrated_at is the
-    # only signal that this item's writes already landed; treat it as a
-    # no-op rather than re-deriving rows that would fail to dedupe.
+    # second event and a second assertion every time. integrated_at alone is
+    # NOT the right guard, though: spec 4.2's pending predicate is
+    # `integrated_at IS NULL OR integrate_prompt_version < :current`, and
+    # 0009's comment names exactly the failure a version-blind guard would
+    # reintroduce -- "bumping the integration prompt left integrated_at set
+    # so nothing could re-extract". Scope the guard to the CURRENT version:
+    # bumping INTEGRATE_PROMPT_VERSION must still re-integrate. A NULL
+    # integrate_prompt_version makes `NULL >= n` NULL (never true), so a row
+    # that was never integrated always falls through and (re-)writes.
     already = conn.execute(
         "SELECT 1 FROM item_triage WHERE item_id = %s AND verdict = 'material' "
-        "AND integrated_at IS NOT NULL",
-        (item_id,),
+        "AND integrated_at IS NOT NULL AND integrate_prompt_version >= %s",
+        (item_id, INTEGRATE_PROMPT_VERSION),
     ).fetchone()
     if already:
         return True

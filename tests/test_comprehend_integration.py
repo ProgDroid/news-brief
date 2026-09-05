@@ -479,6 +479,7 @@ def test_a_bad_item_does_not_take_its_neighbours_down(kb):
             is True
         )
     assert tally.items_lost_to_savepoint == 1
+    assert tally.failed_integration == 1
 
 
 def test_an_instrument_entity_shadowing_a_company_is_refused(kb):
@@ -562,3 +563,39 @@ def test_reprocessing_the_same_item_does_not_duplicate_assertions(kb):
         )
         kb.commit()
     assert kb.execute("SELECT count(*) FROM assertions").fetchone()[0] == 1
+
+
+def test_a_bumped_integration_prompt_version_re_integrates(kb, monkeypatch):
+    """0009's two-column split exists so an integration-prompt bump re-extracts
+    WITHOUT touching triage, and spec 4.2's pending predicate is
+    `integrated_at IS NULL OR integrate_prompt_version < :current`. Keyed on
+    integrated_at alone, the guard no-ops forever: task 10's SELECT re-offers
+    the item every run, this function skips it, and the stored version never
+    advances -- the exact single-column bug 0009 says the split retired.
+    """
+    iid = _item(kb)
+    kb.commit()
+    comprehend.write_extraction(
+        kb, _fresh(iid), comprehend.SurfaceIndex([]), comprehend.Tally()
+    )
+    kb.commit()
+    first = kb.execute(
+        "SELECT integrate_prompt_version FROM item_triage WHERE item_id = %s", (iid,)
+    ).fetchone()[0]
+
+    monkeypatch.setattr(comprehend, "INTEGRATE_PROMPT_VERSION", first + 1)
+    assert (
+        comprehend.write_extraction(
+            kb, _fresh(iid), comprehend.SurfaceIndex([]), comprehend.Tally()
+        )
+        is True
+    )
+    kb.commit()
+
+    assert (
+        kb.execute(
+            "SELECT integrate_prompt_version FROM item_triage WHERE item_id = %s",
+            (iid,),
+        ).fetchone()[0]
+        == first + 1
+    ), "the bump must advance the stored version, or task 10 re-selects forever"
