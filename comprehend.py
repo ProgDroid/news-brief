@@ -209,7 +209,8 @@ class SurfaceIndex:
                 forms.append(SurfaceForm(f, "tracked_entity", eid))
         for (topic,) in conn.execute(
             "SELECT DISTINCT topic FROM claims "
-            "WHERE topic IS NOT NULL AND status IN ('standing', 'challenged')"
+            "WHERE topic IS NOT NULL AND status IN ('standing', 'challenged') "
+            "AND retired_on IS NULL"
         ).fetchall():
             forms.append(SurfaceForm(topic, "tracked_claim", None))
         for (name,) in conn.execute(
