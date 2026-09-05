@@ -115,6 +115,40 @@ def test_sampled_is_a_material_reason(kb):
     )
 
 
+def test_material_must_not_carry_error(kb):
+    """The forward direction's SECOND excluded reason. Every other forward test
+    uses 'none', so without this one the CHECK could read `reason <> 'none'`
+    and the whole suite would still pass -- the exclusion set has two members
+    and only one was ever attempted."""
+    item_id = _item(kb)
+    with pytest.raises(psycopg.errors.CheckViolation):
+        with kb.transaction():
+            _triage(kb, item_id, verdict="material", reason="error")
+
+
+def test_an_immaterial_row_with_no_reason_is_accepted(kb):
+    """Presence sibling on the NON-material side. Both other accept tests use
+    verdict='material', so a constraint over-broad enough to forbid the ordinary
+    immaterial+'none' row -- the majority row in production -- had nothing to
+    catch it."""
+    item_id = _item(kb)
+    _triage(kb, item_id, verdict="immaterial", reason="none")
+    assert kb.execute(
+        "SELECT verdict, reason FROM item_triage WHERE item_id = %s", (item_id,)
+    ).fetchone() == ("immaterial", "none")
+
+
+def test_a_failed_row_carries_error(kb):
+    """`failed` is in the verdict enum and was inserted by nothing. It is how a
+    triage call that raised is recorded, so if the enum member were dropped the
+    error path would fail to write and no test would report it."""
+    item_id = _item(kb)
+    _triage(kb, item_id, verdict="failed", reason="error")
+    assert kb.execute(
+        "SELECT verdict, reason FROM item_triage WHERE item_id = %s", (item_id,)
+    ).fetchone() == ("failed", "error")
+
+
 def test_one_row_per_item_per_triage_version(kb):
     item_id = _item(kb)
     _triage(kb, item_id, version=1)
