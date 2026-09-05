@@ -465,8 +465,28 @@ Per item, inside its own savepoint:
 1. `entities` — `ON CONFLICT (lower(name), type) DO NOTHING`, then re-select the conflicting rows.
 2. `events` — insert new, or use the candidate id.
 3. `event_entities` — `ON CONFLICT DO NOTHING` (the pair is the primary key).
-4. `assertions` — `ON CONFLICT (item_id, event_id) DO NOTHING`, so reprocessing cannot duplicate.
+4. `assertions` — `ON CONFLICT (item_id, event_id) DO NOTHING`.
 5. `item_triage.integrated_at`.
+
+**Corrected 2026-09-05, measured against the built code.** This section previously claimed the
+`assertions` conflict clause meant "reprocessing cannot duplicate". It does not, and the guarantee
+was never enforced. The clause protects the *pair*, but a re-extraction at a bumped
+`integrate_prompt_version` takes step 2's "insert new" branch and mints a **fresh `event_id`** — so
+`(item_id, event_id)` differs, the conflict never fires, and the item gains a second event and a
+second assertion. Measured directly against a real database: 1 event / 1 assertion before a bump,
+2 / 2 after.
+
+Re-integration therefore **accumulates, it does not supersede**. That is unreachable at v1, where
+`INTEGRATE_PROMPT_VERSION` never moves, and it is not a reason to hold the build — but it means an
+operator bumping that knob doubles the affected events rather than replacing them, which inflates
+both `events` and any corroboration figure read off it. Superseding needs a real design (this repo
+retires rather than deletes, per `claims.retired_on`, and `assertions` carries FKs), so it is
+deferred to its own issue rather than invented inside a fix round.
+
+The general failure this records: a spec stating a guarantee is intent, never enforcement. The
+sentence was written from the conflict clause's *shape* without asking which test would fail if it
+were false — and none would have, because nothing re-ran an extraction at a bumped version until
+one was written to.
 
 `extractor_model` and `prompt_version` are stamped on `entities`, `events` and `assertions`
 (`bqa.9` item 4 for these tables).
