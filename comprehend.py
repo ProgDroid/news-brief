@@ -369,3 +369,38 @@ def record_triage(conn, item_id, verdict, reason, triage_model, version) -> None
         "  attempts = item_triage.attempts + 1",
         (item_id, verdict, reason, triage_model, version),
     )
+
+
+def select_sampled(conn, version: int, per_day: int) -> list[int]:
+    """Items BOTH halves rejected, promoted to material as the §5.3 control.
+
+    Why this exists, and it is not coverage: a model-judged `topical` set is
+    confounded with the triage model's own view of the domain. Measure enum
+    variance over topical rows alone and there is no way to separate "the
+    extractor works" from "triage picked items its sibling finds easy". A
+    recency sample is not confounded, so these rows are the control the other
+    arms are read against.
+
+    Cheap because it is capped: removing the model triage half entirely and
+    integrating by recency was considered and rejected -- it moves integration
+    from ~120/day to ~1,200/day in the expensive tier.
+
+    PER DAY, NOT PER RUN. The schedule is hourly, so a bare LIMIT would draw
+    the cap on every fire: 20 becomes 480/day in the EXPENSIVE tier, turning a
+    ~17% control-arm overhead into ~400% -- the same order of cost error as the
+    proposal this arm was chosen over.
+    """
+    used = conn.execute(
+        "SELECT count(*) FROM item_triage "
+        "WHERE reason = 'sampled' AND created_at >= date_trunc('day', now())"
+    ).fetchone()[0]
+    remaining = max(0, per_day - used)
+    if remaining == 0:
+        return []
+    rows = conn.execute(
+        "SELECT item_id FROM item_triage "
+        "WHERE triage_prompt_version = %s AND verdict = 'immaterial' "
+        "ORDER BY item_id DESC LIMIT %s",
+        (version, remaining),
+    ).fetchall()
+    return [r[0] for r in rows]

@@ -334,3 +334,39 @@ def test_a_malformed_row_is_dropped_without_losing_its_neighbours():
         ]
     }
     assert comprehend.parse_triage_response(resp, {7, 8, 9}) == {9: True}
+
+
+def test_the_sample_draws_only_from_items_both_halves_rejected(kb):
+    rejected = _add_item(kb, "Local sports result", h="H1")
+    accepted = _add_item(kb, "Ukraine ceasefire", h="H2")
+    kb.commit()
+    comprehend.record_triage(kb, rejected, "immaterial", "none", "m", 1)
+    comprehend.record_triage(kb, accepted, "material", "topical", "m", 1)
+    kb.commit()
+
+    assert comprehend.select_sampled(kb, 1, 10) == [rejected], (
+        "a material item is already integrated; sampling it would not be a "
+        "selection-independent control"
+    )
+
+
+def test_the_sample_respects_the_daily_cap(kb):
+    ids = [_add_item(kb, f"Item {i}", h=f"H{i}") for i in range(5)]
+    kb.commit()
+    for i in ids:
+        comprehend.record_triage(kb, i, "immaterial", "none", "m", 1)
+    kb.commit()
+
+    assert len(comprehend.select_sampled(kb, 1, 2)) == 2
+
+
+def test_an_already_sampled_item_is_not_sampled_again(kb):
+    item_id = _add_item(kb, "Local sports result")
+    kb.commit()
+    comprehend.record_triage(kb, item_id, "immaterial", "none", "m", 1)
+    kb.commit()
+    assert comprehend.select_sampled(kb, 1, 10) == [item_id]
+
+    comprehend.record_triage(kb, item_id, "material", "sampled", None, 1)
+    kb.commit()
+    assert comprehend.select_sampled(kb, 1, 10) == []
