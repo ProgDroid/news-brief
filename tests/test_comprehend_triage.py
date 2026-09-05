@@ -67,9 +67,8 @@ def test_an_enabled_run_sees_the_item(kb, monkeypatch):
 
 
 def _outlet(kb, name="Reuters"):
-    """Get-or-create. `outlets` is UNIQUE (lower(name)) (0006:25), so a helper
-    that always inserts raises UniqueViolation the second time a test calls it
-    -- and several tests below add multiple items."""
+    """Get-or-create. `outlets` is UNIQUE (lower(name)) (0006:25), so a bare
+    INSERT would fail on the second call within one test."""
     row = kb.execute(
         "SELECT id FROM outlets WHERE lower(name) = lower(%s)", (name,)
     ).fetchone()
@@ -189,4 +188,55 @@ def test_a_failed_item_is_retried_until_the_ceiling(kb):
     kb.commit()
     assert comprehend.pending_triage(kb, 1, 10) == [], (
         "at the ceiling it stops being selected, or it re-pays model cost forever"
+    )
+
+
+def test_a_second_triage_at_the_same_version_bumps_attempts_and_overwrites(kb):
+    """The increment the ceiling depends on, exercised through the real path.
+
+    The ceiling test reaches attempts=3 with a raw UPDATE, so nothing calls
+    record_triage twice and the ON CONFLICT branch never runs -- delete
+    `attempts = item_triage.attempts + 1` and the suite stays green while a
+    failed item re-pays model cost on every pass, forever.
+    """
+    item_id = _add_item(kb, "Ukraine signals a ceasefire")
+    kb.commit()
+    comprehend.record_triage(kb, item_id, "failed", "error", None, 1)
+    comprehend.record_triage(kb, item_id, "material", "tracked_entity", None, 1)
+    kb.commit()
+
+    rows = kb.execute(
+        "SELECT verdict, reason, attempts FROM item_triage WHERE item_id = %s",
+        (item_id,),
+    ).fetchall()
+    assert len(rows) == 1, (
+        "the unique key on (item_id, triage_prompt_version) must collapse the "
+        "retry onto one row rather than inserting a second"
+    )
+    assert rows[0][0] == "material", "EXCLUDED must overwrite the stale verdict"
+    assert rows[0][1] == "tracked_entity"
+    assert rows[0][2] == 2, (
+        "the second call bumps attempts; without the bump the ceiling at 3 is "
+        "unreachable and a failing item retries forever"
+    )
+
+
+def test_a_tracked_story_name_makes_an_item_material(kb):
+    """The third arm of the tracked half. Entity and claim forms are both
+    covered; without this, a story form could stop producing a hit and only
+    the build() test would notice -- and that one checks the index, not the
+    verdict the index produces."""
+    index = comprehend.SurfaceIndex(
+        [comprehend.SurfaceForm("Black Sea shipping", "tracked_story", None)]
+    )
+    hit = comprehend.triage_by_rules(
+        {"title": "Black Sea shipping resumes after talks", "body": None}, index
+    )
+    assert hit is not None, "a tracked story name in the title is a material hit"
+    assert hit.reason == "tracked_story"
+
+    miss = comprehend.triage_by_rules({"title": "Weather report", "body": None}, index)
+    assert miss is None, (
+        "presence sibling for the assertion above: an unrelated title must NOT "
+        "match, or `hit is not None` passes for a matcher that matches everything"
     )
