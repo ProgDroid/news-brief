@@ -4060,6 +4060,19 @@ def mode_capture():
         capture.run(conn)
 
 
+def mode_comprehend():
+    """Triage captured items and extract entities, events and assertions.
+
+    Takes no arguments: run_job calls fn() with none. `comprehend.run` owns its
+    own commit boundaries -- one transaction per micro-batch, one savepoint per
+    item, so a malformed extraction costs one item and not its neighbours.
+    """
+    import comprehend
+
+    with db.connect() as conn:
+        comprehend.run(conn)
+
+
 # Module level, not inside __main__, so a test can assert JOB_MODES is covered.
 # A mode in JOB_MODES but missing here is not a quiet no-op: the supervisor
 # spawns it, gets exit 1 from the usage branch, and alerts on every fire time.
@@ -4073,6 +4086,7 @@ MODES = {
     "backup": mode_backup,
     "pgdiag": mode_pgdiag,
     "capture": mode_capture,
+    "comprehend": mode_comprehend,
 }
 
 
@@ -4083,7 +4097,9 @@ MODES = {
 # path (spec section 3.6), and a guard the bypass path skips is not a guard.
 # `paper` is NOT here — see the note above; the book is already guarded
 # by file_lock at the resource level, which is the right grain for it.
-JOB_MODES = frozenset({"submit", "collect", "weekly", "monitor", "backup", "capture"})
+JOB_MODES = frozenset(
+    {"submit", "collect", "weekly", "monitor", "backup", "capture", "comprehend"}
+)
 
 # EX_ALREADY_RUNNING is imported from common (see Step 3a): the supervisor needs
 # it too, and `supervisor` importing `brief` would be circular — brief imports

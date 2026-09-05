@@ -73,6 +73,7 @@ SCHEDULES: tuple[Schedule, ...] = (
     Schedule("weekly", "daily", "21:00", None, grace_minutes=180, weekdays=(7,)),
     Schedule("monitor", "interval", None, 60, grace_minutes=15),
     Schedule("capture", "interval", None, 30, grace_minutes=10),
+    Schedule("comprehend", "interval", None, 60, grace_minutes=15),
 )
 
 

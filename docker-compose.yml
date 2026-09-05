@@ -146,6 +146,13 @@ x-newsbrief: &newsbrief
     # NEWSBRIEF_CAPTURE_ENABLED here until news-brief-bz1, which crossed the
     # container boundary correctly and was read by nothing.
     - CAPTURE_ENABLED=${CAPTURE_ENABLED:-}
+    - COMPREHEND_ENABLED=${COMPREHEND_ENABLED:-}
+    - COMPREHEND_TRIAGE_BATCH=${COMPREHEND_TRIAGE_BATCH:-}
+    - COMPREHEND_INTEGRATE_BATCH=${COMPREHEND_INTEGRATE_BATCH:-}
+    - COMPREHEND_MAX_ITEMS=${COMPREHEND_MAX_ITEMS:-}
+    - COMPREHEND_SAMPLE_PER_DAY=${COMPREHEND_SAMPLE_PER_DAY:-}
+    - NEWSBRIEF_TRIAGE_MODEL=${NEWSBRIEF_TRIAGE_MODEL:-}
+    - NEWSBRIEF_INTEGRATE_MODEL=${NEWSBRIEF_INTEGRATE_MODEL:-}
     - JOB_MAX_RUNTIME_MINUTES=${JOB_MAX_RUNTIME_MINUTES:-}
     # Postgres holds the run ledger, the advisory locks that interlock the entry
     # paths, and the scheduler's state. These MUST be declared here: compose

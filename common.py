@@ -262,6 +262,13 @@ KNOBS: dict[str, Knob] = {
     # shared tables and has no consumer yet, so it is switched on deliberately
     # on the host after a deploy rather than starting on its own.
     "CAPTURE_ENABLED": Knob(bool, False),
+    "COMPREHEND_ENABLED": Knob(bool, False),
+    "COMPREHEND_TRIAGE_BATCH": Knob(int, 25),
+    "COMPREHEND_INTEGRATE_BATCH": Knob(int, 5),
+    "COMPREHEND_MAX_ITEMS": Knob(int, 300),
+    "COMPREHEND_SAMPLE_PER_DAY": Knob(int, 20),
+    "TRIAGE_MODEL": Knob(str, "", env="NEWSBRIEF_TRIAGE_MODEL"),
+    "INTEGRATE_MODEL": Knob(str, "", env="NEWSBRIEF_INTEGRATE_MODEL"),
     # How long a job child may run before the supervisor stops it, in minutes;
     # <= 0 disables the cap entirely (news-brief-0q0.12). A ROW rather than a
     # constant because the right value is a property of this deployment's real
