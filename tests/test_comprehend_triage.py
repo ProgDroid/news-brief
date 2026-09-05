@@ -290,11 +290,17 @@ def test_an_id_that_was_never_offered_is_dropped():
     assert comprehend.parse_triage_response(resp, {1}) == {1: True}
 
 
-def test_a_boolean_id_is_not_accepted_as_id_one():
-    """`isinstance(True, int)` is True and `True == 1`, so a bare isinstance
-    guard admits a boolean id AND `True in {1}` succeeds. The written dict key
-    `True` then EQUALS the key `1`, so the garbage row does not appear as an
-    obvious extra entry -- it overwrites the genuine verdict for item 1."""
+def test_a_boolean_id_cannot_overwrite_a_genuine_verdict():
+    """The genuine row comes FIRST here, and that ordering is the whole test.
+
+    `hash(True) == hash(1)`, so both rows address the same dict slot. With the
+    boolean row second, an unguarded parser writes `out[1] = True` and then
+    lets `out[True] = False` land on top of it -- the garbage row does not
+    appear as an obvious extra entry, it silently replaces a correct verdict
+    for a real item. With the rows the other way round the later genuine write
+    masks the bug and the assertion passes either way, which is what an earlier
+    version of this test did.
+    """
     resp = {
         "content": [
             {
@@ -302,15 +308,16 @@ def test_a_boolean_id_is_not_accepted_as_id_one():
                 "name": "emit_triage",
                 "input": {
                     "items": [
-                        {"id": True, "material": False},
                         {"id": 1, "material": True},
+                        {"id": True, "material": False},
                     ]
                 },
             }
         ]
     }
     assert comprehend.parse_triage_response(resp, {1}) == {1: True}, (
-        "the boolean row must be dropped, not merged onto item 1"
+        "the boolean row must be dropped; unguarded it overwrites item 1's "
+        "verdict with False and nothing errors, because the id is real"
     )
 
 
