@@ -729,6 +729,27 @@ def test_a_short_form_still_needs_a_word_boundary():
     assert not comprehend.form_matches("US", "USB drives were seized")
 
 
+def test_html_entities_are_decoded_and_whitespace_collapsed():
+    """Measured on production 2026-09-05: bodies carry literal &nbsp;, e.g.
+    `...facing 10 years in jail&nbsp;&nbsp;Reuters`."""
+    assert comprehend.clean("jail&nbsp;&nbsp;Reuters") == "jail Reuters"
+
+
+def test_a_MULTI_WORD_form_needs_the_decode_to_match():
+    """This is where the decode earns its place, and the single-word case is
+    NOT the example: `&nbsp;` ends in a semicolon, which is already a word
+    boundary, so `Reuters` matches with or without it. A form containing a
+    SPACE is what breaks -- the entity sits where the space should be.
+    """
+    raw = "the New&nbsp;York talks resumed"
+    assert not comprehend.form_matches("New York", raw), (
+        "undecoded, the space in the form cannot match the entity in the text"
+    )
+    assert comprehend.form_matches("New York", comprehend.clean(raw)), (
+        "presence sibling: decoded, the same form matches the same text"
+    )
+
+
 def test_a_stop_listed_form_never_matches():
     assert "will" in comprehend.STOP_FORMS
     assert not comprehend.form_matches("will", "the deal will collapse")
@@ -771,7 +792,7 @@ Expected: FAIL — `module 'comprehend' has no attribute 'form_matches'`.
 
 - [ ] **Step 3: Implement the matcher**
 
-**Add `import re` to the TOP import block of `comprehend.py`**, beside `import time`. Do not append it lower down: ruff's E402 is active (there is no `pyproject.toml` or `ruff.toml` in this repo, so defaults apply), and a mid-file module-level import fails `ruff check .` with exit 1. E402 constrains an import's POSITION, not when it is added — the move that satisfies it is always editing the top block.
+**Add `import html` and `import re` to the TOP import block of `comprehend.py`**, beside `import time`. Do not append it lower down: ruff's E402 is active (there is no `pyproject.toml` or `ruff.toml` in this repo, so defaults apply), and a mid-file module-level import fails `ruff check .` with exit 1. E402 constrains an import's POSITION, not when it is added — the move that satisfies it is always editing the top block.
 
 Then add to `comprehend.py`, after `pending_triage`:
 
@@ -789,6 +810,21 @@ STOP_FORMS = frozenset(
 # Below this length a form must match case-sensitively. Acronyms are real
 # entities (US, EU, UN, IMF); lowercased they collide with common words.
 _CASE_SENSITIVE_BELOW = 4
+
+
+def clean(text: str | None) -> str:
+    """Decode HTML entities and collapse whitespace.
+
+    Measured on production 2026-09-05: item bodies carry literal `&nbsp;`.
+    Reuters items read `...facing 10 years in jail&nbsp;&nbsp;Reuters`. Without
+    unescaping, a surface form spanning an entity boundary silently fails to
+    match -- and a silent miss in the tracked half presents as "the KB did not
+    find that interesting", not as an error.
+
+    Used by BOTH the matcher and the prompt builders, so the model never sees
+    entity noise either.
+    """
+    return re.sub(r"\s+", " ", html.unescape(text or "")).strip()
 
 
 def form_matches(form: str, text: str) -> bool:
@@ -874,7 +910,7 @@ Expected: PASS, 10 tests.
 
 - [ ] **Step 5: Run the full gate**
 
-Expected: **1482 passed** (1472 + 10).
+Expected: **1484 passed** (1472 + 12).
 
 - [ ] **Step 6: Commit**
 
@@ -1046,7 +1082,7 @@ def triage_by_rules(item: dict, index: SurfaceIndex) -> SurfaceForm | None:
     entry.get("summary"), not article text -- so it is short and there is no
     window to choose.
     """
-    text = f"{item.get('title') or ''}\n{item.get('body') or ''}"
+    text = f"{clean(item.get('title'))} {clean(item.get('body'))}"
     hits = index.match(text)
     return hits[0] if hits else None
 
@@ -1075,7 +1111,7 @@ def record_triage(conn, item_id, verdict, reason, triage_model, version) -> None
 Run: `py -m pytest tests/test_comprehend_triage.py -q`
 Expected: PASS, 8 tests in the file.
 
-- [ ] **Step 5: Full gate.** Expected: **1488 passed** (1482 + 6).
+- [ ] **Step 5: Full gate.** Expected: **1490 passed** (1484 + 6).
 
 - [ ] **Step 6: Commit**
 
@@ -1209,10 +1245,13 @@ def _triage_model() -> str:
 def build_triage_request(items: list[dict]) -> dict:
     lines = []
     for it in items:
-        body = (it.get("body") or "").strip().replace("\n", " ")
+        # clean() so the model never sees `&nbsp;` noise either. Measured
+        # 2026-09-05: 41% of captured volume is Google News proxy items whose
+        # body is the headline restated with entity separators.
+        body = clean(it.get("body"))
         lines.append(
             f"- id={it['id']} outlet={it.get('outlet', '?')} "
-            f"title={it['title']!r} lead={body[:300]!r}"
+            f"title={clean(it['title'])!r} lead={body[:300]!r}"
         )
     return {
         "model": _triage_model(),
@@ -1253,7 +1292,7 @@ def parse_triage_response(resp: dict, offered_ids: set[int]) -> dict[int, bool]:
 
 - [ ] **Step 4: Run to verify they pass.** 13 tests in the file.
 
-- [ ] **Step 5: Full gate.** Expected: **1493 passed** (1488 + 5).
+- [ ] **Step 5: Full gate.** Expected: **1495 passed** (1490 + 5).
 
 - [ ] **Step 6: Commit**
 
@@ -1355,7 +1394,7 @@ def select_sampled(conn, version: int, per_day: int) -> list[int]:
 ```
 
 - [ ] **Step 4: Run to verify they pass.**
-- [ ] **Step 5: Full gate.** Expected: **1496 passed** (1493 + 3).
+- [ ] **Step 5: Full gate.** Expected: **1498 passed** (1495 + 3).
 - [ ] **Step 6: Commit**
 
 Subject: `feat(comprehend): a sampled arm, because topical rows cannot control for themselves`
@@ -1634,7 +1673,7 @@ def build_integration_request(
     ev_lines = "\n".join(f"- id={e['id']} {e['summary']}" for e in events) or "(none)"
     item_lines = "\n".join(
         f"- item_id={it['id']} outlet={it.get('outlet', '?')} "
-        f"title={it['title']!r}\n  body={(it.get('body') or '')!r}"
+        f"title={clean(it['title'])!r}\n  body={clean(it.get('body'))!r}"
         for it in items
     )
     return {
@@ -1660,7 +1699,7 @@ def build_integration_request(
 Note `assertions.source_relationship` is absent from the tool schema. It is not extracted in v1: `bqa.8` records it as the only extracted enum with no worked example anywhere, which is `severity`'s exact provenance.
 
 - [ ] **Step 4: Run to verify they pass.** 5 tests.
-- [ ] **Step 5: Full gate.** Expected: **1501 passed** (1496 + 5).
+- [ ] **Step 5: Full gate.** Expected: **1503 passed** (1498 + 5).
 - [ ] **Step 6: Commit**
 
 Subject: `feat(comprehend): candidates offer a summary and withhold the label being scored`
@@ -1846,7 +1885,7 @@ def _validate_item(row, item_ids, entity_ids, event_ids) -> dict | None:
 ```
 
 - [ ] **Step 4: Run to verify they pass.** 6 new tests.
-- [ ] **Step 5: Full gate.** Expected: **1507 passed** (1501 + 6).
+- [ ] **Step 5: Full gate.** Expected: **1509 passed** (1503 + 6).
 - [ ] **Step 6: Commit**
 
 Subject: `feat(comprehend): a candidate id we never offered is a hallucination, not data`
@@ -2262,7 +2301,7 @@ def write_batch(conn, extractions, index: SurfaceIndex, tally: Tally) -> int:
 ```
 
 - [ ] **Step 4: Run to verify they pass.** 6 new tests.
-- [ ] **Step 5: Full gate.** Expected: **1514 passed** (1507 + 7).
+- [ ] **Step 5: Full gate.** Expected: **1516 passed** (1509 + 7).
 - [ ] **Step 6: Commit**
 
 Subject: `feat(comprehend): a malformed extraction costs one item, not its batch`
@@ -2540,7 +2579,7 @@ def run(conn) -> Tally:
 **One thing to watch, and it has bitten this repo before.** `_post_messages` uses `SIGNALS_TIMEOUT` and `SIGNALS_MAX_ATTEMPTS` — sized for the signals extraction. The integration call runs at `max_tokens=8192` against a larger prompt, so it is a materially slower request. `signals-extraction-separate-call-followup` records the exact failure: a 30s timeout copied from a Haiku call was too short for Sonnet, the call timed out, and the day's signals were wiped. If integration calls start failing on read timeouts, that is the cause — raise the timeout for this path rather than shortening the prompt.
 
 - [ ] **Step 4: Run to verify it passes.**
-- [ ] **Step 5: Full gate.** Expected: **1515 passed** (1514 + 1).
+- [ ] **Step 5: Full gate.** Expected: **1517 passed** (1516 + 1).
 - [ ] **Step 6: Commit**
 
 Subject: `feat(comprehend): the pass runs end to end, still reading nothing back`
@@ -2615,6 +2654,36 @@ def score_enum(shares, total):
     return ok, f"n={total} {detail} (>=10%: {at_10}, top {top:.0%})"
 
 
+def by_depth_tier(conn, table, column):
+    """Enum distribution split by the source item's body length.
+
+    Spec 12.3 amendment 1. Measured 2026-09-05: 15 of 24 outlets have a median
+    body under 150 characters, and 41% of captured volume is Google News proxy
+    items whose body is the headline restated. An aggregate distribution over
+    that corpus substantially measures feed composition rather than model
+    judgement, so the tiers are reported alongside it.
+    """
+    if table == "events":
+        join = (
+            "FROM events e "
+            "JOIN assertions a ON a.event_id = e.id "
+            "JOIN items i ON i.id = a.item_id"
+        )
+        col = f"e.{column}"
+    else:
+        join = "FROM assertions a JOIN items i ON i.id = a.item_id"
+        col = f"a.{column}"
+    return conn.execute(
+        "SELECT CASE WHEN coalesce(length(i.body), 0) < 150 THEN '<150' "
+        "            WHEN length(i.body) < 350 THEN '150-350' "
+        "            ELSE '350+' END AS tier, "
+        f"       {col} AS value, count(*) AS n "
+        f"{join} "
+        f"WHERE {col} IS NOT NULL "
+        "GROUP BY 1, 2 ORDER BY 1, 3 DESC"
+    ).fetchall()
+
+
 def corroboration(conn):
     row = conn.execute(
         "WITH per_event AS ("
@@ -2676,6 +2745,40 @@ def main() -> int:
         print("disagreement -- a secondary signal contradicting the headline is")
         print("the tell that the probe measured the wrong layer.")
 
+        # Spec 12.3 amendment 1. Measured 2026-09-05: 15 of 24 outlets have a
+        # median body under 150 chars and 41% of volume is Google News proxy
+        # items whose body is the headline restated. An aggregate enum
+        # distribution therefore substantially measures FEED COMPOSITION.
+        print("\n=== Enum variance by body-depth tier (spec 12.3) ===")
+        for table, column in ENUMS:
+            print(f"  {table}.{column}:")
+            for tier, value, n in by_depth_tier(conn, table, column):
+                print(f"    [{tier}] {value}: {n}")
+
+        # Spec 12.3 amendment 2. standing is the field at risk, and its likely
+        # failure is NOT low variance -- it is becoming a function of the
+        # OUTLET rather than of the item, which looks healthy in aggregate
+        # while carrying no per-item information. No aggregate distribution
+        # can show that; this can.
+        print("\n=== standing variance WITHIN each outlet (spec 12.3) ===")
+        print("A field constant within every outlet is degenerate however")
+        print("varied it looks overall -- severity's failure in disguise.")
+        rows = conn.execute(
+            "SELECT o.name, count(DISTINCT a.standing) AS distinct_standing, "
+            "       count(*) AS n "
+            "FROM assertions a "
+            "JOIN items i ON i.id = a.item_id "
+            "JOIN outlets o ON o.id = i.outlet_id "
+            "GROUP BY o.name HAVING count(*) >= 10 ORDER BY 2, 3 DESC"
+        ).fetchall()
+        for name, distinct, n in rows:
+            flag = "  <-- CONSTANT" if distinct <= 1 else ""
+            print(f"  {name}: {distinct} distinct over n={n}{flag}")
+        constant = [r[0] for r in rows if r[1] <= 1]
+        if rows and len(constant) == len(rows):
+            failures.append("standing is constant within every outlet")
+            print("FAIL  standing carries no per-item information")
+
         print("\n=== Triage reason distribution (spec 5.1.1) ===")
         print("Interpretable only AFTER entities has accumulated. tracked_story")
         print("is expected at ZERO: nothing in production writes `stories`.")
@@ -2697,7 +2800,7 @@ if __name__ == "__main__":
 Run: `py scripts/score_comprehension.py`
 Expected: exit 1, "no rows" for each enum and "no events to measure". An empty KB must FAIL the gate, not pass it vacuously — that is the whole shape this repo keeps getting wrong.
 
-- [ ] **Step 3: Full gate.** Expected: **1515 passed** (unchanged; the script has no tests of its own because it is a read-only reporting tool whose logic is thresholds).
+- [ ] **Step 3: Full gate.** Expected: **1517 passed** (unchanged; the script has no tests of its own because it is a read-only reporting tool whose logic is thresholds).
 
 - [ ] **Step 4: Commit**
 

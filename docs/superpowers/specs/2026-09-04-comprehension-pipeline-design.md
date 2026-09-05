@@ -696,7 +696,7 @@ Stated rather than resolved, because guessing them silently is the failure mode.
    open.
 2. **The 14-day event-candidate window is unmeasured.** Too narrow and corroboration fails
    artificially; too wide and the matcher merges a recurring event type across weeks.
-3. **How much text `items.body` actually holds. This one is a PROBE, and it is queued.**
+3. ~~**How much text `items.body` actually holds.**~~ **ANSWERED 2026-09-05 — see §12.**
    `capture.py` stores `entry.get("summary")`, which for some feeds is a full article and for
    others is one sentence. The answer decides whether extraction is headline-level or richer, and
    §8.1 says `commitment_state` is the field that will show it first. Twenty real rows settle it:
@@ -746,3 +746,84 @@ is the `the-rule-exempts-its-own-origin` shape.
 argument for it — that a model-selected set is confounded — is correct and is why §5.3 exists.
 The claim that it was cost-neutral is not: it moves integration from ~120/day to ~1,200/day
 against a ~$6/mo triage saving.
+
+---
+
+## 12. Measured against production, 2026-09-05
+
+§10 items 3 and 4 are answered. Measured on the deploy host at 2026-09-05 11:30, over the
+22-hour window since capture was enabled (oldest item 2026-09-04 13:30). Control first: 87
+`capture_runs`, 45 of them `enabled`, newest run 11:30 the same day — these figures describe a
+live system, not a switched-off one.
+
+### 12.1 Volume — the spec's assumption survives, the cost estimate does not
+
+**2,270 items in 22 hours ≈ 2,475/day**, against §6.4's assumed ~1,200/day.
+
+**Treat that as an UPPER BOUND, not a rate.** The first enabled pass stores every feed's whole
+window, so an unknown share of the 2,270 is backfill rather than throughput. IranWire at 491
+items in 22 hours is ~22/hour from one outlet, which no newsroom publishes; the shape says
+backfill dominates. Decomposing it needs a per-hour breakdown and is not worth blocking on,
+because the bound is conservative in both directions that matter: it over-sizes the caps and
+over-states the cost.
+
+**Sizing survives.** `COMPREHEND_MAX_ITEMS=300` hourly is 7,200/day of capacity — 3x headroom
+even at the upper bound. No change.
+
+**Cost does not survive, and this is now the pre-registered figure.** At ~10% material, 2,475/day
+gives ~250 integrated/day against the §6.4 model's 120/day. Integration roughly doubles, from
+~$13/mo to ~$27/mo, putting the total nearer **$45-55/mo than $25-35/mo**. Recorded here before
+the first run so the comparison afterwards means something.
+
+### 12.2 Body depth — headline-level, confirmed, and UNEVENLY so
+
+Median `body` length by outlet, 24 outlets:
+
+| Band | Outlets | Examples |
+|---|---|---|
+| under 150 chars | **15 of 24** | Reuters 56, Kyiv Independent 58, NHK 77, IranWire 140 |
+| 150-350 | 7 | The Hindu 176, Meduza 234, Times of Israel 310 |
+| ~500 | 2 | SCMP 500, OilPrice 546 |
+
+**No outlet carries article text.** The two richest are clamped, not merely long: SCMP runs
+min 487 / max 503 and OilPrice min 520 / max 557. That spread is the signature of a hard
+server-side truncation, not natural variation. So "fetch article text at integration time" would
+be a genuine addition rather than a way of using what is already stored.
+
+**The two highest-volume outlets have the least text**, because they are Google News proxies whose
+`summary` is the headline restated. Reuters bodies read
+`UAE pardons Egyptian-Turkish poet facing 10 years in jail&nbsp;&nbsp;Reuters`. IranWire is clamped
+at 140. Together they are **926 of 2,270 items — 41% of volume with no body beyond the title.**
+
+Two incidental findings, both actionable:
+
+- **HTML entities are not decoded.** `&nbsp;` appears literally. The matcher and the prompt must
+  `html.unescape()` before use, or a surface form spanning an entity boundary silently fails to
+  match.
+- **The proxy feeds carry non-news.** `(MYCN.O) | Stock Price & Latest News` is a stock-quote
+  page. Triage should reject it, and the per-outlet immaterial rate becomes a real measurement of
+  proxy-feed junk rather than a triage failure.
+
+### 12.3 What this changes in the gate
+
+**It does not change the build.** Headlines are more judgeable than "56 characters" suggests:
+*"Ukrainian drones attacked Russia's Moscow region"* is unambiguously `action` / `in_force`, and
+*"Iran and Oman state that negotiations are ongoing"* is unambiguously `statement` / `intended`.
+`events.type` and `commitment_state` are not obviously starved by this input.
+
+`assertions.standing` is the field at risk, for a reason worth stating precisely: separating
+`official` from `attributed` from `alleged` normally needs the attribution clause, and a headline
+strips it. The likely failure is not low variance — it is that **standing becomes a function of
+the OUTLET rather than of the item**, which would look healthy in aggregate while carrying no
+per-item information at all.
+
+Two amendments to §8.1 follow:
+
+1. **Report each enum per body-depth tier** (under 150 / 150-350 / 350+) as well as in aggregate.
+   With 41% of volume in one tier, an aggregate figure substantially measures feed composition.
+2. **For `standing`, also report variance WITHIN each outlet.** A field that varies across outlets
+   and is constant within one is degenerate in the way that matters, and no aggregate distribution
+   would show it. This is `severity`'s failure wearing a disguise that the original gate would
+   have passed.
+
+Neither loosens the thresholds. They add the breakdowns that stop a pass being spurious.
