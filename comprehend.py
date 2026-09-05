@@ -404,3 +404,174 @@ def select_sampled(conn, version: int, per_day: int) -> list[int]:
         (version, remaining),
     ).fetchall()
     return [r[0] for r in rows]
+
+
+# Prompt-budget choices, not measurements. Ordered most-recent-first so
+# truncation drops the least likely candidates, and a cap reached is counted.
+CANDIDATE_ENTITY_CAP = 40
+CANDIDATE_EVENT_CAP = 30
+CANDIDATE_WINDOW_DAYS = 14
+
+INTEGRATE_MAX_TOKENS = 8192
+
+
+def candidate_events(conn, entity_ids: list[int], tally: Tally) -> list[dict]:
+    """Recent events sharing an entity with this batch.
+
+    Returns id and summary and NOTHING ELSE. events.type and
+    commitment_state are scored by the pre-registered gate; sending them here
+    would make every attached assertion inherit the framing by echo, and the
+    gate would measure the prompt rather than the model.
+    """
+    if not entity_ids:
+        return []
+    rows = conn.execute(
+        "SELECT DISTINCT e.id, e.summary, e.occurred_at FROM events e "
+        "JOIN event_entities ee ON ee.event_id = e.id "
+        "WHERE ee.entity_id = ANY(%s) "
+        "  AND e.occurred_at >= now() - make_interval(days => %s) "
+        "ORDER BY e.occurred_at DESC "
+        "LIMIT %s",
+        (list(entity_ids), CANDIDATE_WINDOW_DAYS, CANDIDATE_EVENT_CAP + 1),
+    ).fetchall()
+    if len(rows) > CANDIDATE_EVENT_CAP:
+        tally.candidate_cap_hit += 1
+        rows = rows[:CANDIDATE_EVENT_CAP]
+    return [{"id": r[0], "summary": r[1]} for r in rows]
+
+
+_INTEGRATE_SYSTEM = """You extract structured knowledge from news items for a \
+geopolitics and macro knowledge base.
+
+For each item, return:
+  entities   -- the actors involved. Prefer an id from CANDIDATE ENTITIES when \
+one refers to the same real-world actor; otherwise propose a new entity.
+  events     -- what happened. Prefer an id from CANDIDATE EVENTS when the item \
+reports the SAME event another outlet already reported; otherwise propose a new \
+one. Matching an existing event is how corroboration is recorded, so match \
+whenever the underlying occurrence is the same, even if the wording differs.
+  assertion  -- how this outlet stands behind each event.
+
+ONE ENTITY PER REAL-WORLD ACTOR. A company and its equity line are the SAME \
+entity: use type 'company' and put the ticker in aliases. Never create a \
+separate entity of type 'instrument' for a company's shares.
+
+Distinguish what was DONE from what was SAID. "Trump declared the ceasefire \
+over" is a statement; whether the ceasefire is over is a separate matter."""
+
+_INTEGRATE_TOOL = {
+    "name": "emit_extraction",
+    "description": "Structured extraction for each input item.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "item_id": {"type": "integer"},
+                        "entities": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "candidate_id": {"type": "integer"},
+                                    "name": {"type": "string"},
+                                    "type": {
+                                        "type": "string",
+                                        "enum": [
+                                            "country",
+                                            "institution",
+                                            "company",
+                                            "person",
+                                            "instrument",
+                                        ],
+                                    },
+                                    "aliases": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                    },
+                                },
+                            },
+                        },
+                        "events": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "candidate_id": {"type": "integer"},
+                                    "summary": {"type": "string"},
+                                    "type": {
+                                        "type": "string",
+                                        "enum": ["action", "statement", "disclosure"],
+                                    },
+                                    "commitment_state": {
+                                        "type": "string",
+                                        "enum": [
+                                            "in_force",
+                                            "committed",
+                                            "intended",
+                                            "proposed",
+                                        ],
+                                    },
+                                    "standing": {
+                                        "type": "string",
+                                        "enum": [
+                                            "verified",
+                                            "official",
+                                            "reported",
+                                            "attributed",
+                                            "alleged",
+                                        ],
+                                    },
+                                },
+                                "required": ["standing"],
+                            },
+                        },
+                    },
+                    "required": ["item_id", "entities", "events"],
+                },
+            }
+        },
+        "required": ["items"],
+    },
+}
+
+
+def _integrate_model() -> str:
+    return common.INTEGRATE_MODEL or common.MODEL
+
+
+def build_integration_request(
+    items: list[dict], entities: list[dict], events: list[dict]
+) -> dict:
+    ent_lines = (
+        "\n".join(f"- id={e['id']} {e['name']} ({e['type']})" for e in entities)
+        or "(none)"
+    )
+    # id and summary ONLY. See candidate_events.
+    ev_lines = "\n".join(f"- id={e['id']} {e['summary']}" for e in events) or "(none)"
+    item_lines = "\n".join(
+        f"- item_id={it['id']} outlet={it.get('outlet', '?')} "
+        f"title={clean(it['title'])!r}\n  body={clean(it.get('body'))!r}"
+        for it in items
+    )
+    return {
+        "model": _integrate_model(),
+        "max_tokens": INTEGRATE_MAX_TOKENS,
+        "thinking": {"type": "disabled"},
+        "system": _INTEGRATE_SYSTEM,
+        "tools": [_INTEGRATE_TOOL],
+        "tool_choice": {"type": "tool", "name": "emit_extraction"},
+        "messages": [
+            {
+                "role": "user",
+                "content": (
+                    f"CANDIDATE ENTITIES:\n{ent_lines}\n\n"
+                    f"CANDIDATE EVENTS:\n{ev_lines}\n\n"
+                    f"ITEMS:\n{item_lines}"
+                ),
+            }
+        ],
+    }
