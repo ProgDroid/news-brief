@@ -14,6 +14,8 @@ unmeasured field, and measurement is what lifts it. The only thing that can say
 whether this works is scripts/score_comprehension.py.
 """
 
+import html
+import re
 import time
 from dataclasses import dataclass, field
 
@@ -108,3 +110,133 @@ def pending_triage(conn, version: int, limit: int) -> list[dict]:
         }
         for r in rows
     ]
+
+
+# Surface forms that are also ordinary English words. A form on this list never
+# matches, whatever entity claims it. Short and hand-maintained on purpose: a
+# large stop-list hides a matcher that is too loose.
+STOP_FORMS = frozenset(
+    {
+        "will",
+        "may",
+        "can",
+        "us",
+        "it",
+        "he",
+        "she",
+        "they",
+        "the",
+        "and",
+        "for",
+        "was",
+        "are",
+        "has",
+        "had",
+        "new",
+        "one",
+        "two",
+        "all",
+        "any",
+    }
+)
+
+# Below this length a form must match case-sensitively. Acronyms are real
+# entities (US, EU, UN, IMF); lowercased they collide with common words.
+_CASE_SENSITIVE_BELOW = 4
+
+
+def clean(text: str | None) -> str:
+    """Decode HTML entities and collapse whitespace.
+
+    Measured on production 2026-09-05: item bodies carry literal `&nbsp;`.
+    Reuters items read `...facing 10 years in jail&nbsp;&nbsp;Reuters`. Without
+    unescaping, a surface form spanning an entity boundary silently fails to
+    match -- and a silent miss in the tracked half presents as "the KB did not
+    find that interesting", not as an error.
+
+    Used by BOTH the matcher and the prompt builders, so the model never sees
+    entity noise either.
+    """
+    return re.sub(r"\s+", " ", html.unescape(text or "")).strip()
+
+
+def form_matches(form: str, text: str) -> bool:
+    """Word-boundary match, never substring.
+
+    Substring matching is the recorded PolyGram failure: `MU` matched "Musk".
+    """
+    form = (form or "").strip()
+    if not form or not text:
+        return False
+    # The stop-list check is CASE-SENSITIVE for short forms, and that is not a
+    # detail. STOP_FORMS holds lowercase words, and a short form already relies
+    # on case to disambiguate -- so lowercasing before the lookup would stop
+    # `US` (the country) because `us` (the pronoun) is on the list, and the same
+    # for EU, UN and every other acronym that is also a common word. The short
+    # form `us` is still stopped; the entity `US` is not.
+    if (form if len(form) < _CASE_SENSITIVE_BELOW else form.lower()) in STOP_FORMS:
+        return False
+    flags = 0 if len(form) < _CASE_SENSITIVE_BELOW else re.IGNORECASE
+    return re.search(rf"(?<!\w){re.escape(form)}(?!\w)", text, flags) is not None
+
+
+@dataclass(frozen=True)
+class SurfaceForm:
+    form: str
+    reason: str  # tracked_entity | tracked_claim | tracked_story
+    entity_id: int | None = None
+
+
+class SurfaceIndex:
+    """Every trackable surface form, held in memory for one run.
+
+    A full scan of `entities` per run, deliberately: the word-boundary and
+    case rules above do not express well in SQL, and one scan per run is
+    cheaper than a per-mention query. This is why there is NO GIN index on
+    entities.aliases -- an index with no reader is dead weight.
+    """
+
+    def __init__(self, forms: list[SurfaceForm]) -> None:
+        self._forms = list(forms)
+
+    @classmethod
+    def build(cls, conn) -> "SurfaceIndex":
+        forms: list[SurfaceForm] = []
+        for eid, name, aliases in conn.execute(
+            "SELECT id, name, aliases FROM entities"
+        ).fetchall():
+            for f in [name, *(aliases or [])]:
+                forms.append(SurfaceForm(f, "tracked_entity", eid))
+        for (topic,) in conn.execute(
+            "SELECT DISTINCT topic FROM claims "
+            "WHERE topic IS NOT NULL AND status IN ('standing', 'challenged')"
+        ).fetchall():
+            forms.append(SurfaceForm(topic, "tracked_claim", None))
+        for (name,) in conn.execute(
+            "SELECT name FROM stories WHERE state <> 'closed'"
+        ).fetchall():
+            forms.append(SurfaceForm(name, "tracked_story", None))
+        return cls(forms)
+
+    def add_entity(self, entity_id: int, name: str, aliases: list[str]) -> None:
+        """Called after each batch's writes. Built once per run, an entity
+        created in batch 1 is invisible to batch 3, so events attached to it
+        cannot be offered as candidates -- which depresses events_matched, the
+        numerator of the corroboration gate. The gate would then fail for a
+        caching reason while the matcher worked."""
+        for f in [name, *(aliases or [])]:
+            self._forms.append(SurfaceForm(f, "tracked_entity", entity_id))
+
+    def match(self, text: str) -> list[SurfaceForm]:
+        """Every distinct hit, deduplicated by entity (or by form where there
+        is no entity). Order is stable: entity hits first, in insertion order."""
+        seen: set = set()
+        out: list[SurfaceForm] = []
+        for sf in self._forms:
+            key = ("e", sf.entity_id) if sf.entity_id is not None else ("f", sf.form)
+            if key in seen:
+                continue
+            if form_matches(sf.form, text):
+                seen.add(key)
+                out.append(sf)
+        return out
