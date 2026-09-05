@@ -290,6 +290,30 @@ def test_an_id_that_was_never_offered_is_dropped():
     assert comprehend.parse_triage_response(resp, {1}) == {1: True}
 
 
+def test_a_boolean_id_is_not_accepted_as_id_one():
+    """`isinstance(True, int)` is True and `True == 1`, so a bare isinstance
+    guard admits a boolean id AND `True in {1}` succeeds. The written dict key
+    `True` then EQUALS the key `1`, so the garbage row does not appear as an
+    obvious extra entry -- it overwrites the genuine verdict for item 1."""
+    resp = {
+        "content": [
+            {
+                "type": "tool_use",
+                "name": "emit_triage",
+                "input": {
+                    "items": [
+                        {"id": True, "material": False},
+                        {"id": 1, "material": True},
+                    ]
+                },
+            }
+        ]
+    }
+    assert comprehend.parse_triage_response(resp, {1}) == {1: True}, (
+        "the boolean row must be dropped, not merged onto item 1"
+    )
+
+
 def test_a_missing_tool_block_raises():
     with pytest.raises(ValueError, match="emit_triage"):
         comprehend.parse_triage_response(

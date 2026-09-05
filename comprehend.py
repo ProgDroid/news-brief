@@ -324,6 +324,17 @@ def build_triage_request(items: list[dict]) -> dict:
     }
 
 
+def _is_id(x) -> bool:
+    """A real integer id, excluding the values Python quietly counts as one.
+
+    `bool` subclasses `int`, so `isinstance(True, int)` is True and `True == 1`;
+    and `1.0 == 1`, so a float passes a set-membership test against integer ids.
+    Either would bind a hallucinated value onto a real row -- and because the
+    resulting id IS real, nothing downstream errors.
+    """
+    return isinstance(x, int) and not isinstance(x, bool)
+
+
 def parse_triage_response(resp: dict, offered_ids: set[int]) -> dict[int, bool]:
     """id -> material. Drops ids that were never offered.
 
@@ -342,11 +353,7 @@ def parse_triage_response(resp: dict, offered_ids: set[int]) -> dict[int, bool]:
                 if not isinstance(r, dict):
                     continue
                 rid, mat = r.get("id"), r.get("material")
-                if (
-                    isinstance(rid, int)
-                    and isinstance(mat, bool)
-                    and rid in offered_ids
-                ):
+                if _is_id(rid) and isinstance(mat, bool) and rid in offered_ids:
                     out[rid] = mat
             return out
     raise ValueError("no emit_triage tool_use block in response")
@@ -619,7 +626,7 @@ def parse_integration_response(
 
 def _validate_item(row, item_ids, entity_ids, event_ids) -> dict | None:
     item_id = row.get("item_id")
-    if not isinstance(item_id, int) or item_id not in item_ids:
+    if not _is_id(item_id) or item_id not in item_ids:
         return None
 
     entities = []
@@ -628,7 +635,7 @@ def _validate_item(row, item_ids, entity_ids, event_ids) -> dict | None:
             return None
         cid = e.get("candidate_id")
         if cid is not None:
-            if cid not in entity_ids:
+            if not _is_id(cid) or cid not in entity_ids:
                 return None
             entities.append({"candidate_id": cid})
             continue
@@ -644,7 +651,7 @@ def _validate_item(row, item_ids, entity_ids, event_ids) -> dict | None:
             return None
         cid = ev.get("candidate_id")
         if cid is not None:
-            if cid not in event_ids:
+            if not _is_id(cid) or cid not in event_ids:
                 return None
             events.append({"candidate_id": cid, "standing": ev["standing"]})
             continue

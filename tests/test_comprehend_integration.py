@@ -204,6 +204,33 @@ def test_a_hallucinated_event_candidate_id_is_rejected():
     assert got == []
 
 
+def test_a_boolean_entity_candidate_id_is_rejected():
+    """`True not in {1}` is False, so without an integer guard a hallucinated
+    `true` passes the very check this parser exists to enforce and the
+    extraction is attached to entity 1 -- a real entity the model never named.
+    Nothing errors downstream, because the id is real."""
+    bad = dict(ONE, entities=[{"candidate_id": True}])
+    got = comprehend.parse_integration_response(_extraction([bad]), {1}, {1}, {20})
+    assert got == [], "a boolean candidate id must not stand in for the real id 1"
+
+
+def test_a_boolean_event_candidate_id_is_rejected():
+    """Same hole on the event arm. Both loops had the same missing guard, so
+    fixing one and testing only that one would leave the other open."""
+    bad = dict(ONE, events=[{"candidate_id": True, "standing": "reported"}])
+    got = comprehend.parse_integration_response(_extraction([bad]), {1}, {10}, {1})
+    assert got == [], "a boolean candidate id must not stand in for the real id 1"
+
+
+def test_a_float_entity_candidate_id_is_rejected():
+    """The other half of the same hole: `1.0 == 1`, so a float satisfies the
+    membership test and then travels on as a float where an integer id is
+    expected."""
+    bad = dict(ONE, entities=[{"candidate_id": 1.0}])
+    got = comprehend.parse_integration_response(_extraction([bad]), {1}, {1}, {20})
+    assert got == [], "a float candidate id must not stand in for the real id 1"
+
+
 def test_an_item_id_that_was_never_sent_is_dropped():
     got = comprehend.parse_integration_response(_extraction([ONE]), {2}, {10}, {20})
     assert got == []
