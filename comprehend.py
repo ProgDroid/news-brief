@@ -163,17 +163,26 @@ def run(conn) -> Tally:
         conn, TRIAGE_PROMPT_VERSION, int(common.COMPREHEND_SAMPLE_PER_DAY)
     ):
         record_triage(conn, item_id, "material", "sampled", None, TRIAGE_PROMPT_VERSION)
+        conn.execute(
+            "UPDATE item_triage SET sampled_at = now() "
+            "WHERE item_id = %s AND triage_prompt_version = %s",
+            (item_id, TRIAGE_PROMPT_VERSION),
+        )
         tally.sampled += 1
     conn.commit()
 
     # --- Integration.
     rows = conn.execute(
         "SELECT i.id, i.title, i.body, i.outlet_id, i.published_at FROM items i "
-        "JOIN item_triage t ON t.item_id = i.id "
+        "JOIN item_triage t ON t.item_id = i.id AND t.triage_prompt_version = %s "
         "WHERE t.verdict = 'material' AND t.integrate_attempts < 3 "
         "  AND (t.integrated_at IS NULL OR t.integrate_prompt_version < %s) "
         "ORDER BY i.id LIMIT %s",
-        (INTEGRATE_PROMPT_VERSION, int(common.COMPREHEND_MAX_ITEMS)),
+        (
+            TRIAGE_PROMPT_VERSION,
+            INTEGRATE_PROMPT_VERSION,
+            int(common.COMPREHEND_MAX_ITEMS),
+        ),
     ).fetchall()
     # published_at is carried because write_extraction needs it for
     # events.occurred_at. Without it every created event is invisible to
@@ -197,12 +206,13 @@ def run(conn) -> Tally:
         hits = [
             sf
             for it in batch
-            for sf in index.match(f"{it['title']}\n{it['body']}")
+            for sf in index.match(f"{clean(it['title'])}\n{clean(it['body'])}")
             if sf.entity_id is not None
         ]
-        entity_ids = list(dict.fromkeys(sf.entity_id for sf in hits))[
-            :CANDIDATE_ENTITY_CAP
-        ]
+        distinct_entity_ids = list(dict.fromkeys(sf.entity_id for sf in hits))
+        if len(distinct_entity_ids) > CANDIDATE_ENTITY_CAP:
+            tally.candidate_cap_hit += 1
+        entity_ids = distinct_entity_ids[:CANDIDATE_ENTITY_CAP]
         cand_entities = (
             [
                 {"id": r[0], "name": r[1], "type": r[2]}
@@ -583,10 +593,16 @@ def select_sampled(conn, version: int, per_day: int) -> list[int]:
     the cap on every fire: 20 becomes 480/day in the EXPENSIVE tier, turning a
     ~17% control-arm overhead into ~400% -- the same order of cost error as the
     proposal this arm was chosen over.
+
+    The cap counts PROMOTIONS today via `sampled_at`, not `created_at`:
+    `created_at` records when the row was TRIAGED, and `record_triage`'s
+    ON CONFLICT never rewrites it on promotion. A row triaged yesterday and
+    promoted today would be invisible to today's budget under `created_at`,
+    letting the cap silently unbind across every UTC day boundary.
     """
     used = conn.execute(
         "SELECT count(*) FROM item_triage "
-        "WHERE reason = 'sampled' AND created_at >= date_trunc('day', now())"
+        "WHERE reason = 'sampled' AND sampled_at >= date_trunc('day', now())"
     ).fetchone()[0]
     remaining = max(0, per_day - used)
     if remaining == 0:
@@ -931,9 +947,10 @@ def write_extraction(conn, extraction: dict, index: SurfaceIndex, tally: Tally) 
     # integrate_prompt_version makes `NULL >= n` NULL (never true), so a row
     # that was never integrated always falls through and (re-)writes.
     already = conn.execute(
-        "SELECT 1 FROM item_triage WHERE item_id = %s AND verdict = 'material' "
+        "SELECT 1 FROM item_triage WHERE item_id = %s "
+        "AND triage_prompt_version = %s AND verdict = 'material' "
         "AND integrated_at IS NOT NULL AND integrate_prompt_version >= %s",
-        (item_id, INTEGRATE_PROMPT_VERSION),
+        (item_id, TRIAGE_PROMPT_VERSION, INTEGRATE_PROMPT_VERSION),
     ).fetchone()
     if already:
         return True
@@ -1008,8 +1025,9 @@ def write_extraction(conn, extraction: dict, index: SurfaceIndex, tally: Tally) 
             conn.execute(
                 "UPDATE item_triage SET integrated_at = now(), "
                 "  integrate_prompt_version = %s "
-                "WHERE item_id = %s AND verdict = 'material'",
-                (INTEGRATE_PROMPT_VERSION, item_id),
+                "WHERE item_id = %s AND triage_prompt_version = %s "
+                "  AND verdict = 'material'",
+                (INTEGRATE_PROMPT_VERSION, item_id, TRIAGE_PROMPT_VERSION),
             )
     except Exception:
         tally.items_lost_to_savepoint += 1

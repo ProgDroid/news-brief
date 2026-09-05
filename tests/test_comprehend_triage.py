@@ -451,6 +451,13 @@ def test_the_daily_cap_blocks_a_later_run_on_the_same_day(kb):
     assert len(first) == 2, "the day starts with the full budget available"
     for i in first:
         comprehend.record_triage(kb, i, "material", "sampled", "m", 1)
+        # The budget is spent at PROMOTION (F1): stamp sampled_at the same way
+        # run()'s control-arm loop does, or this test cannot reach the cap at all.
+        kb.execute(
+            "UPDATE item_triage SET sampled_at = now() "
+            "WHERE item_id = %s AND triage_prompt_version = 1",
+            (i,),
+        )
     kb.commit()
 
     assert comprehend.select_sampled(kb, 1, 2) == [], (
@@ -749,4 +756,142 @@ def test_a_sampled_item_reaches_integration(kb, monkeypatch):
     assert row == ("material", "sampled")
     assert tally.assertions_written == 1, (
         "the sampled item must reach integration, not merely promotion"
+    )
+
+
+def test_the_daily_cap_counts_promotions_not_row_creation(kb):
+    """A row triaged YESTERDAY and promoted today must still spend today's
+    budget. created_at records triage and ON CONFLICT never rewrites it, so
+    counting it lets the cap silently unbind across the UTC day boundary --
+    20 per fire on an hourly schedule is 480/day in the expensive tier.
+    """
+    ids = [_add_item(kb, f"Item {i}", h=f"H{i}") for i in range(3)]
+    kb.commit()
+    for i in ids:
+        comprehend.record_triage(kb, i, "immaterial", "none", "m", 1)
+    # Backdate created_at to simulate the state production reaches naturally
+    # overnight: triaged yesterday, still sitting immaterial.
+    kb.execute("UPDATE item_triage SET created_at = created_at - interval '1 day'")
+    kb.commit()
+
+    first = comprehend.select_sampled(kb, 1, 2)
+    assert len(first) == 2, (
+        "created_at is backdated but sampled_at is still NULL for every row -- "
+        "the budget must read as fully available"
+    )
+    for i in first:
+        comprehend.record_triage(kb, i, "material", "sampled", "m", 1)
+        kb.execute(
+            "UPDATE item_triage SET sampled_at = now() "
+            "WHERE item_id = %s AND triage_prompt_version = 1",
+            (i,),
+        )
+    kb.commit()
+
+    assert comprehend.select_sampled(kb, 1, 2) == [], (
+        "both were promoted TODAY (sampled_at = now()) even though created_at "
+        "was backdated to yesterday -- a cap counting created_at would wrongly "
+        "see yesterday's timestamps and refill the budget"
+    )
+    assert len(comprehend.select_sampled(kb, 1, 3)) == 1, (
+        "presence sibling: a third immaterial item is still sitting there "
+        "unselected -- the empty result above is the BUDGET, not an empty pool"
+    )
+
+
+def test_a_bumped_TRIAGE_prompt_version_is_integrated_on_its_own_row(kb, monkeypatch):
+    """0009 splits the two versions so a triage bump and an integration bump are
+    independent. With the integration SELECT joining on item_id alone, the new
+    v2 row is offered every pass, the guard matches the OLD v1 row and no-ops,
+    integrated_at is never set on v2, and integrate_attempts never moves --
+    re-selected forever, paying a model call each time.
+    """
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
+    item_id = _add_item(kb, "Ukraine talks resume")
+    kb.commit()
+
+    # Integrate at triage version 1 directly, no model call needed.
+    comprehend.record_triage(kb, item_id, "material", "tracked_entity", None, 1)
+    kb.commit()
+    index = comprehend.SurfaceIndex.build(kb)
+    tally = comprehend.Tally(enabled=True)
+    comprehend.write_extraction(
+        kb,
+        {
+            "item_id": item_id,
+            "entities": [{"name": "Kyiv delegation", "type": "country", "aliases": []}],
+            "events": [
+                {
+                    "summary": "S1",
+                    "type": "action",
+                    "commitment_state": "in_force",
+                    "standing": "reported",
+                }
+            ],
+        },
+        index,
+        tally,
+    )
+    kb.commit()
+    v1_integrated_at = kb.execute(
+        "SELECT integrated_at FROM item_triage "
+        "WHERE item_id = %s AND triage_prompt_version = 1",
+        (item_id,),
+    ).fetchone()[0]
+    assert v1_integrated_at is not None, "setup: v1 must actually be integrated"
+
+    # Bump the triage version and record a fresh v2 triage row for the same item.
+    monkeypatch.setattr(comprehend, "TRIAGE_PROMPT_VERSION", 2)
+    comprehend.record_triage(kb, item_id, "material", "tracked_entity", None, 2)
+    kb.commit()
+
+    def fake_integrate(req):
+        return {
+            "stop_reason": "tool_use",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "emit_extraction",
+                    "input": {
+                        "items": [
+                            {
+                                "item_id": item_id,
+                                "entities": [
+                                    {"name": "E2", "type": "country", "aliases": []}
+                                ],
+                                "events": [
+                                    {
+                                        "summary": "S2",
+                                        "type": "action",
+                                        "commitment_state": "in_force",
+                                        "standing": "reported",
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                }
+            ],
+        }
+
+    monkeypatch.setattr(comprehend, "call_integration", fake_integrate)
+
+    comprehend.run(kb)
+    kb.commit()
+
+    v1_row = kb.execute(
+        "SELECT integrated_at FROM item_triage "
+        "WHERE item_id = %s AND triage_prompt_version = 1",
+        (item_id,),
+    ).fetchone()
+    v2_row = kb.execute(
+        "SELECT integrated_at, integrate_attempts FROM item_triage "
+        "WHERE item_id = %s AND triage_prompt_version = 2",
+        (item_id,),
+    ).fetchone()
+    assert v2_row[0] is not None, "the v2 row must be the one integration advances"
+    assert v1_row[0] == v1_integrated_at, (
+        "presence sibling: the v1 row must be untouched, not blanket-updated -- "
+        "an implementation that stamps every version for this item_id also "
+        "passes the assertion above"
     )
