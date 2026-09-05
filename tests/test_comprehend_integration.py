@@ -159,3 +159,71 @@ def test_candidates_come_back_newest_first(kb):
         "newest first; the insertion order above is deliberately not the "
         "expected order, so a missing ORDER BY cannot pass by coincidence"
     )
+
+
+def _extraction(items):
+    return {
+        "stop_reason": "tool_use",
+        "content": [
+            {"type": "tool_use", "name": "emit_extraction", "input": {"items": items}}
+        ],
+    }
+
+
+ONE = {
+    "item_id": 1,
+    "entities": [{"candidate_id": 10}],
+    "events": [{"candidate_id": 20, "standing": "reported"}],
+}
+
+
+def test_a_well_formed_extraction_is_parsed():
+    got = comprehend.parse_integration_response(_extraction([ONE]), {1}, {10}, {20})
+    assert got[0]["item_id"] == 1
+    assert got[0]["entities"][0]["candidate_id"] == 10
+
+
+def test_a_truncated_extraction_raises_before_parsing():
+    resp = _extraction([ONE])
+    resp["stop_reason"] = "max_tokens"
+    with pytest.raises(ValueError, match="truncated"):
+        comprehend.parse_integration_response(resp, {1}, {10}, {20})
+
+
+def test_a_hallucinated_entity_candidate_id_is_rejected():
+    """The model can name an id that was never offered. Writing it would
+    attach this item's assertion to an unrelated entity."""
+    bad = dict(ONE, entities=[{"candidate_id": 999}])
+    got = comprehend.parse_integration_response(_extraction([bad]), {1}, {10}, {20})
+    assert got == [], "an item citing an unoffered entity id must be dropped whole"
+
+
+def test_a_hallucinated_event_candidate_id_is_rejected():
+    bad = dict(ONE, events=[{"candidate_id": 999, "standing": "reported"}])
+    got = comprehend.parse_integration_response(_extraction([bad]), {1}, {10}, {20})
+    assert got == []
+
+
+def test_an_item_id_that_was_never_sent_is_dropped():
+    got = comprehend.parse_integration_response(_extraction([ONE]), {2}, {10}, {20})
+    assert got == []
+
+
+def test_a_new_entity_and_a_new_event_are_accepted():
+    """Presence sibling for the four rejection tests: a parser that returned []
+    unconditionally would satisfy every one of them."""
+    fresh = {
+        "item_id": 1,
+        "entities": [{"name": "Moldova", "type": "country", "aliases": []}],
+        "events": [
+            {
+                "summary": "Border checks tightened",
+                "type": "action",
+                "commitment_state": "in_force",
+                "standing": "reported",
+            }
+        ],
+    }
+    got = comprehend.parse_integration_response(_extraction([fresh]), {1}, set(), set())
+    assert got[0]["entities"][0]["name"] == "Moldova"
+    assert got[0]["events"][0]["type"] == "action"

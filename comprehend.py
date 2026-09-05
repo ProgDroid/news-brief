@@ -575,3 +575,94 @@ def build_integration_request(
             }
         ],
     }
+
+
+_ENTITY_TYPES = {"country", "institution", "company", "person", "instrument"}
+_EVENT_TYPES = {"action", "statement", "disclosure"}
+_COMMITMENT = {"in_force", "committed", "intended", "proposed"}
+_STANDING = {"verified", "official", "reported", "attributed", "alleged"}
+
+
+def parse_integration_response(
+    resp: dict,
+    offered_item_ids: set[int],
+    offered_entity_ids: set[int],
+    offered_event_ids: set[int],
+) -> list[dict]:
+    """Validated extractions, one per item. Drops an item WHOLE on any defect.
+
+    Dropping the whole item rather than the bad part is deliberate: a
+    half-written extraction is a claim about the world that no source made, and
+    the item can be retried. A hallucinated candidate id is the specific hazard
+    -- the model may name an id that was never offered, and writing it would
+    attach this item's assertion to an unrelated entity or event.
+    """
+    if resp.get("stop_reason") == "max_tokens":
+        raise ValueError("integration response truncated at max_tokens; not parsed")
+    for block in resp.get("content", []):
+        if block.get("type") == "tool_use" and block.get("name") == "emit_extraction":
+            rows = block.get("input", {}).get("items")
+            if not isinstance(rows, list):
+                raise ValueError("emit_extraction input missing 'items' list")
+            return [
+                p
+                for r in rows
+                if isinstance(r, dict)
+                and (
+                    p := _validate_item(
+                        r, offered_item_ids, offered_entity_ids, offered_event_ids
+                    )
+                )
+            ]
+    raise ValueError("no emit_extraction tool_use block in response")
+
+
+def _validate_item(row, item_ids, entity_ids, event_ids) -> dict | None:
+    item_id = row.get("item_id")
+    if not isinstance(item_id, int) or item_id not in item_ids:
+        return None
+
+    entities = []
+    for e in row.get("entities") or []:
+        if not isinstance(e, dict):
+            return None
+        cid = e.get("candidate_id")
+        if cid is not None:
+            if cid not in entity_ids:
+                return None
+            entities.append({"candidate_id": cid})
+            continue
+        name, etype = e.get("name"), e.get("type")
+        if not (isinstance(name, str) and name.strip() and etype in _ENTITY_TYPES):
+            return None
+        aliases = [a for a in (e.get("aliases") or []) if isinstance(a, str)]
+        entities.append({"name": name.strip(), "type": etype, "aliases": aliases})
+
+    events = []
+    for ev in row.get("events") or []:
+        if not isinstance(ev, dict) or ev.get("standing") not in _STANDING:
+            return None
+        cid = ev.get("candidate_id")
+        if cid is not None:
+            if cid not in event_ids:
+                return None
+            events.append({"candidate_id": cid, "standing": ev["standing"]})
+            continue
+        summary, etype = ev.get("summary"), ev.get("type")
+        commitment = ev.get("commitment_state")
+        if not (isinstance(summary, str) and summary.strip()):
+            return None
+        if etype not in _EVENT_TYPES or commitment not in _COMMITMENT:
+            return None
+        events.append(
+            {
+                "summary": summary.strip(),
+                "type": etype,
+                "commitment_state": commitment,
+                "standing": ev["standing"],
+            }
+        )
+
+    if not entities or not events:
+        return None
+    return {"item_id": item_id, "entities": entities, "events": events}
