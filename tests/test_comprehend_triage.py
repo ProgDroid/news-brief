@@ -240,3 +240,58 @@ def test_a_tracked_story_name_makes_an_item_material(kb):
         "presence sibling for the assertion above: an unrelated title must NOT "
         "match, or `hit is not None` passes for a matcher that matches everything"
     )
+
+
+def _tool_use(items):
+    return {
+        "stop_reason": "tool_use",
+        "content": [
+            {
+                "type": "tool_use",
+                "name": "emit_triage",
+                "input": {"items": items},
+            }
+        ],
+    }
+
+
+def test_the_triage_request_forces_the_tool_and_disables_thinking():
+    req = comprehend.build_triage_request(
+        [{"id": 1, "title": "t", "body": "b", "outlet": "Reuters"}]
+    )
+    assert req["tool_choice"] == {"type": "tool", "name": "emit_triage"}
+    assert req["thinking"] == {"type": "disabled"}, (
+        "a forced-tool extraction on a tight budget must disable thinking: "
+        "Sonnet 5 runs ADAPTIVE thinking when it is omitted, which eats "
+        "max_tokens and truncates"
+    )
+
+
+def test_a_truncated_response_raises_rather_than_being_parsed():
+    """stop_reason is checked BEFORE the parser. Four recorded recurrences of
+    a truncation being misdiagnosed as a broken parser."""
+    resp = _tool_use([{"id": 1, "material": True}])
+    resp["stop_reason"] = "max_tokens"
+    with pytest.raises(ValueError, match="truncated"):
+        comprehend.parse_triage_response(resp, {1})
+
+
+def test_a_well_formed_response_is_parsed():
+    """Presence sibling for the truncation test: an always-raising parser
+    would satisfy that one for free."""
+    resp = _tool_use([{"id": 1, "material": True}, {"id": 2, "material": False}])
+    assert comprehend.parse_triage_response(resp, {1, 2}) == {1: True, 2: False}
+
+
+def test_an_id_that_was_never_offered_is_dropped():
+    """The model can return an id we did not send. Trusting it would write a
+    verdict against an unrelated item."""
+    resp = _tool_use([{"id": 1, "material": True}, {"id": 999, "material": True}])
+    assert comprehend.parse_triage_response(resp, {1}) == {1: True}
+
+
+def test_a_missing_tool_block_raises():
+    with pytest.raises(ValueError, match="emit_triage"):
+        comprehend.parse_triage_response(
+            {"stop_reason": "end_turn", "content": []}, {1}
+        )

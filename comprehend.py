@@ -255,6 +255,103 @@ def triage_by_rules(item: dict, index: SurfaceIndex) -> SurfaceForm | None:
     return hits[0] if hits else None
 
 
+# Sized from the batch: 25 items x ~25 output tokens plus schema overhead. A
+# tight max_tokens is what truncated the signals call twice; leave headroom and
+# check stop_reason regardless.
+TRIAGE_MAX_TOKENS = 2048
+
+_TRIAGE_TOOL = {
+    "name": "emit_triage",
+    "description": "Return one materiality verdict per input item.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "integer"},
+                        "material": {"type": "boolean"},
+                    },
+                    "required": ["id", "material"],
+                },
+            }
+        },
+        "required": ["items"],
+    },
+}
+
+_TRIAGE_SYSTEM = """You are triaging news items for a geopolitics and macro \
+knowledge base. For each item, answer one question: does it belong to that \
+domain -- international relations, conflict, statecraft, energy, trade, \
+central banks, sovereign risk, or the markets those move?
+
+Judge the SUBJECT, not the importance. A minor development in the domain is \
+material; a major story outside it is not. Sport, entertainment, crime and \
+consumer news are not material unless they carry a stated geopolitical or \
+macro consequence.
+
+Return a verdict for every id you were given, and no others."""
+
+
+def _triage_model() -> str:
+    """An unset NEWSBRIEF_TRIAGE_MODEL means "follow MODEL"."""
+    return common.TRIAGE_MODEL or common.MODEL
+
+
+def build_triage_request(items: list[dict]) -> dict:
+    lines = []
+    for it in items:
+        # clean() so the model never sees `&nbsp;` noise either. Measured
+        # 2026-09-05: 41% of captured volume is Google News proxy items whose
+        # body is the headline restated with entity separators.
+        body = clean(it.get("body"))
+        lines.append(
+            f"- id={it['id']} outlet={it.get('outlet', '?')} "
+            f"title={clean(it['title'])!r} lead={body[:300]!r}"
+        )
+    return {
+        "model": _triage_model(),
+        "max_tokens": TRIAGE_MAX_TOKENS,
+        # Forced-tool extraction on a tight budget: thinking OFF. Omitting the
+        # field runs ADAPTIVE thinking on Sonnet 5, which spends max_tokens.
+        "thinking": {"type": "disabled"},
+        "system": _TRIAGE_SYSTEM,
+        "tools": [_TRIAGE_TOOL],
+        "tool_choice": {"type": "tool", "name": "emit_triage"},
+        "messages": [{"role": "user", "content": "ITEMS:\n" + "\n".join(lines)}],
+    }
+
+
+def parse_triage_response(resp: dict, offered_ids: set[int]) -> dict[int, bool]:
+    """id -> material. Drops ids that were never offered.
+
+    stop_reason is checked FIRST: a truncated reply produces a parse error that
+    reads as a broken parser, and this repo has misdiagnosed that four times.
+    """
+    if resp.get("stop_reason") == "max_tokens":
+        raise ValueError("triage response truncated at max_tokens; not parsed")
+    for block in resp.get("content", []):
+        if block.get("type") == "tool_use" and block.get("name") == "emit_triage":
+            rows = block.get("input", {}).get("items")
+            if not isinstance(rows, list):
+                raise ValueError("emit_triage input missing 'items' list")
+            out: dict[int, bool] = {}
+            for r in rows:
+                if not isinstance(r, dict):
+                    continue
+                rid, mat = r.get("id"), r.get("material")
+                if (
+                    isinstance(rid, int)
+                    and isinstance(mat, bool)
+                    and rid in offered_ids
+                ):
+                    out[rid] = mat
+            return out
+    raise ValueError("no emit_triage tool_use block in response")
+
+
 def record_triage(conn, item_id, verdict, reason, triage_model, version) -> None:
     """Insert a verdict, or bump `attempts` on a retry at the same version.
 
