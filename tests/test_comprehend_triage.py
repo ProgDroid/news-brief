@@ -370,3 +370,36 @@ def test_an_already_sampled_item_is_not_sampled_again(kb):
     comprehend.record_triage(kb, item_id, "material", "sampled", None, 1)
     kb.commit()
     assert comprehend.select_sampled(kb, 1, 10) == []
+
+
+def test_the_daily_cap_blocks_a_later_run_on_the_same_day(kb):
+    """Pins the PER-DAY half of the budget, which no other test reaches.
+
+    The existing cap test runs against a fresh schema, so `used` is 0 and a
+    bare `LIMIT per_day` returns the same two rows -- it pins the LIMIT and
+    not the day window. Here two rows are actually promoted to 'sampled'
+    first, so the second call must come back empty on BUDGET grounds while a
+    third immaterial item is still sitting there unselected.
+    """
+    ids = [_add_item(kb, f"Item {i}", h=f"H{i}") for i in range(3)]
+    kb.commit()
+    for i in ids:
+        comprehend.record_triage(kb, i, "immaterial", "none", "m", 1)
+    kb.commit()
+
+    first = comprehend.select_sampled(kb, 1, 2)
+    assert len(first) == 2, "the day starts with the full budget available"
+    for i in first:
+        comprehend.record_triage(kb, i, "material", "sampled", "m", 1)
+    kb.commit()
+
+    assert comprehend.select_sampled(kb, 1, 2) == [], (
+        "the day's budget of 2 is spent; a bare LIMIT would refill it on every "
+        "fire and turn 20/day into 480/day on an hourly schedule"
+    )
+    assert len(comprehend.select_sampled(kb, 1, 3)) == 1, (
+        "presence sibling: the empty result above must be the BUDGET, not an "
+        "empty pool -- a third immaterial item was there the whole time, and "
+        "without this the assertion above also passes for a sampler that can "
+        "never return anything at all"
+    )
