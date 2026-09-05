@@ -895,3 +895,203 @@ def test_a_bumped_TRIAGE_prompt_version_is_integrated_on_its_own_row(kb, monkeyp
         "an implementation that stamps every version for this item_id also "
         "passes the assertion above"
     )
+
+
+def test_a_stale_triage_version_row_does_not_duplicate_the_item_in_a_batch(
+    kb, monkeypatch
+):
+    """The join-scoping fix (F2) matters even though write_extraction's guard
+    is idempotent. Without `AND t.triage_prompt_version = %s` on the
+    integration SELECT's join, an item carrying a material-but-unintegrated
+    row at an OLD triage version alongside its current one is offered TWICE
+    in the same batch -- the model is asked about the same item twice in one
+    prompt, and we pay for both. Nothing corrupts (the guard makes the
+    second write a no-op), but the waste is real and invisible.
+    """
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
+    item_id = _add_item(kb, "Some ordinary item")
+    comprehend.record_triage(kb, item_id, "material", "topical", "m", 1)
+    kb.commit()
+
+    # Bump the triage version; the v1 row above is left material and
+    # unintegrated, exactly the state a stale in-flight item reaches.
+    monkeypatch.setattr(comprehend, "TRIAGE_PROMPT_VERSION", 2)
+    comprehend.record_triage(kb, item_id, "material", "topical", "m", 2)
+    kb.commit()
+
+    captured = []
+
+    def fake_integrate(req):
+        captured.append(req)
+        return {
+            "stop_reason": "tool_use",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "emit_extraction",
+                    "input": {
+                        "items": [
+                            {
+                                "item_id": item_id,
+                                "entities": [
+                                    {"name": "E", "type": "country", "aliases": []}
+                                ],
+                                "events": [
+                                    {
+                                        "summary": "S",
+                                        "type": "action",
+                                        "commitment_state": "in_force",
+                                        "standing": "reported",
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                }
+            ],
+        }
+
+    monkeypatch.setattr(comprehend, "call_integration", fake_integrate)
+
+    comprehend.run(kb)
+    kb.commit()
+
+    assert len(captured) == 1, "one batch call was expected"
+    occurrences = captured[0]["messages"][0]["content"].count(f"item_id={item_id} ")
+    assert occurrences == 1, (
+        f"the item must appear exactly once in the batch payload; found "
+        f"{occurrences} -- an unscoped join fans it out once per stale "
+        f"triage-version row"
+    )
+
+
+def test_the_integration_matcher_sees_cleaned_text(kb, monkeypatch):
+    """clean() at the integration matcher (F3) was unpinned anywhere in the
+    suite. Note build_integration_request cleans the ITEMS section on its
+    own regardless of this bug, so the assertion below is scoped to the
+    CANDIDATE ENTITIES section specifically -- checking the raw request text
+    would pass either way and prove nothing.
+    """
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
+    kb.execute("INSERT INTO entities (name, type) VALUES ('Black Sea', 'country')")
+    black_sea_id = kb.execute(
+        "SELECT id FROM entities WHERE name = 'Black Sea'"
+    ).fetchone()[0]
+    item_id = _add_item(kb, "Update", body="Black&nbsp;Sea shipping resumes")
+    kb.commit()
+
+    captured = []
+
+    def fake_integrate(req):
+        captured.append(req)
+        return {
+            "stop_reason": "tool_use",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "emit_extraction",
+                    "input": {
+                        "items": [
+                            {
+                                "item_id": item_id,
+                                "entities": [{"candidate_id": black_sea_id}],
+                                "events": [
+                                    {
+                                        "summary": "S",
+                                        "type": "action",
+                                        "commitment_state": "in_force",
+                                        "standing": "reported",
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                }
+            ],
+        }
+
+    monkeypatch.setattr(comprehend, "call_integration", fake_integrate)
+
+    comprehend.run(kb)
+    kb.commit()
+
+    assert len(captured) == 1
+    content = captured[0]["messages"][0]["content"]
+    cand_section = content.split("CANDIDATE ENTITIES:\n", 1)[1].split(
+        "\n\nCANDIDATE EVENTS:\n", 1
+    )[0]
+    assert "Black Sea" in cand_section, (
+        "without clean() at the matcher, the literal &nbsp; sits between "
+        "'Black' and 'Sea' and the word-boundary match never fires, so the "
+        "entity never becomes a candidate"
+    )
+
+
+def test_the_entity_cap_keeps_the_newest_candidates(kb, monkeypatch):
+    """Spec Section 6: both caps are ordered most-recent-first so truncation
+    drops the least likely candidates. Entity ids are monotonically
+    increasing, so the highest ids are the newest entities -- an
+    insertion-order slice keeps the OLDEST match instead, which is exactly
+    backwards: an entity THIS RUN just created is the one the mid-run index
+    refresh exists to surface, and insertion order drops it first.
+    """
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
+    monkeypatch.setattr(comprehend, "CANDIDATE_ENTITY_CAP", 2)
+
+    for name in ("Alpha Nation", "Beta Nation", "Gamma Nation"):
+        kb.execute("INSERT INTO entities (name, type) VALUES (%s, 'country')", (name,))
+    kb.commit()
+    item_id = _add_item(
+        kb, "Update", body="Alpha Nation, Beta Nation and Gamma Nation met today"
+    )
+    kb.commit()
+
+    captured = []
+
+    def fake_integrate(req):
+        captured.append(req)
+        return {
+            "stop_reason": "tool_use",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "emit_extraction",
+                    "input": {
+                        "items": [
+                            {
+                                "item_id": item_id,
+                                "entities": [
+                                    {"name": "E", "type": "country", "aliases": []}
+                                ],
+                                "events": [
+                                    {
+                                        "summary": "S",
+                                        "type": "action",
+                                        "commitment_state": "in_force",
+                                        "standing": "reported",
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                }
+            ],
+        }
+
+    monkeypatch.setattr(comprehend, "call_integration", fake_integrate)
+
+    tally = comprehend.run(kb)
+    kb.commit()
+
+    assert len(captured) == 1
+    content = captured[0]["messages"][0]["content"]
+    cand_section = content.split("CANDIDATE ENTITIES:\n", 1)[1].split(
+        "\n\nCANDIDATE EVENTS:\n", 1
+    )[0]
+    assert "Beta Nation" in cand_section, "the second-newest match must survive"
+    assert "Gamma Nation" in cand_section, "the newest match must survive"
+    assert "Alpha Nation" not in cand_section, (
+        "the OLDEST match (lowest id) must be the one the cap drops -- an "
+        "insertion-order slice drops the newest instead"
+    )
+    assert tally.candidate_cap_hit == 1

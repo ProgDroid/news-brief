@@ -209,10 +209,19 @@ def run(conn) -> Tally:
             for sf in index.match(f"{clean(it['title'])}\n{clean(it['body'])}")
             if sf.entity_id is not None
         ]
-        distinct_entity_ids = list(dict.fromkeys(sf.entity_id for sf in hits))
-        if len(distinct_entity_ids) > CANDIDATE_ENTITY_CAP:
+        # Most-recent-first (spec §6), same as the event cap's ORDER BY DESC:
+        # truncation should drop the least likely candidates. Entity ids are
+        # monotonically increasing, so `id DESC` IS newest-first, and it is
+        # unambiguous -- unlike index insertion order, which is index-build
+        # order (SurfaceIndex.build's SELECT has no ORDER BY, so DB order is
+        # arbitrary) followed by this-run's add_entity appends. Keeping the
+        # FIRST N of insertion order means an entity THIS RUN just created is
+        # the first one dropped, defeating the mid-run index refresh that
+        # exists specifically to surface it as a candidate.
+        ranked = sorted(dict.fromkeys(sf.entity_id for sf in hits), reverse=True)
+        if len(ranked) > CANDIDATE_ENTITY_CAP:
             tally.candidate_cap_hit += 1
-        entity_ids = distinct_entity_ids[:CANDIDATE_ENTITY_CAP]
+        entity_ids = ranked[:CANDIDATE_ENTITY_CAP]
         cand_entities = (
             [
                 {"id": r[0], "name": r[1], "type": r[2]}
