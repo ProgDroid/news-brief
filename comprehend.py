@@ -236,6 +236,25 @@ def run(conn) -> Tally:
             conn.commit()
             continue
 
+        # A row _validate_item rejected never reaches write_batch, so nothing
+        # else advances it: it satisfies the integration SELECT forever and
+        # `ORDER BY i.id` puts it at the FRONT of every future batch, re-paying
+        # its share of the call each pass with no operator-visible signal.
+        # Charging it an attempt lets the ceiling of 3 retire it, which is the
+        # same treatment a whole-batch failure already gets.
+        dropped = [
+            it["id"]
+            for it in batch
+            if it["id"] not in {e["item_id"] for e in extractions}
+        ]
+        if dropped:
+            tally.failed_integration += len(dropped)
+            conn.execute(
+                "UPDATE item_triage SET integrate_attempts = integrate_attempts + 1 "
+                "WHERE item_id = ANY(%s)",
+                (dropped,),
+            )
+
         for e in extractions:
             e["published_at"] = published.get(e["item_id"])
         write_batch(conn, extractions, index, tally)

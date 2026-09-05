@@ -532,3 +532,221 @@ def test_a_full_pass_triages_and_integrates_with_both_calls_stubbed(kb, monkeypa
     reasons = dict(kb.execute("SELECT item_id, reason FROM item_triage").fetchall())
     assert reasons[tracked] == "tracked_entity"
     assert reasons[topical] == "topical"
+
+
+def test_an_item_the_validator_rejects_is_charged_an_attempt(kb, monkeypatch):
+    """Otherwise it is re-selected first on every pass, forever.
+
+    A rejected row never reaches write_batch, so nothing sets integrated_at and
+    nothing bumps integrate_attempts -- and the integration SELECT's
+    `ORDER BY i.id` puts it at the FRONT of the next batch. It would re-pay an
+    expensive call every pass while no counter moved.
+    """
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
+    kb.execute("INSERT INTO entities (name, type) VALUES ('Ukraine', 'country')")
+    good = _add_item(kb, "Ukraine talks resume", h="Hg")
+    bad = _add_item(kb, "Ukraine border incident", h="Hb")
+    kb.commit()
+
+    def fake_integrate(req):
+        sent = [
+            int(line.split("item_id=")[1].split()[0])
+            for line in req["messages"][0]["content"].splitlines()
+            if "item_id=" in line
+        ]
+        items = []
+        for i in sent:
+            if i == good:
+                items.append(
+                    {
+                        "item_id": i,
+                        "entities": [
+                            {
+                                "name": "Kyiv delegation",
+                                "type": "country",
+                                "aliases": [],
+                            }
+                        ],
+                        "events": [
+                            {
+                                "summary": "S",
+                                "type": "action",
+                                "commitment_state": "in_force",
+                                "standing": "reported",
+                            }
+                        ],
+                    }
+                )
+            else:
+                # An entity carrying a candidate_id nothing offered: the
+                # cheapest way to make _validate_item reject the whole row.
+                items.append(
+                    {
+                        "item_id": i,
+                        "entities": [{"candidate_id": 999999999}],
+                        "events": [
+                            {
+                                "summary": "S",
+                                "type": "action",
+                                "commitment_state": "in_force",
+                                "standing": "reported",
+                            }
+                        ],
+                    }
+                )
+        return {
+            "stop_reason": "tool_use",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "emit_extraction",
+                    "input": {"items": items},
+                }
+            ],
+        }
+
+    monkeypatch.setattr(comprehend, "call_integration", fake_integrate)
+
+    tally = comprehend.run(kb)
+    kb.commit()
+
+    attempts = dict(
+        kb.execute("SELECT item_id, integrate_attempts FROM item_triage").fetchall()
+    )
+    assert attempts[bad] == 1, "the rejected item is now charged one attempt"
+    assert attempts[good] == 0, (
+        "presence sibling: without this, an implementation charging EVERY "
+        "item in the batch also passes the assertion above"
+    )
+    assert (
+        kb.execute(
+            "SELECT integrated_at FROM item_triage WHERE item_id = %s", (good,)
+        ).fetchone()[0]
+        is not None
+    ), "the accepted item actually integrated"
+    assert tally.assertions_written == 1
+
+
+def test_a_passed_deadline_stops_before_the_next_batch(kb, monkeypatch):
+    """DEADLINE_SECONDS is 2400 and a test runs in milliseconds, so nothing
+    here would ever reach the break naturally -- delete either one and the
+    suite stays green while an overrunning hourly pass collides with its own
+    next run.
+    """
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
+    # The second half of this test marks the item immaterial via the model, and
+    # the default per-day budget would then promote it into the sampled arm and
+    # on to an unstubbed call_integration -- the exact gotcha Task 10's own
+    # test_an_enabled_run_sees_the_item hit. Zero it so this test stays scoped
+    # to the deadline.
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_SAMPLE_PER_DAY", 0)
+    item_id = _add_item(kb, "Storm hits coastal region")
+    kb.commit()
+
+    def fail_if_called(_req):
+        pytest.fail("call_triage must not run once the deadline has passed")
+
+    monkeypatch.setattr(comprehend, "call_triage", fail_if_called)
+    monkeypatch.setattr(comprehend, "DEADLINE_SECONDS", 0)
+
+    tally = comprehend.run(kb)
+    kb.commit()
+
+    assert tally.items_seen >= 1
+    assert tally.triaged_by_model == 0
+
+    # Presence sibling, same fixture: with the deadline restored, the model
+    # half IS reached -- otherwise `== 0` above would also pass for a run that
+    # skips the loop for an unrelated reason.
+    monkeypatch.setattr(comprehend, "DEADLINE_SECONDS", 2400)
+
+    def fake_triage(_req):
+        return {
+            "stop_reason": "tool_use",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "emit_triage",
+                    "input": {"items": [{"id": item_id, "material": False}]},
+                }
+            ],
+        }
+
+    monkeypatch.setattr(comprehend, "call_triage", fake_triage)
+
+    tally2 = comprehend.run(kb)
+    kb.commit()
+
+    assert tally2.triaged_by_model == 1
+
+
+def test_a_sampled_item_reaches_integration(kb, monkeypatch):
+    """The sampled arm is the control the gate reads topical rows against. If
+    sampled rows never integrate, the control is empty and the comparison is
+    against nothing -- and the integration SELECT filters on verdict alone, so
+    adding `AND t.reason != 'sampled'` to it currently fails no test.
+    """
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
+    item_id = _add_item(kb, "Storm hits coastal region")
+    kb.commit()
+
+    def fake_triage(_req):
+        return {
+            "stop_reason": "tool_use",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "emit_triage",
+                    "input": {"items": [{"id": item_id, "material": False}]},
+                }
+            ],
+        }
+
+    def fake_integrate(req):
+        sent = [
+            int(line.split("item_id=")[1].split()[0])
+            for line in req["messages"][0]["content"].splitlines()
+            if "item_id=" in line
+        ]
+        return {
+            "stop_reason": "tool_use",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "emit_extraction",
+                    "input": {
+                        "items": [
+                            {
+                                "item_id": i,
+                                "entities": [
+                                    {"name": f"E{i}", "type": "country", "aliases": []}
+                                ],
+                                "events": [
+                                    {
+                                        "summary": f"S{i}",
+                                        "type": "action",
+                                        "commitment_state": "in_force",
+                                        "standing": "reported",
+                                    }
+                                ],
+                            }
+                            for i in sent
+                        ]
+                    },
+                }
+            ],
+        }
+
+    monkeypatch.setattr(comprehend, "call_triage", fake_triage)
+    monkeypatch.setattr(comprehend, "call_integration", fake_integrate)
+
+    tally = comprehend.run(kb)
+    kb.commit()
+
+    row = kb.execute(
+        "SELECT verdict, reason FROM item_triage WHERE item_id = %s", (item_id,)
+    ).fetchone()
+    assert row == ("material", "sampled")
+    assert tally.assertions_written == 1, (
+        "the sampled item must reach integration, not merely promotion"
+    )
