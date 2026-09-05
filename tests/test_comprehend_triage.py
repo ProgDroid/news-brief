@@ -47,8 +47,37 @@ def test_a_disabled_run_writes_no_triage_rows(kb, monkeypatch):
 
 def test_an_enabled_run_sees_the_item(kb, monkeypatch):
     """Presence sibling. Without it, the disabled assertion above is satisfied
-    for free by a run() that does nothing under any setting."""
+    for free by a run() that does nothing under any setting.
+
+    Now that run() is wired end to end (Task 10), an unmatched item falls
+    through to the model triage half, and the sampled control arm can promote
+    an immaterial item straight into the integration step. Stub call_triage so
+    the item never reaches a real socket, and zero the sample budget so this
+    item -- deliberately marked immaterial -- can't be promoted into a call to
+    the (unstubbed) call_integration.
+    """
     monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_SAMPLE_PER_DAY", 0)
+
+    def fake_triage(req):
+        ids = [
+            int(line.split("id=")[1].split()[0])
+            for line in req["messages"][0]["content"].splitlines()
+            if line.startswith("- id=")
+        ]
+        return {
+            "stop_reason": "tool_use",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "emit_triage",
+                    "input": {"items": [{"id": i, "material": False} for i in ids]},
+                }
+            ],
+        }
+
+    monkeypatch.setattr(comprehend, "call_triage", fake_triage)
+
     outlet_id = kb.execute(
         "INSERT INTO outlets (name, kind) VALUES ('Reuters', 'wire') RETURNING id"
     ).fetchone()[0]
@@ -434,3 +463,72 @@ def test_the_daily_cap_blocks_a_later_run_on_the_same_day(kb):
         "without this the assertion above also passes for a sampler that can "
         "never return anything at all"
     )
+
+
+def test_a_full_pass_triages_and_integrates_with_both_calls_stubbed(kb, monkeypatch):
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
+    kb.execute("INSERT INTO entities (name, type) VALUES ('Ukraine', 'country')")
+    tracked = _add_item(kb, "Ukraine signals a ceasefire", h="Ht")
+    topical = _add_item(kb, "Sahel coup attempt reported", h="Hp")
+    kb.commit()
+
+    def fake_triage(_req):
+        return {
+            "stop_reason": "tool_use",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "emit_triage",
+                    "input": {"items": [{"id": topical, "material": True}]},
+                }
+            ],
+        }
+
+    def fake_integrate(req):
+        sent = [
+            int(line.split("item_id=")[1].split()[0])
+            for line in req["messages"][0]["content"].splitlines()
+            if "item_id=" in line
+        ]
+        return {
+            "stop_reason": "tool_use",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "emit_extraction",
+                    "input": {
+                        "items": [
+                            {
+                                "item_id": i,
+                                "entities": [
+                                    {"name": f"E{i}", "type": "country", "aliases": []}
+                                ],
+                                "events": [
+                                    {
+                                        "summary": f"S{i}",
+                                        "type": "action",
+                                        "commitment_state": "in_force",
+                                        "standing": "reported",
+                                    }
+                                ],
+                            }
+                            for i in sent
+                        ]
+                    },
+                }
+            ],
+        }
+
+    monkeypatch.setattr(comprehend, "call_triage", fake_triage)
+    monkeypatch.setattr(comprehend, "call_integration", fake_integrate)
+
+    tally = comprehend.run(kb)
+    kb.commit()
+
+    assert tally.triaged_by_rules == 1, "Ukraine matched the tracked half, no model"
+    assert tally.triaged_by_model == 1, "Sahel needed the model half"
+    assert tally.material == 2
+    assert tally.assertions_written == 2
+    reasons = dict(kb.execute("SELECT item_id, reason FROM item_triage").fetchall())
+    assert reasons[tracked] == "tracked_entity"
+    assert reasons[topical] == "topical"

@@ -62,11 +62,35 @@ class Tally:
     failures: dict = field(default_factory=dict)
 
 
+def call_triage(request: dict) -> dict:
+    """The network seam for triage. Tests monkeypatch this.
+
+    Reuses brief._post_messages rather than adding a second HTTP path: it
+    already carries the retry and the generous timeout that a synchronous
+    tool-use generation needs.
+    """
+    import brief
+
+    return brief._post_messages(request)
+
+
+def call_integration(request: dict) -> dict:
+    """The network seam for integration. Tests monkeypatch this."""
+    import brief
+
+    return brief._post_messages(request)
+
+
+def _chunk(seq, size):
+    for i in range(0, len(seq), size):
+        yield seq[i : i + size]
+
+
 def run(conn) -> Tally:
     """One full pass. Bounded by DEADLINE_SECONDS.
 
-    Commit boundaries are load-bearing: one transaction per micro-batch with a
-    savepoint per item. See the module docstring and spec section 6.4.
+    Commit boundaries are load-bearing: one transaction per micro-batch, one
+    savepoint per item inside it (spec section 6.4).
     """
     tally = Tally(enabled=bool(common.COMPREHEND_ENABLED))
     if not tally.enabled:
@@ -74,11 +98,155 @@ def run(conn) -> Tally:
         return tally
 
     deadline = time.monotonic() + DEADLINE_SECONDS
+    index = SurfaceIndex.build(conn)
+    outlets = dict(conn.execute("SELECT id, name FROM outlets").fetchall())
+
     pending = pending_triage(
         conn, TRIAGE_PROMPT_VERSION, int(common.COMPREHEND_MAX_ITEMS)
     )
     tally.items_seen = len(pending)
-    _ = deadline  # stages are added in Tasks 4-10
+
+    # --- Triage: rules half first, so the model never sees what a lookup answered.
+    undecided = []
+    for item in pending:
+        hit = triage_by_rules(item, index)
+        if hit:
+            record_triage(
+                conn, item["id"], "material", hit.reason, None, TRIAGE_PROMPT_VERSION
+            )
+            tally.triaged_by_rules += 1
+            tally.material += 1
+        else:
+            undecided.append(item)
+    conn.commit()
+
+    # --- Triage: model half, on the remainder only.
+    for batch in _chunk(undecided, int(common.COMPREHEND_TRIAGE_BATCH)):
+        if time.monotonic() >= deadline:
+            break
+        payload = [dict(it, outlet=outlets.get(it["outlet_id"], "?")) for it in batch]
+        try:
+            verdicts = parse_triage_response(
+                call_triage(build_triage_request(payload)), {it["id"] for it in batch}
+            )
+        except Exception:
+            tally.failed_triage += len(batch)
+            log.warning("Comprehend: triage batch failed", exc_info=True)
+            for it in batch:
+                record_triage(
+                    conn,
+                    it["id"],
+                    "failed",
+                    "error",
+                    _triage_model(),
+                    TRIAGE_PROMPT_VERSION,
+                )
+            conn.commit()
+            continue
+        for it in batch:
+            material = verdicts.get(it["id"], False)
+            record_triage(
+                conn,
+                it["id"],
+                "material" if material else "immaterial",
+                "topical" if material else "none",
+                _triage_model(),
+                TRIAGE_PROMPT_VERSION,
+            )
+            tally.triaged_by_model += 1
+            tally.material += int(material)
+            tally.immaterial += int(not material)
+        conn.commit()
+
+    # --- The unconfounded control arm.
+    for item_id in select_sampled(
+        conn, TRIAGE_PROMPT_VERSION, int(common.COMPREHEND_SAMPLE_PER_DAY)
+    ):
+        record_triage(conn, item_id, "material", "sampled", None, TRIAGE_PROMPT_VERSION)
+        tally.sampled += 1
+    conn.commit()
+
+    # --- Integration.
+    rows = conn.execute(
+        "SELECT i.id, i.title, i.body, i.outlet_id, i.published_at FROM items i "
+        "JOIN item_triage t ON t.item_id = i.id "
+        "WHERE t.verdict = 'material' AND t.integrate_attempts < 3 "
+        "  AND (t.integrated_at IS NULL OR t.integrate_prompt_version < %s) "
+        "ORDER BY i.id LIMIT %s",
+        (INTEGRATE_PROMPT_VERSION, int(common.COMPREHEND_MAX_ITEMS)),
+    ).fetchall()
+    # published_at is carried because write_extraction needs it for
+    # events.occurred_at. Without it every created event is invisible to
+    # candidate_events and corroboration is impossible.
+    material_items = [
+        {
+            "id": r[0],
+            "title": r[1],
+            "body": r[2] or "",
+            "outlet_id": r[3],
+            "published_at": r[4],
+        }
+        for r in rows
+    ]
+    published = {it["id"]: it["published_at"] for it in material_items}
+
+    for batch in _chunk(material_items, int(common.COMPREHEND_INTEGRATE_BATCH)):
+        if time.monotonic() >= deadline:
+            break
+        payload = [dict(it, outlet=outlets.get(it["outlet_id"], "?")) for it in batch]
+        hits = [
+            sf
+            for it in batch
+            for sf in index.match(f"{it['title']}\n{it['body']}")
+            if sf.entity_id is not None
+        ]
+        entity_ids = list(dict.fromkeys(sf.entity_id for sf in hits))[
+            :CANDIDATE_ENTITY_CAP
+        ]
+        cand_entities = (
+            [
+                {"id": r[0], "name": r[1], "type": r[2]}
+                for r in conn.execute(
+                    "SELECT id, name, type FROM entities WHERE id = ANY(%s)",
+                    (entity_ids,),
+                ).fetchall()
+            ]
+            if entity_ids
+            else []
+        )
+        cand_events = candidate_events(conn, entity_ids, tally)
+
+        try:
+            extractions = parse_integration_response(
+                call_integration(
+                    build_integration_request(payload, cand_entities, cand_events)
+                ),
+                {it["id"] for it in batch},
+                {c["id"] for c in cand_entities},
+                {c["id"] for c in cand_events},
+            )
+        except Exception:
+            tally.failed_integration += len(batch)
+            log.warning("Comprehend: integration batch failed", exc_info=True)
+            conn.execute(
+                "UPDATE item_triage SET integrate_attempts = integrate_attempts + 1 "
+                "WHERE item_id = ANY(%s)",
+                ([it["id"] for it in batch],),
+            )
+            conn.commit()
+            continue
+
+        for e in extractions:
+            e["published_at"] = published.get(e["item_id"])
+        write_batch(conn, extractions, index, tally)
+        conn.commit()
+
+    tally.gave_up_integration = conn.execute(
+        "SELECT count(*) FROM item_triage WHERE integrate_attempts >= 3"
+    ).fetchone()[0]
+    tally.gave_up_triage = conn.execute(
+        "SELECT count(*) FROM item_triage WHERE verdict = 'failed' AND attempts >= 3"
+    ).fetchone()[0]
     log.info(f"Comprehend: {tally}")
     return tally
 
