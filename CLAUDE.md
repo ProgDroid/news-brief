@@ -40,7 +40,8 @@ There are **two** copies of the corpus, and which one is authoritative depends o
 
 - `~/.claude/projects/<key>/memory/` — the **live** one. The auto-memory system reads and
   writes here, and its `MEMORY.md` loads automatically. **Write learnings here.**
-- `.claude/memory/` — the **committed** copy, 68 entries, carried in git.
+- `.claude/memory/` — the **committed** copy, carried in git. (No count here on purpose: the
+  previous version of this file hardcoded one and it went stale. Run `ls .claude/memory/*.md`.)
 
 `.claude/hooks/hydrate-memory.sh` runs at SessionStart. Where the live corpus exists it
 prints **nothing**, because the index is already loaded and a second copy is noise. Where it
@@ -49,14 +50,26 @@ you to read `.claude/memory/<name>.md` for an entry that looks relevant. It deli
 **not** copy files into the live corpus: the project key is derived from the working
 directory, its form on a Linux host is unverified, and a wrong key writes where nothing reads.
 
-Memories written in a session do **not** reach git on their own. `scripts/flush-memory.sh`
-copies live → committed and then stops, without staging or committing.
+Memories written in a session reach the committed copy **automatically**, as of 2026-09-06:
+the `sync-memory.sh` Stop hook from `personal@progdroid` copies live → committed after every
+turn. It copies only — it never stages and never commits. `scripts/flush-memory.sh` does the
+same thing on demand and is still worth keeping: it works when the plugin is not loaded (a
+fresh clone, or before `/reload-plugins`), and it prints a diff summary first.
 
-**That last part is deliberate, and it is the thing to remember: this repository is PUBLIC.**
-Every memory written here is a publishing candidate. The 2026-09-04 review of 21 files found
-no credentials, but did find an operational map of the deploy host and a behavioural profile
-of the author — material that wants a human glance, not a hook. Review
-`git diff -- .claude/memory/` before committing, and see `live-state-on-deploy-host.md`.
+That hook did nothing here at all until 2026-09-06, which is worth knowing because the
+failure was completely silent. Its shared `memory_key()` derived the project key from
+`git rev-parse --show-toplevel`, which on Git Bash returns `G:/pythonDev/news-brief` — a
+Windows path — while the matcher only understood the MSYS `/g/...` form. The key came back
+as `G:-pythonDev-news-brief`, no such directory could exist, and every call hit a
+`[ -d ] || return 0` guard without a word. Fixed in `personal@0.11.1`. The cloud path was
+never affected: a Linux root parses correctly, which is exactly why it went unnoticed.
+
+**The automatic copy makes the next part more important, not less: this repository is PUBLIC.**
+Every memory written here is a publishing candidate, and it now lands in the working tree
+without you asking for it. The 2026-09-04 review of 21 files found no credentials, but did
+find an operational map of the deploy host and a behavioural profile of the author — material
+that wants a human glance, not a hook. **Review `git diff -- .claude/memory/` before
+committing**, and see `live-state-on-deploy-host.md`.
 
 **Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/core-concepts/sync-concepts.md for details and anti-patterns.
 
