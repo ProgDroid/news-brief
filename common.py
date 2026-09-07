@@ -267,6 +267,15 @@ KNOBS: dict[str, Knob] = {
     "COMPREHEND_INTEGRATE_BATCH": Knob(int, 5),
     "COMPREHEND_MAX_ITEMS": Knob(int, 300),
     "COMPREHEND_SAMPLE_PER_DAY": Knob(int, 20),
+    # Per-call HTTP budgets, in seconds. Knobs rather than constants because
+    # the right values are an empirical question this has not answered yet:
+    # comprehend logs each call's elapsed time, so the host can tighten these
+    # from real durations without a redeploy. Deliberately generous to start.
+    # The asymmetry is the reason -- too short silently drops evidence AND
+    # misattributes it as a model failure, while too long only spends
+    # DEADLINE_SECONDS, which the tally reports.
+    "COMPREHEND_INTEGRATE_TIMEOUT": Knob(int, 300),
+    "COMPREHEND_TRIAGE_TIMEOUT": Knob(int, 90),
     "TRIAGE_MODEL": Knob(str, "", env="NEWSBRIEF_TRIAGE_MODEL"),
     "INTEGRATE_MODEL": Knob(str, "", env="NEWSBRIEF_INTEGRATE_MODEL"),
     # How long a job child may run before the supervisor stops it, in minutes;

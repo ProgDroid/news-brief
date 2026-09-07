@@ -599,3 +599,108 @@ def test_a_bumped_integration_prompt_version_re_integrates(kb, monkeypatch):
         ).fetchone()[0]
         == first + 1
     ), "the bump must advance the stored version, or task 10 re-selects forever"
+
+
+# --- news-brief-uer: an item with genuinely nothing in it is not a failure.
+# _validate_item returned None both for a MALFORMED row and for a well-formed
+# row carrying nothing, so run() could not tell them apart: the empty item was
+# charged three integration calls and counted in failed_integration as though
+# the model or the parser had broken. It concentrates on the `sampled` control
+# arm by construction -- sampled items are the ones BOTH triage halves
+# rejected -- and `sampled` is the gate's unconfounded control.
+
+
+EMPTY = {"item_id": 1, "entities": [], "events": []}
+
+
+def test_a_well_formed_but_empty_extraction_survives_parsing():
+    """It must reach run(), which is the only layer that can mark it done.
+    Dropping it at the parser is what made it indistinguishable from garbage."""
+    got = comprehend.parse_integration_response(_extraction([EMPTY]), {1}, set(), set())
+    assert [e["item_id"] for e in got] == [1]
+    assert got[0]["entities"] == [] and got[0]["events"] == []
+
+
+def test_a_malformed_row_is_still_dropped_whole():
+    """The positive control for the test above: widening 'empty' must not
+    widen 'malformed'. An unoffered item_id is still garbage."""
+    got = comprehend.parse_integration_response(_extraction([EMPTY]), {2}, set(), set())
+    assert got == []
+
+
+def test_an_empty_extraction_is_marked_integrated_and_writes_nothing(kb):
+    iid = _item(kb)
+    kb.commit()
+    tally = comprehend.Tally()
+
+    assert (
+        comprehend.write_extraction(
+            kb, dict(EMPTY, item_id=iid), comprehend.SurfaceIndex([]), tally
+        )
+        is True
+    )
+    kb.commit()
+
+    assert kb.execute("SELECT count(*) FROM entities").fetchone()[0] == 0
+    assert kb.execute("SELECT count(*) FROM events").fetchone()[0] == 0
+    assert kb.execute("SELECT count(*) FROM assertions").fetchone()[0] == 0
+    integrated_at, attempts = kb.execute(
+        "SELECT integrated_at, integrate_attempts FROM item_triage WHERE item_id = %s",
+        (iid,),
+    ).fetchone()
+    assert integrated_at is not None, (
+        "an empty item must be advanced past the integration SELECT, or it is "
+        "re-offered at the FRONT of every future batch forever"
+    )
+    assert attempts == 0, "nothing failed, so nothing may be charged an attempt"
+
+
+def test_an_empty_extraction_is_counted_apart_from_failures(kb):
+    """A genuinely empty sample arm is a real finding about the corpus. Folding
+    it into failed_integration is the unattributable-count shape this repo has
+    a rule against -- it conflates 'the pipeline broke' with 'nothing here'."""
+    iid = _item(kb)
+    kb.commit()
+    tally = comprehend.Tally()
+
+    comprehend.write_extraction(
+        kb, dict(EMPTY, item_id=iid), comprehend.SurfaceIndex([]), tally
+    )
+
+    assert tally.empty_extraction == 1
+    assert tally.failed_integration == 0
+    assert tally.items_lost_to_savepoint == 0
+    assert tally.assertions_written == 0
+
+
+def test_an_extraction_whose_entities_all_fail_resolution_is_still_a_failure(kb):
+    """The distinction that makes the fix honest. 'The model returned nothing'
+    and 'every entity the model returned was refused' are different events:
+    the second means work was done and rejected, so it keeps its attempt."""
+    iid = _item(kb)
+    eid = _entity(kb, name="Shell", type_="company")
+    kb.execute(
+        "INSERT INTO entity_instruments (entity_id, symbol, asset_class) "
+        "VALUES (%s, 'SHEL', 'equity')",
+        (eid,),
+    )
+    kb.commit()
+    tally = comprehend.Tally()
+
+    shadowed = dict(
+        _fresh(iid), entities=[{"name": "SHEL", "type": "instrument", "aliases": []}]
+    )
+    assert (
+        comprehend.write_extraction(kb, shadowed, comprehend.SurfaceIndex([]), tally)
+        is False
+    )
+    kb.commit()
+
+    assert tally.empty_extraction == 0, "this is a refusal, not an empty extraction"
+    assert tally.failed_integration == 1
+    assert (
+        kb.execute(
+            "SELECT integrate_attempts FROM item_triage WHERE item_id = %s", (iid,)
+        ).fetchone()[0]
+        == 1
+    )

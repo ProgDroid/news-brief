@@ -2858,22 +2858,34 @@ SIGNALS_MAX_ATTEMPTS = 2
 SIGNALS_MAX_TOKENS = 8192
 
 
-def _post_messages(payload: dict) -> dict:
+def _post_messages(
+    payload: dict,
+    *,
+    timeout: int = SIGNALS_TIMEOUT,
+    max_attempts: int = SIGNALS_MAX_ATTEMPTS,
+) -> dict:
     """Raw Anthropic Messages API call with one retry on transient failures.
 
     The 30s default was too tight for a synchronous Sonnet tool-use generation
     and timed out (read timeout) -> extraction failed to extract_error and wiped
     the day's signals. Because extract_signals runs AFTER the brief is delivered,
     a slow call never delays the user, so we use a generous timeout and retry.
+
+    The defaults are the signals budget, so that caller is unchanged. Other
+    callers MUST pass their own: this function is shared, and the justification
+    above ("latency is free") is a property of extract_signals, not of the HTTP
+    call. comprehend runs inside an hourly job against its own deadline and
+    generates at four times the token budget, so it sizes both itself
+    (news-brief-wvt).
     """
     last_err = None
-    for attempt in range(1, SIGNALS_MAX_ATTEMPTS + 1):
+    for attempt in range(1, max_attempts + 1):
         try:
             resp = requests.post(
                 "https://api.anthropic.com/v1/messages",
                 headers=ANTHROPIC_HEADERS,
                 json=payload,
-                timeout=SIGNALS_TIMEOUT,
+                timeout=timeout,
             )
             resp.raise_for_status()
             return resp.json()

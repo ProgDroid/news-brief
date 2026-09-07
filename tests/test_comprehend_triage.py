@@ -1095,3 +1095,124 @@ def test_the_entity_cap_keeps_the_newest_candidates(kb, monkeypatch):
         "insertion-order slice drops the newest instead"
     )
     assert tally.candidate_cap_hit == 1
+
+
+def test_an_item_with_nothing_to_extract_is_never_re_offered(kb, monkeypatch):
+    """news-brief-uer's acceptance criterion, asserted as the PROPERTY rather
+    than as its mechanism. Checking `integrated_at IS NOT NULL` would restate
+    the implementation; this drives run()'s real integration SELECT a second
+    time and fails if the item comes back. Spec 12.2 measured genuine
+    stock-quote and market-summary junk in the corpus, so this is the ordinary
+    case, not an exotic one -- and before the fix it cost three integration
+    calls per empty item and reported three failures that never happened.
+    """
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
+    item_id = _add_item(kb, "FTSE 100 closes up 0.3%")
+    kb.commit()
+
+    def fake_triage(_req):
+        return {
+            "stop_reason": "tool_use",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "emit_triage",
+                    "input": {"items": [{"id": item_id, "material": True}]},
+                }
+            ],
+        }
+
+    def empty_extraction(_req):
+        return {
+            "stop_reason": "tool_use",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "emit_extraction",
+                    "input": {
+                        "items": [{"item_id": item_id, "entities": [], "events": []}]
+                    },
+                }
+            ],
+        }
+
+    monkeypatch.setattr(comprehend, "call_triage", fake_triage)
+    monkeypatch.setattr(comprehend, "call_integration", empty_extraction)
+
+    first = comprehend.run(kb)
+    kb.commit()
+
+    assert first.empty_extraction == 1
+    assert first.failed_integration == 0, "nothing failed; nothing may be reported as"
+    assert (
+        kb.execute(
+            "SELECT integrate_attempts FROM item_triage WHERE item_id = %s", (item_id,)
+        ).fetchone()[0]
+        == 0
+    )
+
+    # The property. A second pass must not offer the item again -- so an
+    # integration call at all is the failure.
+    monkeypatch.setattr(
+        comprehend,
+        "call_integration",
+        lambda _req: pytest.fail("an integrated empty item was re-offered"),
+    )
+    second = comprehend.run(kb)
+    kb.commit()
+    assert second.empty_extraction == 0
+
+
+def test_a_still_pending_item_IS_re_offered(kb, monkeypatch):
+    """The presence sibling for the test above. Without it, that test's second
+    run would also pass if run() had simply stopped offering anything at all --
+    a broken SELECT and a correctly-advanced row look identical from there.
+    """
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
+    item_id = _add_item(kb, "Border checks tightened")
+    kb.commit()
+
+    monkeypatch.setattr(
+        comprehend,
+        "call_triage",
+        lambda _req: {
+            "stop_reason": "tool_use",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "emit_triage",
+                    "input": {"items": [{"id": item_id, "material": True}]},
+                }
+            ],
+        },
+    )
+    # Malformed: an unoffered item_id. Dropped whole, so nothing advances it.
+    monkeypatch.setattr(
+        comprehend,
+        "call_integration",
+        lambda _req: {
+            "stop_reason": "tool_use",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "emit_extraction",
+                    "input": {
+                        "items": [{"item_id": 10**9, "entities": [], "events": []}]
+                    },
+                }
+            ],
+        },
+    )
+
+    comprehend.run(kb)
+    kb.commit()
+
+    offered = []
+    monkeypatch.setattr(
+        comprehend,
+        "call_integration",
+        lambda req: offered.append(req) or {"stop_reason": "tool_use", "content": []},
+    )
+    comprehend.run(kb)
+    kb.commit()
+    assert offered, "a malformed row must still come back; only 'empty' advances"

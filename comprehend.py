@@ -57,28 +57,70 @@ class Tally:
     # Distinguishes "one item failed" from "four items were collateral" -- the
     # exact confusion a batch-wide transaction would have produced.
     items_lost_to_savepoint: int = 0
+    # Well-formed extractions that carried nothing. NOT a failure: spec 12.2
+    # measured real stock-quote and market-summary junk in the corpus, so an
+    # empty sample arm is a finding about the corpus, not about the pipeline.
+    # Counted separately because folding it into failed_integration makes the
+    # failure counters unattributable (news-brief-uer).
+    empty_extraction: int = 0
     instrument_entity_refused: int = 0
     candidate_cap_hit: int = 0
     failures: dict = field(default_factory=dict)
 
 
-def call_triage(request: dict) -> dict:
-    """The network seam for triage. Tests monkeypatch this.
+def _timed_post(request: dict, label: str, timeout: int, max_attempts: int) -> dict:
+    """Post via brief's HTTP path, logging how long it actually took.
 
-    Reuses brief._post_messages rather than adding a second HTTP path: it
-    already carries the retry and the generous timeout that a synchronous
-    tool-use generation needs.
+    The elapsed time is the point. Both timeouts below are opening guesses, and
+    a guess is only defensible while something is measuring it -- this is what
+    lets the host retune the knobs from real durations instead of from a
+    token-rate estimate. Logged on failure too: a call that timed out is
+    precisely the one whose duration you want.
     """
     import brief
 
-    return brief._post_messages(request)
+    started = time.monotonic()
+    try:
+        resp = brief._post_messages(request, timeout=timeout, max_attempts=max_attempts)
+    except Exception:
+        log.warning(
+            f"Comprehend: {label} call failed after "
+            f"{time.monotonic() - started:.1f}s (timeout={timeout}s)"
+        )
+        raise
+    usage = resp.get("usage") or {}
+    log.info(
+        f"Comprehend: {label} call took {time.monotonic() - started:.1f}s "
+        f"(timeout={timeout}s) stop_reason={resp.get('stop_reason')} "
+        f"out={usage.get('output_tokens')}"
+    )
+    return resp
+
+
+def call_triage(request: dict) -> dict:
+    """The network seam for triage. Tests monkeypatch this."""
+    return _timed_post(
+        request, "triage", int(common.COMPREHEND_TRIAGE_TIMEOUT), max_attempts=2
+    )
 
 
 def call_integration(request: dict) -> dict:
-    """The network seam for integration. Tests monkeypatch this."""
-    import brief
+    """The network seam for integration. Tests monkeypatch this.
 
-    return brief._post_messages(request)
+    ONE HTTP attempt, deliberately. item_triage.integrate_attempts < 3 already
+    gates the integration SELECT and the failure paths increment it, so a
+    failed item is retried on the next hourly pass. Retrying here as well
+    multiplies against that ceiling -- up to six charged 8192-token
+    generations for one persistently-bad item -- and, unlike the item-level
+    retry, it spends this pass's DEADLINE_SECONDS, shrinking how many other
+    items get processed at all (news-brief-wvt).
+    """
+    return _timed_post(
+        request,
+        "integration",
+        int(common.COMPREHEND_INTEGRATE_TIMEOUT),
+        max_attempts=1,
+    )
 
 
 def _chunk(seq, size):
@@ -882,8 +924,13 @@ def _validate_item(row, item_ids, entity_ids, event_ids) -> dict | None:
             }
         )
 
-    if not entities or not events:
-        return None
+    # An empty list here is NOT a defect: every member that survived the loops
+    # above was well-formed, so reaching this point with nothing means the item
+    # genuinely had nothing to extract. Returning None would collapse that into
+    # the malformed case, and run() would charge it three integration calls
+    # before the ceiling retired it (news-brief-uer). write_extraction owns the
+    # empty branch, because marking the item done is the only thing that stops
+    # it being re-offered.
     return {"item_id": item_id, "entities": entities, "events": events}
 
 
@@ -963,6 +1010,25 @@ def write_extraction(conn, extraction: dict, index: SurfaceIndex, tally: Tally) 
     ).fetchone()
     if already:
         return True
+
+    # Nothing to extract. Mark it done and charge it nothing: it is neither a
+    # model failure nor a parser failure, and leaving integrated_at NULL is the
+    # shape this repo has hit three times -- a row a predicate keeps
+    # re-selecting that nothing advances. `ORDER BY i.id` would put it at the
+    # FRONT of every future batch, re-paying its share of the call each pass.
+    # Note this is NOT the same as "every entity was refused": that path went
+    # through resolution and had work rejected, so it keeps its attempt.
+    if not extraction["entities"] and not extraction["events"]:
+        conn.execute(
+            "UPDATE item_triage SET integrated_at = now(), "
+            "  integrate_prompt_version = %s "
+            "WHERE item_id = %s AND triage_prompt_version = %s "
+            "  AND verdict = 'material'",
+            (INTEGRATE_PROMPT_VERSION, item_id, TRIAGE_PROMPT_VERSION),
+        )
+        tally.empty_extraction += 1
+        return True
+
     try:
         with conn.transaction():
             entity_ids = []
