@@ -34,6 +34,8 @@ if str(REPO_ROOT) not in sys.path:
 
 import db  # noqa: E402  (path shim above must run first)
 from comprehend import (  # noqa: E402
+    _ENTITY_LABEL,
+    _EVENT_LABEL,
     CANDIDATE_ENTITY_CAP,
     INTEGRATE_PROMPT_VERSION,
     TRIAGE_PROMPT_VERSION,
@@ -44,6 +46,7 @@ from comprehend import (  # noqa: E402
     call_integration,
     candidate_events,
     clean,
+    label_map,
 )
 
 DEFAULT_BATCH = 5
@@ -117,13 +120,13 @@ def report(conn, limit: int) -> int:
     cand_entities, cand_events = build_candidates(conn, batch)
 
     offered_items = {it["id"] for it in batch}
-    offered_entities = {c["id"] for c in cand_entities}
-    offered_events = {c["id"] for c in cand_events}
+    entity_labels = label_map(_ENTITY_LABEL, cand_entities)
+    event_labels = label_map(_EVENT_LABEL, cand_events)
 
     print("=== Offered ===")
     print(f"items             : {sorted(offered_items)}")
-    print(f"entity candidates : {sorted(offered_entities) or '(none)'}")
-    print(f"event candidates  : {sorted(offered_events) or '(none)'}")
+    print(f"entity candidates : {entity_labels or '(none)'}")
+    print(f"event candidates  : {event_labels or '(none)'}")
 
     resp = call_integration(
         build_integration_request(payload, cand_entities, cand_events)
@@ -155,13 +158,14 @@ def report(conn, limit: int) -> int:
         return 1
 
     print("\n=== _validate_item verdict per row ===")
+    tally = Tally(enabled=True)
     accepted = 0
     for i, row in enumerate(items):
         if not isinstance(row, dict):
             print(f"[{i}] row is {type(row).__name__}, not an object")
             continue
         ok = (
-            _validate_item(row, offered_items, offered_entities, offered_events)
+            _validate_item(row, offered_items, entity_labels, event_labels, tally)
             is not None
         )
         accepted += int(ok)
@@ -173,8 +177,15 @@ def report(conn, limit: int) -> int:
 
     print(
         f"\nrows={len(items)} offered={len(offered_items)} "
-        f"accepted={accepted} rejected={len(items) - accepted}"
+        f"accepted={accepted} rejected={len(items) - accepted} "
+        f"unmapped_candidate={tally.unmapped_candidate}"
     )
+    if tally.unmapped_candidate:
+        print(
+            "unmapped_candidate > 0 means the model supplied labels that match "
+            "nothing offered. Those rows still resolve via name/type, but it is "
+            "non-compliance with the prompt and worth reading the payload for."
+        )
     return 0
 
 

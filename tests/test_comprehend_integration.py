@@ -172,13 +172,17 @@ def _extraction(items):
 
 ONE = {
     "item_id": 1,
-    "entities": [{"candidate_id": 10}],
-    "events": [{"candidate_id": 20, "standing": "reported"}],
+    "entities": [{"candidate": "ENT1"}],
+    "events": [{"candidate": "EVT1", "standing": "reported"}],
 }
+# Label -> real id. Raw ids never reach the model now (comprehend.label_map), so
+# a fixture citing 10 directly would be testing a contract that no longer exists.
+ENT = {"ENT1": 10}
+EVT = {"EVT1": 20}
 
 
 def test_a_well_formed_extraction_is_parsed():
-    got = comprehend.parse_integration_response(_extraction([ONE]), {1}, {10}, {20})
+    got = comprehend.parse_integration_response(_extraction([ONE]), {1}, ENT, EVT)
     assert got[0]["item_id"] == 1
     assert got[0]["entities"][0]["candidate_id"] == 10
 
@@ -187,63 +191,34 @@ def test_a_truncated_extraction_raises_before_parsing():
     resp = _extraction([ONE])
     resp["stop_reason"] = "max_tokens"
     with pytest.raises(ValueError, match="truncated"):
-        comprehend.parse_integration_response(resp, {1}, {10}, {20})
+        comprehend.parse_integration_response(resp, {1}, ENT, EVT)
 
 
-def test_a_hallucinated_entity_candidate_id_is_rejected():
-    """The model can name an id that was never offered. Writing it would
-    attach this item's assertion to an unrelated entity."""
-    bad = dict(ONE, entities=[{"candidate_id": 999}])
-    got = comprehend.parse_integration_response(_extraction([bad]), {1}, {10}, {20})
-    assert got == [], "an item citing an unoffered entity id must be dropped whole"
-
-
-def test_a_hallucinated_event_candidate_id_is_rejected():
-    bad = dict(ONE, events=[{"candidate_id": 999, "standing": "reported"}])
-    got = comprehend.parse_integration_response(_extraction([bad]), {1}, {10}, {20})
-    assert got == []
-
-
-def test_a_boolean_entity_candidate_id_is_rejected():
-    """`True not in {1}` is False, so without an integer guard a hallucinated
-    `true` passes the very check this parser exists to enforce and the
-    extraction is attached to entity 1 -- a real entity the model never named.
-    Nothing errors downstream, because the id is real."""
-    bad = dict(ONE, entities=[{"candidate_id": True}])
-    got = comprehend.parse_integration_response(_extraction([bad]), {1}, {1}, {20})
-    assert got == [], "a boolean candidate id must not stand in for the real id 1"
-
-
-def test_a_boolean_event_candidate_id_is_rejected():
-    """Same hole on the event arm. Both loops had the same missing guard, so
-    fixing one and testing only that one would leave the other open."""
-    bad = dict(ONE, events=[{"candidate_id": True, "standing": "reported"}])
-    got = comprehend.parse_integration_response(_extraction([bad]), {1}, {10}, {1})
-    assert got == [], "a boolean candidate id must not stand in for the real id 1"
-
-
-def test_a_float_entity_candidate_id_is_rejected():
-    """The other half of the same hole: `1.0 == 1`, so a float satisfies the
-    membership test and then travels on as a float where an integer id is
-    expected."""
-    bad = dict(ONE, entities=[{"candidate_id": 1.0}])
-    got = comprehend.parse_integration_response(_extraction([bad]), {1}, {1}, {20})
-    assert got == [], "a float candidate id must not stand in for the real id 1"
-
-
-def test_a_float_event_candidate_id_is_rejected():
-    """Mirrors the float-entity test on the event arm: `1.0 == 1`, so a float
-    satisfies the membership test there too, and `_is_id` is applied
-    identically at both sites -- fix-1's brief specified boolean-entity,
-    boolean-event and float-entity but no float-event, leaving this arm
-    untested."""
-    bad = dict(ONE, events=[{"candidate_id": 1.0, "standing": "reported"}])
-    got = comprehend.parse_integration_response(_extraction([bad]), {1}, {10}, {1})
-    assert got == [], "a float candidate id must not stand in for the real id 1"
+# The six integer-coercion guard tests that stood here until 2026-09-07
+# (hallucinated / boolean / float candidate ids, on both the entity and event
+# arms) are GONE, and their coverage moved rather than evaporating.
+#
+# They guarded `candidate_id`, an INTEGER the model could collide with a real
+# BIGSERIAL id -- `True == 1` and `1.0 == 1` both satisfied a membership test
+# against real ids. news-brief-bqa.11 replaced that field with an opaque label
+# space (`candidate`, "ENT1"/"EVT1"), which makes the collision structurally
+# impossible instead of guarded: a value that is not a string, or a string
+# naming nothing offered, cannot be a reference at all.
+#
+# The replacements live in tests/test_comprehend_labels.py -- deliberately in a
+# file with no DB pytestmark, since they are pure function calls:
+#   test_a_candidate_that_looks_like_a_raw_id_does_not_resolve  (the collision)
+#   test_a_non_string_candidate_does_not_resolve                (bool / float)
+#   test_an_unmappable_entity_label_with_no_usable_name_drops_the_item
+#
+# Note the behaviour change these encode: an unrecognised candidate no longer
+# rejects the item, it falls back to the new-entity path and is COUNTED. That is
+# deliberate -- rejecting deadlocked the cold start, because with an empty KB
+# nothing can map, so no entity is ever created, so there are never candidates.
 
 
 def test_an_item_id_that_was_never_sent_is_dropped():
-    got = comprehend.parse_integration_response(_extraction([ONE]), {2}, {10}, {20})
+    got = comprehend.parse_integration_response(_extraction([ONE]), {2}, ENT, EVT)
     assert got == []
 
 
@@ -262,7 +237,7 @@ def test_a_new_entity_and_a_new_event_are_accepted():
             }
         ],
     }
-    got = comprehend.parse_integration_response(_extraction([fresh]), {1}, set(), set())
+    got = comprehend.parse_integration_response(_extraction([fresh]), {1}, {}, {})
     assert got[0]["entities"][0]["name"] == "Moldova"
     assert got[0]["events"][0]["type"] == "action"
 
@@ -280,10 +255,13 @@ def test_a_row_with_one_bad_entity_is_rejected_ENTIRELY():
         ONE,
         entities=[
             {"name": "Moldova", "type": "country", "aliases": []},
-            {"candidate_id": 999},
+            # An invalid `type` is now the cheapest way to make an entity bad.
+            # An unoffered candidate no longer is: under opaque labels it falls
+            # back to the new-entity path by design (news-brief-bqa.11).
+            {"name": "Ruritania", "type": "not_a_type"},
         ],
     )
-    got = comprehend.parse_integration_response(_extraction([bad]), {1}, {10}, {20})
+    got = comprehend.parse_integration_response(_extraction([bad]), {1}, ENT, EVT)
     assert got == [], "one bad entity must drop the whole row, not just itself"
 
 
@@ -297,10 +275,10 @@ def test_a_row_with_two_good_entities_is_accepted_with_BOTH():
         ONE,
         entities=[
             {"name": "Moldova", "type": "country", "aliases": []},
-            {"candidate_id": 10},
+            {"candidate": "ENT1"},
         ],
     )
-    got = comprehend.parse_integration_response(_extraction([good]), {1}, {10}, {20})
+    got = comprehend.parse_integration_response(_extraction([good]), {1}, ENT, EVT)
     assert len(got) == 1
     assert len(got[0]["entities"]) == 2, (
         "both entities must survive -- not just a truthy non-empty check"
@@ -616,7 +594,7 @@ EMPTY = {"item_id": 1, "entities": [], "events": []}
 def test_a_well_formed_but_empty_extraction_survives_parsing():
     """It must reach run(), which is the only layer that can mark it done.
     Dropping it at the parser is what made it indistinguishable from garbage."""
-    got = comprehend.parse_integration_response(_extraction([EMPTY]), {1}, set(), set())
+    got = comprehend.parse_integration_response(_extraction([EMPTY]), {1}, {}, {})
     assert [e["item_id"] for e in got] == [1]
     assert got[0]["entities"] == [] and got[0]["events"] == []
 

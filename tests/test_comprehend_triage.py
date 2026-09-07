@@ -585,12 +585,14 @@ def test_an_item_the_validator_rejects_is_charged_an_attempt(kb, monkeypatch):
                     }
                 )
             else:
-                # An entity carrying a candidate_id nothing offered: the
-                # cheapest way to make _validate_item reject the whole row.
+                # An entity with an invalid `type`: the cheapest way to make
+                # _validate_item reject the whole row. An unoffered candidate
+                # is NOT that any more -- under opaque labels it falls back to
+                # the new-entity path by design (news-brief-bqa.11).
                 items.append(
                     {
                         "item_id": i,
-                        "entities": [{"candidate_id": 999999999}],
+                        "entities": [{"name": "Ruritania", "type": "not_a_type"}],
                         "events": [
                             {
                                 "summary": "S",
@@ -974,9 +976,6 @@ def test_the_integration_matcher_sees_cleaned_text(kb, monkeypatch):
     """
     monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
     kb.execute("INSERT INTO entities (name, type) VALUES ('Black Sea', 'country')")
-    black_sea_id = kb.execute(
-        "SELECT id FROM entities WHERE name = 'Black Sea'"
-    ).fetchone()[0]
     item_id = _add_item(kb, "Update", body="Black&nbsp;Sea shipping resumes")
     kb.commit()
 
@@ -994,7 +993,10 @@ def test_the_integration_matcher_sees_cleaned_text(kb, monkeypatch):
                         "items": [
                             {
                                 "item_id": item_id,
-                                "entities": [{"candidate_id": black_sea_id}],
+                                # Black Sea is the only candidate the matcher
+                                # can offer, so it is ENT1. Citing its raw id
+                                # would no longer resolve.
+                                "entities": [{"candidate": "ENT1"}],
                                 "events": [
                                     {
                                         "summary": "S",
@@ -1024,6 +1026,75 @@ def test_the_integration_matcher_sees_cleaned_text(kb, monkeypatch):
         "without clean() at the matcher, the literal &nbsp; sits between "
         "'Black' and 'Sea' and the word-boundary match never fires, so the "
         "entity never becomes a candidate"
+    )
+
+
+def test_a_candidate_label_resolves_to_the_offered_entity_end_to_end(kb, monkeypatch):
+    """The label the prompt RENDERS must be the label the parser ACCEPTS.
+
+    The unit tests in test_comprehend_labels.py build the label map by hand, so
+    they cannot see a drift between build_integration_request's rendering and
+    run()'s map -- both would have to be wrong in the same way to fail there,
+    and identically wrong is exactly how drift looks. This drives the real
+    run() and checks the entity the assertion actually landed on.
+
+    Failure mode it pins, VERIFIED BY MUTATION: replacing the fixture's label
+    with one that cannot resolve leaves `event_entities` empty. This fixture
+    gives the entity no name, so resolution is the only route to it and the
+    item is dropped whole.
+
+    Deliberately NOT asserting the entity COUNT. It stays at 1 under that same
+    mutation, so it would read like a guard while discriminating nothing. A
+    failed resolution only mints a duplicate when the model ALSO supplies a
+    name, and even then `_resolve_entity` upserts ON CONFLICT
+    (lower(name), type) and lands back on the same row.
+    """
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
+    kb.execute("INSERT INTO entities (name, type) VALUES ('Black Sea', 'country')")
+    offered_id = kb.execute(
+        "SELECT id FROM entities WHERE name = 'Black Sea'"
+    ).fetchone()[0]
+    item_id = _add_item(kb, "Update", body="Black Sea shipping resumes")
+    kb.commit()
+
+    def fake_integrate(req):
+        return {
+            "stop_reason": "tool_use",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "emit_extraction",
+                    "input": {
+                        "items": [
+                            {
+                                "item_id": item_id,
+                                "entities": [{"candidate": "ENT1"}],
+                                "events": [
+                                    {
+                                        "summary": "S",
+                                        "type": "action",
+                                        "commitment_state": "in_force",
+                                        "standing": "reported",
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                }
+            ],
+        }
+
+    monkeypatch.setattr(comprehend, "call_integration", fake_integrate)
+
+    comprehend.run(kb)
+    kb.commit()
+
+    linked = kb.execute(
+        "SELECT count(*) FROM event_entities WHERE entity_id = %s", (offered_id,)
+    ).fetchone()[0]
+    assert linked == 1, (
+        "the event must attach to the OFFERED entity id; a label that failed to "
+        "resolve leaves this at 0"
     )
 
 

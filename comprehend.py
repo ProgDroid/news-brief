@@ -25,7 +25,7 @@ from common import log
 # Bump on any material change to the triage prompt. A prompt change that is not
 # versioned is indistinguishable from a change in the world.
 TRIAGE_PROMPT_VERSION = 1
-INTEGRATE_PROMPT_VERSION = 1
+INTEGRATE_PROMPT_VERSION = 2
 
 # A pass must not outlive its own fire time: supervisor's _due_jobs loop alerts
 # on any job still running at its next fire. Hourly schedule, 40-minute bound.
@@ -65,6 +65,11 @@ class Tally:
     empty_extraction: int = 0
     instrument_entity_refused: int = 0
     candidate_cap_hit: int = 0
+    # A `candidate` the model supplied that matched no offered label. Not a
+    # failure -- the row falls back to the new-entity/new-event path -- but it
+    # is model NON-COMPLIANCE, and a fallback that left no trace would repeat
+    # exactly what made failed_integration=172 unattributable.
+    unmapped_candidate: int = 0
     failures: dict = field(default_factory=dict)
 
 
@@ -283,8 +288,9 @@ def run(conn) -> Tally:
                     build_integration_request(payload, cand_entities, cand_events)
                 ),
                 {it["id"] for it in batch},
-                {c["id"] for c in cand_entities},
-                {c["id"] for c in cand_events},
+                label_map(_ENTITY_LABEL, cand_entities),
+                label_map(_EVENT_LABEL, cand_events),
+                tally,
             )
         except Exception:
             tally.failed_integration += len(batch)
@@ -718,7 +724,13 @@ entity: use type 'company' and put the ticker in aliases. Never create a \
 separate entity of type 'instrument' for a company's shares.
 
 Distinguish what was DONE from what was SAID. "Trump declared the ceasefire \
-over" is a statement; whether the ceasefire is over is a separate matter."""
+over" is a statement; whether the ceasefire is over is a separate matter.
+
+CANDIDATE LABELS. Candidates are listed with labels like ENT1 and EVT1. Set \
+`candidate` to one of those labels ONLY to refer to that exact listed item. \
+OMIT `candidate` entirely for anything new -- never invent or number a label \
+yourself. Entities are deduplicated by name automatically, so you do not need \
+an id to link two mentions of the same actor across items."""
 
 _INTEGRATE_TOOL = {
     "name": "emit_extraction",
@@ -737,7 +749,14 @@ _INTEGRATE_TOOL = {
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "candidate_id": {"type": "integer"},
+                                    "candidate": {
+                                        "type": "string",
+                                        "description": (
+                                            "A label from CANDIDATE ENTITIES, "
+                                            "e.g. 'ENT1'. Omit entirely for a "
+                                            "new entity; never invent a label."
+                                        ),
+                                    },
                                     "name": {"type": "string"},
                                     "type": {
                                         "type": "string",
@@ -761,7 +780,14 @@ _INTEGRATE_TOOL = {
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "candidate_id": {"type": "integer"},
+                                    "candidate": {
+                                        "type": "string",
+                                        "description": (
+                                            "A label from CANDIDATE EVENTS, "
+                                            "e.g. 'EVT1'. Omit entirely for a "
+                                            "new event; never invent a label."
+                                        ),
+                                    },
                                     "summary": {"type": "string"},
                                     "type": {
                                         "type": "string",
@@ -804,15 +830,65 @@ def _integrate_model() -> str:
     return common.INTEGRATE_MODEL or common.MODEL
 
 
+_ENTITY_LABEL = "ENT"
+_EVENT_LABEL = "EVT"
+
+
+def label_map(prefix: str, candidates: list[dict]) -> dict[str, int]:
+    """Opaque label -> real id. The ONE definition of the label scheme.
+
+    Raw database ids used to be sent to the model as `candidate_id`. `entities.id`
+    is BIGSERIAL from 1, and a model numbering its own extractions 1, 2, 3
+    produces values indistinguishable from real ids the moment the KB holds any
+    rows -- so a parser liberal enough to survive a cold start would bind an
+    assertion to an unrelated entity, silently and permanently. A label space
+    the model cannot accidentally land in removes that ambiguity structurally
+    rather than by instruction (news-brief-bqa.11).
+    """
+    return {f"{prefix}{i}": c["id"] for i, c in enumerate(candidates, 1)}
+
+
+def _resolve_label(raw, labels: dict[str, int], tally) -> int | None:
+    """The real id an offered label names, or None meaning "not a reference".
+
+    None covers three cases that must NOT be distinguished by the caller: the
+    field was omitted (compliance), it held a non-string, or it held a string
+    naming nothing offered. All three fall through to the new-entity path.
+    Rejecting instead would deadlock the cold start -- with an empty KB nothing
+    can map, so no entity is ever created, so there are never any candidates.
+
+    Only a supplied-but-unmatched value is counted: an omitted field is the
+    documented way to say "this is new" and is not non-compliance.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, str) and raw in labels:
+        return labels[raw]
+    if tally is not None:
+        tally.unmapped_candidate += 1
+    return None
+
+
 def build_integration_request(
     items: list[dict], entities: list[dict], events: list[dict]
 ) -> dict:
+    # Labels, never raw ids. Rendered from the SAME label_map the parser accepts
+    # against, so what is offered and what is understood cannot drift apart.
     ent_lines = (
-        "\n".join(f"- id={e['id']} {e['name']} ({e['type']})" for e in entities)
+        "\n".join(
+            f"- {label} {e['name']} ({e['type']})"
+            for label, e in zip(label_map(_ENTITY_LABEL, entities), entities)
+        )
         or "(none)"
     )
-    # id and summary ONLY. See candidate_events.
-    ev_lines = "\n".join(f"- id={e['id']} {e['summary']}" for e in events) or "(none)"
+    # label and summary ONLY. See candidate_events.
+    ev_lines = (
+        "\n".join(
+            f"- {label} {e['summary']}"
+            for label, e in zip(label_map(_EVENT_LABEL, events), events)
+        )
+        or "(none)"
+    )
     item_lines = "\n".join(
         f"- item_id={it['id']} outlet={it.get('outlet', '?')} "
         f"title={clean(it['title'])!r}\n  body={clean(it.get('body'))!r}"
@@ -847,16 +923,20 @@ _STANDING = {"verified", "official", "reported", "attributed", "alleged"}
 def parse_integration_response(
     resp: dict,
     offered_item_ids: set[int],
-    offered_entity_ids: set[int],
-    offered_event_ids: set[int],
+    entity_labels: dict[str, int],
+    event_labels: dict[str, int],
+    tally=None,
 ) -> list[dict]:
     """Validated extractions, one per item. Drops an item WHOLE on any defect.
 
     Dropping the whole item rather than the bad part is deliberate: a
     half-written extraction is a claim about the world that no source made, and
-    the item can be retried. A hallucinated candidate id is the specific hazard
-    -- the model may name an id that was never offered, and writing it would
-    attach this item's assertion to an unrelated entity or event.
+    the item can be retried.
+
+    An unrecognised `candidate` is NOT such a defect. It is treated as "this is
+    new" rather than as a reference, because a label the model invented cannot
+    collide with a real id -- see `label_map`. It is counted, not silently
+    absorbed.
     """
     if resp.get("stop_reason") == "max_tokens":
         raise ValueError("integration response truncated at max_tokens; not parsed")
@@ -871,14 +951,16 @@ def parse_integration_response(
                 if isinstance(r, dict)
                 and (
                     p := _validate_item(
-                        r, offered_item_ids, offered_entity_ids, offered_event_ids
+                        r, offered_item_ids, entity_labels, event_labels, tally
                     )
                 )
             ]
     raise ValueError("no emit_extraction tool_use block in response")
 
 
-def _validate_item(row, item_ids, entity_ids, event_ids) -> dict | None:
+def _validate_item(
+    row, item_ids, entity_labels, event_labels, tally=None
+) -> dict | None:
     item_id = row.get("item_id")
     if not _is_id(item_id) or item_id not in item_ids:
         return None
@@ -887,10 +969,8 @@ def _validate_item(row, item_ids, entity_ids, event_ids) -> dict | None:
     for e in row.get("entities") or []:
         if not isinstance(e, dict):
             return None
-        cid = e.get("candidate_id")
+        cid = _resolve_label(e.get("candidate"), entity_labels, tally)
         if cid is not None:
-            if not _is_id(cid) or cid not in entity_ids:
-                return None
             entities.append({"candidate_id": cid})
             continue
         name, etype = e.get("name"), e.get("type")
@@ -903,10 +983,8 @@ def _validate_item(row, item_ids, entity_ids, event_ids) -> dict | None:
     for ev in row.get("events") or []:
         if not isinstance(ev, dict) or ev.get("standing") not in _STANDING:
             return None
-        cid = ev.get("candidate_id")
+        cid = _resolve_label(ev.get("candidate"), event_labels, tally)
         if cid is not None:
-            if not _is_id(cid) or cid not in event_ids:
-                return None
             events.append({"candidate_id": cid, "standing": ev["standing"]})
             continue
         summary, etype = ev.get("summary"), ev.get("type")
