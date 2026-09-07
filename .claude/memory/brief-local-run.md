@@ -76,3 +76,20 @@ stops in is one you did not touch. A hang is not a slow test, and it is not your
 **The suite count moved again**: 1457 passing as of `9264278` (was 1410 at the start of the same
 session). Report the ABSOLUTE number and reconcile any gap — predicting 1462 and seeing 1457 was
 me double-counting tests already in the baseline, not a missing test.
+
+## A module-level DB skipmark hides non-DB tests from CI (2026-09-07)
+
+Every `tests/test_comprehend_*.py` file opens with
+`pytestmark = pytest.mark.skipif(not db.is_configured(), ...)`, which skips the **whole module**.
+So a test that needs no database, dropped into one of those files for topical tidiness, never runs
+in CI — where no `DATABASE_URL` is set. It passes locally (you have a container up) and is silently
+absent from the gate that matters.
+
+**Rule: place a test by what it NEEDS, not by what it is ABOUT.** The network-seam tests for
+`comprehend` went into a new `tests/test_comprehend_network.py` with no skipmark, precisely so the
+fix they pin is exercised on every CI run. Before adding to an existing test file, check the top of
+it for a `pytestmark`.
+
+Same family as "a skip is not a pass" above — and the count is the check: this session went
+1554 → 1571 with **0 skipped**, and the +17 was reconciled against the tests actually written
+(10 + 5 + 2) rather than assumed.

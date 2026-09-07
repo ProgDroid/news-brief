@@ -1,6 +1,6 @@
 ---
 name: batch-pipeline-timing
-description: "collect polls the batch up to 12h, so the submit→collect cron gap is not load-bearing; brief timing tolerates schedule changes and slow batches; collect only has the brief TEXT + state.json — submit-time feed data must be persisted across the gap to be usable at reconcile"
+description: "collect polls the batch up to 12h, so the submit→collect cron gap is not load-bearing; brief timing tolerates schedule changes and slow batches; collect only has the brief TEXT + state.json — submit-time feed data must be persisted across the gap to be usable at reconcile; also HOW TO TELL IF A CRASHED SUBMIT LEFT AN ORPHAN BATCH and how to safely rerun one mode"
 metadata: 
   node_type: memory
   type: project
@@ -16,3 +16,16 @@ metadata:
 **DATE-KEYING CAVEAT (added 2026-06-26 — qualifies the "no date-coupling" line below):** the batch *result* has no date-coupling (collect reads `state["batch_id"]`), but these per-day persisted artifacts ARE date-keyed: submit writes `…-{submit_day}.json`, collect loads `…-{collect_today}.json`. This works ONLY because submit + collect run the SAME UTC day (current cron: 00:00 submit / 06:00 collect — user-confirmed). If the schedule ever straddles UTC midnight (submit late evening → collect next-day), BOTH #3 corroboration AND #6 verification silently load a missing file and fall back to their no-data path (fail-safe, but the feature goes dark). Shared root cause. Fix if it ever matters: key the collect-side load by `state["date"]` (the submit-stamped day) instead of `collect_today`. Retention ([[newsbrief-deferred-findings]]) is immune — it computes its window from collect-today as "now", no cross-process date handoff.
 
 **How to apply:** Cron-timing questions ("safe to move submit later?") are safe by default — collect polls. No date-coupling: collect reads `state["batch_id"]` directly and never compares dates against submit (submit's `today` is only a same-UTC-day double-submit guard; collect's `today` is only archive filename + header). Moving submit *later* only shrinks slack against the academic 24h worst case (less of the 24h elapses before collect's 12h poll window). Relates to [[signals-parse-error-is-truncation]] (max_tokens truncation is the other batch-result failure mode).
+
+**SUBMIT CRASHED — IS A RESUBMIT SAFE? (added 2026-09-06, after a host DNS blip killed submit mid-run.)** Yes, and the decision is mechanical — do not guess:
+
+- `mode_submit` opens with a guard: if `runtime_state` has `date == today` **and** a `batch_id`, it logs `Already submitted today` and returns. So a rerun is a no-op once a batch is recorded, and a clean full re-run when nothing was.
+- The gap that guard cannot see: `submit_batch` is a **single POST, `timeout=30`, no retry**, and `save_state` runs only *after* it returns. If Anthropic accepted the batch but the response was lost, the batch exists, nothing was recorded, and a rerun creates a **second** one. `custom_id="newsbrief-{day}"` does NOT dedupe — custom_id is unique within one batch's request list, never across batches.
+- **The discriminator is a log line, and it is free.** Inside `submit_batch`, `log.info(f"Batch submitted (...): {batch_id}")` runs after `raise_for_status()` and JSON parsing but **before** `save_state`. Present in the day's logs → the batch exists and that line carries its id; do not resubmit, write the id into `runtime_state` instead. Absent → no batch was created.
+- **A `NameResolutionError` / `socket.gaierror` settles it outright**: `getaddrinfo` failed, so no socket was opened and not one byte was sent. Strictly before the request — no orphan batch is possible. (Tell: the same failure hits every host at once — Yahoo, Telegram, `api.anthropic.com`.)
+
+**Rerunning a single mode:** `docker compose run --rm newsbrief submit` — the form is documented in a comment in `brief.py`'s `__main__`. Use `run`, not `up`: `up` would start a second `commands` daemon and 409 the Telegram `getUpdates` consumer. With none of `NEWSBRIEF_SCHEDULED_FOR`/`NEWSBRIEF_TRIGGER`/`NEWSBRIEF_RUN_ID` in the environment it records a `trigger=manual` `job_runs` row rather than masquerading as the scheduled run. No need to stop the supervisor — if it fires its own submit later the guard catches it.
+
+**Cost of a rerun:** `mode_submit` has **no resume point**. It redoes the RSS pulls, the web scrapes and `build_enrichment`, so the Bigdata units are spent again (~8.5k on 2026-09-06) even though `enrichment-{day}.json` from the crashed run is already on the volume. Budget for the second charge; do not expect a resume.
+
+**Alerting caveat:** a network outage also takes out the Telegram alert path (`Alert send failed: ... api.telegram.org`), so the failure can look silent at the moment it happens. The alert does arrive once DNS recovers — an absent alert during an outage is not evidence the job survived.

@@ -20,3 +20,20 @@ Any function with several independent fail-closed gates whose ordinary outcome i
 - **A `try/except` that swallows the failure must record a `crashed` state**, not leave the status `None`. Wrapping the live path so it can't break the paper run was correct, but the handler only logged — so a crashed sleeve rendered no status block at all and looked exactly like one that declined every market. That reintroduced the same ambiguity one level up (fixed 0ca9286). Use `log.exception` there, not `log.warning(f"{e}")`.
 
 Relates to [[http-error-body-is-the-diagnosis]] (same failure of nerve, one layer down) and [[signals-parse-error-is-truncation]] (another "the log didn't say enough" recurrence).
+
+## Recurrence 2026-09-07 — one sentinel for two different events (`news-brief-uer`)
+
+`comprehend._validate_item` returned `None` both for a **malformed** extraction row and for a
+well-formed row that legitimately **contained nothing**. The caller could not tell them apart, so
+an item with genuinely nothing in it was charged three expensive integration calls and counted in
+`failed_integration` as though the model or the parser had broken.
+
+Same shape as the `-> int` above, one level smaller: **a single falsy return value standing for two
+outcomes, one of which is design and the other a fault.** Fixed by making "well-formed but empty" a
+representable value rather than a `None`, marking the item done, charging it no attempt, and giving
+it its own `Tally.empty_extraction` counter.
+
+**The generalisation worth keeping: `None`/`0`/`[]` is a fine return for ONE outcome. The moment a
+second, differently-caused outcome maps to it, it is a bug — and it will read as the wrong one,
+because the failure counter is the one people look at.** An empty sample arm is a real finding about
+the corpus; hiding it inside a failure count destroys that finding.

@@ -1,16 +1,20 @@
 ---
 name: newsbrief-comprehension-pipeline
-description: "bqa.4b BUILT 2026-09-05 but UNPUSHED and disabled — comprehend.py plus its pre-registered gate, and the five defects that nearly shipped silently"
+description: "bqa.4b — comprehend.py and its pre-registered gate: PUSHED, still disabled; the five defects that nearly shipped, and why two 'follow-ups' were really gate-validity bugs"
 metadata: 
   node_type: memory
   type: project
   originSessionId: 19b68250-ca61-4936-834b-18d6a595831c
-  modified: 2026-09-05T19:23:03.674Z
+  modified: 2026-09-07T12:57:34.158Z
 ---
 
-**`bqa.4b` CLOSED 2026-09-05.** 26 commits on local `main` (`25d911f..41d7747`), suite **1554
-passed / 0 failed**, ruff clean. **NOT PUSHED, NOT DEPLOYED.** Behind `COMPREHEND_ENABLED`, which
-defaults off; the compose anchor line exists.
+**`bqa.4b` CLOSED 2026-09-05.** 26 commits (`25d911f..41d7747`), ruff clean.
+**CORRECTED 2026-09-07: it IS pushed** — this file said "NOT PUSHED, NOT DEPLOYED" for two days
+after it stopped being true, and that stale line sent me looking for unpushed commits at the top
+of a session. `git rev-list --left-right --count origin/main...HEAD` after a `git fetch` is the
+probe; an empty `origin/main..HEAD` against a stale remote-tracking ref proves nothing.
+Still **DISABLED and NOT DEPLOYED**: `COMPREHEND_ENABLED` defaults off and the compose anchor
+exists.
 
 `comprehend.py` is an hourly job child building the entity/event/assertion layer over captured
 items: triage in two halves (a free `SurfaceIndex` lookup, then a model call on the remainder),
@@ -41,11 +45,30 @@ none by reading:
 advances.** Whenever a row is selected by a predicate, ask what advances it and check every path
 that can decline to — each case was an early exit that skipped the advancement step.
 
-**Open follow-ups:** `news-brief-3wb` (re-integration accumulates rather than supersedes — measured
-1→2 events after a version bump), `news-brief-wvt` (integration reuses `_post_messages`'s 90s
-timeout, sized for signals, at `max_tokens=8192`), `news-brief-uer` (an empty extraction is retried
-3× as a failure), `news-brief-ya4` (`_TRIAGE_SYSTEM` not derived from `brief.SYSTEM_PROMPT` —
-**deliberately deferred so the pre-registered gate measures the system it was registered against**).
+## Sequence the flag-flip: gate-validity bugs first (2026-09-07)
+
+**A pre-registered gate is a ONE-SHOT instrument, so audit the backlog for bugs that distort what
+it READS before flipping the flag.** The script says it outright — "Do not tune these to make a run
+pass; a threshold moved after seeing the data measures nothing" — which means a FAIL you cannot
+attribute is close to unrecoverable: you cannot honestly re-run a pre-registration after looking.
+Two of the four bqa.4b "follow-ups" turned out to be gate-validity bugs, not deferrable polish, and
+nothing in their titles said so. **Read each open bug asking "does this change a number the gate
+reads?", not "is it P2 or P3".** He chose fix-first over flip-now on exactly this argument.
+
+- **`news-brief-wvt` FIXED 2026-09-07.** A too-short timeout dumps items into `failed_integration`,
+  which the gate then reads as a weak extractor — thin data misattributed as a bad model.
+- **`news-brief-uer` FIXED 2026-09-07.** Its own description said it concentrates on the `sampled`
+  arm *by construction*, and `sampled` is the gate's unconfounded control. A P3 whose blast radius
+  is the control arm outranks its priority number.
+- **`news-brief-3wb` still open, correctly deferred** — unreachable while `INTEGRATE_PROMPT_VERSION`
+  is 1, so it cannot touch the first gate run.
+- **`news-brief-ya4` still open, deliberately deferred** so the gate measures the system it was
+  registered against.
+
+**Still to do before the gate means anything:** enable `COMPREHEND_ENABLED` on the host, choose an
+accumulation window, and decide whether triage runs on a cheaper model. The gate needs an outlet
+with 10+ assertions and multi-outlet corroboration between 10% and 60%, so it needs both volume and
+elapsed time. See [[shared-helper-carries-first-callers-tuning]] for what the two fixes taught.
 
 **Operational gap:** `scripts/` is not in the Dockerfile COPY (consistent with the three older
 scripts), so the gate cannot run inside the container despite measuring production data.
