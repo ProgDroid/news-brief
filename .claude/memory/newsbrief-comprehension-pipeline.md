@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: 19b68250-ca61-4936-834b-18d6a595831c
-  modified: 2026-09-07T12:57:34.158Z
+  modified: 2026-09-07T17:08:11.783Z
 ---
 
 **`bqa.4b` CLOSED 2026-09-05.** 26 commits (`25d911f..41d7747`), ruff clean.
@@ -65,10 +65,20 @@ reads?", not "is it P2 or P3".** He chose fix-first over flip-now on exactly thi
 - **`news-brief-ya4` still open, deliberately deferred** so the gate measures the system it was
   registered against.
 
-**Still to do before the gate means anything:** enable `COMPREHEND_ENABLED` on the host, choose an
-accumulation window, and decide whether triage runs on a cheaper model. The gate needs an outlet
-with 10+ assertions and multi-outlet corroboration between 10% and 60%, so it needs both volume and
-elapsed time. See [[shared-helper-carries-first-callers-tuning]] for what the two fixes taught.
+**NEXT = `news-brief-bqa.11`** (filed 2026-09-07, tops `bd ready`): enable `COMPREHEND_ENABLED` on
+the host, choose an accumulation window, decide whether triage runs on a cheaper model, then run the
+gate. The gate needs an outlet with 10+ assertions and multi-outlet corroboration between 10% and
+60%, so it needs both volume and elapsed time. `news-brief-115` and `news-brief-ya4` are now
+correctly BLOCKED on it. **The one input only he can supply: how many items a day capture is
+actually producing** — it sets both the cost exposure and the window, and cannot be answered from
+the dev repo. See [[shared-helper-carries-first-callers-tuning]] for what the two fixes taught.
+
+**bd work state is LOCAL-ONLY on this machine** (verified 2026-09-07): `git ls-remote origin
+'refs/dolt/*'` returns nothing, so the documented Dolt sync has never run, and `bd sync` is not a
+command in this version. The only cross-machine record is the git-tracked passive export, which had
+gone **a week stale** (45 lines vs 93 real issues) until `bd export -o .beads/issues.jsonl`
+regenerated it. **Re-export before any session where the work state needs to travel** — a cloud
+session reads the JSONL, never the Dolt DB.
 
 **Operational gap:** `scripts/` is not in the Dockerfile COPY (consistent with the three older
 scripts), so the gate cannot run inside the container despite measuring production data.
