@@ -1,0 +1,18 @@
+# Bead ids whose "declared complete by a commit" signal is known to be WRONG.
+#
+# .claude/hooks/check-beads.sh treats a bead id alone on a line in a commit
+# message as "this commit finished it". That convention is real and it found a
+# genuine miss (news-brief-bqa.12, built in d48b036 and left open for a day).
+# But a trailer can name the wrong bead, and history cannot be rewritten once
+# pushed -- so the mis-attribution has to be recorded here instead.
+#
+# Only add an id after establishing that the COMMIT is wrong, not the bead.
+# An id listed here is invisible to signal 1 forever; if the bead is genuinely
+# finished later, close it rather than relying on the hook to notice.
+
+# Commit 338d2bb ("opaque candidate labels, so an invented id cannot collide")
+# ends with this id, but bqa.11 is "Enable COMPREHEND_ENABLED in production and
+# run the pre-registered gate" -- blocked on bqa.19 and not started. The label
+# work it actually describes had no bead of its own. The bead status is right;
+# the trailer is wrong.
+news-brief-bqa.11

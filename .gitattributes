@@ -1,0 +1,8 @@
+# core.autocrlf is true on the development machine and this repo had no
+# attributes file, so git would rewrite the beads export to CRLF on the next
+# checkout while `bd export` keeps emitting LF. The Stop hook in
+# .claude/hooks/check-beads.sh compares the two byte for byte to decide whether
+# the tracked export has drifted, so that mismatch would make it rewrite the
+# file and warn on EVERY turn -- a hook that always fires is a hook that gets
+# switched off. It is generated data; nothing wants it line-ending-normalised.
+.beads/issues.jsonl -text
