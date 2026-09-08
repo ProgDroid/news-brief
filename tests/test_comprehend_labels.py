@@ -563,3 +563,68 @@ def test_a_json_string_decoding_to_a_non_list_still_raises():
         comprehend.parse_integration_response(
             _string_items('"just a string"'), {1}, {}, {}
         )
+
+
+# --- The published schema must ask for what the validator demands
+# (news-brief-bqa.16).
+#
+# `_validate_item` rejects a NEW event with no `summary` or `type`, and a NEW
+# entity with no `name` or `type` -- while the tool schema required `standing`
+# alone on events and NOTHING at all on entities. A model omitting one of those
+# was obeying the schema exactly as published, and the whole ITEM was dropped
+# for it. One JSON Schema object was serving two shapes: a candidate-matched
+# member legitimately needs only its label plus (for an event) its standing,
+# while a new one needs the full set.
+#
+# These read the SCHEMA and execute the VALIDATOR, so they fail if either side
+# moves without the other. Asserting that the schema contains an `anyOf` would
+# restate the diff rather than test the contract the `anyOf` exists to keep.
+
+
+def _member_schema(array_name):
+    props = comprehend._INTEGRATE_TOOL["input_schema"]["properties"]
+    return props["items"]["items"]["properties"][array_name]["items"]
+
+
+def _required_branches(array_name):
+    """Every field set the published schema calls sufficient. A flat `required`
+    reads as a single branch, so this understands the pre-fix schema too and
+    the test below FAILS on it rather than erroring on a missing key."""
+    member = _member_schema(array_name)
+    if "anyOf" in member:
+        return [branch["required"] for branch in member["anyOf"]]
+    return [member.get("required", [])]
+
+
+def _member_values(label, type_value):
+    return {
+        "candidate": label,
+        "name": "Iran",
+        "summary": "Iran resumed enrichment at Fordow.",
+        "type": type_value,
+        "standing": "reported",
+    }
+
+
+@pytest.mark.parametrize(
+    "array_name,label,type_value",
+    [("entities", "ENT1", "country"), ("events", "EVT1", "action")],
+)
+def test_every_shape_the_schema_calls_sufficient_is_accepted(
+    array_name, label, type_value
+):
+    branches = _required_branches(array_name)
+    assert branches, f"no required fields declared for {array_name}; nothing tested"
+    values = _member_values(label, type_value)
+    for required in branches:
+        member = {field: values[field] for field in required}
+        got = comprehend.parse_integration_response(
+            _extraction([_labelled(**{array_name: [member]})]),
+            {1},
+            {"ENT1": 7},
+            {"EVT1": 9},
+        )
+        assert len(got) == 1, (
+            f"the schema publishes {sorted(required)} as a sufficient "
+            f"{array_name[:-1]}, but the validator rejected the item"
+        )

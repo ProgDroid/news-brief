@@ -920,6 +920,20 @@ _INTEGRATE_TOOL = {
                                         "items": {"type": "string"},
                                     },
                                 },
+                                # Two shapes, one object. A matched entity needs
+                                # only its label; a NEW one needs what
+                                # _validate_item actually demands. This object
+                                # published NO required list at all, so a model
+                                # omitting `name` or `type` was obeying the
+                                # schema exactly and lost the whole item for it
+                                # (news-brief-bqa.16). `anyOf`, not `oneOf`: it
+                                # is the conditional the structured-output
+                                # schema subset supports, so the contract still
+                                # holds if this tool ever goes `strict`.
+                                "anyOf": [
+                                    {"required": ["candidate"]},
+                                    {"required": ["name", "type"]},
+                                ],
                             },
                         },
                         "events": {
@@ -960,7 +974,14 @@ _INTEGRATE_TOOL = {
                                         ],
                                     },
                                 },
-                                "required": ["standing"],
+                                # As above. `standing` is asked of BOTH shapes
+                                # -- it is how the item relates to the event,
+                                # not a property of the event -- while summary
+                                # and type are demanded only of a new one.
+                                "anyOf": [
+                                    {"required": ["candidate", "standing"]},
+                                    {"required": ["summary", "type", "standing"]},
+                                ],
                             },
                         },
                     },
