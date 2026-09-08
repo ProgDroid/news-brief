@@ -4091,6 +4091,48 @@ def comprehend_retirement_alert(conn) -> None:
         log.exception("comprehend retirement check failed")
 
 
+CAPTURE_FAILING_KEY = "capture_failing_alert"
+CAPTURE_DROUGHT_KEY = "capture_drought_alert"
+
+
+def capture_quality_alert(conn, now) -> None:
+    """The QUALITY half of capture's monitoring (news-brief-w3q).
+
+    Liveness answers "is it still running"; these answer "is what it returns
+    still worth anything". They waited on `b42.2` because a guessed rate is
+    indistinguishable, to the operator, from a measured one — so neither number
+    here is invented: the failure tolerance reuses the constant `liveness`
+    already justifies, and the drought compares against the trailing history
+    rather than against a constant at all.
+
+    Two independent episode keys, not one. A widening feed outage and a drought
+    are different stories, and sharing a key would let the first one seen
+    silence the second.
+    """
+    import capture
+
+    for state_key, produce in (
+        (CAPTURE_FAILING_KEY, capture.failing_feeds),
+        (CAPTURE_DROUGHT_KEY, capture.item_drought),
+    ):
+        try:
+            verdict = produce(conn, now)
+            seen = load_state().get(state_key)
+            if verdict is None:
+                if seen:
+                    config.clear_runtime_state([state_key])
+                continue
+            key, message = verdict
+            if key == seen:
+                continue
+            # Sent BEFORE the key is stored, for the reason
+            # capture_liveness_alert gives.
+            telegram_alert(f"\U0001f4e1 {message}")
+            save_state({state_key: key})
+        except Exception:
+            log.exception(f"capture quality check failed ({state_key})")
+
+
 IGNORED_KNOBS_ALERT_KEY = "ignored_knobs_alert"
 
 
@@ -4137,7 +4179,11 @@ def mode_monitor():
     # cost the capture check and nothing else.
     try:
         with db.connect(connect_timeout=JOBS_DB_TIMEOUT_SECONDS) as conn:
-            capture_liveness_alert(conn, datetime.now(timezone.utc))
+            now = datetime.now(timezone.utc)
+            capture_liveness_alert(conn, now)
+            # Liveness asks whether capture still runs; this asks whether what
+            # it returns is still worth anything (news-brief-w3q).
+            capture_quality_alert(conn, now)
             # Same connection, same reason: this reports the pipeline's own
             # silent losses, and everything below it reports what the world
             # did (news-brief-bqa.15).

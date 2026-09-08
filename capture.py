@@ -473,6 +473,133 @@ def liveness(conn, now) -> tuple[str, str] | None:
     return None
 
 
+# The baseline must contain at least one weekend, or the first quiet Sunday
+# looks unprecedented and alerts every week. Derived from the volume cycle
+# rather than picked: it is the shortest window that spans one.
+HISTORY_DAYS = 7
+
+
+def failing_feeds(conn, now) -> tuple[str, str] | None:
+    """(episode key, message) for feeds that are being polled and never work.
+
+    The tolerance is `STALE_AFTER_INTERVALS`, reused rather than copied — this
+    is the same question `liveness` asks, one level down, and a second constant
+    would be a knob tracking a knob.
+
+    Two distinctions the filter exists for, both ABSENT versus UNKNOWN:
+
+      * A feed still being ATTEMPTED and failing, against one that is no longer
+        polled at all. A feed dropped from `RSS_FEEDS` has a last success that
+        ages forever, so a stale-success test alone would alert hourly about a
+        feed nobody asked for and the operator cannot fix.
+      * NEVER succeeded, against succeeded long ago. The NULL survives into the
+        message as "never", because rendering it as an age prints a confident
+        wrong number — the failure `feed_health`'s docstring already names.
+    """
+    tolerance = timedelta(minutes=_interval_minutes() * STALE_AFTER_INTERVALS)
+    cutoff = now - tolerance
+    rows = conn.execute(
+        "WITH ok AS ("
+        "  SELECT source_name, max(polled_at) AS last_ok FROM feed_polls "
+        "  WHERE failure IS NULL GROUP BY source_name"
+        ") "
+        "SELECT p.source_name, max(p.polled_at), o.last_ok, "
+        "  count(*) FILTER (WHERE p.failure IS NOT NULL "
+        "    AND (o.last_ok IS NULL OR p.polled_at > o.last_ok)), "
+        "  (array_agg(p.failure ORDER BY p.polled_at DESC) "
+        "    FILTER (WHERE p.failure IS NOT NULL))[1] "
+        "FROM feed_polls p LEFT JOIN ok o ON o.source_name = p.source_name "
+        "GROUP BY p.source_name, o.last_ok "
+        "ORDER BY o.last_ok ASC NULLS FIRST, p.source_name"
+    ).fetchall()
+
+    failing = [
+        (name, last_ok, fails, kind)
+        for name, last_try, last_ok, fails, kind in rows
+        if last_try > cutoff and (last_ok is None or last_ok < cutoff)
+    ]
+    if not failing:
+        return None
+
+    lines = [
+        f"   {name[:24]:<26}"
+        + (f"last ok {_duration(now - last_ok)} ago" if last_ok else "never succeeded")
+        + f", {fails} failures since ({kind})"
+        for name, last_ok, fails, kind in failing
+    ]
+    return (
+        "failing:" + ",".join(sorted(name for name, _, _, _ in failing)),
+        f"{len(failing)} feed(s) have not polled successfully in "
+        f"{_duration(tolerance)}:\n" + "\n".join(lines),
+    )
+
+
+def item_drought(conn, now) -> tuple[str, str] | None:
+    """(episode key, message) when new items stop arriving for longer than ever.
+
+    The threshold is the feed's OWN history rather than a constant: alert when
+    the current run of zero-new passes is longer than the longest in the
+    trailing window. That makes the message state its evidence — "the longest
+    gap in seven days was two passes, this is eight" — which a guessed rate
+    never could, and it tracks volume as the corpus grows.
+
+    Three silences, each a different fact from "healthy":
+
+      * Not enough history. A baseline that has never seen a weekend makes the
+        first quiet Sunday look unprecedented. Below HISTORY_DAYS this reports
+        nothing, because it has measured nothing.
+      * A disabled capture. It writes a row every fire with zero new items,
+        which is exactly what `capture_runs.enabled` exists to tell apart.
+      * A drought a fetch failure explains. That is `failing_feeds`' story, and
+        two messages about one cause is how an operator learns to skim them —
+        the `fail-closed-needs-status-not-count` rule about attributing a zero.
+    """
+    since = now - timedelta(days=HISTORY_DAYS)
+    oldest = conn.execute(
+        "SELECT min(started_at) FROM capture_runs "
+        "WHERE enabled AND finished_at IS NOT NULL"
+    ).fetchone()[0]
+    if oldest is None or oldest > since:
+        return None
+
+    rows = conn.execute(
+        "SELECT id, started_at, items_new FROM capture_runs "
+        "WHERE enabled AND finished_at IS NOT NULL AND started_at > %s "
+        "ORDER BY started_at DESC, id DESC",
+        (since,),
+    ).fetchall()
+
+    current = 0
+    while current < len(rows) and rows[current][2] == 0:
+        current += 1
+    if current == 0:
+        return None
+
+    longest, run = 0, 0
+    for _, _, items_new in rows[current:]:
+        run = run + 1 if items_new == 0 else 0
+        longest = max(longest, run)
+    if current <= longest:
+        return None
+
+    streak = [r[0] for r in rows[:current]]
+    if conn.execute(
+        "SELECT count(*) FROM feed_polls "
+        "WHERE capture_run_id = ANY(%s) AND failure IS NOT NULL",
+        (streak,),
+    ).fetchone()[0]:
+        return None
+
+    started_at = rows[current - 1][1]
+    return (
+        f"drought:{rows[current - 1][0]}",
+        f"No new items for {current} consecutive passes "
+        f"({_duration(now - started_at)}).\n"
+        f"   Longest gap in the previous {HISTORY_DAYS} days: {longest} passes.\n"
+        "   Every poll in that stretch succeeded, so this is not a fetch failure.",
+    )
+
+
 def _duration(delta: timedelta) -> str:
     hours, seconds = divmod(int(delta.total_seconds()), 3600)
     return f"{hours}h{seconds // 60:02d}m" if hours else f"{seconds // 60}m"

@@ -666,3 +666,193 @@ def test_feed_health_puts_the_worst_feeds_first(store):
         "Stale",
         "Healthy",
     ]
+
+
+# ── Quality alerting: the half that needed measured data (news-brief-w3q) ─────
+#
+# Liveness needed no threshold; these two do, and the bead sat open for six days
+# because a guessed rate is indistinguishable to the operator from a measured
+# one. Neither number below is invented. The failure tolerance REUSES
+# STALE_AFTER_INTERVALS, the constant liveness already justifies, and the
+# drought compares against the feed's own history rather than a constant at all.
+
+
+def _run_new(store, *, minutes_ago, items_new, enabled=True):
+    started = NOW - timedelta(minutes=minutes_ago)
+    return store.execute(
+        "INSERT INTO capture_runs (started_at, finished_at, enabled, items_new) "
+        "VALUES (%s, %s, %s, %s) RETURNING id",
+        (started, started + timedelta(minutes=2), enabled, items_new),
+    ).fetchone()[0]
+
+
+TOLERANCE = INTERVAL * capture.STALE_AFTER_INTERVALS
+
+
+def test_a_feed_failing_past_the_tolerance_is_flagged_and_a_recovered_one_is_not(store):
+    """Presence and absence in one call: a check that flagged nothing would
+    satisfy the second assertion on its own."""
+    run = _run(store, minutes_ago=1)
+    for ago in (TOLERANCE + 60, TOLERANCE + 30, 10):
+        _poll(store, run, "Broken", failure="http_403", minutes_ago=ago)
+    _poll(store, run, "Fine", failure="timeout", minutes_ago=TOLERANCE + 60)
+    _poll(store, run, "Fine", minutes_ago=10)
+    store.commit()
+
+    verdict = capture.failing_feeds(store, NOW)
+
+    assert verdict is not None
+    assert "Broken" in verdict[1]
+    assert "Fine" not in verdict[1]
+
+
+def test_a_feed_that_is_no_longer_polled_at_all_is_not_flagged(store):
+    """A feed dropped from RSS_FEEDS stops being attempted, so its last success
+    ages forever. Flagging it would alert every hour about a feed nobody has
+    asked for since — and the operator cannot make it succeed."""
+    run = _run(store, minutes_ago=1)
+    _poll(store, run, "Retired", failure="http_403", minutes_ago=TOLERANCE + 500)
+    _poll(store, run, "Live", failure="http_403", minutes_ago=TOLERANCE + 10)
+    _poll(store, run, "Live", failure="http_403", minutes_ago=5)
+    store.commit()
+
+    verdict = capture.failing_feeds(store, NOW)
+
+    assert "Live" in verdict[1]
+    assert "Retired" not in verdict[1]
+
+
+def test_a_feed_that_has_never_succeeded_says_so_rather_than_an_age(store):
+    """NULL last_ok_at is load-bearing and must survive to the message: 'never
+    worked' and 'worked a while ago' are opposite facts, and rendering the NULL
+    as an age would print a confident wrong number."""
+    run = _run(store, minutes_ago=1)
+    _poll(store, run, "NeverWorked", failure="ssl", minutes_ago=TOLERANCE + 10)
+    _poll(store, run, "NeverWorked", failure="ssl", minutes_ago=5)
+    store.commit()
+
+    verdict = capture.failing_feeds(store, NOW)
+
+    assert "never" in verdict[1].lower()
+
+
+def test_the_failure_episode_changes_when_another_feed_joins_the_outage(store):
+    """One alert per episode, but a widening outage is a NEW episode. Keying on
+    the mere existence of failures would report the first feed and stay silent
+    while the rest of the board went dark."""
+    run = _run(store, minutes_ago=1)
+    for ago in (TOLERANCE + 10, 5):
+        _poll(store, run, "First", failure="http_403", minutes_ago=ago)
+    store.commit()
+    before = capture.failing_feeds(store, NOW)[0]
+
+    for ago in (TOLERANCE + 10, 5):
+        _poll(store, run, "Second", failure="http_403", minutes_ago=ago)
+    store.commit()
+
+    assert capture.failing_feeds(store, NOW)[0] != before
+
+
+def test_a_drought_longer_than_the_trailing_history_is_flagged(store):
+    """The baseline is the feed's own past: 'longest gap in seven days was two
+    passes, this is six' is a claim the data supports, unlike any constant."""
+    for i in range(340, 8, -1):  # a week of history, mostly productive
+        _run_new(store, minutes_ago=i * INTERVAL, items_new=0 if i % 50 == 0 else 12)
+    for i in range(8, 0, -1):
+        _run_new(store, minutes_ago=i * INTERVAL, items_new=0)
+    store.commit()
+
+    verdict = capture.item_drought(store, NOW)
+
+    assert verdict is not None
+    assert "8" in verdict[1]
+
+
+def test_a_dry_streak_no_longer_than_the_baseline_is_not_flagged(store):
+    """Quiet nights happen. The signal is a gap the history has never shown."""
+    for i in range(340, 4, -1):
+        _run_new(store, minutes_ago=i * INTERVAL, items_new=0 if i % 20 < 4 else 12)
+    for i in range(4, 0, -1):
+        _run_new(store, minutes_ago=i * INTERVAL, items_new=0)
+    store.commit()
+
+    assert capture.item_drought(store, NOW) is None
+
+
+def test_a_drought_is_unknown_while_the_history_is_too_short(store):
+    """A baseline that has not seen a weekend makes the first quiet Sunday look
+    unprecedented, and would alert every week. Below the minimum this reports
+    nothing — unmeasured, not healthy."""
+    for i in range(20, 0, -1):
+        _run_new(store, minutes_ago=i * INTERVAL, items_new=0)
+    store.commit()
+
+    assert capture.item_drought(store, NOW) is None
+
+
+def test_a_drought_explained_by_failing_feeds_is_left_to_the_failure_alert(store):
+    """Attribution, not just detection: a zero that a fetch failure explains is
+    the failure alert's story, and two messages about one cause is how an
+    operator learns to skim them."""
+    for i in range(340, 8, -1):
+        _run_new(store, minutes_ago=i * INTERVAL, items_new=0 if i % 50 == 0 else 12)
+    dry = [
+        _run_new(store, minutes_ago=i * INTERVAL, items_new=0) for i in range(8, 0, -1)
+    ]
+    for run in dry:
+        _poll(store, run, "Broken", failure="http_403", minutes_ago=1)
+    store.commit()
+
+    assert capture.item_drought(store, NOW) is None
+
+
+def test_a_disabled_pass_is_not_a_drought(store):
+    """A switched-off capture writes a row every fire with zero new items, which
+    is exactly what capture_runs.enabled exists to tell apart from broken."""
+    for i in range(340, 8, -1):
+        _run_new(store, minutes_ago=i * INTERVAL, items_new=0 if i % 50 == 0 else 12)
+    for i in range(8, 0, -1):
+        _run_new(store, minutes_ago=i * INTERVAL, items_new=0, enabled=False)
+    store.commit()
+
+    assert capture.item_drought(store, NOW) is None
+
+
+def test_failing_feeds_alert_once_per_episode_and_again_after_a_recovery(
+    store, monkeypatch
+):
+    sent = _alerts(monkeypatch)
+    run = _run(store, minutes_ago=1)
+    for ago in (TOLERANCE + 10, 5):
+        _poll(store, run, "Broken", failure="http_403", minutes_ago=ago)
+    store.commit()
+
+    for _ in range(4):
+        brief.capture_quality_alert(store, NOW)
+    assert len(sent) == 1
+
+    _poll(store, run, "Broken", minutes_ago=1)  # recovered
+    store.commit()
+    brief.capture_quality_alert(store, NOW)
+    assert len(sent) == 1
+
+    _poll(store, run, "Other", failure="ssl", minutes_ago=TOLERANCE + 10)
+    _poll(store, run, "Other", failure="ssl", minutes_ago=2)
+    store.commit()
+    brief.capture_quality_alert(store, NOW)
+    assert len(sent) == 2
+
+
+def test_a_drought_alerts_once_not_once_an_hour(store, monkeypatch):
+    sent = _alerts(monkeypatch)
+    for i in range(340, 8, -1):
+        _run_new(store, minutes_ago=i * INTERVAL, items_new=0 if i % 50 == 0 else 12)
+    for i in range(8, 0, -1):
+        _run_new(store, minutes_ago=i * INTERVAL, items_new=0)
+    store.commit()
+
+    for _ in range(3):
+        brief.capture_quality_alert(store, NOW)
+
+    assert len(sent) == 1
+    assert "new items" in sent[0]
