@@ -6,3 +6,10 @@
 # file and warn on EVERY turn -- a hook that always fires is a hook that gets
 # switched off. It is generated data; nothing wants it line-ending-normalised.
 .beads/issues.jsonl -text
+
+# Same root cause, worse symptom. core.autocrlf would hand a fresh clone on the
+# Windows dev machine CRLF shell scripts, and bash dies on the carriage return
+# with `$'\r': command not found` -- a hook that fails this way looks exactly
+# like a hook that was never wired up. The working copies are all LF today, so
+# this pins what is already true rather than changing anything.
+*.sh text eol=lf
