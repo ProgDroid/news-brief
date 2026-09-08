@@ -259,13 +259,32 @@ HOST_GAP_SECONDS = 5
 
 
 def capture_sources() -> list[dict]:
-    """Feeds only. `brief.all_sources()` also returns source_type='page' entries,
-    which are scraped pages with no entry list. RSS_FEEDS carries no source_type
-    key, so its ABSENCE means feed."""
+    """Feeds only, each with the URL CAPTURE should poll.
+
+    `brief.all_sources()` also returns source_type='page' entries, which are
+    scraped pages with no entry list. RSS_FEEDS carries no source_type key, so
+    its ABSENCE means feed.
+
+    A feed may carry `capture_url`, a narrower window than the brief's
+    (news-brief-b42.4). Four Google News proxies return exactly 100 entries per
+    poll — the cap — because `when:2d` offers Google ~370 candidates for 100
+    relevance-ranked slots, and ranking is not chronological, so an item never
+    in the top 100 at any poll instant is lost unobservably. A shorter window
+    removes that mechanism. The brief cannot share it: it fetches at brief time
+    and takes the newest 25, so a 6h window at 06:00 would hand it the overnight
+    hours and nothing else.
+
+    Substituted into a COPY. The brief reads `RSS_FEEDS` directly, and editing
+    the dict in place would narrow its window too — silently, and only in
+    processes that had run a capture pass first.
+    """
     temp = [
         s for s in brief.load_temp_sources() if s.get("source_type", "feed") == "feed"
     ]
-    return list(brief.RSS_FEEDS) + temp
+    return [
+        {**feed, "url": feed["capture_url"]} if feed.get("capture_url") else feed
+        for feed in list(brief.RSS_FEEDS) + temp
+    ]
 
 
 def _host(feed: dict) -> str:

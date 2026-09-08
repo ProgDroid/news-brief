@@ -1,5 +1,7 @@
 """Unit tests for continuous capture (news-brief-b42.1). No network, no DB."""
 
+import re
+
 import brief
 import capture
 import common
@@ -345,3 +347,106 @@ def test_the_pass_deadline_is_shorter_than_the_interval():
 
 def test_the_capture_knob_defaults_off():
     assert common.KNOBS["CAPTURE_ENABLED"].default is False
+
+
+# ── The capture window is narrower than the brief's ──────────────────────────
+#
+# news-brief-b42.4. Four Google News proxies return exactly 100 entries per
+# poll -- the cap -- because `when:2d` offers Google ~370 candidates for 100
+# relevance-ranked slots. Ranking is not chronological, so items move in and out
+# of view (measured flicker 1.51 on Reuters Markets), and an item that is never
+# in the top 100 at any poll instant is lost unobservably.
+#
+# Narrowing the window removes the MECHANISM rather than fixing a measured loss:
+# at when:6h there are ~20 candidates for 100 slots and nothing can be ranked
+# out. But the brief fetches these feeds at brief time and takes the newest 25,
+# so a 6h window at 06:00 would show it only the overnight hours. One URL cannot
+# serve both readers, which is what `capture_url` is for.
+
+
+def test_capture_prefers_the_capture_url_where_a_feed_carries_one(monkeypatch):
+    """Presence and absence in one call: a substitution that returned the
+    override for everything would pass the first assertion alone."""
+    monkeypatch.setattr(
+        brief,
+        "RSS_FEEDS",
+        [
+            {
+                "name": "Capped",
+                "url": "https://news.google.com/rss/search?q=when:2d+site%3Aa.com",
+                "capture_url": "https://news.google.com/rss/search?q=when:6h+site%3Aa.com",
+            },
+            {"name": "Plain", "url": "https://b.example/feed"},
+        ],
+    )
+    monkeypatch.setattr(brief, "load_temp_sources", lambda: [])
+
+    urls = {f["name"]: f["url"] for f in capture.capture_sources()}
+
+    assert urls["Capped"] == "https://news.google.com/rss/search?q=when:6h+site%3Aa.com"
+    assert urls["Plain"] == "https://b.example/feed"
+
+
+def test_substituting_the_capture_url_does_not_mutate_the_brief_s_feed(monkeypatch):
+    """The brief reads RSS_FEEDS directly and needs the WIDE window: at 06:00 a
+    6h window would hand it the overnight hours and nothing else. A substitution
+    that edited the dict in place would silently narrow the brief too."""
+    feed = {
+        "name": "Capped",
+        "url": "https://news.google.com/rss/search?q=when:2d+site%3Aa.com",
+        "capture_url": "https://news.google.com/rss/search?q=when:6h+site%3Aa.com",
+    }
+    monkeypatch.setattr(brief, "RSS_FEEDS", [feed])
+    monkeypatch.setattr(brief, "load_temp_sources", lambda: [])
+
+    capture.capture_sources()
+
+    assert feed["url"] == "https://news.google.com/rss/search?q=when:2d+site%3Aa.com"
+
+
+def test_a_capture_url_points_at_the_same_source_through_a_shorter_window():
+    """The pair must not drift. Two hand-maintained URLs invite an edit to one
+    and not the other, and the failure would be silent: capture would quietly be
+    reading a different source from the brief, with both feeds still working."""
+    # The four measured as capping on 2026-09-08 (100 entries every poll, at
+    # when:1d and wider). Pinned rather than counted, so dropping an override
+    # fails here instead of silently reinstating the truncation; changing this
+    # set is a claim about the feeds and wants a fresh measurement behind it.
+    assert {f["name"] for f in brief.RSS_FEEDS if f.get("capture_url")} == {
+        "Reuters Markets",
+        "Reuters World",
+        "Kyiv Independent",
+        "Yonhap (English)",
+    }
+
+    for feed in brief.RSS_FEEDS:
+        override = feed.get("capture_url")
+        if not override:
+            continue
+        site = _site_term(feed["url"])
+        assert site and _site_term(override) == site, feed["name"]
+        assert _when_hours(override) < _when_hours(feed["url"]), feed["name"]
+
+
+def test_every_google_news_feed_keeps_a_freshness_window():
+    """Dropping `when:` is the documented way to chase volume and get staleness
+    instead: a deep section path can hold ~100 OLD items and almost nothing
+    recent, so a no-window query returns a full feed of stale headlines."""
+    for feed in brief.RSS_FEEDS:
+        for url in (feed["url"], feed.get("capture_url")):
+            if url and "news.google.com" in url:
+                assert _when_hours(url) is not None, feed["name"]
+
+
+def _when_hours(url: str):
+    """The `when:` window in hours, or None if the URL carries no window."""
+    found = re.search(r"when:(\d+)([hd])", url)
+    if not found:
+        return None
+    return int(found.group(1)) * (24 if found.group(2) == "d" else 1)
+
+
+def _site_term(url: str):
+    """The `site:` term, URL-encoded as it appears in the query."""
+    found = re.search(r"site%3A([^&+]+)", url)
+    return found.group(1) if found else None

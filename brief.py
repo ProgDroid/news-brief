@@ -155,17 +155,34 @@ RSS_FEEDS = [
         "name": "Reuters Markets",
         # Reuters discontinued public RSS (June 2020); proxy via Google News.
         # `site:` is stable (unlike allinurl:); `when:2d` is a freshness guardrail
-        # so a quiet section never feeds the LLM stale headlines as news. Only the
-        # 25 newest items are used (fetch_rss max_items), so the window isn't a
-        # volume control — markets still returns 100 items inside 2d.
+        # so a quiet section never feeds the LLM stale headlines as news. For the
+        # BRIEF the window is not a volume control, since only the 25 newest items
+        # are used (fetch_rss max_items). For CAPTURE it is exactly that, which is
+        # what `capture_url` below exists to say.
+        # Capped: when:2d returns exactly 100 (the Google News cap) with ~370
+        # candidates for 100 RELEVANCE-ranked slots, so an item never in the top
+        # 100 at any poll instant is lost unobservably. Capture polls a 6h window
+        # (measured 17-24 items, 2026-09-08) where nothing can be ranked out. The
+        # brief keeps 2d: it takes the newest 25 at brief time, and 6h at 06:00
+        # would be the overnight hours only. The narrow window REQUIRES frequent
+        # polling -- do not slow these feeds without widening it (b42.4/b42.5).
         "url": "https://news.google.com/rss/search?q=when:2d+site%3Areuters.com%2Fmarkets&hl=en-US&gl=US&ceid=US%3Aen",
+        "capture_url": "https://news.google.com/rss/search?q=when:6h+site%3Areuters.com%2Fmarkets&hl=en-US&gl=US&ceid=US%3Aen",
         "category": "macro",
         "kind": "wire",
         "outlet": "Reuters",
     },
     {
         "name": "Reuters World",
+        # Capped: when:2d returns exactly 100 (the Google News cap) with ~370
+        # candidates for 100 RELEVANCE-ranked slots, so an item never in the top
+        # 100 at any poll instant is lost unobservably. Capture polls a 6h window
+        # (measured 40 items, 2026-09-08) where nothing can be ranked out. The
+        # brief keeps 2d: it takes the newest 25 at brief time, and 6h at 06:00
+        # would be the overnight hours only. The narrow window REQUIRES frequent
+        # polling -- do not slow these feeds without widening it (b42.4/b42.5).
         "url": "https://news.google.com/rss/search?q=when:2d+site%3Areuters.com%2Fworld&hl=en-US&gl=US&ceid=US%3Aen",
+        "capture_url": "https://news.google.com/rss/search?q=when:6h+site%3Areuters.com%2Fworld&hl=en-US&gl=US&ceid=US%3Aen",
         "category": "geo",
         "kind": "wire",
         "outlet": "Reuters",
@@ -230,7 +247,15 @@ RSS_FEEDS = [
     {
         "name": "Kyiv Independent",
         # Native feed returns 0; proxy verified 56 entries 2026-06-14
+        # Capped: when:2d returns exactly 100 (the Google News cap) with ~370
+        # candidates for 100 RELEVANCE-ranked slots, so an item never in the top
+        # 100 at any poll instant is lost unobservably. Capture polls a 6h window
+        # (measured 61 items, 2026-09-08) where nothing can be ranked out. The
+        # brief keeps 2d: it takes the newest 25 at brief time, and 6h at 06:00
+        # would be the overnight hours only. The narrow window REQUIRES frequent
+        # polling -- do not slow these feeds without widening it (b42.4/b42.5).
         "url": "https://news.google.com/rss/search?q=when:2d+site%3Akyivindependent.com&hl=en-US&gl=US&ceid=US%3Aen",
+        "capture_url": "https://news.google.com/rss/search?q=when:6h+site%3Akyivindependent.com&hl=en-US&gl=US&ceid=US%3Aen",
         "category": "ukraine",
         "kind": "regional",
         "perspective": "UKRAINIAN",
@@ -246,7 +271,15 @@ RSS_FEEDS = [
     {
         "name": "Yonhap (English)",
         # Proxy — 64 entries verified 2026-06-14
+        # Capped: when:2d returns exactly 100 (the Google News cap) with ~370
+        # candidates for 100 RELEVANCE-ranked slots, so an item never in the top
+        # 100 at any poll instant is lost unobservably. Capture polls a 12h window
+        # (measured 26 items, 2026-09-08) where nothing can be ranked out. The
+        # brief keeps 2d: it takes the newest 25 at brief time, and 12h at 06:00
+        # would be the overnight hours only. The narrow window REQUIRES frequent
+        # polling -- do not slow these feeds without widening it (b42.4/b42.5).
         "url": "https://news.google.com/rss/search?q=when:2d+site%3Aen.yna.co.kr&hl=en-US&gl=US&ceid=US%3Aen",
+        "capture_url": "https://news.google.com/rss/search?q=when:12h+site%3Aen.yna.co.kr&hl=en-US&gl=US&ceid=US%3Aen",
         "category": "korea",
         "kind": "regional",
         "perspective": "KOREAN",
