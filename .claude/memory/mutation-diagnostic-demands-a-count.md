@@ -72,3 +72,26 @@ meant to change — `grep -n` the pattern first, or read the diff. An anchored p
 specific (`^        return None$`) is specific to an INDENTATION LEVEL, not to a function. Only
 once the mutation is confirmed to be the named one does a surprising count license the
 "broader than its name" reading.
+
+## 2026-09-08 — COUNT THE LIST, DO NOT DERIVE THE NUMBER
+
+Three pre-registrations lost in one session, all the same way, none of them about the code:
+
+- "13 new tests" — arithmetic from a total minus a remembered baseline. It was 12.
+- "10 in the store file plus 2 wrappers" — I had written 9 plus 2. It was 11.
+- "3 scripts, 1 fails" — `scripts/` held 7, so the control was six-wide, not two.
+
+Every one was a prediction about MY OWN artifact, derived by subtraction or memory rather than
+read off the thing itself. The tests were right each time; the number was not. That is the
+[[the-prediction-had-a-generator]] shape at its smallest — the generator was mental arithmetic,
+and correcting the figure afterwards fixes nothing, because the next estimate is made the same way.
+
+**How to apply:** before writing a count down, run `grep -c "^def test"` or list the names. A
+pre-registration is only worth something if a disagreement is informative, and a prediction with a
+sloppy generator turns every disagreement into "recount", which is exactly the noise the technique
+exists to remove.
+
+**The countermeasure that DID work, same session:** assert the mutation anchor matches exactly
+once inside the patch script (`assert s.count(old) == 1`). Four mutations, four predictions of
+"exactly one failing test", four hits — and unlike the earlier sed that silently hit three
+functions, a wrong anchor now refuses to apply instead of quietly widening the experiment.
