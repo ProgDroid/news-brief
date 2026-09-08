@@ -244,7 +244,7 @@ def test_an_entity_that_is_not_an_object_names_its_branch():
 def test_an_entity_with_an_unknown_type_names_its_branch():
     assert _rejected_because(
         _labelled(entities=[dict(NEW_ENTITY, type="spaceship")])
-    ) == {"validate:entity_fields": 1}
+    ) == {"validate:entity_type_unknown": 1}
 
 
 def test_an_event_with_an_unknown_standing_names_its_branch():
@@ -262,7 +262,7 @@ def test_an_event_with_a_blank_summary_names_its_branch():
 def test_an_event_with_an_unknown_commitment_state_names_its_branch():
     assert _rejected_because(
         _labelled(events=[dict(NEW_EVENT, commitment_state="pondering")])
-    ) == {"validate:event_enums": 1}
+    ) == {"validate:commitment_unknown": 1}
 
 
 def test_a_clean_extraction_records_no_failure_at_all():
@@ -298,4 +298,75 @@ def test_the_recorded_cause_distinguishes_two_different_defects():
         {},
         tally,
     )
-    assert tally.failures == {"validate:entity_fields": 1, "validate:item_id": 1}
+    assert tally.failures == {"validate:entity_type_unknown": 1, "validate:item_id": 1}
+
+
+# --- MISSING vs UNKNOWN, the distinction that chooses the fix.
+#
+# The merged `validate:event_enums` key ranked this cause first on 2026-09-08
+# (73 of 108 failures) and then could not settle what to do about it. `missing`
+# means the tool schema does not require the field and the model is obeying it
+# as published, which is a SCHEMA fix (news-brief-bqa.16). `unknown` means the
+# model invented a value its own declared enum forbids, which is not.
+
+
+def test_an_omitted_event_type_reads_as_missing():
+    ev = {k: v for k, v in NEW_EVENT.items() if k != "type"}
+    assert _rejected_because(_labelled(events=[ev])) == {
+        "validate:event_type_missing": 1
+    }
+
+
+def test_an_omitted_commitment_state_reads_as_missing():
+    ev = {k: v for k, v in NEW_EVENT.items() if k != "commitment_state"}
+    assert _rejected_because(_labelled(events=[ev])) == {
+        "validate:commitment_missing": 1
+    }
+
+
+def test_an_explicit_null_reads_as_unknown_not_missing():
+    """The discriminator is MEMBERSHIP, not a None check. A field explicitly
+    set to null was supplied — the model made a choice — so it is
+    present-but-wrong, and pointing the fix at the schema would be wrong."""
+    assert _rejected_because(_labelled(events=[dict(NEW_EVENT, type=None)])) == {
+        "validate:event_type_unknown": 1
+    }
+
+
+def test_an_omitted_entity_type_reads_as_missing():
+    """The entity object carries the identical latent hazard: it declares NO
+    required list at all, so this branch is one payload away from firing."""
+    ent = {k: v for k, v in NEW_ENTITY.items() if k != "type"}
+    assert _rejected_because(_labelled(entities=[ent])) == {
+        "validate:entity_type_missing": 1
+    }
+
+
+def test_a_blank_entity_name_is_named_apart_from_its_type():
+    """The old key merged name and type. Splitting them is only real if a name
+    defect cannot be reported as a type defect."""
+    assert _rejected_because(_labelled(entities=[dict(NEW_ENTITY, name="  ")])) == {
+        "validate:entity_name": 1
+    }
+
+
+def test_the_rejected_value_is_logged_but_stays_out_of_the_key(caplog):
+    """A model can emit arbitrary strings, so an unbounded key space would make
+    `failures` unreadable exactly when it matters most. The key must stay at
+    four bounded outcomes while the value is still recoverable."""
+    with caplog.at_level("WARNING"):
+        failures = _rejected_because(
+            _labelled(events=[dict(NEW_EVENT, commitment_state="pondering")])
+        )
+    assert failures == {"validate:commitment_unknown": 1}
+    assert "pondering" in caplog.text
+    assert not any("pondering" in k for k in failures)
+
+
+def test_a_missing_field_logs_no_value_because_there_is_none(caplog):
+    """Presence sibling for the logger: one that fired unconditionally would
+    satisfy the test above and emit a bare `None` on every omission."""
+    ev = {k: v for k, v in NEW_EVENT.items() if k != "commitment_state"}
+    with caplog.at_level("WARNING"):
+        _rejected_because(_labelled(events=[ev]))
+    assert "rejected commitment_state" not in caplog.text

@@ -102,6 +102,30 @@ def _note(tally, cause: str, n: int = 1) -> None:
     tally.failures[cause] = tally.failures.get(cause, 0) + n
 
 
+def _absence(obj: dict, field_name: str) -> str:
+    """ "missing" when the model omitted the field, "unknown" when it sent a
+    value the enum forbids. Keyed on membership, not on a None check, so an
+    explicit null counts as present-but-wrong rather than as an omission.
+
+    The two implicate different fixes, which is the whole point of splitting
+    them: `missing` means the tool schema does not require the field and the
+    model is obeying it exactly as published, `unknown` means the model
+    invented a value its own declared enum rules out.
+    """
+    return "missing" if field_name not in obj else "unknown"
+
+
+def _log_rejected_value(label: str, obj: dict, field_name: str) -> None:
+    """Name the offending value, but only when there IS one.
+
+    The value stays OUT of the failure key: a model can emit arbitrary strings
+    and an unbounded key space would make `failures` unreadable exactly when it
+    matters most. The key stays at four bounded outcomes; the value goes here.
+    """
+    if field_name in obj:
+        log.warning(f"Comprehend: rejected {label} {obj[field_name]!r}")
+
+
 def _is_transient(exc: BaseException) -> bool:
     """True when the failure obtained no verdict AND is plausibly temporary.
 
@@ -1048,8 +1072,17 @@ def _validate_item(
             entities.append({"candidate_id": cid})
             continue
         name, etype = e.get("name"), e.get("type")
-        if not (isinstance(name, str) and name.strip() and etype in _ENTITY_TYPES):
-            _note(tally, "validate:entity_fields")
+        if not (isinstance(name, str) and name.strip()):
+            _note(tally, "validate:entity_name")
+            return None
+        # MISSING vs UNKNOWN, because they implicate different fixes: missing
+        # means the tool schema does not require the field and the model is
+        # obeying it (news-brief-bqa.16), unknown means the model invented a
+        # value the schema's own enum forbids. `not in e` rather than a None
+        # check, so an explicit null reads as present-but-wrong.
+        if etype not in _ENTITY_TYPES:
+            _note(tally, f"validate:entity_type_{_absence(e, 'type')}")
+            _log_rejected_value("entity type", e, "type")
             return None
         aliases = [a for a in (e.get("aliases") or []) if isinstance(a, str)]
         entities.append({"name": name.strip(), "type": etype, "aliases": aliases})
@@ -1068,8 +1101,17 @@ def _validate_item(
         if not (isinstance(summary, str) and summary.strip()):
             _note(tally, "validate:event_summary")
             return None
-        if etype not in _EVENT_TYPES or commitment not in _COMMITMENT:
-            _note(tally, "validate:event_enums")
+        # Split, and split again by missing/unknown. The merged
+        # `validate:event_enums` key ranked this cause first (73 of 108
+        # failures on 2026-09-08) but could not choose a fix between them:
+        # four predicates arriving under one label.
+        if etype not in _EVENT_TYPES:
+            _note(tally, f"validate:event_type_{_absence(ev, 'type')}")
+            _log_rejected_value("event type", ev, "type")
+            return None
+        if commitment not in _COMMITMENT:
+            _note(tally, f"validate:commitment_{_absence(ev, 'commitment_state')}")
+            _log_rejected_value("commitment_state", ev, "commitment_state")
             return None
         events.append(
             {
