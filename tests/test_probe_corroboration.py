@@ -615,3 +615,149 @@ def test_the_bakeoff_baseline_reproduces_the_live_query(kb):
         "and a similarity ranking must RECOVER it, or the bake-off has nothing "
         "to report"
     )
+
+
+# --- Batch dilution: 30 slots shared by COMPREHEND_INTEGRATE_BATCH items.
+
+
+def _batch_row(title, event_id, created_at):
+    return {"title": title, "event_id": event_id, "created_at": created_at}
+
+
+def test_reserved_gives_every_item_its_own_slots():
+    """The point of reservation: a loud item must not crowd out a quiet one.
+    Without per-item floors, one item whose entity dominates the pool takes
+    every slot and the other four get nothing."""
+    now = dt.datetime.now(dt.timezone.utc)
+    pool = [
+        {
+            "id": 1,
+            "occurred_at": now,
+            "summary": "Iran resumed enrichment",
+            "entities": set(),
+        },
+        {
+            "id": 2,
+            "occurred_at": now,
+            "summary": "Brazil soybean harvest beats",
+            "entities": set(),
+        },
+        {
+            "id": 3,
+            "occurred_at": now,
+            "summary": "Iran enrichment continues apace",
+            "entities": set(),
+        },
+        {
+            "id": 4,
+            "occurred_at": now,
+            "summary": "Brazil harvest forecast raised",
+            "entities": set(),
+        },
+    ]
+    batch = [
+        _batch_row("Iran resumes enrichment", 10, now),
+        _batch_row("Brazil soybean harvest beats forecasts", 11, now),
+    ]
+    picked = pc.batch_reserved(pool, batch, {}, 2)
+    assert 1 in picked, "the Iran item must get a slot"
+    assert 2 in picked, "and so must the Brazil item, or reservation does nothing"
+
+
+def test_unreserved_batch_similarity_can_starve_an_item():
+    """The failure reservation exists to prevent, asserted rather than assumed.
+    If this could not be made to fail, reservation would be complexity with no
+    justification.
+
+    Starvation needs ONE item holding several strong matches, not merely two
+    items competing: a max-over-titles ranking already lets each item's single
+    best match rank high, so the first version of this test passed for the
+    wrong reason.
+    """
+    now = dt.datetime.now(dt.timezone.utc)
+    pool = [
+        {
+            "id": 1,
+            "occurred_at": now,
+            "summary": "Iran resumes enrichment at Fordow",
+            "entities": set(),
+        },
+        {
+            "id": 3,
+            "occurred_at": now,
+            "summary": "Iran resumes enrichment Fordow today",
+            "entities": set(),
+        },
+        {
+            "id": 2,
+            "occurred_at": now,
+            "summary": "Brazil soybean harvest",
+            "entities": set(),
+        },
+    ]
+    batch = [
+        _batch_row("Iran resumes enrichment at Fordow", 10, now),
+        _batch_row("Brazil soybean harvest beats forecasts", 11, now),
+    ]
+    picked = pc.batch_similarity(pool, batch, {}, 2)
+    assert picked == [1, 3], "the loud item takes both slots"
+    assert 2 not in picked, "and the quiet item is starved"
+
+    reserved = pc.batch_reserved(pool, batch, {}, 2)
+    assert 2 in reserved, "reservation must rescue exactly this case"
+
+
+def test_every_batch_strategy_respects_the_cap():
+    """Equal budget again. A strategy returning more than `cap` would be
+    compared against others at a larger prompt, which is not a ranking win."""
+    now = dt.datetime.now(dt.timezone.utc)
+    pool = [
+        {
+            "id": i,
+            "occurred_at": now - dt.timedelta(hours=i),
+            "summary": f"s{i}",
+            "entities": set(),
+        }
+        for i in range(50)
+    ]
+    batch = [_batch_row(f"t{i}", 100 + i, now) for i in range(5)]
+    for name, fn in pc.BATCH_STRATEGIES.items():
+        assert len(fn(pool, batch, {}, 30)) <= 30, name
+
+
+def test_batch_neighbours_excludes_the_pair_itself():
+    """Including the miss's own events would hand the answer to the ranking and
+    every strategy would score 100%."""
+    now = dt.datetime.now(dt.timezone.utc)
+    rows = [
+        _batch_row("other one", 1, now),
+        _batch_row("other two", 2, now),
+        _batch_row("the later", 99, now),
+        _batch_row("the earlier", 98, now),
+    ]
+    miss = {
+        "later": {"event_id": 99, "title": "the later", "created_at": now},
+        "earlier": {"event_id": 98},
+    }
+    batch = pc.batch_neighbours(rows, miss, 3)
+    ids = [row["event_id"] for row in batch]
+    assert ids[0] == 99, "the miss's own item leads the batch"
+    assert 98 not in ids, "the TARGET must never be seeded into the batch"
+
+
+def test_batch_neighbours_stops_at_the_batch_size():
+    now = dt.datetime.now(dt.timezone.utc)
+    rows = [_batch_row(f"o{i}", i, now) for i in range(20)]
+    miss = {
+        "later": {"event_id": 99, "title": "x", "created_at": now},
+        "earlier": {"event_id": 98},
+    }
+    assert len(pc.batch_neighbours(rows, miss, 5)) == 5
+
+
+def test_the_batch_size_comes_from_the_live_knob():
+    """A hardcoded 5 would measure a system nobody runs if the host retunes
+    COMPREHEND_INTEGRATE_BATCH."""
+    assert pc.integrate_batch_size() == max(
+        1, int(comprehend.common.COMPREHEND_INTEGRATE_BATCH)
+    )

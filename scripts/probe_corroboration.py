@@ -480,6 +480,140 @@ def bake_off(conn, misses, ents, cap):
     return results, (agree, disagree)
 
 
+def integrate_batch_size() -> int:
+    """Production's real batch size, read from the live knob rather than
+    assumed. The whole point of this section is that 30 slots are shared by
+    THIS many items, so a hardcoded 5 would measure a system nobody runs."""
+    try:
+        return max(1, int(comprehend.common.COMPREHEND_INTEGRATE_BATCH))
+    except Exception:
+        return 5
+
+
+def batch_neighbours(rows, miss, size):
+    """The other items that would share this miss's candidate list.
+
+    Production chunks `ORDER BY i.id LIMIT 300` into groups of `size`, so a
+    batch is items processed in the same pass. Nearest-in-time is the closest
+    reconstruction available: exact historical batches were never recorded.
+    """
+    target = miss["later"]["created_at"]
+    seen = {miss["later"]["event_id"], miss["earlier"]["event_id"]}
+    others = []
+    for row in sorted(
+        rows, key=lambda r: abs((r["created_at"] - target).total_seconds())
+    ):
+        if row["event_id"] in seen:
+            continue
+        seen.add(row["event_id"])
+        others.append(row)
+        if len(others) >= size - 1:
+            break
+    return [miss["later"]] + others
+
+
+def candidate_pool_for(conn, entity_ids, at):
+    """The uncapped pool for an explicit entity set. Split out from
+    candidate_pool so a BATCH's union of entities can be passed in -- which is
+    what production actually retrieves against."""
+    if not entity_ids:
+        return []
+    rows = conn.execute(
+        "SELECT e.id, e.occurred_at, e.summary, array_agg(DISTINCT ee2.entity_id) "
+        "FROM events e "
+        "JOIN event_entities ee ON ee.event_id = e.id AND ee.entity_id = ANY(%s) "
+        "JOIN event_entities ee2 ON ee2.event_id = e.id "
+        "WHERE e.occurred_at >= %s::timestamptz - make_interval(days => %s) "
+        "  AND e.created_at < %s "
+        "GROUP BY e.id, e.occurred_at, e.summary",
+        (list(entity_ids), at, comprehend.CANDIDATE_WINDOW_DAYS, at),
+    ).fetchall()
+    return [
+        {"id": r[0], "occurred_at": r[1], "summary": r[2], "entities": set(r[3] or ())}
+        for r in rows
+    ]
+
+
+def batch_recency(pool, batch, ents, cap):
+    """Production today: one list, ordered by recency, shared by the batch."""
+    return [
+        e["id"] for e in sorted(pool, key=lambda e: e["occurred_at"], reverse=True)
+    ][:cap]
+
+
+def batch_similarity(pool, batch, ents, cap):
+    """One list ranked by the BEST similarity to any item in the batch. The
+    simplest adaptation of the winning single-item ranking, and the one that
+    dilution would hurt: five items compete for the same 30 slots."""
+    titles = [row["title"] for row in batch]
+    scored = sorted(
+        pool,
+        key=lambda e: max(similarity(t, e["summary"]) for t in titles),
+        reverse=True,
+    )
+    return [e["id"] for e in scored][:cap]
+
+
+def batch_reserved(pool, batch, ents, cap):
+    """Slots reserved PER ITEM, so a loud item cannot crowd out a quiet one.
+    Each item gets cap // len(batch) picks ranked against its own title; any
+    remainder is filled by the batch-wide ranking, so the budget is identical."""
+    per_item = max(1, cap // max(1, len(batch)))
+    picked, seen = [], set()
+    for row in batch:
+        ranked = sorted(
+            pool, key=lambda e: similarity(row["title"], e["summary"]), reverse=True
+        )
+        taken = 0
+        for event in ranked:
+            if taken >= per_item or len(picked) >= cap:
+                break
+            if event["id"] in seen:
+                continue
+            seen.add(event["id"])
+            picked.append(event["id"])
+            taken += 1
+    for event_id in batch_similarity(pool, batch, ents, cap):
+        if len(picked) >= cap:
+            break
+        if event_id not in seen:
+            seen.add(event_id)
+            picked.append(event_id)
+    return picked
+
+
+BATCH_STRATEGIES = {
+    "recency, batched": batch_recency,
+    "similarity, batched": batch_similarity,
+    "reserved per item": batch_reserved,
+}
+
+
+def batch_bake_off(conn, misses, ents, rows, cap, size):
+    """recall@cap when one candidate list is shared by `size` items.
+
+    The single-item bake-off is an UPPER BOUND: it gave every slot to one item.
+    This is what production would actually see, and the gap between them is the
+    cost of batching.
+    """
+    results = {name: 0 for name in BATCH_STRATEGIES}
+    evaluated = 0
+    for miss in misses:
+        batch = batch_neighbours(rows, miss, size)
+        entity_union = set()
+        for row in batch:
+            entity_union |= ents.get(row["event_id"], set())
+        pool = candidate_pool_for(conn, entity_union, miss["later"]["created_at"])
+        if not pool:
+            continue
+        evaluated += 1
+        target = miss["earlier"]["event_id"]
+        for name, fn in BATCH_STRATEGIES.items():
+            if target in fn(pool, batch, ents, cap):
+                results[name] += 1
+    return results, evaluated
+
+
 def merges_from_pairs(misses) -> int:
     """Union-find over the pair graph. Merging a cluster of k events removes
     k-1 events, NOT C(k,2) -- counting pairs as merges is what produced a
@@ -652,6 +786,30 @@ def report(conn, days: int, rng=None) -> int:
             )
         print("  Equal budget: every strategy ranks the SAME pool into the same")
         print("  number of slots, so a win is ranking rather than volume.")
+
+    size = integrate_batch_size()
+    print("")
+    print(f"=== Batch dilution: {cap} slots shared by {size} items ===")
+    print("The table above gave every slot to ONE item, which is an upper")
+    print("bound. Production shares one candidate list across a batch, so the")
+    print("gap between the two tables IS the cost of batching.")
+    if subset:
+        bresults, evaluated = batch_bake_off(conn, subset, ents, rows, cap, size)
+        print(f"evaluated on {evaluated} pairs")
+        if evaluated:
+            bbest = max(bresults.values())
+            for name, hits in sorted(bresults.items(), key=lambda kv: -kv[1]):
+                mark = "  <-- best" if hits == bbest and bbest else ""
+                print(
+                    f"  {name:>20}: {hits:>4}/{evaluated}  "
+                    f"recall={hits / evaluated:.0%}{mark}"
+                )
+            single = results.get("title similarity", 0) / len(subset)
+            batched = bresults["similarity, batched"] / evaluated
+            print(
+                f"  dilution cost: {single:.0%} single-item -> {batched:.0%} "
+                f"batched ({single - batched:+.0%})"
+            )
 
     print("\n=== Sample pairs -- same story or not? ===")
     for m in strong[:10]:
