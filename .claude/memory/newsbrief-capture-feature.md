@@ -120,3 +120,45 @@ below it is measuring an outage.
 different clocks is a separate bead — a scheduler change does not belong inside a measurement
 task. Also noted on `news-brief-115`: removing `scripts/` from the Dockerfile COPY now needs BOTH
 measurements taken, not just the comprehension gate.
+
+## 2026-09-08 — `w3q` CLOSED, and the design rule above is PARTLY WRONG
+
+The rule this file records — "LIVENESS needs no measurement, QUALITY does" — held for three days
+and then cost six more. The quality half needed **no measured threshold either**, once the signals
+were reshaped. `w3q` was blocked on `b42.2` the whole time for a number neither alert ended up
+using.
+
+**Corrected rule: before waiting on a measurement, ask whether the signal can be compared against
+something the system ALREADY KNOWS.** Two candidates, and both paid off here:
+
+  * **An existing justified constant.** `failing_feeds` reuses `STALE_AFTER_INTERVALS` rather than
+    introducing a tolerance of its own — it is the same question `liveness` asks, one level down,
+    so a second constant would have been a knob tracking a knob.
+  * **The system's own history.** `item_drought` alerts when the current run of zero-new passes
+    exceeds the longest in the trailing window. No constant at all, and it tracks volume as the
+    corpus grows.
+
+**A threshold that carries its evidence into the message is one the operator can argue with.**
+"The longest gap in seven days was two passes, this is eight" invites a check; a hardcoded `6`
+invites nothing. That is the practical difference between measured and guessed, and it is visible
+in the alert text rather than buried in a constant.
+
+**The one number, and why it is derived rather than picked:** `HISTORY_DAYS = 7`, because the
+baseline must span a WEEKEND. A shorter window makes the first quiet Sunday look unprecedented and
+pages every week.
+
+**The spec's wording was also wrong, and the data said so.** Section 10 asks for "failed feeds
+above a threshold" — a per-PASS count, which fires on a transient blip that recovers by the next
+pass and stays silent about one feed dead for a week. Per-FEED persistence catches the case that
+matters (the revoked cert, the permanent 403). Two filters carry it, both ABSENT-versus-UNKNOWN:
+a feed still being ATTEMPTED versus one dropped from `RSS_FEEDS` (whose last success ages forever,
+so a stale-success test alone pages hourly about something nobody can fix), and NEVER succeeded
+versus succeeded long ago (the NULL reaches the message as "never", not as a confident age).
+
+Three silences on the drought, each a different fact from healthy: too little history, a DISABLED
+capture (it writes a zero-item row every fire — what `capture_runs.enabled` exists to tell apart),
+and a drought a fetch failure explains, which is `failing_feeds`' story. Two independent episode
+keys, because sharing one would let whichever was seen first silence the other.
+
+Built in `c12db23`: `capture.failing_feeds`, `capture.item_drought`, `brief.capture_quality_alert`
+in `mode_monitor`. 11 tests; 4 pre-registered mutations each failing exactly one test.
