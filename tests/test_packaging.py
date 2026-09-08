@@ -16,8 +16,13 @@ next module added is covered without anyone remembering to come back here.
 """
 
 import ast
+import os
 import re
+import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DOCKERFILE = REPO_ROOT / "Dockerfile"
@@ -278,4 +283,49 @@ def test_every_variable_the_anchor_passes_through_is_read_by_something():
         f"{unread} are passed into the container by the x-newsbrief anchor but "
         f"are read by nothing -- not a common.KNOBS key, not an os.environ read, "
         f"not a db connection variable. Setting one of them has no effect."
+    )
+
+
+# ── Scripts must be runnable the way the Dockerfile documents ────────────────
+#
+# Same class as the COPY allowlist above, and it bit on 2026-09-08: a script
+# with 14 passing tests died on the host with `ModuleNotFoundError: No module
+# named 'db'`. Nothing in the suite could catch it, because pytest imports a
+# script as `scripts.<name>` with the repo root already on sys.path, while
+# running one as a PATH puts `scripts/` at sys.path[0] and the repo root
+# nowhere. The two older scripts carry a path shim for exactly this reason and
+# neither had a test holding it there -- so the convention was load-bearing,
+# undocumented outside a comment, and free to be forgotten by the next file.
+
+
+def _runnable_scripts() -> list[Path]:
+    return sorted(
+        p for p in (REPO_ROOT / "scripts").glob("*.py") if p.stem != "__init__"
+    )
+
+
+@pytest.mark.parametrize("script", _runnable_scripts(), ids=lambda p: p.stem)
+def test_a_script_run_as_a_path_can_import_the_root_modules(script):
+    """Run it the way the Dockerfile's comment says to, and watch it resolve.
+
+    DATABASE_URL is stripped so nothing connects: every one of these exits early
+    or dies on the missing connection, and either is fine. The assertion is
+    narrow on purpose -- this is about import resolution, not about the script
+    doing its job, and widening it would make the test fail for reasons that
+    have nothing to do with what it guards.
+    """
+    env = {k: v for k, v in os.environ.items() if k != "DATABASE_URL"}
+
+    done = subprocess.run(
+        [sys.executable, str(script)],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+
+    assert "ModuleNotFoundError" not in done.stderr, (
+        f"{script.name} cannot import a root module when run as a path. "
+        f"It needs the sys.path shim its siblings carry.\n{done.stderr[-600:]}"
     )

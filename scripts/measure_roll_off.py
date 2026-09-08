@@ -59,7 +59,18 @@ at the COPY that puts this directory in the image.)
 import statistics
 import sys
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import NamedTuple
+
+# Run as a PATH, `scripts/` is sys.path[0] and the repo root is nowhere -- so
+# `import db` fails in the image while every test passes, because pytest imports
+# this as `scripts.measure_roll_off` with the root already on the path. Both
+# older scripts carry this shim; `tests/test_packaging.py` now holds it there.
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+import db  # noqa: E402  (path shim above must run first)
 
 
 class Sighting(NamedTuple):
@@ -238,8 +249,6 @@ def _show(value, spec: str = "") -> str:
 
 
 def main() -> int:
-    import db
-
     if not db.is_configured():
         print("No DATABASE_URL: this reads the host's capture telemetry.")
         return 2
@@ -301,7 +310,7 @@ def main() -> int:
     raw_per_day = sum(1440 / m for m in known.values()) if known else 0
     fitted = fit_budget(known, BUDGET_PER_DAY)
     print(
-        f"\n{len(known)} feeds measured, {len(unknown)} UNKNOWN "
+        f"\n{len(known)} feed(s) measured, {len(unknown)} UNKNOWN "
         f"(no usable pair, or nothing observed rolling off).\n"
         f"Unconstrained that is {raw_per_day:.0f} requests/day against a budget "
         f"of {BUDGET_PER_DAY}."
