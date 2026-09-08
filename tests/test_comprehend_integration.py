@@ -800,3 +800,39 @@ def test_write_extraction_tolerates_an_event_with_no_commitment_key_at_all(kb):
         (iid,),
     ).fetchall()
     assert stored and all(row[0] is None for row in stored)
+
+
+def test_an_extraction_with_events_but_no_entities_is_terminal_not_retried(kb):
+    """news-brief-bqa.17, confirmed against a real payload on 2026-09-08.
+
+    Refusing is correct: candidate_events retrieves BY entity id, so an
+    entity-less event can never be offered as a candidate or matched, and would
+    inflate events_created while never touching events_matched -- depressing
+    the corroboration ratio the pre-registered gate reads. What was wrong was
+    refusing by raising and charging: the outcome is DETERMINISTIC for this
+    item at this prompt version, so it failed identically every pass and burned
+    three 8192-token generations to reach a verdict available on the first.
+    """
+    iid = _item(kb)
+    tally = comprehend.Tally()
+
+    extraction = dict(_fresh(iid), entities=[])
+    assert extraction["events"], (
+        "the fixture must carry events, or it is the empty case"
+    )
+
+    assert (
+        comprehend.write_extraction(kb, extraction, comprehend.SurfaceIndex([]), tally)
+        is True
+    )
+    kb.commit()
+
+    assert tally.entityless_extraction == 1
+    assert tally.items_lost_to_savepoint == 0, "nothing was rolled back; nothing failed"
+    assert tally.failed_integration == 0
+    row = kb.execute(
+        "SELECT integrated_at, integrate_attempts FROM item_triage WHERE item_id = %s",
+        (iid,),
+    ).fetchone()
+    assert row[0] is not None, "must be terminal, or it is re-offered forever"
+    assert row[1] == 0, "the model answered; it just answered 'no entities'"

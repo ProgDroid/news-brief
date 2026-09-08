@@ -1424,3 +1424,62 @@ def test_a_response_the_parser_rejects_still_charges_the_item(kb, monkeypatch):
     assert tally.failed_integration == 1
     assert tally.deferred_transport == 0
     assert tally.failures == {"batch:ValueError": 1}
+
+
+def test_an_entityless_item_is_never_re_offered(kb, monkeypatch):
+    """news-brief-bqa.17 as the PROPERTY, driven through run()'s real
+    integration SELECT rather than restating it. Before the fix this item
+    raised NoEntitySurvived, kept integrated_at NULL, and came straight back to
+    the FRONT of the next batch (ORDER BY i.id) to re-pay its call -- three
+    times, then died forever."""
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
+    item_id = _tracked_material(kb)
+
+    def entityless(_req):
+        return {
+            "stop_reason": "tool_use",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "emit_extraction",
+                    "input": {
+                        "items": [
+                            {
+                                "item_id": item_id,
+                                "entities": [],
+                                "events": [
+                                    {
+                                        "summary": "Ukraine talks resumed.",
+                                        "type": "action",
+                                        "commitment_state": "in_force",
+                                        "standing": "reported",
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                }
+            ],
+        }
+
+    monkeypatch.setattr(comprehend, "call_integration", entityless)
+    first = comprehend.run(kb)
+    kb.commit()
+
+    assert first.entityless_extraction == 1
+    assert first.failed_integration == 0
+    assert (
+        kb.execute(
+            "SELECT integrate_attempts FROM item_triage WHERE item_id = %s", (item_id,)
+        ).fetchone()[0]
+        == 0
+    )
+
+    # The property. A second pass must not offer it again, so an integration
+    # call at all is the failure.
+    monkeypatch.setattr(
+        comprehend,
+        "call_integration",
+        lambda _req: pytest.fail("an entityless item was re-offered"),
+    )
+    comprehend.run(kb)

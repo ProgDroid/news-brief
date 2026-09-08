@@ -15,6 +15,7 @@ whether this works is scripts/score_comprehension.py.
 """
 
 import html
+import json
 import re
 import time
 from dataclasses import dataclass, field
@@ -84,6 +85,15 @@ class Tally:
     # this repo's rule is that an unmeasured field gets measured -- without it
     # nobody can tell a rare edge case from most of the corpus (migration 0011).
     commitment_omitted: int = 0
+    # Extractions carrying events but no entities. NOT a failure and NOT empty:
+    # the model answered, it just found nothing nameable to attach the event to.
+    # Terminal rather than retried, because the answer is deterministic
+    # (news-brief-bqa.17).
+    entityless_extraction: int = 0
+    # Batches whose `items` arrived as a JSON STRING rather than an array and
+    # were recovered. Model NON-COMPLIANCE, not a failure -- counted so a
+    # healthy failure count cannot hide it continuing.
+    items_json_string: int = 0
     failures: dict = field(default_factory=dict)
 
 
@@ -1045,6 +1055,34 @@ def parse_integration_response(
     for block in resp.get("content", []):
         if block.get("type") == "tool_use" and block.get("name") == "emit_extraction":
             rows = block.get("input", {}).get("items")
+            # The model sometimes SERIALISES the array instead of emitting it:
+            # `input keys=['items'] items type=str`, measured 2026-09-08 at 35
+            # items per pass -- 12% of the corpus, whole batches at a time, and
+            # re-paid every hour. The content is well formed; only the encoding
+            # is wrong, so discarding the batch spends an 8192-token generation
+            # to throw away a correct answer.
+            #
+            # Recovery is deliberately narrow. `json.loads('"x"')` SUCCEEDS and
+            # yields a string, so the shape is re-checked below rather than
+            # inferred from the parse -- otherwise the comprehension would
+            # iterate over characters. A string that is not JSON at all stays a
+            # batch failure and keeps its attempt.
+            #
+            # parse_triage_response has the same shape and is deliberately NOT
+            # changed: failed_triage has been 0 across every measured pass, so
+            # there is nothing to fix there and a speculative copy would be an
+            # untested branch.
+            if isinstance(rows, str):
+                try:
+                    rows = json.loads(rows)
+                except ValueError:
+                    pass
+                else:
+                    # Counted, never silently absorbed: a recovery leaving no
+                    # trace hides continuing non-compliance behind a suddenly
+                    # healthy failure count.
+                    if tally is not None:
+                        tally.items_json_string += 1
             if not isinstance(rows, list):
                 # Name what arrived. This fired 35 times in the 2026-09-08
                 # 11:00 pass -- 12% of items, whole batches at a time -- and
@@ -1251,6 +1289,36 @@ def write_extraction(conn, extraction: dict, index: SurfaceIndex, tally: Tally) 
             (INTEGRATE_PROMPT_VERSION, item_id, TRIAGE_PROMPT_VERSION),
         )
         tally.empty_extraction += 1
+        return True
+
+    # Events but NO entities. Refusing to write is correct: candidate_events
+    # retrieves BY entity id, so an entity-less event can never be offered as a
+    # candidate or matched -- it would inflate events_created while never
+    # touching events_matched, depressing the corroboration ratio the
+    # pre-registered gate reads. That is the same by-construction trap the
+    # occurred_at comment below describes.
+    #
+    # What was WRONG (news-brief-bqa.17) was refusing by raising inside the
+    # savepoint and charging an attempt. The outcome is DETERMINISTIC for this
+    # item at this prompt version, so it failed identically every pass and
+    # burned three 8192-token generations to reach a verdict available on the
+    # first. Terminal and uncharged instead -- the model answered, it just
+    # answered "no entities".
+    #
+    # NoEntitySurvived below keeps its attempt and keeps its name: entities
+    # WERE offered there and every one was refused, which is work rejected
+    # rather than work never done. The comment above the empty branch always
+    # claimed that distinction; until now nothing enforced it, because
+    # `not entity_ids` is true in both cases.
+    if not extraction["entities"]:
+        conn.execute(
+            "UPDATE item_triage SET integrated_at = now(), "
+            "  integrate_prompt_version = %s "
+            "WHERE item_id = %s AND triage_prompt_version = %s "
+            "  AND verdict = 'material'",
+            (INTEGRATE_PROMPT_VERSION, item_id, TRIAGE_PROMPT_VERSION),
+        )
+        tally.entityless_extraction += 1
         return True
 
     try:

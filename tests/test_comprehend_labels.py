@@ -485,3 +485,81 @@ def test_a_wrongly_typed_items_field_is_distinguishable_from_an_absent_one():
     with pytest.raises(ValueError) as exc:
         comprehend.parse_integration_response(resp, {1}, {}, {})
     assert "dict" in str(exc.value)
+
+
+# --- `items` arriving as a JSON STRING rather than an array.
+#
+# Measured 2026-09-08 13:00: 35 items per pass, whole batches at a time, 12% of
+# the corpus, re-paid every hour and grinding those items toward the 3-attempt
+# ceiling. The detail added to this error is what named it -- `input
+# keys=['items'] items type=str` -- after two passes where the bare message
+# could only say the list was "missing".
+
+
+def _string_items(payload: str):
+    return {
+        "stop_reason": "tool_use",
+        "content": [
+            {
+                "type": "tool_use",
+                "name": "emit_extraction",
+                "input": {"items": payload},
+            }
+        ],
+    }
+
+
+def test_items_serialised_as_a_json_string_is_recovered():
+    import json
+
+    got = comprehend.parse_integration_response(
+        _string_items(json.dumps([_labelled(entities=[dict(NEW_ENTITY)])])),
+        {1},
+        {},
+        {},
+    )
+    assert len(got) == 1, "a serialised array is still an array"
+    assert got[0]["entities"][0]["name"] == "Iran"
+
+
+def test_a_recovered_json_string_is_counted_as_non_compliance():
+    """Recovering it silently would repeat what made failed_integration=172
+    unattributable: the batch stops failing and nobody can see that the model
+    is still doing the wrong thing."""
+    import json
+
+    tally = comprehend.Tally()
+    comprehend.parse_integration_response(
+        _string_items(json.dumps([_labelled()])), {1}, {}, {}, tally
+    )
+    assert tally.items_json_string == 1
+
+
+def test_a_normal_array_is_not_counted_as_recovered():
+    """Presence sibling. A counter incremented on every parse would satisfy the
+    test above while measuring nothing at all."""
+    tally = comprehend.Tally()
+    comprehend.parse_integration_response(
+        _extraction([_labelled()]), {1}, {}, {}, tally
+    )
+    assert tally.items_json_string == 0
+
+
+def test_a_string_that_is_not_json_still_raises():
+    """The recovery must not become a blanket swallow: garbage is still a
+    batch failure, and one that charges its attempt."""
+    with pytest.raises(ValueError) as exc:
+        comprehend.parse_integration_response(
+            _string_items("not json at all"), {1}, {}, {}
+        )
+    assert "items type=str" in str(exc.value)
+
+
+def test_a_json_string_decoding_to_a_non_list_still_raises():
+    """`json.loads('"x"')` succeeds and yields a string. Recovering only the
+    parse, without re-checking the SHAPE, would let that through to a `for`
+    loop over characters."""
+    with pytest.raises(ValueError):
+        comprehend.parse_integration_response(
+            _string_items('"just a string"'), {1}, {}, {}
+        )
