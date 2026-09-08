@@ -76,3 +76,47 @@ seen per pass of which ~1% are new. `2026-09-04`'s 1,926 is the first-fill artif
 meeting each feed's whole window — **never use it in a rate**. Only ~25% of items carry 150+ chars
 of body. Full numbers and what they imply downstream are in
 [[newsbrief-comprehension-pipeline]]; they are the empirical input `b42.2` was waiting on.
+
+## 2026-09-08 — the `b42.2` INSTRUMENT exists; the measurement does not yet
+
+`scripts/measure_roll_off.py` + 14 tests, pushed in `1b2af00`. Read-only, model-free. Run it on
+the host, where the data is — the ENTRYPOINT takes a MODE, so the override is what lets a script
+run at all:
+
+    docker compose run --rm --entrypoint python newsbrief scripts/measure_roll_off.py
+
+**`feed_sightings` has no per-poll membership, so membership is RECONSTRUCTED**: an item was in the
+window when a poll falls inside its closed `[first_seen_at, last_seen_at]`. That yields the three
+metrics — median window size, overlap between consecutive polls, and the share of items seen
+exactly once. Overlap is what an interval gets set against; singles are the population that would
+vanish first if the interval grew.
+
+**THE CENSORING IS THE WHOLE POINT, and it is the [[a-detectors-hits-are-a-FLOOR]] shape applied to
+time.** An item published and gone BETWEEN two polls leaves no row anywhere, so the current 30-min
+cadence bounds what is observable about the cadence. Every loss figure is a FLOOR. A feed that
+looks lossless is lossless AT 30 MINUTES and unmeasured below it — the script prints that line
+itself rather than trusting the reader to infer it.
+
+**Two denominators, both the same mistake in different clothes** — counting a poll that never
+happened as a poll that saw nothing. Only `failure IS NULL` polls are observations (the trap
+`capture.rolled_off`'s docstring already names). And only pairs within 1.5x the schedule are
+compared: two successes either side of an outage measure a two-hour interval, and using that to
+justify a thirty-minute one is evidence from the wrong experiment.
+
+**UNKNOWN survives to the caller everywhere it arises, and this is the assertion worth keeping.** A
+feed whose polls all failed must not report `0.0` overlap — zero reads as "the whole window turned
+over", the strongest claim available made from no evidence, and it would earn that feed the
+SHORTEST interval in the table. Same for `full_turnover_minutes` when nothing rolled off: an
+unchanged window sets no upper bound, so any number there invents the one fact the measurement
+exists to supply.
+
+**Pre-registered before the run**, so a shortfall is read as liveness rather than as roll-off:
+~5,000–5,600 `feed_polls` rows (26 feeds x 48/day x the span since 2026-09-04). The script prints
+actual-vs-predicted on its FIRST line for exactly that reason. A large shortfall means the table
+below it is measuring an outage.
+
+**Scope boundary held deliberately:** capture has ONE global 30-minute schedule
+(`scheduler.py:75`). If the data justifies per-feed cadences, the MECHANISM to run feeds on
+different clocks is a separate bead — a scheduler change does not belong inside a measurement
+task. Also noted on `news-brief-115`: removing `scripts/` from the Dockerfile COPY now needs BOTH
+measurements taken, not just the comprehension gate.

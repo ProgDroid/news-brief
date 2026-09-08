@@ -167,3 +167,38 @@ one. Filed `news-brief-5fc` to make this loud — a boot-time warning for any KN
 environment with no backing row, which would have caught it in the 18:16 startup log. Note both
 arms matter: an absent row is what fired here, but a row DISAGREEING with the env var is the
 nastier variant, where a row set months ago silently wins with an identical symptom.
+
+## 2026-09-08 — `news-brief-5fc` SHIPPED, so this class is now LOUD (commit `1131d2c`)
+
+The bead filed at the end of the previous section is built and pushed. Both arms this file
+predicted are covered, and the predicted-nastier one is covered by the same predicate rather than
+a second check.
+
+**The rule the detector uses: what the environment ASKS FOR against what is IN EFFECT** —
+`config.ignored_env_knobs()`. Not "is there a row", which was the bead's own title and would have
+been wrong: it misses the stale row entirely, and it fires on the harmless case where the env
+merely repeats the default. Comparing effective values catches absent row, disagreeing row, and a
+value that will not coerce — that last one matters because `coerce_knob` answers with the DEFAULT
+for a value it cannot read, so `PG_A_STAKE=banana` would otherwise compare EQUAL to the very
+default it was written to override. A bool is sharper still: it coerces anything, so `banana` is
+simply not in `_TRUTHY`, reads False, and matches a default of False. `common.knob_parses()` is
+the strict check that separates those; it lives in `common.py` so the truthy tokens stay defined
+once.
+
+**Two channels, because they have different NATURAL RATES — and this is the part that generalises
+to any future boot-time check here.** `config.warn_ignored_env_knobs()` logs at boot, called
+next to `import_settings_from_env` in BOTH seed paths and deliberately outside it, since the
+importer returns early on exactly the established host where this bug lives. Telegram gets the
+once-per-episode version through `brief.ignored_knobs_alert()` in `mode_monitor`.
+
+**Why not alert at boot: `brief.py` seeds on EVERY `docker compose run --rm <mode>`.** A Telegram
+alert wired to the boot path is one message per cron mode, several a day, forever — which is how
+an operator learns to mute the channel that was supposed to tell them something. Boot is a fine
+place for a log line and a bad place for a page. The alert follows the `capture.liveness` contract
+instead ([[newsbrief-capture-feature]]): `(episode_key, message) | None`, keyed on which knobs and
+what they ask for, so fixing one while breaking another is a new episode rather than a silence.
+
+**How to apply:** the 2026-09-07 diagnostic queries above are still correct, but you should no
+longer need them — the 18:16-startup case now prints itself. If a knob is misbehaving and the boot
+log says nothing, that is evidence the knob is NOT of this class, and worth spending on a
+different hypothesis rather than re-running the three queries.

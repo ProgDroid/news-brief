@@ -45,3 +45,30 @@ wrong probe when the behaviour is original and correct — there, name a mutatio
 Sibling technique to [[tests-asserting-less-than-their-name]]; the substitution form (swap in a
 plausible *wrong* implementation) found the two worst defects in the comprehension build, both
 invisible to three reading passes each. See [[newsbrief-comprehension-pipeline]].
+
+## 2026-09-08 — two refinements to the pre-registered count, one of them a CORRECTION
+
+Measured while shipping `news-brief-5fc` and the `b42.2` instrument, doing the mutations myself
+rather than through a worker. Both are about the arithmetic of the prediction, which is the part
+that decides whether a disagreement teaches anything.
+
+**1. Subtract the silence-assertions.** Predicting "gut the detector, all 12 new tests fail" is
+wrong by construction: a test asserting that nothing is reported is satisfied by an implementation
+that reports nothing, ever. The honest prediction was 11 of 12, and 11 is what came back. So
+before writing the number down, count the tests whose assertion an EMPTY or INERT implementation
+already passes, and exclude them — then make sure each of those has a presence-sibling holding it
+up, because they are exactly the tests that carry no weight under this mutation.
+
+**2. When the count OVERSHOOTS, first check the mutation is the one you named.** The entry above
+says a mutation failing more tests than expected means "the test measures something broader than
+its name". That is one explanation and I reached for it first; it was wrong. Predicted 1 failure
+for "empty window returns 0.0 instead of None", got 3 — because the mutation was applied with
+`sed 's/^        return None$/        return 0.0/'` and that pattern matched the same line in
+THREE functions. The tests were fine and each of the three `None` returns was independently held
+by one test, which is a stronger result than intended but not the one I predicted.
+
+**How to apply:** a regex-applied mutation must be verified by what it CHANGED, not by what it was
+meant to change — `grep -n` the pattern first, or read the diff. An anchored pattern that looks
+specific (`^        return None$`) is specific to an INDENTATION LEVEL, not to a function. Only
+once the mutation is confirmed to be the named one does a surprising count license the
+"broader than its name" reading.
