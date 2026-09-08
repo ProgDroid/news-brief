@@ -21,3 +21,36 @@ The Dockerfile copies first-party modules by an explicit allowlist (`COPY common
 **Verify in the artifact, not statically.** The static test goes green the moment the COPY line is edited; that shares an assumption with grep and with reconstructing the file set. Build the image and run a real mode through it: `docker build -t nb-probe:local .` then `docker run --rm -e ANTHROPIC_API_KEY=x -e TELEGRAM_BOT_TOKEN=x -e TELEGRAM_CHAT_ID=1 -e DATABASE_URL=... nb-probe:local pgdiag`. **`ENTRYPOINT ["python", "brief.py"]`** — pass the MODE only; `python brief.py pgdiag` doubles the argv and silently prints the usage banner instead. A non-zero exit from that probe is often the harness (env-var guards fire before anything interesting), so read the message, never just the code.
 
 The image also publishes a `type=sha` tag — pull by short-sha, not `:latest`, when you must be certain the server isn't on a stale cached image.
+
+## 2026-09-08 — the same class, one level down: a script in `scripts/` needs a sys.path SHIM
+
+`scripts/measure_roll_off.py` passed 14 tests locally and died on the host with
+`ModuleNotFoundError: No module named 'db'`. **Run as a PATH — the only way, since the ENTRYPOINT
+takes a MODE — `scripts/` becomes `sys.path[0]` and the repo root is nowhere.** pytest never sees
+it, because it imports the file as `scripts.<name>` with the root already on the path. The suite
+and the container disagree BY CONSTRUCTION, which is this file's whole subject.
+
+Every script needs the shim its siblings carry, before any root import:
+
+```python
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+import db  # noqa: E402  (path shim above must run first)
+```
+
+**Deferring the import into `main()` does NOT fix it** — that was my first instinct and it is the
+wrong axis. The problem is the search path, not the timing.
+
+**Now ENFORCED in `tests/test_packaging.py`** (`test_a_script_run_as_a_path_can_import_the_root_modules`),
+parametrized over every `scripts/*.py`: it runs each as a path with `DATABASE_URL` stripped and
+asserts no `ModuleNotFoundError`. The assertion is narrow on purpose — scripts are free to exit
+early or die on the missing connection. **It discriminates**: six siblings passed before and after,
+only the new file failed, so it is a control rather than a tautology.
+
+**The general lesson, and the reason this took a deploy cycle:** the two older scripts had carried
+the shim for months with NO test holding it there. A convention that lives in one comment is one
+new file away from being forgotten, and the forgetting is invisible until it reaches the image.
+When you find yourself copying a load-bearing incantation from a sibling, that is the moment to
+ask what test holds it — and if the answer is none, write it for ALL of them, not just yours.
