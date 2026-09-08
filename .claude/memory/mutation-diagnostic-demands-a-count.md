@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: feedback
   originSessionId: 19b68250-ca61-4936-834b-18d6a595831c
-  modified: 2026-09-05T19:22:43.932Z
+  modified: 2026-09-08T06:16:36.006Z
 ---
 
 When a fix round adds a test, require the worker to **break the code deliberately and report the
@@ -25,6 +25,13 @@ the tests themselves, and it repeatedly audited *me*:
   their absence. Fixes on trust, shipped green.
 - A mutation failing *more* tests than expected is also a finding: the test measures something
   broader than its name. Ask for the extras to be named.
+- **Failing FEWER than expected, while every mutation is still caught, is the subtlest finding.**
+  2026-09-08, five mutations caught by 3/3/10/1/2 tests: I predicted 4 for one and got 3. A
+  "deferred item is re-offered" test still passed under a mutation that charged the item, because
+  the ceiling is 3 and a once-charged item is *still* re-selected. Neither test was redundant —
+  one guards the charge, the other guards that the deferral path does not mark the item done — but
+  a pass/fail check would have said "caught" and taught nothing. **Pre-register each count before
+  running, and read every disagreement as information about which test does which work.**
 
 **How to apply:** name the mutation exactly ("change `return None` to `continue` in the entity
 loop, keep the trailing empty-list check"), state which single test must fail, and require the

@@ -68,3 +68,11 @@ from `job_runs`, not from a guessed grace period).
 **Dedupe lives in `runtime_state`, not in a set on an object.** The supervisor can remember in
 memory because it is a resident; `mode_monitor` is a fresh job child every hour, so an in-process
 set forgets between checks and turns one outage into 24 messages a day.
+
+## 2026-09-07 — first real volume numbers (feeds `b42.2`)
+
+Measured off the host: **700–900 new items/day across 24 outlets**, 48 passes/day, ~1,400 items
+seen per pass of which ~1% are new. `2026-09-04`'s 1,926 is the first-fill artifact of capture
+meeting each feed's whole window — **never use it in a rate**. Only ~25% of items carry 150+ chars
+of body. Full numbers and what they imply downstream are in
+[[newsbrief-comprehension-pipeline]]; they are the empirical input `b42.2` was waiting on.

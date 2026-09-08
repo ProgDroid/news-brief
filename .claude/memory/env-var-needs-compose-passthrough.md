@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: 5f544ef0-a044-4db3-becf-2fcd5cbae0f3
-  modified: 2026-09-02T10:04:07.605Z
+  modified: 2026-09-07T20:52:35.425Z
 ---
 
 In news-brief, adding a new `os.environ` knob to `common.py` is only HALF the change. `docker-compose.yml` forwards **only** the variables enumerated in the `x-newsbrief` anchor's `environment:` block. Setting the variable on the host — exported in the shell, in systemd, or in a `.env` beside the compose file — delivers **nothing** to the process: compose reads `.env` purely for `${VAR}` *interpolation*, and with no matching `- VAR=${VAR:-}` line there is nothing to interpolate into.
@@ -124,3 +124,46 @@ established host, **no environment change can move a knob at all**. `import_sett
 runs only while `settings` is empty. The row is the only path — `INSERT … ON CONFLICT (key)
 WHERE user_id IS NULL DO UPDATE`. `config.knob`'s own docstring states this: "An absent row means
 the code default, NOT a lookup in the environment."
+
+## 2026-09-07 — SECOND live occurrence, and I recommended the wrong route
+
+`COMPREHEND_ENABLED=1` was set in the host's compose and the stack restarted. The 19:00 pass
+logged `Comprehend: disabled by COMPREHEND_ENABLED; nothing read`. Nothing ran.
+
+**The rule at the end of the previous section was already correct and I still walked into it** —
+because the `bqa.11` bd notes from an earlier session recorded "he will edit the server's compose
+himself" without carrying the caveat forward. A rule stated in memory does not survive into a task
+note automatically. **When writing a bd note that names an operator action, restate the constraint
+inline; the note is what the next session reads, not this file.**
+
+Discriminating probe, three queries, no guessing:
+
+```
+SELECT count(*) FROM settings WHERE user_id IS NULL;                       -- non-empty => importer no-ops
+SELECT key, value FROM settings WHERE user_id IS NULL AND key ILIKE '%X%'; -- row present?
+docker compose exec -T newsbrief printenv | grep -i X                      -- env present?
+```
+
+Reading it: env set + no row = this bug. No row + no env = the edit landed nowhere. Row under a
+PREFIXED name = right idea, wrong key.
+
+**Ruled out during that investigation, so nobody re-checks them:** cache staleness (60s TTL, and
+each job runs as a FRESH CHILD PROCESS so its settings cache starts empty — no restart is ever
+needed for a row change to take effect), and value casing (`coerce_knob` does
+`text.lower() in _TRUTHY`, so `True`/`TRUE`/`on`/`yes`/`1` all work; `t` and `enabled` do not).
+
+The fix is one statement, no redeploy and no restart. **The `WHERE user_id IS NULL` in the
+conflict clause is required**, not decoration — `settings_key_global` (`migrations/0001:23`) is a
+PARTIAL unique index and Postgres needs the predicate to infer it:
+
+```sql
+INSERT INTO settings (key, user_id, value) VALUES ('COMPREHEND_ENABLED', NULL, '1')
+ON CONFLICT (key) WHERE user_id IS NULL DO UPDATE SET value = EXCLUDED.value, updated_at = now();
+```
+
+Keep the compose line anyway: it seeds the row on a fresh database and `tests/test_packaging.py`
+enforces anchor-to-KNOBS parity. Compose is right for a NEW deployment, the row for an ESTABLISHED
+one. Filed `news-brief-5fc` to make this loud — a boot-time warning for any KNOBS key set in the
+environment with no backing row, which would have caught it in the 18:16 startup log. Note both
+arms matter: an absent row is what fired here, but a row DISAGREEING with the env var is the
+nastier variant, where a row set months ago silently wins with an identical symptom.

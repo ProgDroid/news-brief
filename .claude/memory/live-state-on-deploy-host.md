@@ -38,3 +38,16 @@ replay files had no secrets at all and still should not be published. To make so
 without publishing it, put it under `from-server/`, which survives temp cleanup and stays out of
 git. If a test genuinely needs the data, synthesise a fixture that keeps the structure and drops
 the real text. See [[newsbrief-kb-architecture-2026-08-29]].
+
+## 2026-09-07 — there is NO git checkout on the deploy host
+
+Confirmed by him. That settles a recurring question: a diagnostic script cannot be run "from a
+checkout" there, and pasting a heredoc over is the fallback he explicitly dislikes ("pasting is a
+bit cumbersome"). **Prefer committing a diagnostic to `scripts/` and letting CI rebuild the image**,
+even though that costs a build round trip — `scripts/` is currently in the Dockerfile COPY
+allowlist (`Dockerfile:55`), and CI lints `scripts` as a DIRECTORY, so a new file needs no workflow
+edit and `tests/test_packaging.py` does not reference `scripts` at all.
+
+Run it with `docker compose run --rm --entrypoint python newsbrief scripts/<name>.py`. The
+bind-mount recipe above still works and is right for code that is not committed yet; it is not
+right as the standing answer, because it makes every future run a paste.
