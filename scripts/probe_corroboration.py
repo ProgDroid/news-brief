@@ -71,6 +71,16 @@ NEGATIVE_MAX_PAIRS = 4000
 
 MIN_CALIBRATION_PAIRS = 20
 
+# Used ONLY when the negative class cannot exist yet. Never printed as a
+# measurement -- see report().
+FALLBACK_SEPARATOR = 0.35
+
+# Bake-off evaluation set. Bounded because each miss costs one pool query; the
+# size is REPORTED, since a silently truncated evaluation reads exactly like a
+# small corpus.
+BAKEOFF_MIN_SCORE = 0.20
+BAKEOFF_MAX_PAIRS = 800
+
 # Reported bands rather than one threshold. A single number would hide exactly
 # the place where the A/B answer changes.
 BANDS = [(0.10, 0.20), (0.20, 0.35), (0.35, 0.50), (0.50, 0.70), (0.70, 1.01)]
@@ -352,6 +362,124 @@ def was_retrievable(conn, miss, ents) -> bool:
     return miss["earlier"]["event_id"] in {r[0] for r in rows}
 
 
+# How many slots each arm of the hybrid gets. They sum to CANDIDATE_EVENT_CAP
+# so the bake-off compares strategies at EQUAL budget -- a hybrid given more
+# slots than the baseline would win by size rather than by ranking.
+HYBRID_SPLIT = (10, 10, 10)
+
+
+def candidate_pool(conn, miss, ents):
+    """Every event candidate_events COULD rank at this moment, before any cap.
+
+    The cap is what the strategies compete over, so it must not be applied
+    here: fetching a capped pool would hand every strategy the same 30 rows and
+    the bake-off would measure nothing.
+    """
+    entity_ids = list(ents.get(miss["later"]["event_id"], ()))
+    if not entity_ids:
+        return []
+    rows = conn.execute(
+        "SELECT e.id, e.occurred_at, e.summary, array_agg(DISTINCT ee2.entity_id) "
+        "FROM events e "
+        "JOIN event_entities ee ON ee.event_id = e.id AND ee.entity_id = ANY(%s) "
+        "JOIN event_entities ee2 ON ee2.event_id = e.id "
+        "WHERE e.occurred_at >= %s::timestamptz - make_interval(days => %s) "
+        "  AND e.created_at < %s "
+        "GROUP BY e.id, e.occurred_at, e.summary",
+        (
+            entity_ids,
+            miss["later"]["created_at"],
+            comprehend.CANDIDATE_WINDOW_DAYS,
+            miss["later"]["created_at"],
+        ),
+    ).fetchall()
+    return [
+        {"id": r[0], "occurred_at": r[1], "summary": r[2], "entities": set(r[3] or ())}
+        for r in rows
+    ]
+
+
+def rank_recency(pool, miss, ents):
+    """The incumbent. Reproducing it in Python is what makes the bake-off
+    trustworthy: if it disagrees with was_retrievable's SQL, every other
+    strategy's number is measured against the wrong baseline."""
+    return sorted(pool, key=lambda e: e["occurred_at"], reverse=True)
+
+
+def rank_entity_overlap(pool, miss, ents):
+    """Most entities in common, recency breaking ties. The hypothesis: an event
+    sharing three actors with this item is likelier to BE this item's event
+    than an unrelated one that happens to be newer."""
+    want = ents.get(miss["later"]["event_id"], set())
+    return sorted(
+        pool,
+        key=lambda e: (len(want & e["entities"]), e["occurred_at"]),
+        reverse=True,
+    )
+
+
+def rank_title_similarity(pool, miss, ents):
+    """Lexical ranking, despite lexical DETECTION being weak here. Ranking is
+    an easier problem than detection: it needs the true match to beat its
+    neighbours, not to clear an absolute line."""
+    title = miss["later"]["title"]
+    return sorted(pool, key=lambda e: similarity(title, e["summary"]), reverse=True)
+
+
+def rank_hybrid(pool, miss, ents):
+    """Reserved slots per signal. Hedges instead of betting the cap on one
+    ranking being right about every kind of event."""
+    arms = (rank_entity_overlap, rank_title_similarity, rank_recency)
+    picked, seen = [], set()
+    for fn, slots in zip(arms, HYBRID_SPLIT):
+        for event in fn(pool, miss, ents):
+            if len(picked) >= sum(HYBRID_SPLIT):
+                break
+            if event["id"] in seen:
+                continue
+            seen.add(event["id"])
+            picked.append(event)
+            slots -= 1
+            if slots == 0:
+                break
+    return picked
+
+
+STRATEGIES = {
+    "recency (today)": rank_recency,
+    "entity overlap": rank_entity_overlap,
+    "title similarity": rank_title_similarity,
+    "hybrid 10/10/10": rank_hybrid,
+}
+
+
+def bake_off(conn, misses, ents, cap):
+    """recall@cap per strategy: of the duplicates we know exist, how many would
+    each ranking have put in front of the model?
+
+    Returns (results, agreement) where `agreement` is the control: the recency
+    arm must reproduce was_retrievable's verdict. A bake-off whose baseline
+    disagrees with the live query is measuring an adjacent system.
+    """
+    results = {name: 0 for name in STRATEGIES}
+    agree = disagree = 0
+    for miss in misses:
+        pool = candidate_pool(conn, miss, ents)
+        if not pool:
+            continue
+        target = miss["earlier"]["event_id"]
+        for name, fn in STRATEGIES.items():
+            top = {e["id"] for e in fn(pool, miss, ents)[:cap]}
+            if target in top:
+                results[name] += 1
+        baseline = target in {e["id"] for e in rank_recency(pool, miss, ents)[:cap]}
+        if baseline == was_retrievable(conn, miss, ents):
+            agree += 1
+        else:
+            disagree += 1
+    return results, (agree, disagree)
+
+
 def merges_from_pairs(misses) -> int:
     """Union-find over the pair graph. Merging a cluster of k events removes
     k-1 events, NOT C(k,2) -- counting pairs as merges is what produced a
@@ -413,10 +541,35 @@ def report(conn, days: int, rng=None) -> int:
             f"  p{int(q * 100):02d}  positives={quantile(pos, q):.3f}"
             f"   negatives={quantile(neg, q):.3f}"
         )
-    separator = quantile(neg, 0.99) if neg else 0.35
+    # An empty negative class must NOT be printed as a measured p99. The first
+    # run did exactly that -- it fell back to 0.35 and labelled it "p99 of
+    # NEGATIVES", which is an invented number wearing a measurement's name.
+    if neg:
+        separator = quantile(neg, 0.99)
+        source = "p99 of NEGATIVES (measured)"
+    else:
+        separator = FALLBACK_SEPARATOR
+        source = "FALLBACK, NOT MEASURED"
+        print(
+            f"\n  !! No negative pairs exist: the class needs items "
+            f"{NEGATIVE_MIN_DAYS}+ days apart and the KB is younger than that.\n"
+            f"  !! Using {FALLBACK_SEPARATOR} as an ARBITRARY cut. Every "
+            "'above the line' count below\n"
+            "  !! inherits that choice. Comparisons BETWEEN buckets stay valid "
+            "(one cut for all);\n"
+            "  !! absolute counts do not. Re-run once the corpus spans "
+            f"{NEGATIVE_MIN_DAYS}+ days."
+        )
     kept = sum(1 for s in pos if s >= separator) / len(pos)
-    print(f"p99 of NEGATIVES = {separator:.3f}  (keeps {kept:.0%} of positives)")
-    print("Read this as: above that line, a pair is unlikely to be coincidence.")
+    print(f"\nseparator = {separator:.3f}  [{source}]  keeps {kept:.0%} of positives")
+    if kept < 0.5:
+        print(
+            f"  NOTE: it discards {1 - kept:.0%} of KNOWN duplicates, so every "
+            "count below is a\n  FLOOR. Positives reach down to "
+            f"p50={quantile(pos, 0.50):.3f}: two outlets covering one event "
+            "genuinely\n  share little vocabulary, so lexical detection cannot "
+            "separate the classes here."
+        )
 
     print("\n=== A vs B, BANDED (no single threshold is trusted) ===")
     rows = event_rows(conn, days)
@@ -474,6 +627,31 @@ def report(conn, days: int, rng=None) -> int:
         print(f"  {label:>26}: merges={merges:<6} best case={ceiling:.1%}  ({verdict})")
     print("  Syndication is the same wire copy in two feeds. Clearing the floor")
     print("  on it alone would prove feed duplication, not confirmation.")
+
+    cap = comprehend.CANDIDATE_EVENT_CAP
+    print("")
+    print(f"=== Ranking bake-off: recall@{cap} over known misses ===")
+    subset = [m for m in misses if m["score"] >= BAKEOFF_MIN_SCORE][:BAKEOFF_MAX_PAIRS]
+    print(f"evaluated on {len(subset)} pairs scoring >= {BAKEOFF_MIN_SCORE}")
+    if subset:
+        results, (agree, disagree) = bake_off(conn, subset, ents, cap)
+        # The control. If the Python recency arm does not reproduce the live
+        # SQL, every delta below is measured against the wrong baseline.
+        print(
+            f"baseline control: recency arm agrees with was_retrievable on "
+            f"{agree}/{agree + disagree}"
+        )
+        if disagree:
+            print("  !! DISAGREEMENT: treat every number in this table as suspect.")
+        best = max(results.values()) if results else 0
+        for name, hits in sorted(results.items(), key=lambda kv: -kv[1]):
+            mark = "  <-- best" if hits == best and best else ""
+            print(
+                f"  {name:>18}: {hits:>4}/{len(subset)}  "
+                f"recall={hits / len(subset):.0%}{mark}"
+            )
+        print("  Equal budget: every strategy ranks the SAME pool into the same")
+        print("  number of slots, so a win is ranking rather than volume.")
 
     print("\n=== Sample pairs -- same story or not? ===")
     for m in strong[:10]:

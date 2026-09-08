@@ -478,3 +478,140 @@ def test_negatives_are_pairs_far_apart_in_time(kb):
     # near_a/near_b are 1h apart and must NOT appear; only pairs involving
     # `far` qualify, and there is exactly one such cross-outlet pair.
     assert len(scores) <= 1
+
+
+# --- The ranking bake-off. Its whole value is the comparison, so the thing to
+# --- guard is that the strategies actually differ AND that the baseline arm
+# --- reproduces the live query.
+
+
+def _pool(n_entities_shared, occurred_at, summary="x", eid=1):
+    return {
+        "id": eid,
+        "occurred_at": occurred_at,
+        "summary": summary,
+        "entities": set(range(n_entities_shared)),
+    }
+
+
+def _miss(title="Iran resumes enrichment at Fordow", event_id=99):
+    return {"later": {"event_id": event_id, "title": title}}
+
+
+def test_entity_overlap_beats_recency_when_they_disagree():
+    """The whole hypothesis in one assertion. An older event sharing three
+    actors must outrank a newer one sharing one -- if the two strategies cannot
+    disagree here, the bake-off can never show a difference."""
+    now = dt.datetime.now(dt.timezone.utc)
+    old_rich = _pool(3, now - dt.timedelta(days=2), eid=1)
+    new_poor = _pool(1, now, eid=2)
+    ents = {99: {0, 1, 2}}
+
+    by_overlap = pc.rank_entity_overlap([new_poor, old_rich], _miss(), ents)
+    by_recency = pc.rank_recency([new_poor, old_rich], _miss(), ents)
+
+    assert by_overlap[0]["id"] == 1, "three shared entities must win"
+    assert by_recency[0]["id"] == 2, "and recency must disagree, or nothing is tested"
+
+
+def test_title_similarity_ranks_the_matching_summary_first():
+    now = dt.datetime.now(dt.timezone.utc)
+    decoy = _pool(1, now, summary="Brazil soybean harvest beats forecasts", eid=1)
+    match = _pool(
+        1,
+        now - dt.timedelta(days=3),
+        summary="Iran resumed enrichment at Fordow",
+        eid=2,
+    )
+    ranked = pc.rank_title_similarity([decoy, match], _miss(), {99: {0}})
+    assert ranked[0]["id"] == 2
+
+
+def test_the_hybrid_takes_from_more_than_one_arm():
+    """A hybrid that silently collapses to one strategy would score identically
+    to it and read as agreement between methods."""
+    now = dt.datetime.now(dt.timezone.utc)
+    overlap_pick = _pool(3, now - dt.timedelta(days=5), summary="unrelated text", eid=1)
+    lexical_pick = _pool(
+        1, now - dt.timedelta(days=4), summary="Iran resumed enrichment Fordow", eid=2
+    )
+    recent_pick = _pool(1, now, summary="another unrelated thing", eid=3)
+    ents = {99: {0, 1, 2}}
+
+    picked = {
+        e["id"]
+        for e in pc.rank_hybrid(
+            [overlap_pick, lexical_pick, recent_pick], _miss(), ents
+        )
+    }
+    assert {1, 2, 3} <= picked
+
+
+def test_the_hybrid_budget_equals_the_candidate_cap():
+    """Equal budget is what makes the comparison fair. A hybrid handed more
+    slots than the baseline would win on volume rather than on ranking."""
+    assert sum(pc.HYBRID_SPLIT) == comprehend.CANDIDATE_EVENT_CAP
+
+
+def test_every_strategy_returns_the_whole_pool_or_the_hybrid_budget():
+    """Truncation must happen at the CAP in bake_off, not inside a strategy --
+    a strategy that truncated early would be measured at a smaller budget."""
+    now = dt.datetime.now(dt.timezone.utc)
+    pool = [_pool(1, now - dt.timedelta(hours=i), eid=i) for i in range(50)]
+    ents = {99: {0}}
+    for name, fn in pc.STRATEGIES.items():
+        got = fn(pool, _miss(), ents)
+        expected = sum(pc.HYBRID_SPLIT) if "hybrid" in name else len(pool)
+        assert len(got) == expected, name
+
+
+def test_the_bakeoff_baseline_reproduces_the_live_query(kb):
+    """THE control. bake_off's recency arm ranks a Python-fetched pool while
+    was_retrievable asks Postgres. If those two disagree, every delta in the
+    table is measured against the wrong baseline -- so the probe reports the
+    agreement count and this test proves it can reach zero disagreements."""
+    reuters, ap = _outlet(kb, "Reuters"), _outlet(kb, "AP")
+    now = dt.datetime.now(dt.timezone.utc)
+    iran = _entity(kb, "Iran")
+
+    old = _event(
+        kb,
+        "Iran resumed enrichment",
+        occurred_at=now - dt.timedelta(days=2),
+        created_at=now - dt.timedelta(days=2),
+    )
+    _link(kb, old, iran)
+    _assert(kb, _item(kb, reuters, "Iran resumes enrichment Fordow", "h-old"), old)
+    for n in range(comprehend.CANDIDATE_EVENT_CAP):
+        filler = _event(
+            kb,
+            f"Unrelated Iran development {n}",
+            occurred_at=now - dt.timedelta(hours=n + 1),
+            created_at=now - dt.timedelta(hours=n + 1),
+        )
+        _link(kb, filler, iran)
+    new = _event(kb, "Iran restarted enrichment", occurred_at=now, created_at=now)
+    _link(kb, new, iran)
+    _assert(kb, _item(kb, ap, "Iran resumes enrichment Fordow", "h-new"), new)
+    kb.commit()
+
+    ents = pc.entities_by_event(kb, 7)
+    miss = {
+        "score": 0.9,
+        "earlier": {"event_id": old},
+        "later": {
+            "event_id": new,
+            "title": "Iran resumes enrichment Fordow",
+            "created_at": now + dt.timedelta(seconds=1),
+        },
+    }
+    results, (agree, disagree) = pc.bake_off(
+        kb, [miss], ents, comprehend.CANDIDATE_EVENT_CAP
+    )
+    assert disagree == 0, "the Python baseline must agree with the SQL one"
+    assert agree == 1
+    assert results["recency (today)"] == 0, "buried by the cap, as in production"
+    assert results["title similarity"] == 1, (
+        "and a similarity ranking must RECOVER it, or the bake-off has nothing "
+        "to report"
+    )
