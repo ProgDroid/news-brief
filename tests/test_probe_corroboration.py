@@ -17,6 +17,7 @@ import datetime as dt
 
 import pytest
 
+import comprehend
 import db
 from scripts import probe_corroboration as pc
 
@@ -180,7 +181,8 @@ def _two_outlet_miss(kb, gap_hours=1, same_outlet=False, share_entity=True):
 def test_a_cross_outlet_pair_with_different_events_is_a_miss(kb):
     _two_outlet_miss(kb)
     rows, ents = pc.event_rows(kb, 7), pc.entities_by_event(kb, 7)
-    assert len(pc.probable_misses(rows, ents, 0.3)) == 1
+    misses, _ = pc.probable_misses(rows, ents, 0.3)
+    assert len(misses) == 1
 
 
 def test_an_already_merged_pair_is_a_success_not_a_miss(kb):
@@ -196,19 +198,22 @@ def test_an_already_merged_pair_is_a_success_not_a_miss(kb):
     kb.commit()
 
     rows, ents = pc.event_rows(kb, 7), pc.entities_by_event(kb, 7)
-    assert pc.probable_misses(rows, ents, 0.3) == []
+    misses, _ = pc.probable_misses(rows, ents, 0.3)
+    assert misses == []
 
 
 def test_a_same_outlet_pair_is_not_a_miss(kb):
     _two_outlet_miss(kb, same_outlet=True)
     rows, ents = pc.event_rows(kb, 7), pc.entities_by_event(kb, 7)
-    assert pc.probable_misses(rows, ents, 0.3) == []
+    misses, _ = pc.probable_misses(rows, ents, 0.3)
+    assert misses == []
 
 
 def test_a_pair_outside_the_time_window_is_not_a_miss(kb):
     _two_outlet_miss(kb, gap_hours=pc.PAIR_WINDOW_HOURS + 5)
     rows, ents = pc.event_rows(kb, 7), pc.entities_by_event(kb, 7)
-    assert pc.probable_misses(rows, ents, 0.3) == []
+    misses, _ = pc.probable_misses(rows, ents, 0.3)
+    assert misses == []
 
 
 def test_a_pair_sharing_no_entity_is_not_a_miss(kb):
@@ -216,7 +221,8 @@ def test_a_pair_sharing_no_entity_is_not_a_miss(kb):
     would blame retrieval for something retrieval was never asked to do."""
     _two_outlet_miss(kb, share_entity=False)
     rows, ents = pc.event_rows(kb, 7), pc.entities_by_event(kb, 7)
-    assert pc.probable_misses(rows, ents, 0.3) == []
+    misses, _ = pc.probable_misses(rows, ents, 0.3)
+    assert misses == []
 
 
 # --- Retrievability: the reconstruction that decides A vs B.
@@ -225,7 +231,7 @@ def test_a_pair_sharing_no_entity_is_not_a_miss(kb):
 def test_a_nearby_duplicate_was_retrievable(kb):
     e1, e2 = _two_outlet_miss(kb)
     rows, ents = pc.event_rows(kb, 7), pc.entities_by_event(kb, 7)
-    miss = pc.probable_misses(rows, ents, 0.3)[0]
+    miss = pc.probable_misses(rows, ents, 0.3)[0][0]
     assert pc.was_retrievable(kb, miss, ents) is True
 
 
@@ -345,3 +351,130 @@ def test_too_few_calibration_pairs_refuses_to_report(kb):
     kb.commit()
 
     assert pc.report(kb, 7) == 2
+
+
+# --- The ceiling. The first version counted PAIRS as merges and reported
+# --- 1779%, so this is the arithmetic that has already been wrong once.
+
+
+def test_a_chain_of_three_events_is_two_merges_not_three_pairs():
+    """A->B, B->C and A->C are three PAIRS but one cluster of three, which
+    collapses to a single event: two merges. Counting pairs is what produced a
+    ceiling above 100%."""
+    misses = [
+        {"earlier": {"event_id": 1}, "later": {"event_id": 2}},
+        {"earlier": {"event_id": 2}, "later": {"event_id": 3}},
+        {"earlier": {"event_id": 1}, "later": {"event_id": 3}},
+    ]
+    assert pc.merges_from_pairs(misses) == 2
+
+
+def test_two_disjoint_pairs_are_two_merges():
+    """Presence sibling: a counter that always returned cluster_count - 1, or
+    always 1, would satisfy the test above."""
+    misses = [
+        {"earlier": {"event_id": 1}, "later": {"event_id": 2}},
+        {"earlier": {"event_id": 3}, "later": {"event_id": 4}},
+    ]
+    assert pc.merges_from_pairs(misses) == 2
+
+
+def test_a_repeated_pair_is_still_one_merge():
+    misses = [
+        {"earlier": {"event_id": 1}, "later": {"event_id": 2}},
+        {"earlier": {"event_id": 1}, "later": {"event_id": 2}},
+    ]
+    assert pc.merges_from_pairs(misses) == 1
+
+
+def test_no_pairs_is_no_merges():
+    assert pc.merges_from_pairs([]) == 0
+
+
+# --- Syndication: the same wire copy in two feeds is not confirmation.
+
+
+def test_a_source_suffix_does_not_make_two_headlines_different():
+    assert pc.is_syndication(
+        "Uber to exit Nigeria after 12 years of operations - Reuters",
+        "Uber to exit Nigeria after 12 years of operations",
+    )
+
+
+def test_curly_and_straight_quotes_are_the_same_headline():
+    assert pc.is_syndication(
+        "Vance says Iran conflict is 'not a war', declines to offer timeline",
+        "Vance says Iran conflict is \u2018not a war\u2019, declines to offer timeline",
+    )
+
+
+def test_two_outlets_writing_their_own_headline_is_NOT_syndication(kb=None):
+    """The distinction the whole flag exists for. These report one event in
+    different words -- genuine independent confirmation, which section 8.2 is
+    asking about. Marking it syndicated would erase the finding."""
+    assert not pc.is_syndication(
+        "UK minister condemns anti-migrant protests in Portsmouth",
+        "Minister slams thuggish behaviour at Portsmouth migrant demonstration",
+    )
+
+
+def test_the_suffix_stripper_does_not_amputate_a_real_headline():
+    """`_SOURCE_SUFFIX` is bounded on purpose. An unbounded trailing-dash rule
+    would eat the second half of any headline containing a dash, silently
+    turning unrelated stories into syndication."""
+    long_tail = "Iran - what happens next in the long war over enrichment and sanctions"
+    assert pc.normalise_title(long_tail).endswith("sanctions")
+
+
+# --- Banding and bucketing.
+
+
+def test_every_band_is_reachable_and_they_do_not_overlap():
+    """A band table is only readable if each score lands in exactly one row."""
+    for score in (0.15, 0.25, 0.4, 0.6, 0.9, 1.0):
+        assert pc.band_of(score) is not None
+    assert pc.band_of(0.05) is None, "below the lowest band is not a band"
+    seen = [pc.band_of(s) for s in (0.15, 0.25, 0.4, 0.6, 0.9)]
+    assert len(set(seen)) == len(seen)
+
+
+def test_hub_buckets_straddle_the_candidate_cap():
+    """The hypothesis is that B dominates once an entity carries more events
+    than the cap can offer, so a bucket boundary must sit AT the cap or the
+    table cannot show the transition."""
+    boundaries = {lo for lo, _ in pc.HUB_BUCKETS} | {hi for _, hi in pc.HUB_BUCKETS}
+    assert comprehend.CANDIDATE_EVENT_CAP in boundaries
+
+
+def test_hub_bucket_places_a_value_in_exactly_one_bucket():
+    assert pc.hub_bucket(5) == (0, 10)
+    assert pc.hub_bucket(30) == (30, 100)
+    assert pc.hub_bucket(99999) == pc.HUB_BUCKETS[-1]
+
+
+# --- The negative class.
+
+
+def test_negatives_are_pairs_far_apart_in_time(kb):
+    """Contamination is the risk: sampling ALL pairs would include real
+    duplicates and drag the negative distribution up, which would push the
+    threshold up and hide the misses. Temporal separation is what keeps the
+    class clean."""
+    reuters, ap = _outlet(kb, "Reuters"), _outlet(kb, "AP")
+    now = dt.datetime.now(dt.timezone.utc)
+    iran = _entity(kb, "Iran")
+
+    near_a = _event(kb, "a", created_at=now)
+    near_b = _event(kb, "b", created_at=now - dt.timedelta(hours=1))
+    far = _event(kb, "c", created_at=now - dt.timedelta(days=pc.NEGATIVE_MIN_DAYS + 1))
+    for e in (near_a, near_b, far):
+        _link(kb, e, iran)
+    _assert(kb, _item(kb, reuters, "Iran enrichment resumes today", "h1"), near_a)
+    _assert(kb, _item(kb, ap, "Iran enrichment resumes today", "h2"), near_b)
+    _assert(kb, _item(kb, ap, "Iran enrichment resumes today", "h3"), far)
+    kb.commit()
+
+    scores = pc.negative_pairs(kb, 14, __import__("random").Random(1))
+    # near_a/near_b are 1h apart and must NOT appear; only pairs involving
+    # `far` qualify, and there is exactly one such cross-outlet pair.
+    assert len(scores) <= 1

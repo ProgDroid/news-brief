@@ -3,35 +3,50 @@
 news-brief-bqa.18. Read-only and model-free: it SELECTs, computes, prints, and
 writes nothing. Safe against production.
 
-`events_matched / (events_matched + events_created)` fell from 26% to 10.2%
-across 2026-09-08, against a pre-registered floor of 0.10 that spec section 8.2
-makes the EXISTENCE test for the event layer -- "below this the event layer
-bought essentially nothing over the claim ledger". Before designing a fix, find
-out which of three things is true, because they have nothing in common:
+Spec section 8.2 makes cross-outlet corroboration the EXISTENCE test for the
+event layer -- "below this the event layer bought essentially nothing over the
+claim ledger". Before designing a fix, find out which of three things is true,
+because they share no fix:
 
   A  the duplicate WAS offered and the model declined to match it
      -> the prompt or the model is the bottleneck
   B  the duplicate existed but was never offered
      -> `candidate_events` ranking is the bottleneck
   C  no duplicate existed
-     -> the outlets do not cover the same events, and section 8.2's premise is
-        wrong rather than its implementation
+     -> the outlets do not cover the same events, and 8.2's premise is wrong
 
-C is the one nobody has tested, and no amount of retrieval work rescues it.
+WHAT THE FIRST VERSION OF THIS SCRIPT GOT WRONG, 2026-09-08, and why the
+structure below looks the way it does:
 
-THE DETECTOR IS CALIBRATED, NOT INVENTED. A similarity threshold picked by hand
-would make a null result uninterpretable, because a detector that finds
-duplicates by evidence-of-duplication bounds the true count from BELOW: "few
-hits" and "weak detector" look identical. So the threshold is measured off the
-model's OWN matches -- item pairs already sharing an event_id across different
-outlets, which are same-event pairs by the model's judgment.
+- It calibrated the threshold on the POSITIVE class only. That controls recall
+  and says nothing about false positives, so p25-of-duplicates came out at
+  0.059 and the probe reported 58,310 "probable misses" across 2,753 events --
+  about 21 per event, which is not credible. A threshold now needs a NEGATIVE
+  class to separate against, and no single threshold is trusted: results are
+  reported BANDED, so the reader sees where the answer changes.
+- Its ceiling counted PAIRS as merges. Merging a cluster of k events removes
+  k-1 events, not C(k,2), so the "best case" came out at 1779%. Merges are now
+  counted by union-find over the pair graph and capped at events - clusters.
+- Its single aggregate (82% B) DISAGREED with its own top-scoring samples,
+  which were mostly offered-and-not-matched. An aggregate over a population
+  that is mostly noise describes the noise. Hence the stratification by
+  similarity AND by entity frequency: the hypothesis worth testing is that B
+  dominates on hub entities (Iran, UN -- where 30 recency slots cover hours)
+  while A dominates elsewhere.
+- It could not see SYNDICATION. Several "duplicates" differed only by a
+  "- Reuters" suffix or curly quotes: the same wire copy in two feeds, which is
+  feed duplication rather than independent confirmation. Corroboration is now
+  reported with and without it, because clearing the floor on syndication alone
+  would prove less than 8.2 intends.
 
 Run:  docker compose run --rm --entrypoint python newsbrief \\
           scripts/probe_corroboration.py [days]
 """
 
+import random
 import re
 import sys
+import unicodedata
 from collections import defaultdict
 from pathlib import Path
 
@@ -42,27 +57,35 @@ if str(REPO_ROOT) not in sys.path:
 import comprehend  # noqa: E402  (path shim above must run first)
 import db  # noqa: E402
 
-# How far back to look. Kept separate from CANDIDATE_WINDOW_DAYS: this bounds
-# the probe's own corpus, that bounds what the matcher may retrieve.
 DEFAULT_DAYS = 7
 
-# Two items reporting the same event land within hours of each other, not days.
-# Wider than the news cycle would pair unrelated coverage of a running story.
+# Two items reporting the same event land within hours of each other.
 PAIR_WINDOW_HOURS = 48
 
-# Below this many calibration pairs, the threshold is not measured -- it is
-# read off noise, and every number downstream inherits that.
+# The NEGATIVE class: cross-outlet pairs sharing an entity but separated by
+# this much time. Two items about Iran a week apart are almost certainly
+# different events, which makes this a clean non-duplicate sample -- far
+# cleaner than sampling all pairs, where true duplicates would contaminate it.
+NEGATIVE_MIN_DAYS = 5
+NEGATIVE_MAX_PAIRS = 4000
+
 MIN_CALIBRATION_PAIRS = 20
 
-# Which quantile of KNOWN duplicates the threshold sits at. 0.25 keeps three
-# quarters of real duplicates above the line, trading precision for the recall
-# that matters here: a MISSED miss understates the problem.
-CALIBRATION_QUANTILE = 0.25
+# Reported bands rather than one threshold. A single number would hide exactly
+# the place where the A/B answer changes.
+BANDS = [(0.10, 0.20), (0.20, 0.35), (0.35, 0.50), (0.50, 0.70), (0.70, 1.01)]
+
+# `candidate_events` offers CANDIDATE_EVENT_CAP events, so an entity carrying
+# more than that in the window can bury a duplicate by recency alone. Buckets
+# straddle the cap deliberately.
+HUB_BUCKETS = [(0, 10), (10, 30), (30, 100), (100, 500), (500, 10**9)]
+
+# Pairwise comparison is quadratic within an entity. A hub entity with several
+# thousand events would dominate the runtime; the cap is REPORTED, because a
+# cap nobody sees is indistinguishable from an absence of data.
+MAX_EVENTS_PER_ENTITY = 1500
 
 _WORD = re.compile(r"[a-z0-9]+")
-# Not a linguistic stopword list -- these are the tokens that make unrelated
-# headlines look similar. Keeping them inflates every score toward the mean and
-# flattens the very distinction the threshold depends on.
 _NOISE = {
     "a",
     "an",
@@ -98,6 +121,10 @@ _NOISE = {
     "that",
     "this",
 }
+# " - Reuters", " | Al Jazeera", " - reuters.com". Bounded word count so a real
+# headline clause ("Iran - what happens next in the long war over enrichment")
+# is not amputated.
+_SOURCE_SUFFIX = re.compile(r"\s*[-|–—]\s*[\w.\s]{1,25}$")
 
 
 def tokens(text: str) -> set[str]:
@@ -105,13 +132,30 @@ def tokens(text: str) -> set[str]:
 
 
 def similarity(a: str, b: str) -> float:
-    """Jaccard over content tokens. Deliberately crude and deliberately the
-    SAME function on both sides: calibration and detection must share it, or
-    the threshold measures one thing and the search another."""
     ta, tb = tokens(a), tokens(b)
     if not ta or not tb:
         return 0.0
     return len(ta & tb) / len(ta | tb)
+
+
+def normalise_title(text: str) -> str:
+    """Strip what syndication varies and meaning does not: unicode quotes and
+    dashes, a trailing source suffix, punctuation, case, spacing."""
+    text = unicodedata.normalize("NFKD", text or "")
+    text = text.replace("‘", "'").replace("’", "'")
+    text = text.replace("“", '"').replace("”", '"')
+    text = _SOURCE_SUFFIX.sub("", text)
+    return " ".join(_WORD.findall(text.lower()))
+
+
+def is_syndication(a: str, b: str) -> bool:
+    """The SAME wire copy in two feeds, rather than two outlets independently
+    confirming an event. Corroboration built on this proves feed duplication,
+    which is not what 8.2 is asking for."""
+    na, nb = normalise_title(a), normalise_title(b)
+    if not na or not nb:
+        return False
+    return na == nb or similarity(na, nb) >= 0.85
 
 
 def quantile(values: list[float], q: float) -> float:
@@ -123,9 +167,8 @@ def quantile(values: list[float], q: float) -> float:
 
 
 def calibration_pairs(conn, days: int) -> list[tuple[float, str, str]]:
-    """Item-title pairs the MODEL already judged to be the same event, from
-    different outlets. This is the positive control: it is what a genuine
-    duplicate looks like in text space, measured rather than assumed."""
+    """POSITIVES: item-title pairs the model itself merged into one event,
+    across different outlets. Same-event by its own judgment."""
     rows = conn.execute(
         "SELECT a.event_id, i.title, i.outlet_id "
         "FROM assertions a JOIN items i ON i.id = a.item_id "
@@ -134,7 +177,6 @@ def calibration_pairs(conn, days: int) -> list[tuple[float, str, str]]:
         "ORDER BY a.event_id",
         (days,),
     ).fetchall()
-
     by_event = defaultdict(list)
     for event_id, title, outlet_id in rows:
         by_event[event_id].append((title, outlet_id))
@@ -144,15 +186,48 @@ def calibration_pairs(conn, days: int) -> list[tuple[float, str, str]]:
         for i in range(len(members)):
             for j in range(i + 1, len(members)):
                 (t1, o1), (t2, o2) = members[i], members[j]
-                if o1 == o2:
-                    continue  # same outlet is republication, not corroboration
-                pairs.append((similarity(t1, t2), t1, t2))
+                if o1 != o2:
+                    pairs.append((similarity(t1, t2), t1, t2))
     return pairs
 
 
+def negative_pairs(conn, days: int, rng: random.Random) -> list[float]:
+    """NEGATIVES: cross-outlet, entity-sharing pairs separated by at least
+    NEGATIVE_MIN_DAYS. Without this class the threshold controls recall and
+    nothing else -- which is exactly how the first version of this probe
+    produced 21 "duplicates" per event."""
+    rows = event_rows(conn, days)
+    ents = entities_by_event(conn, days)
+    by_entity = defaultdict(list)
+    for row in rows:
+        for entity_id in ents.get(row["event_id"], ()):
+            by_entity[entity_id].append(row)
+
+    seen, scores = set(), []
+    entities = list(by_entity)
+    rng.shuffle(entities)
+    for entity_id in entities:
+        members = by_entity[entity_id]
+        if len(members) < 2:
+            continue
+        for _ in range(min(200, len(members))):
+            a, b = rng.choice(members), rng.choice(members)
+            if a["event_id"] == b["event_id"] or a["outlet_id"] == b["outlet_id"]:
+                continue
+            gap = abs((a["created_at"] - b["created_at"]).total_seconds())
+            if gap < NEGATIVE_MIN_DAYS * 86400:
+                continue
+            key = tuple(sorted((a["event_id"], b["event_id"])))
+            if key in seen:
+                continue
+            seen.add(key)
+            scores.append(similarity(a["title"], b["title"]))
+            if len(scores) >= NEGATIVE_MAX_PAIRS:
+                return scores
+    return scores
+
+
 def event_rows(conn, days: int) -> list[dict]:
-    """One row per (event, asserting item). An event asserted by two items
-    appears twice, which is correct: the pairing below is over ITEMS."""
     rows = conn.execute(
         "SELECT e.id, e.created_at, e.occurred_at, i.id, i.title, i.outlet_id "
         "FROM events e "
@@ -187,31 +262,44 @@ def entities_by_event(conn, days: int) -> dict[int, set[int]]:
     return out
 
 
-def probable_misses(rows, ents, threshold):
-    """Cross-outlet item pairs above the calibrated threshold whose events are
-    DIFFERENT -- duplicates the matcher did not merge.
+def entity_event_counts(conn, days: int) -> dict[int, int]:
+    """How many events each entity carries in the window -- its "hubness".
+    An entity above CANDIDATE_EVENT_CAP can bury a duplicate by recency."""
+    rows = conn.execute(
+        "SELECT ee.entity_id, count(DISTINCT ee.event_id) FROM event_entities ee "
+        "JOIN events e ON e.id = ee.event_id "
+        "WHERE e.created_at >= now() - make_interval(days => %s) "
+        "GROUP BY 1",
+        (days,),
+    ).fetchall()
+    return {r[0]: r[1] for r in rows}
 
-    Blocked on a shared entity, mirroring `candidate_events`: a pair with no
-    shared entity could never have been offered under any ranking, so counting
-    it would blame retrieval for something retrieval was never asked to do.
+
+def probable_misses(rows, ents, threshold, counts=None):
+    """Cross-outlet pairs above `threshold` whose events are DIFFERENT.
+
+    Blocked on a shared entity, mirroring candidate_events: a pair with no
+    shared entity could never have been offered under any ranking.
     """
+    counts = counts or {}
     by_entity = defaultdict(list)
     for row in rows:
         for entity_id in ents.get(row["event_id"], ()):
             by_entity[entity_id].append(row)
 
-    seen, misses = set(), []
+    seen, misses, capped = set(), [], 0
     for members in by_entity.values():
+        if len(members) > MAX_EVENTS_PER_ENTITY:
+            capped += 1
+            members = members[:MAX_EVENTS_PER_ENTITY]
         for i in range(len(members)):
             for j in range(i + 1, len(members)):
                 a, b = members[i], members[j]
-                if a["event_id"] == b["event_id"]:
-                    continue  # already merged: this is a SUCCESS, not a miss
-                if a["outlet_id"] == b["outlet_id"]:
+                if a["event_id"] == b["event_id"] or a["outlet_id"] == b["outlet_id"]:
                     continue
                 key = tuple(sorted((a["event_id"], b["event_id"])))
                 if key in seen:
-                    continue  # the same pair shares several entities
+                    continue
                 gap = abs((a["created_at"] - b["created_at"]).total_seconds())
                 if gap > PAIR_WINDOW_HOURS * 3600:
                     continue
@@ -220,36 +308,38 @@ def probable_misses(rows, ents, threshold):
                     continue
                 seen.add(key)
                 earlier, later = sorted((a, b), key=lambda r: r["created_at"])
-                misses.append({"score": score, "earlier": earlier, "later": later})
-    return sorted(misses, key=lambda m: -m["score"])
+                misses.append(
+                    {
+                        "score": score,
+                        "earlier": earlier,
+                        "later": later,
+                        "syndicated": is_syndication(a["title"], b["title"]),
+                        "hubness": max(
+                            (counts.get(e, 0) for e in ents.get(later["event_id"], ())),
+                            default=0,
+                        ),
+                    }
+                )
+    return sorted(misses, key=lambda m: -m["score"]), capped
 
 
 def was_retrievable(conn, miss, ents) -> bool:
-    """Could `candidate_events` have offered the earlier event when the later
-    one was created?
-
-    Deliberately GENEROUS -- it uses the ideal entity set attached to the later
-    event rather than the narrower set that batch actually matched, and it
-    applies no entity cap. A miss under ideal conditions is therefore decisive
-    about ranking rather than suggestive. `created_at <` is what makes this a
-    reconstruction instead of a query about today.
-    """
+    """Could candidate_events have offered the earlier event when the later one
+    was created? Deliberately GENEROUS: the ideal entity set, no entity cap.
+    `created_at <` is what makes this a reconstruction rather than a query
+    about today."""
     entity_ids = list(ents.get(miss["later"]["event_id"], ()))
     if not entity_ids:
         return False
     rows = conn.execute(
-        # `occurred_at` is in the select list because SELECT DISTINCT requires
-        # every ORDER BY expression to be -- the same reason candidate_events
-        # selects it. Dropping it to "tidy up" breaks the query outright.
+        # occurred_at is in the select list because SELECT DISTINCT requires
+        # every ORDER BY expression to be. The ORDER BY must mirror
+        # candidate_events: ordering IS the mechanism under investigation.
         "SELECT DISTINCT e.id, e.occurred_at FROM events e "
         "JOIN event_entities ee ON ee.event_id = e.id "
         "WHERE ee.entity_id = ANY(%s) "
         "  AND e.occurred_at >= %s::timestamptz - make_interval(days => %s) "
         "  AND e.created_at < %s "
-        # MUST mirror candidate_events' ranking, not merely its filters. That
-        # function orders by occurred_at DESC, and ordering IS the mechanism
-        # under investigation -- reconstructing it with a different ORDER BY
-        # would answer a question adjacent to the one being asked.
         "ORDER BY e.occurred_at DESC LIMIT %s",
         (
             entity_ids,
@@ -262,78 +352,134 @@ def was_retrievable(conn, miss, ents) -> bool:
     return miss["earlier"]["event_id"] in {r[0] for r in rows}
 
 
-def current_rate(conn) -> tuple[int, int, float]:
+def merges_from_pairs(misses) -> int:
+    """Union-find over the pair graph. Merging a cluster of k events removes
+    k-1 events, NOT C(k,2) -- counting pairs as merges is what produced a
+    1779% ceiling in the first version of this script."""
+    parent = {}
+
+    def find(x):
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for m in misses:
+        a, b = find(m["earlier"]["event_id"]), find(m["later"]["event_id"])
+        if a != b:
+            parent[a] = b
+    sizes = defaultdict(int)
+    for node in parent:
+        sizes[find(node)] += 1
+    return sum(size - 1 for size in sizes.values())
+
+
+def band_of(score: float):
+    for lo, hi in BANDS:
+        if lo <= score < hi:
+            return (lo, hi)
+    return None
+
+
+def hub_bucket(n: int):
+    for lo, hi in HUB_BUCKETS:
+        if lo <= n < hi:
+            return (lo, hi)
+    return HUB_BUCKETS[-1]
+
+
+def report(conn, days: int, rng=None) -> int:
+    rng = rng or random.Random(20260908)
     events = conn.execute("SELECT count(*) FROM events").fetchone()[0]
     assertions = conn.execute("SELECT count(*) FROM assertions").fetchone()[0]
     rate = (assertions - events) / assertions if assertions else 0.0
-    return events, assertions, rate
-
-
-def report(conn, days: int) -> int:
     print(f"=== Corpus: events created in the last {days} day(s) ===")
-    events, assertions, rate = current_rate(conn)
-    print(f"events={events} assertions={assertions} match rate={rate:.1%}")
+    print(f"events={events} assertions={assertions} cumulative match rate={rate:.1%}")
 
-    print("\n=== Calibration: what a KNOWN duplicate looks like ===")
-    cal = calibration_pairs(conn, days)
-    scores = [s for s, _, _ in cal]
-    print(f"cross-outlet pairs the model itself merged: n={len(scores)}")
-    if len(scores) < MIN_CALIBRATION_PAIRS:
+    print("\n=== Calibration: POSITIVES vs NEGATIVES ===")
+    pos = [s for s, _, _ in calibration_pairs(conn, days)]
+    print(f"positives (model's own cross-outlet merges): n={len(pos)}")
+    if len(pos) < MIN_CALIBRATION_PAIRS:
         print(
-            f"NOT MEASURABLE: fewer than {MIN_CALIBRATION_PAIRS} calibration "
-            "pairs. Every number below would inherit a threshold read off "
-            "noise, so the probe stops rather than reporting a shaped guess."
-        )
-        print(
-            "\nThat scarcity is itself the finding: the model has merged "
-            "almost nothing across outlets. Re-run with more --days, or treat "
-            "outcome C as live."
+            f"NOT MEASURABLE: fewer than {MIN_CALIBRATION_PAIRS} positives. "
+            "Every number below would inherit a threshold read off noise."
         )
         return 2
-    for q in (0.10, 0.25, 0.50, 0.75):
-        print(f"  p{int(q * 100):02d} similarity = {quantile(scores, q):.3f}")
-    threshold = quantile(scores, CALIBRATION_QUANTILE)
-    print(f"threshold = p{int(CALIBRATION_QUANTILE * 100)} = {threshold:.3f}")
+    neg = negative_pairs(conn, days, rng)
+    print(f"negatives (cross-outlet, >={NEGATIVE_MIN_DAYS}d apart): n={len(neg)}")
+    for q in (0.50, 0.75, 0.90, 0.99):
+        print(
+            f"  p{int(q * 100):02d}  positives={quantile(pos, q):.3f}"
+            f"   negatives={quantile(neg, q):.3f}"
+        )
+    separator = quantile(neg, 0.99) if neg else 0.35
+    kept = sum(1 for s in pos if s >= separator) / len(pos)
+    print(f"p99 of NEGATIVES = {separator:.3f}  (keeps {kept:.0%} of positives)")
+    print("Read this as: above that line, a pair is unlikely to be coincidence.")
 
-    print("\n=== Probable MISSES: same story, different event rows ===")
+    print("\n=== A vs B, BANDED (no single threshold is trusted) ===")
     rows = event_rows(conn, days)
     ents = entities_by_event(conn, days)
-    misses = probable_misses(rows, ents, threshold)
-    print(f"probable missed duplicate pairs: {len(misses)}")
-
+    counts = entity_event_counts(conn, days)
+    misses, capped = probable_misses(rows, ents, BANDS[0][0], counts)
+    if capped:
+        print(f"NOTE: {capped} entity/entities truncated at {MAX_EVENTS_PER_ENTITY}")
     if not misses:
-        print(
-            "\nOUTCOME C is indicated: above a threshold calibrated on real "
-            "duplicates, no unmerged cross-outlet pair was found. Read this as "
-            "a FLOOR, never a proof -- a weak detector looks identical here."
-        )
+        print("No unmerged cross-outlet pair above the lowest band.")
+        print("OUTCOME C indicated -- but read it as a FLOOR, never a proof.")
         return 0
 
-    retrievable = [m for m in misses if was_retrievable(conn, m, ents)]
-    n_a, n_b = len(retrievable), len(misses) - len(retrievable)
-    print(f"  A  offered but not matched : {n_a}  ({n_a / len(misses):.0%})")
-    print(f"  B  never offered           : {n_b}  ({n_b / len(misses):.0%})")
+    print(
+        f"{'band':>12}  {'pairs':>6}  {'A offered':>10}  {'B never':>8}  {'syndic':>7}"
+    )
+    for lo, hi in BANDS:
+        band = [m for m in misses if lo <= m["score"] < hi]
+        if not band:
+            continue
+        a = sum(1 for m in band if was_retrievable(conn, m, ents))
+        syn = sum(1 for m in band if m["syndicated"])
+        print(
+            f"{lo:.2f}-{hi:.2f}  {len(band):>6}  {a / len(band):>9.0%}  "
+            f"{1 - a / len(band):>7.0%}  {syn / len(band):>6.0%}"
+        )
 
-    print("\n=== Ceiling: the rate if EVERY probable miss had merged ===")
-    # Bound the problem rather than estimate it. Each merged pair removes one
-    # event and keeps both assertions, so the numerator gains one per pair.
-    if assertions:
-        ceiling = (assertions - (events - len(misses))) / assertions
-        print(f"  best case = {ceiling:.1%} (floor is 10.0%)")
-        if ceiling < 0.10:
-            print(
-                "  Even perfect matching FAILS the floor. No retrieval work "
-                "rescues this; the premise is what needs revisiting."
-            )
-        else:
-            print("  Perfect matching would clear the floor: the headroom is real.")
+    print("\n=== The hub hypothesis: A vs B by entity frequency ===")
+    print("(events carried by the busiest entity on the later event; the cap is")
+    print(
+        f" {comprehend.CANDIDATE_EVENT_CAP}, so above it recency alone can bury a duplicate)"
+    )
+    strong = [m for m in misses if m["score"] >= separator]
+    print(f"restricted to the {len(strong)} pairs above the negative-class line")
+    print(f"{'entity events':>14}  {'pairs':>6}  {'A offered':>10}  {'B never':>8}")
+    for lo, hi in HUB_BUCKETS:
+        bucket = [m for m in strong if hub_bucket(m["hubness"]) == (lo, hi)]
+        if not bucket:
+            continue
+        a = sum(1 for m in bucket if was_retrievable(conn, m, ents))
+        label = f"{lo}-{hi}" if hi < 10**9 else f"{lo}+"
+        print(
+            f"{label:>14}  {len(bucket):>6}  {a / len(bucket):>9.0%}  "
+            f"{1 - a / len(bucket):>7.0%}"
+        )
 
-    print("\n=== Sample pairs -- do these look like the same story? ===")
-    print("(same/different judgment; if they are NOT duplicates the detector")
-    print(" is wrong and every count above is inflated)")
-    for m in misses[:10]:
+    print("\n=== Ceiling, by union-find over the pair graph ===")
+    for label, subset in (
+        ("all pairs above the line", strong),
+        ("excluding syndication", [m for m in strong if not m["syndicated"]]),
+    ):
+        merges = min(merges_from_pairs(subset), max(0, events - 1))
+        ceiling = (assertions - (events - merges)) / assertions if assertions else 0.0
+        verdict = "clears" if ceiling >= 0.10 else "STILL FAILS"
+        print(f"  {label:>26}: merges={merges:<6} best case={ceiling:.1%}  ({verdict})")
+    print("  Syndication is the same wire copy in two feeds. Clearing the floor")
+    print("  on it alone would prove feed duplication, not confirmation.")
+
+    print("\n=== Sample pairs -- same story or not? ===")
+    for m in strong[:10]:
         flag = "OFFERED" if was_retrievable(conn, m, ents) else "NOT OFFERED"
-        print(f"\n  [{m['score']:.2f}] {flag}")
+        syn = " SYNDICATED" if m["syndicated"] else ""
+        print(f"\n  [{m['score']:.2f}] {flag}{syn}  hub={m['hubness']}")
         print(f"    earlier: {m['earlier']['title']}")
         print(f"    later  : {m['later']['title']}")
     return 0
