@@ -93,3 +93,9 @@ it for a `pytestmark`.
 Same family as "a skip is not a pass" above — and the count is the check: this session went
 1554 → 1571 with **0 skipped**, and the +17 was reconciled against the tests actually written
 (10 + 5 + 2) rather than assumed.
+
+**The skip count is the tell, and it is now a known number (2026-09-08).** With a Postgres
+up the full suite is **1680 passed, 0 skipped**; with none it is **1313 passed, 361 skipped**
+and exits 0 either way. So `361 skipped` is not a warning sign to interpret — it is the exact
+signature of "no `DATABASE_URL`, and you have tested none of the database layer". Read the skip
+count before believing a green run, and pre-register both numbers when a change touches DB code.

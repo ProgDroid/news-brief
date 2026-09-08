@@ -260,3 +260,24 @@ none, because you act on it.
 **NEXT: `bqa.15`** (the stop-loss — `gave_up_integration` sat at 90 with nothing watching,
 and it is the gap that made this day expensive), then re-measure `corroboration_by_outlet`
 after the ranking change has run a full window.
+
+## A tool schema is a PROMPT, and the validator must not out-demand it (bqa.16, 2026-09-08)
+
+`_validate_item` rejected a NEW event with no `summary`/`type` and a NEW entity with no
+`name`/`type`, while `_INTEGRATE_TOOL` required `standing` alone on events and **nothing at all**
+on entities. A model omitting one of those was **obeying the published schema exactly**, and lost
+the WHOLE item for it — 73 of 108 integration failures on the 08:00 pass. The reflex to "fix the
+validator" is wrong when the schema is the thing that lied.
+
+- **`anyOf` is in the structured-output schema subset; `oneOf` is NOT.** Use `anyOf` for a
+  two-shape object (matched: `[candidate]`; new: `[name, type]`), so the contract survives the
+  tool ever going `strict: true`.
+- **Test it by reading the SCHEMA and executing the VALIDATOR.** Asserting `"anyOf" in schema`
+  restates the diff. Deriving each branch's required fields, building a member from exactly
+  those, and asserting the validator accepts it fails if either side moves alone — and a flat
+  `required` reads as a single branch, so the test failed cleanly on the pre-fix schema.
+- **Do NOT bump `INTEGRATE_PROMPT_VERSION` to ship a schema change** while `news-brief-3wb` is
+  open: a bump re-integrates every completed item and a re-extraction MINTS a fresh event rather
+  than superseding (1 → 2, measured), inflating exactly the corroboration figure `bqa.19` is
+  waiting to read. Items that FAILED have `integrated_at` NULL and pick up a new schema with no
+  bump at all, so the fix reaches everything actually broken. Deferred as `news-brief-ymk`.
