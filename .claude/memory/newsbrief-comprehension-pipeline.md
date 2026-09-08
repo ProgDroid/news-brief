@@ -1,6 +1,6 @@
 ---
 name: newsbrief-comprehension-pipeline
-description: "bqa.4b — comprehend.py and its pre-registered gate: LIVE in production since 2026-09-08 and filling the KB; the five defects that nearly shipped, the cold-start deadlock, and the ratchet that was retiring items on network faults"
+description: "bqa.4b — comprehend.py and its pre-registered gate: LIVE, every failure class fixed (failures={}), candidates now ranked by shared entities — but spec 8.2's REAL floor metric is 6.6% and FAILING, and bqa.11 is blocked on it"
 metadata: 
   node_type: memory
   type: project
@@ -199,11 +199,60 @@ extraction carrying entities but no events is a legitimate `assertions_written=0
 so any fixture meant to prove a successful write must carry an event
 ([[tdd-plan-fixtures-drift-from-contracts]]).
 
-**NEXT:** he deploys `a452bd3` himself — he handles the server, I handle the repo. Read the first
-tally after it: `failed_integration` should drop by roughly the transport share, and `failures`
-should finally name the ~51. **Let that dict decide whether the accumulation window starts or
-whether one more defect needs clearing** — picking a window before reading it is choosing blind.
-`news-brief-bqa.15` tracks the missing stop-loss; `115` and `ya4` stay blocked on the gate run.
+**SUPERSEDED the same day — see the 2026-09-08 (late) section at the foot.** That dict did name
+the ~51 on its first run (`validate:commitment_missing` 112 of 152), everything was fixed, and
+`failed_integration` reached 0. Do NOT read the "pick a window and run the gate" framing above as
+current: `bqa.11` is now BLOCKED on `bqa.19`, because §8.2's real floor metric is failing.
 
 Method that produced this: [[mutation-diagnostic-demands-a-count]]. Schema context in
 [[newsbrief-kb-schema-0006]]; capture upstream in [[newsbrief-capture-feature]].
+
+
+## 2026-09-08 (late) — pipeline healthy, but the floor metric is FAILING
+
+**Every failure class is fixed and a pass now reports `failures={}`.** The arc, in tallies:
+`failed_integration` 108 -> 152 -> 40 -> **0**. Four commits, each found by the attribution
+layer built in `a452bd3` rather than by reading code:
+
+- `bqa.13` transport failures no longer charge the one-way `integrate_attempts` ratchet.
+- `bqa.14` `Tally.failures` is populated; it named the dominant cause on its FIRST run.
+- `bqa.16`-driven fix: `commitment_state` is now **nullable** (migration 0011). 112 of 152
+  failures were items dropped whole for a field the tool schema never required, and the
+  model omits it correctly — `commitment_omitted` runs ~30% of events, so forcing it would
+  have manufactured `in_force` filler in a column the gate scores for variance.
+- `items` arriving as a JSON **string** is recovered rather than discarded (35/pass), and
+  `bqa.17` entity-less extractions are terminal instead of burning three attempts.
+
+**`candidate_events` now ranks by SHARED-ENTITY COUNT, then recency (`51c850c`).** Recency
+measured recall@30 of **15%** in production's batched shape. The A/B split by entity
+frequency was monotonic and broke exactly at `CANDIDATE_EVENT_CAP=30`: below 30 events per
+entity the duplicate was offered 100% of the time, above 100 events only 33%. Iran carried
+491 events in a 7-day window.
+
+**THE NUMBER THAT MATTERS IS `corroboration_by_outlet`, AND IT IS 6.6% AGAINST A 10% FLOOR
+(`news-brief-bqa.19`, P0).** Everything quoted during the investigation — 16.8%, 17.1%, 20%
+per-pass — was `score_match_rate_corroboration`, the OTHER §8.2 direction. See
+[[analysis-stats-traps]] trap 6. **`bqa.11` is now formally BLOCKED on `bqa.19`: do not run
+the pre-registered gate, it is one-shot and would record a FAIL on a system mid-repair.**
+
+**A cumulative metric cannot show a change's effect.** The 6.6% was measured AFTER deploying
+`51c850c`, and is not evidence the ranking change failed: it averages over 2,999 events,
+almost all created before the cutover. Spec §4 records the consequence — **the gate needs a
+window argument it does not have**, or every post-change run blends two populations.
+`INTEGRATE_PROMPT_VERSION` deliberately stayed at 2, because bumping wakes `3wb` and doubles
+every re-extracted event, inflating the very figure the gate reads.
+
+**Ceiling arithmetic, both ends honest:** merging the 64 cross-outlet pairs the probe
+detected gives 9.0%, still failing; extrapolating for a detector that keeps only 12% of true
+duplicates (~533 merges) gives ~30%. Nobody knows which until real passes land.
+
+**Diagnostics need their own tests.** `scripts/probe_corroboration.py` shipped four defects
+of its own, and the dangerous one was silent: it reconstructed retrieval with
+`ORDER BY e.id DESC` while the live query uses `occurred_at DESC`, which would have produced
+plausible A/B numbers for a ranking nobody runs. Also: it printed a hardcoded 0.35 fallback
+labelled "p99 of NEGATIVES (measured)". A diagnostic that misdirects a design is worse than
+none, because you act on it.
+
+**NEXT: `bqa.15`** (the stop-loss — `gave_up_integration` sat at 90 with nothing watching,
+and it is the gap that made this day expensive), then re-measure `corroboration_by_outlet`
+after the ranking change has run a full window.

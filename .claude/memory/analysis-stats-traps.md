@@ -1,6 +1,6 @@
 ---
 name: analysis-stats-traps
-description: "Four measurement traps that produced confident wrong numbers in this repo — correlated observations, ties counted as failures, a one-directional pre-registered gate, and an LLM eval primed with the field it was scoring"
+description: "Six measurement traps that produced confident wrong numbers in this repo — correlated observations, ties counted as failures, a one-directional pre-registered gate, an LLM eval primed with the field it was scoring, an eval set selected by the signal it was testing, and a threshold quoted off the wrong function"
 metadata: 
   node_type: memory
   type: project
@@ -56,6 +56,33 @@ then reported severity variance as evidence the field was healthy. It came back
 the probe left for the model to assign, measured anything. Caught by explicitly
 comparing input to output rather than trusting the distribution. **In any LLM eval,
 list what the prompt already contains of the answer before reading the result.**
+
+**5. An evaluation set selected by the same signal a strategy uses is not a benchmark
+(2026-09-08, candidate ranking).** A bake-off compared four candidate rankings on 800
+"known missed duplicates". The misses were selected by title-to-title similarity; the
+winning strategy scored candidates by title-to-**summary** similarity, and each summary is
+generated from the earlier item's text. The eval set was enriched for exactly what the
+winner measured, so its 58% was an **upper bound wearing a floor's clothes**. I had written
+in the spec that "one cut applies to all of them, so it cannot favour a strategy" — which is
+**false**: a shared cut is neutral only when it is independent of *every* arm. The one
+unconfounded arm (graph structure: how many entities the event shares) is what shipped.
+
+**How to apply:** for every arm, ask *would this pair be in my eval set if this arm were
+wrong?* If selection and scoring touch the same signal family, the comparison is
+undecidable by that set. The cheap fix is to score against **two or three independently
+selected sets** and check whether the ranking ORDER is stable — a flip means the method
+cannot decide it, not that the loser lost. I did not catch this; a fresh-context red-team
+review of my own spec did. **You cannot see selection bias in an eval set you designed**,
+because the reason you selected those cases is the same reason you think they matter.
+
+**6. Verify WHICH function computes the threshold you are quoting.** The same spec quoted
+§8.2's floor — "events carry assertions from 2+ distinct outlets" — and then reported
+17.1%, which is a *different* §8.2 direction (`score_match_rate_corroboration`). Both are
+gated at 10%, so nothing looked wrong. The quantity actually quoted had **never been
+measured**; when finally run it was **6.6% and failing**. Two metrics can share a threshold,
+a section number and a name, and still be different numbers — and the gap was itself
+diagnostic, because match rate counts any second assertion while the floor counts only
+cross-outlet ones. **Run the query behind the number before building a case on it.**
 
 Sibling of [[backtest-nonstationarity-check]] — that one is about regime instability
 over time, traps 1–2 about dependence across observations, traps 3–4 about the
