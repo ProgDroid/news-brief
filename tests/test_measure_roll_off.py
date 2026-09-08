@@ -12,6 +12,7 @@ every loss figure the script derives is a floor, and the tests that matter most
 are the ones asserting UNKNOWN where a zero would read as a measurement.
 """
 
+import statistics
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -19,13 +20,19 @@ import pytest
 from scripts.measure_roll_off import (
     Poll,
     Sighting,
+    departures,
+    feed_kinds,
     feed_stats,
+    flicker_ratio,
     fit_budget,
     full_turnover_minutes,
+    is_proxy,
     overlap,
+    overlap_floor,
     poll_pairs,
     proposed_interval_minutes,
     single_sighting_fraction,
+    turnover_from_rate,
     window_at,
 )
 
@@ -188,3 +195,115 @@ def test_the_summary_reports_the_median_overlap_over_every_usable_pair():
 
     assert stats["pairs"] == 2
     assert stats["median_overlap"] == pytest.approx(0.5)
+
+
+# ── Rate-based turnover: use the whole span, not a pair ──────────────────────
+#
+# Why the second pass exists. Median pairwise overlap answers "what does a
+# typical 30 minutes look like", and for a feed that loses an item every few
+# hours the answer is "nothing happened" -- so the median pins at 1.00 and the
+# turnover comes back UNKNOWN for exactly the feeds where slowing is safest.
+# 17 of 26 feeds landed there on the first host run. Counting departures over
+# the whole 4.2 days uses every observation instead of summarising each pair.
+
+
+def test_departures_counts_only_items_whose_residence_has_ended():
+    """Same censoring as the singles fraction: an item last seen at the newest
+    successful poll is still in the window and has not departed."""
+    sightings = [_seen("gone", 0, 30), _seen("also_gone", 0, 30), _seen("here", 0, 60)]
+
+    assert departures(sightings, newest_ok=_at(60)) == 2
+
+
+def test_turnover_from_rate_spreads_departures_over_the_whole_span():
+    """10 items, 5 of them replaced across 100 minutes, so the window turns over
+    in 200. No pair is consulted -- that is the point."""
+    assert turnover_from_rate(10, departed=5, span_minutes=100) == 200.0
+
+
+def test_turnover_from_rate_is_unknown_when_nothing_departed():
+    """Dividing by zero departures is an infinite turnover, which would render
+    as the safest feed on the board rather than the least measured one."""
+    assert turnover_from_rate(10, departed=0, span_minutes=100) is None
+
+
+def test_the_worst_pair_is_reported_not_only_the_typical_one():
+    """Loss happens in the tail. A burst that empties a window shows up in one
+    pair out of two hundred and is erased by a median."""
+    assert overlap_floor([0.5, 0.9, 1.0], pct=0) == 0.5
+
+
+def test_a_low_percentile_survives_a_feed_that_is_usually_quiet():
+    """The median and the floor disagree here BY CONSTRUCTION, which is the
+    whole reason for reporting both: nineteen calm pairs and one collapse."""
+    overlaps = [1.0] * 19 + [0.2]
+
+    assert statistics.median(overlaps) == 1.0
+    assert overlap_floor(overlaps, pct=5) == 0.2
+
+
+# ── Flicker: the reconstruction interpolates, entries_seen does not ──────────
+
+
+def test_flicker_shows_as_a_window_wider_than_the_feed_ever_returned():
+    """An item seen at poll 1 and poll 50 is counted present throughout, so
+    "seen, gone, came back" is indistinguishable from "continuously present".
+    feed_polls.entries_seen is what the poll ACTUALLY returned, so the ratio
+    between them measures the interpolation directly. Reuters Markets
+    reconstructs to 150 against a Google News cap of 100."""
+    assert flicker_ratio(150, entries_seen=100) == 1.5
+
+
+def test_no_flicker_when_the_window_matches_what_the_poll_returned():
+    assert flicker_ratio(100, entries_seen=100) == 1.0
+
+
+def test_flicker_is_unknown_when_no_poll_reported_its_size():
+    """Zero entries_seen is a feed that never returned anything, not a feed
+    whose window is perfectly faithful."""
+    assert flicker_ratio(100, entries_seen=0) is None
+
+
+# ── Proxy or native: the question spec section 3 actually asks ───────────────
+
+
+def test_a_google_news_feed_is_a_proxy_and_a_direct_one_is_not():
+    """Section 3 makes this the comparison b42.2 owes: for the 8 capped proxies
+    the loss is truncation INSIDE one poll at the 100-entry cap, not roll-off
+    between polls -- a different mode with a different remedy, since no interval
+    can fix it. Both halves asserted together: a classifier returning False for
+    everything satisfies the second on its own."""
+    proxy = "https://news.google.com/rss/search?q=when:2d+site%3Areuters.com%2Fmarkets"
+
+    assert is_proxy(proxy) is True
+    assert is_proxy("https://www.aljazeera.com/xml/rss/all.xml") is False
+
+
+def test_the_summary_prefers_the_rate_over_the_pair_and_keeps_the_worst_one():
+    """The integration the second pass exists for: a feed whose pairs are mostly
+    quiet still gets a turnover, because departures are counted over the span."""
+    polls = [_ok(30 * i) for i in range(5)]  # 0..120, four pairs
+    sightings = [_seen("a", 0, 30), _seen("b", 0, 60), _seen("c", 0, 120)]
+
+    stats = feed_stats(polls, sightings, nominal_minutes=30)
+
+    # "a" and "b" ended before the newest poll; "c" is still open.
+    assert stats["departed"] == 2
+    assert stats["turnover_rate_minutes"] is not None
+    assert stats["proposed_minutes"] is not None
+    assert stats["worst_overlap"] <= stats["median_overlap"]
+
+
+def test_a_feed_the_list_does_not_carry_is_absent_rather_than_native():
+    """'?' and 'native' are different facts. Defaulting an unrecognised name to
+    native would answer section 3's proxy-versus-native comparison with a guess,
+    silently, on whichever side happened to be the default."""
+    sources = [
+        {"name": "Reuters Markets", "url": "https://news.google.com/rss/search?q=x"},
+        {"name": "Al Jazeera", "url": "https://www.aljazeera.com/xml/rss/all.xml"},
+    ]
+
+    kinds = feed_kinds(sources)
+
+    assert kinds == {"Reuters Markets": "gnews", "Al Jazeera": "native"}
+    assert "Meduza" not in kinds

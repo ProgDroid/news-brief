@@ -20,19 +20,32 @@ FLOOR, never a ceiling. A feed reported as losing nothing has been observed not
 to lose anything AT THIS INTERVAL; that is a different claim from "it loses
 nothing", and only the first one is evidence.
 
-Three metrics per feed:
+Per feed:
 
-  window       items whose [first_seen_at, last_seen_at] spans a poll. The
-               table reports the median rather than the mean: a wire that
-               spikes is exactly the case an interval has to survive.
-  overlap      the share of one poll's items still present at the next. This is
-               what the interval is set against -- high overlap means the
-               interval sits comfortably inside the window, and overlap falling
-               towards zero is direct evidence of loss.
+  src          gnews or native. Section 3 makes this the comparison b42.2 owes:
+               for the 8 capped proxies the loss is truncation INSIDE one poll
+               at the 100-entry cap, not roll-off between polls. A feed the
+               list does not carry reads '?', never 'native'.
+  window       items whose [first_seen_at, last_seen_at] spans a poll, median.
+  entries      what the poll ACTUALLY returned (feed_polls.entries_seen).
+  flick        window / entries. Above 1.00 means the reconstruction is
+               interpolating over absences -- "seen, gone, came back" looks
+               identical to "continuously present" -- and no poll interval
+               fixes flicker.
+  ovl / worst  median and WORST pairwise overlap. Reported together because
+               loss lives in the tail: a burst that empties a window is one
+               pair in two hundred, and the median erases it.
   singles      items seen in exactly one poll. They survived less than two
                intervals, so they are the population that would vanish first if
                the interval grew: the closest observable proxy for what cannot
                be seen at all.
+  dep/turnover departures over the whole span, and the turnover they imply.
+
+THE INTERVAL IS SET FROM THE RATE, NOT FROM A PAIR. The first host run (2026-09-08,
+4.2 days) showed why: for a feed losing an item every few hours, most 30-minute
+pairs see nothing, so a median pairwise overlap pins at 1.00 and the turnover
+comes back UNKNOWN for exactly the feeds where slowing is safest -- 17 of 26
+landed there. Counting departures across the span uses every observation.
 
 Two denominators are load-bearing, and both are the same mistake in different
 clothes -- counting a poll that never happened as a poll that saw nothing:
@@ -56,6 +69,7 @@ same invocation as scripts/score_comprehension.py, which the Dockerfile document
 at the COPY that puts this directory in the image.)
 """
 
+import math
 import statistics
 import sys
 from datetime import datetime, timedelta
@@ -155,6 +169,90 @@ def single_sighting_fraction(sightings: list[Sighting], newest_ok: datetime):
     return sum(1 for s in closed if s.first_seen_at == s.last_seen_at) / len(closed)
 
 
+def departures(sightings: list[Sighting], newest_ok: datetime) -> int:
+    """Items whose residence ENDED inside the observed span.
+
+    Same censoring rule as the singles fraction: an item last seen at the newest
+    successful poll is still in the window and has not departed. Counting it
+    would inflate the departure rate with items whose lifetime is unfinished,
+    and so propose a shorter interval than the evidence supports.
+    """
+    return sum(1 for s in sightings if s.last_seen_at < newest_ok)
+
+
+def turnover_from_rate(window, departed: int, span_minutes: float):
+    """How long the window takes to be replaced, counted over the WHOLE span.
+
+    This is the estimator the first host run showed was needed. Median pairwise
+    overlap answers "what does a typical 30 minutes look like", and for a feed
+    that loses an item every few hours the answer is "nothing happened" — so the
+    median pins at 1.00 and the turnover comes back UNKNOWN for exactly the
+    feeds where slowing is safest. 17 of 26 feeds landed there. Counting
+    departures across 4.2 days uses every observation instead of summarising
+    each pair and discarding the tail.
+
+    Still None when nothing departed: zero departures is an infinite turnover,
+    which would render as the safest feed on the board rather than the least
+    measured one.
+    """
+    if not window or departed <= 0 or span_minutes <= 0:
+        return None
+    return window * span_minutes / departed
+
+
+def overlap_floor(overlaps: list[float], pct: float):
+    """The pct-th percentile overlap by nearest rank; `pct=0` is the worst pair.
+
+    Loss happens in the tail. A publishing burst that empties a window shows up
+    in one pair out of two hundred, and a median erases it completely — so the
+    floor is reported beside the median rather than instead of it, and the two
+    disagreeing is the signal.
+    """
+    if not overlaps:
+        return None
+    ordered = sorted(overlaps)
+    if pct <= 0:
+        return ordered[0]
+    return ordered[max(1, math.ceil(pct / 100 * len(ordered))) - 1]
+
+
+def flicker_ratio(window, entries_seen):
+    """Reconstructed window against what the poll ACTUALLY returned.
+
+    `window_at` interpolates: an item seen at poll 1 and poll 50 counts as
+    present throughout, so "seen, gone, came back" is indistinguishable from
+    "continuously present". `feed_polls.entries_seen` does not interpolate, so
+    the ratio measures that inflation directly. Above 1.0 means items are
+    flickering — which no poll interval fixes, and which on a Google News proxy
+    is more likely ranking churn than roll-off.
+
+    BELOW 1.0 is the other direction and equally worth reading: the
+    reconstruction sees FEWER items than the poll returned, so entries are
+    arriving that never became sightings. That is a capture-side gap, not a
+    cadence one, and it means every window figure for that feed understates.
+
+    None on zero entries: a feed that never returned anything is unmeasured, not
+    perfectly faithful.
+    """
+    if not entries_seen or window is None:
+        return None
+    return window / entries_seen
+
+
+PROXY_HOST = "news.google.com"
+
+
+def is_proxy(url: str) -> bool:
+    """A Google News search feed rather than a publisher's own.
+
+    Spec section 3 makes this the comparison `b42.2` owes: for the 8 capped
+    proxies the loss is truncation INSIDE a single poll at the 100-entry cap,
+    not roll-off between polls. Different mode, different remedy — a narrower
+    query or a native feed, never a shorter interval.
+    """
+    return PROXY_HOST in url.lower()
+
+
 def full_turnover_minutes(overlap_value, gap_minutes: float):
     """How long the whole window takes to be replaced, at the observed rate.
 
@@ -206,25 +304,101 @@ def feed_stats(
     ok = [p for p in polls if p.failure is None]
     newest_ok = max((p.polled_at for p in ok), default=None)
     median_overlap = statistics.median(overlaps) if overlaps else None
-    turnover = full_turnover_minutes(
-        median_overlap, statistics.median(gaps) if gaps else nominal_minutes
+    median_window = (
+        statistics.median([len(window_at(sightings, p.polled_at)) for p in ok])
+        if ok
+        else None
     )
+    span_minutes = (
+        (newest_ok - min(p.polled_at for p in ok)).total_seconds() / 60 if ok else 0
+    )
+    departed = departures(sightings, newest_ok) if newest_ok else 0
+    # The rate, not the pair, decides the interval — see turnover_from_rate. The
+    # pairwise number is kept beside it because the two disagreeing is itself a
+    # finding: a feed with slow turnover and a collapsing worst pair is bursty.
+    turnover_rate = turnover_from_rate(median_window, departed, span_minutes)
     return {
         "polls": len(polls),
         "polls_ok": len(ok),
         "pairs": len(pairs),
-        "median_window": (
-            statistics.median([len(window_at(sightings, p.polled_at)) for p in ok])
-            if ok
-            else None
+        "median_window": median_window,
+        "median_entries": (
+            statistics.median([p.entries_seen for p in ok]) if ok else None
+        ),
+        "flicker": flicker_ratio(
+            median_window,
+            statistics.median([p.entries_seen for p in ok]) if ok else None,
         ),
         "median_overlap": median_overlap,
+        "worst_overlap": overlap_floor(overlaps, 0),
+        "floor_overlap": overlap_floor(overlaps, 5),
         "singles": (
             single_sighting_fraction(sightings, newest_ok) if newest_ok else None
         ),
-        "turnover_minutes": turnover,
-        "proposed_minutes": proposed_interval_minutes(turnover),
+        "departed": departed,
+        "turnover_minutes": full_turnover_minutes(
+            median_overlap, statistics.median(gaps) if gaps else nominal_minutes
+        ),
+        "turnover_rate_minutes": turnover_rate,
+        "proposed_minutes": proposed_interval_minutes(turnover_rate),
     }
+
+
+def feed_kinds(sources: list[dict]) -> dict[str, str]:
+    """source_name -> 'gnews' or 'native', from the feed list itself.
+
+    Takes the list rather than fetching it, so the classification is testable
+    without dragging in `brief`. A name the list does not carry is simply
+    ABSENT here and renders as '?' — never 'native', because the two are
+    different facts and defaulting an unknown onto one side of the comparison
+    would quietly answer section 3's question with a guess.
+    """
+    return {
+        feed["name"]: "gnews" if is_proxy(feed.get("url", "")) else "native"
+        for feed in sources
+        if feed.get("name")
+    }
+
+
+def _capture_sources() -> list[dict]:
+    """The feed list, or nothing. Fail-safe: an unclassifiable table is still
+    worth printing, and every feed reads '?' rather than the script dying after
+    the measurement has already been computed."""
+    try:
+        import capture
+
+        return capture.capture_sources()
+    except Exception as e:  # noqa: BLE001 - reporting is not worth a crash here
+        print(f"(could not read the feed list, so src is unknown: {e})")
+        return []
+
+
+def _report_by_kind(stats: dict, kinds: dict[str, str]) -> None:
+    """Section 3's question: do the CAPPED PROXIES lose more than native wires?
+
+    Medians across feeds within each kind, with the feed counts, because two
+    groups of unequal size invite a mean to be quoted as if it were comparable.
+    """
+    groups: dict[str, list[dict]] = {}
+    for name, s in stats.items():
+        groups.setdefault(kinds.get(name, "?"), []).append(s)
+
+    print("\nBy source kind — spec section 3: do the capped proxies lose more?")
+    for kind in sorted(groups):
+        rows = groups[kind]
+        singles = [r["singles"] for r in rows if r["singles"] is not None]
+        flick = [r["flicker"] for r in rows if r["flicker"] is not None]
+        print(
+            f"  {kind:<8}{len(rows):>3} feeds   median singles "
+            f"{_show(statistics.median(singles) if singles else None, '.3f'):>6}"
+            f"   median flicker "
+            f"{_show(statistics.median(flick) if flick else None, '.2f'):>6}"
+        )
+    print(
+        "  A proxy's singles need not be roll-off: a Google News query reranks, so\n"
+        "  an item can leave and come back. Flicker above 1.00 is that happening,\n"
+        "  and no poll interval fixes it — a narrower query or a native feed does."
+    )
 
 
 def _load(conn):
@@ -280,10 +454,12 @@ def main() -> int:
         name: feed_stats(rows, sightings.get(name, []), NOMINAL_MINUTES)
         for name, rows in sorted(polls.items())
     }
+    kinds = feed_kinds(_capture_sources())
 
     print(
-        f"{'feed':<34}{'ok':>6}{'pairs':>7}{'window':>8}{'overlap':>9}"
-        f"{'singles':>9}{'turnover':>10}{'propose':>9}"
+        f"{'feed':<32}{'src':>7}{'ok':>5}{'window':>8}{'entries':>8}{'flick':>7}"
+        f"{'ovl':>6}{'worst':>7}{'singles':>9}{'dep':>6}{'turnover':>10}"
+        f"{'propose':>9}"
     )
     for name, s in sorted(
         stats.items(),
@@ -293,13 +469,19 @@ def main() -> int:
         ),
     ):
         print(
-            f"{name[:33]:<34}{s['polls_ok']:>6}{s['pairs']:>7}"
+            f"{name[:31]:<32}{kinds.get(name, '?'):>7}{s['polls_ok']:>5}"
             f"{_show(s['median_window'], '.0f'):>8}"
-            f"{_show(s['median_overlap'], '.2f'):>9}"
+            f"{_show(s['median_entries'], '.0f'):>8}"
+            f"{_show(s['flicker'], '.2f'):>7}"
+            f"{_show(s['median_overlap'], '.2f'):>6}"
+            f"{_show(s['worst_overlap'], '.2f'):>7}"
             f"{_show(s['singles'], '.2f'):>9}"
-            f"{_show(s['turnover_minutes'], '.0f'):>10}"
+            f"{s['departed']:>6}"
+            f"{_show(s['turnover_rate_minutes'], '.0f'):>10}"
             f"{_show(s['proposed_minutes'], 'd'):>9}"
         )
+
+    _report_by_kind(stats, kinds)
 
     known = {
         name: s["proposed_minutes"]
