@@ -682,3 +682,47 @@ def test_an_extraction_whose_entities_all_fail_resolution_is_still_a_failure(kb)
         ).fetchone()[0]
         == 1
     )
+
+
+def test_a_refusal_that_empties_an_extraction_names_its_cause(kb):
+    """news-brief-bqa.14 at the savepoint boundary. `items_lost_to_savepoint=6`
+    told the 2026-09-08 operator that six items died and nothing else; the
+    cause had to be read out of six stack traces by hand. A named cause is
+    what distinguishes this class -- which fails the SAME item every pass and
+    is therefore certain to be retired -- from an item that was merely unlucky.
+    """
+    iid = _item(kb)
+    eid = _entity(kb, name="Shell", type_="company")
+    kb.execute(
+        "INSERT INTO entity_instruments (entity_id, symbol, asset_class) "
+        "VALUES (%s, 'SHEL', 'equity')",
+        (eid,),
+    )
+    kb.commit()
+    tally = comprehend.Tally()
+
+    shadowed = dict(
+        _fresh(iid), entities=[{"name": "SHEL", "type": "instrument", "aliases": []}]
+    )
+    assert (
+        comprehend.write_extraction(kb, shadowed, comprehend.SurfaceIndex([]), tally)
+        is False
+    )
+    kb.commit()
+
+    assert tally.failures == {"savepoint:NoEntitySurvived": 1}
+
+
+def test_a_written_extraction_names_no_cause(kb):
+    """Presence sibling: a recorder that fires on every call through
+    write_extraction satisfies the assertion above without discriminating."""
+    iid = _item(kb)
+    tally = comprehend.Tally()
+
+    assert (
+        comprehend.write_extraction(kb, _fresh(iid), comprehend.SurfaceIndex([]), tally)
+        is True
+    )
+    kb.commit()
+
+    assert tally.failures == {}

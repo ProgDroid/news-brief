@@ -19,6 +19,8 @@ import re
 import time
 from dataclasses import dataclass, field
 
+import requests
+
 import common
 from common import log
 
@@ -47,6 +49,12 @@ class Tally:
     immaterial: int = 0
     failed_triage: int = 0
     failed_integration: int = 0
+    # Items whose batch died on the network rather than on its contents. Held
+    # APART from failed_integration on purpose: no verdict about these items was
+    # ever obtained, so counting them as extraction failures misattributes a
+    # host fault as a weak extractor -- the same confound that made
+    # news-brief-uer a gate-validity bug rather than deferrable polish.
+    deferred_transport: int = 0
     gave_up_triage: int = 0
     gave_up_integration: int = 0
     entities_created: int = 0
@@ -71,6 +79,52 @@ class Tally:
     # exactly what made failed_integration=172 unattributable.
     unmapped_candidate: int = 0
     failures: dict = field(default_factory=dict)
+
+
+class NoEntitySurvived(ValueError):
+    """Every entity the model returned was refused by `_resolve_entity`.
+
+    A named subclass rather than a bare ValueError so `failures` can name it.
+    This class fails the SAME item on every pass and is therefore certain to be
+    retired at the ceiling, which is a different operational fact from an item
+    that failed once and would succeed on a retry.
+    """
+
+
+def _note(tally, cause: str, n: int = 1) -> None:
+    """Attribute a failure by cause, so `failures` can say WHICH one fired.
+
+    Tolerates a None tally: `parse_integration_response` is called without one
+    by `scripts/inspect_integration.py` and by the pure-function tests.
+    """
+    if tally is None:
+        return
+    tally.failures[cause] = tally.failures.get(cause, 0) + n
+
+
+def _is_transient(exc: BaseException) -> bool:
+    """True when the failure obtained no verdict AND is plausibly temporary.
+
+    Only these may be retried without charging `integrate_attempts`, which is a
+    ONE-WAY DOOR at 3. A ~90s DNS fault on 2026-09-08 failed three whole batches
+    and spent an attempt on every item in them, for a fault that said nothing
+    about any of those items; because the integration SELECT is `ORDER BY i.id`
+    that loss lands on the OLDEST corpus rather than at random. 429 and 5xx sit
+    here with the connection faults: they are the server declining to answer,
+    which is likewise not a statement about what was asked.
+
+    The set is deliberately narrow, because the failure mode of being too
+    liberal is quieter than the bug it fixes. A 4xx other than 429 means the
+    request itself was refused and will be refused identically next hour, so
+    deferring it forever would re-pay an 8192-token generation every pass while
+    nothing ever retired it.
+    """
+    if not isinstance(exc, requests.RequestException):
+        return False
+    resp = getattr(exc, "response", None)
+    if resp is None:
+        return True
+    return resp.status_code == 429 or resp.status_code >= 500
 
 
 def _timed_post(request: dict, label: str, timeout: int, max_attempts: int) -> dict:
@@ -292,8 +346,21 @@ def run(conn) -> Tally:
                 label_map(_EVENT_LABEL, cand_events),
                 tally,
             )
-        except Exception:
+        except Exception as exc:
+            # A network fault is a statement about the host, not about the news.
+            # Charging it would let three unrelated outages retire an item that
+            # was never once judged -- see _is_transient (news-brief-bqa.13).
+            if _is_transient(exc):
+                tally.deferred_transport += len(batch)
+                _note(tally, "transport", len(batch))
+                log.warning(
+                    f"Comprehend: integration batch deferred, no attempt charged: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                conn.commit()
+                continue
             tally.failed_integration += len(batch)
+            _note(tally, f"batch:{type(exc).__name__}", len(batch))
             log.warning("Comprehend: integration batch failed", exc_info=True)
             conn.execute(
                 "UPDATE item_triage SET integrate_attempts = integrate_attempts + 1 "
@@ -316,6 +383,11 @@ def run(conn) -> Tally:
         ]
         if dropped:
             tally.failed_integration += len(dropped)
+            # Counts EVERY absent item, while the `validate:*` keys attribute
+            # only the subset _validate_item actually saw and rejected. The
+            # difference is therefore items the model never returned at all --
+            # a distinct defect, and one no single counter could have named.
+            _note(tally, "dropped", len(dropped))
             conn.execute(
                 "UPDATE item_triage SET integrate_attempts = integrate_attempts + 1 "
                 "WHERE item_id = ANY(%s)",
@@ -963,11 +1035,13 @@ def _validate_item(
 ) -> dict | None:
     item_id = row.get("item_id")
     if not _is_id(item_id) or item_id not in item_ids:
+        _note(tally, "validate:item_id")
         return None
 
     entities = []
     for e in row.get("entities") or []:
         if not isinstance(e, dict):
+            _note(tally, "validate:entity_shape")
             return None
         cid = _resolve_label(e.get("candidate"), entity_labels, tally)
         if cid is not None:
@@ -975,6 +1049,7 @@ def _validate_item(
             continue
         name, etype = e.get("name"), e.get("type")
         if not (isinstance(name, str) and name.strip() and etype in _ENTITY_TYPES):
+            _note(tally, "validate:entity_fields")
             return None
         aliases = [a for a in (e.get("aliases") or []) if isinstance(a, str)]
         entities.append({"name": name.strip(), "type": etype, "aliases": aliases})
@@ -982,6 +1057,7 @@ def _validate_item(
     events = []
     for ev in row.get("events") or []:
         if not isinstance(ev, dict) or ev.get("standing") not in _STANDING:
+            _note(tally, "validate:event_shape")
             return None
         cid = _resolve_label(ev.get("candidate"), event_labels, tally)
         if cid is not None:
@@ -990,8 +1066,10 @@ def _validate_item(
         summary, etype = ev.get("summary"), ev.get("type")
         commitment = ev.get("commitment_state")
         if not (isinstance(summary, str) and summary.strip()):
+            _note(tally, "validate:event_summary")
             return None
         if etype not in _EVENT_TYPES or commitment not in _COMMITMENT:
+            _note(tally, "validate:event_enums")
             return None
         events.append(
             {
@@ -1117,7 +1195,7 @@ def write_extraction(conn, extraction: dict, index: SurfaceIndex, tally: Tally) 
                     if "name" in spec:
                         index.add_entity(eid, spec["name"], spec.get("aliases") or [])
             if not entity_ids:
-                raise ValueError("no entity survived resolution")
+                raise NoEntitySurvived("no entity survived resolution")
 
             for ev in extraction["events"]:
                 if "candidate_id" in ev:
@@ -1182,9 +1260,10 @@ def write_extraction(conn, extraction: dict, index: SurfaceIndex, tally: Tally) 
                 "  AND verdict = 'material'",
                 (INTEGRATE_PROMPT_VERSION, item_id, TRIAGE_PROMPT_VERSION),
             )
-    except Exception:
+    except Exception as exc:
         tally.items_lost_to_savepoint += 1
         tally.failed_integration += 1
+        _note(tally, f"savepoint:{type(exc).__name__}")
         log.warning(
             f"Comprehend: item {item_id} rolled back its savepoint", exc_info=True
         )

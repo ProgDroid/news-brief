@@ -203,3 +203,99 @@ def test_the_integration_prompt_tells_the_model_to_omit_the_label_for_new_things
     the fix the fallback exists to back up, not replace."""
     system = comprehend.build_integration_request([], [], [])["system"]
     assert "omit" in system.lower()
+
+
+# --- Which branch rejected the row (news-brief-bqa.14).
+#
+# `Tally.failures` was declared at comprehend.py:73 and written by nothing, so
+# a pass reporting failed_integration=72 of 259 material items still printed
+# `failures={}` -- which reads as "no failure details" rather than "field nobody
+# populates". The aggregate cannot separate an item that was UNLUCKY from one
+# that is DOOMED: against a 3-strike one-way door an independent 28% failure
+# rate retires ~2% of the corpus per sweep, while a systematic class fails the
+# same item every time and is certain to die, just three hours slower.
+#
+# _validate_item reports on ITSELF. news-brief-bqa.12 refused a hand-written
+# mirror of this function on the grounds that a copy agrees with itself by
+# construction and cannot detect its own drift; a function naming its own
+# branch has no drift surface at all.
+
+
+def _rejected_because(row):
+    """The failure keys recorded while rejecting `row`, having checked it was
+    actually rejected -- a cause recorded for a row that survived would be a
+    lie the assertions below could not see."""
+    tally = comprehend.Tally()
+    got = comprehend.parse_integration_response(_extraction([row]), {1}, {}, {}, tally)
+    assert got == [], "the row must be rejected for its recorded cause to mean anything"
+    return tally.failures
+
+
+def test_an_item_id_that_was_never_offered_names_its_branch():
+    assert _rejected_because(dict(_labelled(), item_id=99)) == {"validate:item_id": 1}
+
+
+def test_an_entity_that_is_not_an_object_names_its_branch():
+    assert _rejected_because(_labelled(entities=["Iran"])) == {
+        "validate:entity_shape": 1
+    }
+
+
+def test_an_entity_with_an_unknown_type_names_its_branch():
+    assert _rejected_because(
+        _labelled(entities=[dict(NEW_ENTITY, type="spaceship")])
+    ) == {"validate:entity_fields": 1}
+
+
+def test_an_event_with_an_unknown_standing_names_its_branch():
+    assert _rejected_because(
+        _labelled(events=[dict(NEW_EVENT, standing="rumoured")])
+    ) == {"validate:event_shape": 1}
+
+
+def test_an_event_with_a_blank_summary_names_its_branch():
+    assert _rejected_because(_labelled(events=[dict(NEW_EVENT, summary="   ")])) == {
+        "validate:event_summary": 1
+    }
+
+
+def test_an_event_with_an_unknown_commitment_state_names_its_branch():
+    assert _rejected_because(
+        _labelled(events=[dict(NEW_EVENT, commitment_state="pondering")])
+    ) == {"validate:event_enums": 1}
+
+
+def test_a_clean_extraction_records_no_failure_at_all():
+    """Presence sibling for the whole dict, and the only test above that can
+    fail a `_note()` firing unconditionally -- six assertions that a key is
+    PRESENT are each satisfied by a recorder that never stops recording."""
+    tally = comprehend.Tally()
+    got = comprehend.parse_integration_response(
+        _extraction([_labelled(entities=[dict(NEW_ENTITY)], events=[dict(NEW_EVENT)])]),
+        {1},
+        {},
+        {},
+        tally,
+    )
+    assert len(got) == 1
+    assert tally.failures == {}
+
+
+def test_the_recorded_cause_distinguishes_two_different_defects():
+    """Independently-derived expectation rather than a restatement: two rows
+    failing for two reasons must produce two DIFFERENT keys. A recorder keyed
+    by a constant passes every single-row test above."""
+    tally = comprehend.Tally()
+    comprehend.parse_integration_response(
+        _extraction(
+            [
+                _labelled(entities=[dict(NEW_ENTITY, type="spaceship")]),
+                dict(_labelled(), item_id=99),
+            ]
+        ),
+        {1},
+        {},
+        {},
+        tally,
+    )
+    assert tally.failures == {"validate:entity_fields": 1, "validate:item_id": 1}

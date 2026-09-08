@@ -1287,3 +1287,140 @@ def test_a_still_pending_item_IS_re_offered(kb, monkeypatch):
     comprehend.run(kb)
     kb.commit()
     assert offered, "a malformed row must still come back; only 'empty' advances"
+
+
+# --- A network fault must not spend the item's lifetime budget (bqa.13).
+
+
+def _tracked_material(kb):
+    """One item that triage's rules half makes material with no model call, so
+    these tests exercise the integration path and nothing else."""
+    kb.execute("INSERT INTO entities (name, type) VALUES ('Ukraine', 'country')")
+    item_id = _add_item(kb, "Ukraine talks resume")
+    kb.commit()
+    return item_id
+
+
+def test_a_transport_failure_leaves_the_items_lifetime_budget_intact(kb, monkeypatch):
+    """news-brief-bqa.13, asserted on the DATABASE column rather than on the
+    tally, because integrate_attempts is the thing that is one-way.
+
+    A ~90s DNS fault on 2026-09-08 failed three whole batches and charged an
+    attempt to every item in them. No verdict about any of those items was ever
+    obtained -- the failure was a statement about the network.
+    """
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
+    item_id = _tracked_material(kb)
+
+    def dns_is_dead(_req):
+        raise comprehend.requests.exceptions.ConnectionError("name resolution failed")
+
+    monkeypatch.setattr(comprehend, "call_integration", dns_is_dead)
+
+    tally = comprehend.run(kb)
+    kb.commit()
+
+    assert (
+        kb.execute(
+            "SELECT integrate_attempts FROM item_triage WHERE item_id = %s", (item_id,)
+        ).fetchone()[0]
+        == 0
+    )
+    assert tally.deferred_transport == 1
+    assert tally.failed_integration == 0, (
+        "a network fault is not the item failing; folding it into the same "
+        "counter is the confound that made news-brief-uer a gate-validity bug"
+    )
+    assert tally.failures == {"transport": 1}
+
+
+def test_an_item_deferred_by_a_transport_failure_is_offered_again(kb, monkeypatch):
+    """The PROPERTY, not its mechanism. Asserting integrate_attempts == 0 above
+    restates the implementation; this drives run()'s real integration SELECT a
+    second time and fails if the deferred item does not come back."""
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
+    item_id = _tracked_material(kb)
+
+    def dns_is_dead(_req):
+        raise comprehend.requests.exceptions.ConnectionError("name resolution failed")
+
+    monkeypatch.setattr(comprehend, "call_integration", dns_is_dead)
+    comprehend.run(kb)
+    kb.commit()
+
+    offered = []
+
+    def recovered(req):
+        offered.append(req)
+        return {
+            "stop_reason": "tool_use",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "emit_extraction",
+                    "input": {
+                        "items": [
+                            {
+                                "item_id": item_id,
+                                "entities": [
+                                    {
+                                        "name": "Ukraine",
+                                        "type": "country",
+                                        "aliases": [],
+                                    }
+                                ],
+                                # An event is required for an assertion to
+                                # exist at all: write_extraction writes one per
+                                # event, so an entity-only extraction is a
+                                # legitimate zero and would prove nothing here.
+                                "events": [
+                                    {
+                                        "summary": "Ukraine talks resumed.",
+                                        "type": "action",
+                                        "commitment_state": "in_force",
+                                        "standing": "reported",
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                }
+            ],
+        }
+
+    monkeypatch.setattr(comprehend, "call_integration", recovered)
+    second = comprehend.run(kb)
+    kb.commit()
+
+    assert len(offered) == 1, (
+        "the deferred item must be re-offered once the net is back"
+    )
+    assert second.assertions_written == 1
+
+
+def test_a_response_the_parser_rejects_still_charges_the_item(kb, monkeypatch):
+    """Presence sibling, and the bound on the deferral. Without it a classifier
+    answering 'transient' to everything passes both tests above, and a
+    permanently-malformed batch re-pays an 8192-token generation every hour
+    forever because nothing ever retires it."""
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
+    item_id = _tracked_material(kb)
+
+    monkeypatch.setattr(
+        comprehend,
+        "call_integration",
+        lambda _req: {"stop_reason": "tool_use", "content": []},
+    )
+
+    tally = comprehend.run(kb)
+    kb.commit()
+
+    assert (
+        kb.execute(
+            "SELECT integrate_attempts FROM item_triage WHERE item_id = %s", (item_id,)
+        ).fetchone()[0]
+        == 1
+    )
+    assert tally.failed_integration == 1
+    assert tally.deferred_transport == 0
+    assert tally.failures == {"batch:ValueError": 1}

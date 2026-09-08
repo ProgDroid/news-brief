@@ -125,3 +125,56 @@ def test_both_timeouts_are_settings_knobs_not_constants():
     can retune after seeing real durations without a redeploy."""
     assert "COMPREHEND_INTEGRATE_TIMEOUT" in common.KNOBS
     assert "COMPREHEND_TRIAGE_TIMEOUT" in common.KNOBS
+
+
+# --- Which failures may spend an item's lifetime budget (news-brief-bqa.13).
+#
+# integrate_attempts >= 3 is a ONE-WAY DOOR and both integration failure paths
+# charge it. On 2026-09-08 a ~90s host DNS fault failed three whole batches and
+# charged an attempt to every item in them -- roughly 15 items penalised for a
+# fault that obtained no verdict about any of them. Three such faults retire an
+# item permanently, and because the integration SELECT is `ORDER BY i.id` the
+# loss falls on the OLDEST corpus rather than at random.
+
+
+def _http_error(status: int) -> Exception:
+    resp = brief.requests.Response()
+    resp.status_code = status
+    return brief.requests.exceptions.HTTPError(str(status), response=resp)
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        brief.requests.exceptions.ConnectionError("name resolution failed"),
+        brief.requests.exceptions.Timeout("read timed out"),
+        _http_error(429),
+        _http_error(500),
+        _http_error(503),
+    ],
+    ids=["dns", "timeout", "429", "500", "503"],
+)
+def test_a_failure_that_obtained_no_verdict_does_not_blame_the_item(exc):
+    """No verdict was obtained about the item, so the item must not pay for it.
+    429 and 5xx belong here with the connection faults: they are the server
+    declining to answer, which says nothing about what was asked."""
+    assert comprehend._is_transient(exc) is True
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        _http_error(400),
+        _http_error(401),
+        _http_error(413),
+        ValueError("no emit_extraction tool_use block in response"),
+        KeyError("items"),
+    ],
+    ids=["400", "401", "413", "unparseable", "not-a-request-error"],
+)
+def test_a_failure_the_request_itself_caused_still_charges_the_item(exc):
+    """Presence sibling, and the reason the split is bounded rather than an
+    unbounded retry. A classifier answering 'transient' to everything satisfies
+    the test above for free, and would turn a permanently-malformed batch into
+    a loop that re-pays an 8192-token generation every hour and never retires."""
+    assert comprehend._is_transient(exc) is False
