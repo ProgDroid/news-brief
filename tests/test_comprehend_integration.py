@@ -836,3 +836,82 @@ def test_an_extraction_with_events_but_no_entities_is_terminal_not_retried(kb):
     ).fetchone()
     assert row[0] is not None, "must be terminal, or it is re-offered forever"
     assert row[1] == 0, "the model answered; it just answered 'no entities'"
+
+
+# --- Candidates are ranked by SHARED-ENTITY COUNT, then recency (bqa.18).
+
+
+def _link_event(kb, event_id, entity_id):
+    kb.execute(
+        "INSERT INTO event_entities (event_id, entity_id) VALUES (%s, %s)",
+        (event_id, entity_id),
+    )
+
+
+def test_a_more_shared_event_outranks_a_more_recent_one(kb):
+    """The whole change in one assertion. Recency ranked the newer event first
+    and, on a hub entity, that is how a duplicate reported the same evening
+    never reached the model at all: 30 recency slots cover a few hours.
+
+    The two events are deliberately ordered so that recency and overlap
+    DISAGREE -- if they agreed, this would pass under the old ordering too.
+    """
+    a, b, c = _entity(kb, "Ukraine"), _entity(kb, "Russia"), _entity(kb, "France")
+    shared_but_old = _event(kb, a, summary="A and B meet", days_ago=6)
+    _link_event(kb, shared_but_old, b)
+    recent_but_narrow = _event(kb, c, summary="C does something", days_ago=1)
+    kb.commit()
+
+    rows = comprehend.candidate_events(kb, [a, b, c], comprehend.Tally())
+    assert [r["id"] for r in rows] == [shared_but_old, recent_but_narrow], (
+        "two shared entities must outrank one, even six days older"
+    )
+
+
+def test_events_with_EQUAL_overlap_still_come_back_newest_first(kb):
+    """Presence sibling. Without it, the test above is satisfied by an ORDER BY
+    that dropped recency altogether -- and recency is still the right
+    tie-break, since nothing else distinguishes equally-connected events."""
+    a = _entity(kb, "Ukraine")
+    oldest = _event(kb, a, summary="oldest", days_ago=10)
+    newest = _event(kb, a, summary="newest", days_ago=1)
+    middle = _event(kb, a, summary="middle", days_ago=5)
+    kb.commit()
+
+    rows = comprehend.candidate_events(kb, [a], comprehend.Tally())
+    assert [r["id"] for r in rows] == [newest, middle, oldest]
+
+
+def test_the_cap_keeps_the_shared_event_and_drops_recent_unrelated_ones(kb):
+    """The mechanism at the cap, which is where it actually bites. Bury a
+    two-entity event under CANDIDATE_EVENT_CAP newer single-entity ones: under
+    recency it falls off the end, which is the measured 15% recall. It must now
+    survive, and the returned list must still be exactly the cap."""
+    a, b = _entity(kb, "Ukraine"), _entity(kb, "Russia")
+    buried = _event(kb, a, summary="A and B meet", days_ago=9)
+    _link_event(kb, buried, b)
+    for i in range(comprehend.CANDIDATE_EVENT_CAP):
+        _event(kb, a, summary=f"noise {i}", days_ago=1)
+    kb.commit()
+
+    tally = comprehend.Tally()
+    rows = comprehend.candidate_events(kb, [a, b], tally)
+    assert len(rows) == comprehend.CANDIDATE_EVENT_CAP
+    assert tally.candidate_cap_hit == 1
+    assert rows[0]["id"] == buried, (
+        "the event sharing BOTH entities must lead; under recency it was the "
+        "one row that fell off the end"
+    )
+
+
+def test_an_event_reachable_through_two_entities_is_still_returned_once(kb):
+    """GROUP BY replaced SELECT DISTINCT, so the de-duplication moved. If it
+    had been lost, the model would see one candidate under two identical ids
+    and the count of offered candidates would silently shrink."""
+    a, b = _entity(kb, "Ukraine"), _entity(kb, "Russia")
+    shared = _event(kb, a, summary="A and B meet", days_ago=2)
+    _link_event(kb, shared, b)
+    kb.commit()
+
+    ids = [r["id"] for r in comprehend.candidate_events(kb, [a, b], comprehend.Tally())]
+    assert ids == [shared]

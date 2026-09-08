@@ -795,7 +795,31 @@ INTEGRATE_MAX_TOKENS = 8192
 
 
 def candidate_events(conn, entity_ids: list[int], tally: Tally) -> list[dict]:
-    """Recent events sharing an entity with this batch.
+    """Events sharing entities with this batch, MOST SHARED FIRST.
+
+    Ranked by how many of the batch's entities the event carries, then by
+    recency. Recency alone was the ranking until 2026-09-08 and it was the
+    worst available choice: measured recall@30 of 15% in production's batched
+    shape, against 57% for this ordering (news-brief-bqa.18).
+
+    The mechanism it fixes: for a hub entity -- Iran carried 491 events in one
+    7-day window -- 30 recency slots cover a few hours, so a duplicate reported
+    the same evening is never shown to the model and corroboration cannot be
+    recorded at all. The measured A/B split by entity frequency was monotonic
+    and broke exactly at this cap: below 30 events per entity the duplicate was
+    offered 100% of the time, above 100 events only 33%. Recall therefore
+    collapsed precisely on the busiest entities, which is where cross-outlet
+    overlap is most likely and where spec 8.2's corroboration floor -- the
+    existence test for the whole event layer -- has to find its signal.
+
+    RANKING IN SQL IS DELIBERATE. A lexical ranking measured slightly higher,
+    but it needed the whole pool fetched and sorted in Python, and whatever
+    bounded that pool could only be truncated by recency -- reintroducing this
+    exact burial at a larger n. Postgres orders the full set, so there is
+    nothing to truncate and that failure mode cannot occur. The lexical
+    comparison was also confounded: the evaluation set was selected by title
+    similarity, the same signal that ranking used, while this ordering is the
+    one arm that selection did not flatter.
 
     Returns id and summary and NOTHING ELSE. events.type and
     commitment_state are scored by the pre-registered gate; sending them here
@@ -805,11 +829,22 @@ def candidate_events(conn, entity_ids: list[int], tally: Tally) -> list[dict]:
     if not entity_ids:
         return []
     rows = conn.execute(
-        "SELECT DISTINCT e.id, e.summary, e.occurred_at FROM events e "
+        # count(DISTINCT ee.entity_id) is the number of THIS BATCH's entities
+        # the event carries, because the WHERE clause admits no others. GROUP BY
+        # also supplies the de-duplication SELECT DISTINCT used to provide: an
+        # event reachable through two of the batch's entities appears once.
+        "SELECT e.id, e.summary, count(DISTINCT ee.entity_id) AS shared "
+        "FROM events e "
         "JOIN event_entities ee ON ee.event_id = e.id "
         "WHERE ee.entity_id = ANY(%s) "
         "  AND e.occurred_at >= now() - make_interval(days => %s) "
-        "ORDER BY e.occurred_at DESC "
+        "GROUP BY e.id, e.summary, e.occurred_at "
+        # `e.id DESC` last so the order is TOTAL. Two events with equal overlap
+        # and an identical occurred_at would otherwise return in whatever order
+        # the plan happened to produce, making the offered list irreproducible
+        # for a fixed corpus -- which defeats both debugging and any later gold
+        # set built against it.
+        "ORDER BY shared DESC, e.occurred_at DESC, e.id DESC "
         "LIMIT %s",
         (list(entity_ids), CANDIDATE_WINDOW_DAYS, CANDIDATE_EVENT_CAP + 1),
     ).fetchall()
