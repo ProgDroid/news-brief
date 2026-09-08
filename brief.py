@@ -4058,6 +4058,38 @@ def comprehend_retirement_alert(conn) -> None:
         log.exception("comprehend retirement check failed")
 
 
+IGNORED_KNOBS_ALERT_KEY = "ignored_knobs_alert"
+
+
+def ignored_knobs_alert() -> None:
+    """Say once that a knob set in the environment is not in effect.
+
+    Takes no connection, unlike its two siblings above: the verdict is computed
+    from the settings cache and the environment, and the state helpers open
+    their own. It runs here rather than at boot for the reason
+    `config.ignored_env_verdict` gives — boot happens on every
+    `docker compose run --rm <mode>`, and the log warning already covers that
+    path. Telegram gets the once-per-episode version.
+    """
+    try:
+        verdict = config.ignored_env_verdict()
+        seen = load_state().get(IGNORED_KNOBS_ALERT_KEY)
+        if verdict is None:
+            if seen:
+                config.clear_runtime_state([IGNORED_KNOBS_ALERT_KEY])
+            return
+        key, message = verdict
+        if key == seen:
+            return
+        # Sent BEFORE the key is stored, for the reason capture_liveness_alert
+        # gives: the other order loses the alert entirely when Telegram is the
+        # thing that is down.
+        telegram_alert(f"\U0001f39b️ {message}")
+        save_state({IGNORED_KNOBS_ALERT_KEY: key})
+    except Exception:
+        log.exception("ignored-knob check failed")
+
+
 def mode_monitor():
     """Hourly cross-asset volume-anomaly alerts + live-position exit sweep/reconcile.
 
@@ -4077,6 +4109,10 @@ def mode_monitor():
             # silent losses, and everything below it reports what the world
             # did (news-brief-bqa.15).
             comprehend_retirement_alert(conn)
+            # Third of the same kind: not what the world did, but what this
+            # deployment is failing to do because a knob never took effect
+            # (news-brief-5fc). No connection of its own to take.
+            ignored_knobs_alert()
     except Exception as e:
         log.warning(f"Capture liveness check could not reach the database: {e}")
     alerts = run_volume_monitor()
@@ -4261,6 +4297,10 @@ if __name__ == "__main__":
             with db.connect() as _conn:
                 config.ensure_seeded(_conn)
                 config.import_settings_from_env(_conn)
+                # Next to the import, not inside it: the import returns early on
+                # any host whose settings are already populated, which is exactly
+                # the host where a knob set in the environment goes nowhere.
+                config.warn_ignored_env_knobs()
                 config.import_sources_from_file(_conn)
                 config.import_preferences_from_file(_conn)
                 config.import_state_from_file(_conn)

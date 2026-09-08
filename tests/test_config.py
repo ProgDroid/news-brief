@@ -12,6 +12,8 @@ the last known value rather than take the control channel down with the
 database.
 """
 
+import logging
+
 import pytest
 
 import brief
@@ -668,3 +670,211 @@ def test_pinning_one_call_site_leaves_the_others_alone(conn, monkeypatch):
     assert claim_verify._model() == "claude-haiku-4-5-20251001"
     assert brief._signals_model() == "claude-opus-5"
     assert common.MODEL == "claude-opus-5"
+
+
+# ── Knobs set in the environment but not in effect ────────────────────────────
+#
+# The 2026-09-07 failure, as tests: COMPREHEND_ENABLED=1 was set in the host
+# compose and the stack restarted, no row existed, and the pass logged "disabled
+# by COMPREHEND_ENABLED; nothing read". Resolution is correct and deliberate --
+# see the knob() docstring -- so these test that the no-op is VISIBLE, never that
+# the environment wins.
+#
+# Every assertion here names one knob rather than comparing whole lists: the
+# detector scans the real environment, and a developer with an unrelated knob
+# exported would otherwise fail a test about something else entirely.
+
+
+def _ignored(conn=None) -> dict[str, object]:
+    return {rec.key: rec for rec in config.ignored_env_knobs()}
+
+
+def test_an_env_knob_with_no_row_is_reported_with_both_values(conn, monkeypatch):
+    """The 2026-09-07 shape: set in the environment, no row, and the default is
+    something else. What the operator asked for and what is running both have to
+    appear, because the point of the message is the gap between them."""
+    config.import_settings_from_env(conn)  # empty environment: imports nothing
+    monkeypatch.setenv("PG_A_STAKE", "9.0")
+    config.invalidate()
+
+    rec = _ignored()["PG_A_STAKE"]
+
+    assert rec.asks == "9.0"
+    assert rec.in_effect == common.KNOBS["PG_A_STAKE"].default
+    assert rec.row is None
+
+
+def test_a_knob_whose_row_backs_the_environment_is_not_reported(conn, monkeypatch):
+    """The silence that matters, with its presence sibling in the same call: a
+    detector that reports nothing at all would also pass the first assertion."""
+    monkeypatch.setenv("PG_A_STAKE", "7.5")
+    config.import_settings_from_env(conn)
+    monkeypatch.setenv("VOL_SPIKE_MULT", "4.5")  # set after the import: no row
+    config.invalidate()
+
+    ignored = _ignored()
+
+    assert "PG_A_STAKE" not in ignored
+    assert "VOL_SPIKE_MULT" in ignored
+
+
+def test_an_environment_repeating_the_default_is_not_reported(conn, monkeypatch):
+    """Nothing is being ignored in any sense the operator cares about: the knob
+    is doing exactly what the environment asks. Warning here would train them to
+    ignore the warning."""
+    config.import_settings_from_env(conn)
+    monkeypatch.setenv("PG_A_STAKE", str(common.KNOBS["PG_A_STAKE"].default))
+    monkeypatch.setenv("PG_A_ENABLED", "1")  # presence sibling: default is False
+    config.invalidate()
+
+    ignored = _ignored()
+
+    assert "PG_A_STAKE" not in ignored
+    assert "PG_A_ENABLED" in ignored
+
+
+def test_a_row_that_disagrees_with_the_environment_is_reported_as_stale(
+    conn, monkeypatch
+):
+    """The case the bead's title misses. An operator editing compose on an
+    established host is no less ignored for the row existing -- and this is the
+    likelier shape once every knob has been imported once."""
+    monkeypatch.setenv("PG_A_STAKE", "2.0")
+    config.import_settings_from_env(conn)
+    monkeypatch.setenv("PG_A_STAKE", "5.0")
+    config.invalidate()
+
+    rec = _ignored()["PG_A_STAKE"]
+
+    assert rec.asks == "5.0"
+    assert rec.in_effect == 2.0
+    assert rec.row == "2.0"
+
+
+def test_a_value_that_will_not_coerce_is_reported_rather_than_silently_defaulted(
+    conn, monkeypatch
+):
+    """coerce_knob falls back to the default on a value it cannot parse, so a
+    typo'd knob would otherwise compare EQUAL to the default and stay silent --
+    the same invisible no-op, arrived at from the other direction."""
+    config.import_settings_from_env(conn)
+    monkeypatch.setenv("PG_A_STAKE", "banana")
+    config.invalidate()
+
+    assert "PG_A_STAKE" in _ignored()
+
+
+def test_an_unparseable_boolean_is_reported_though_it_coerces_to_false(
+    conn, monkeypatch
+):
+    """A bool coerces anything: `banana` is simply not in _TRUTHY, so it reads
+    False and equals the default. An operator who typed it meant something."""
+    config.import_settings_from_env(conn)
+    monkeypatch.setenv("PG_A_ENABLED", "banana")
+    monkeypatch.setenv("PG_B_ENABLED", "off")  # a real falsy token: silent
+    config.invalidate()
+
+    ignored = _ignored()
+
+    assert "PG_A_ENABLED" in ignored
+    assert "PG_B_ENABLED" not in ignored
+
+
+def test_the_boot_warning_names_the_knob_and_both_values(conn, monkeypatch, caplog):
+    config.import_settings_from_env(conn)
+    monkeypatch.setenv("PG_A_STAKE", "9.0")
+    config.invalidate()
+
+    with caplog.at_level(logging.WARNING, logger="newsbrief"):
+        config.warn_ignored_env_knobs()
+
+    message = caplog.text
+    assert "PG_A_STAKE" in message
+    assert "9.0" in message
+    assert str(common.KNOBS["PG_A_STAKE"].default) in message
+
+
+def test_the_boot_warning_says_nothing_about_a_knob_that_agrees(
+    conn, monkeypatch, caplog
+):
+    monkeypatch.setenv("PG_A_STAKE", "7.5")
+    config.import_settings_from_env(conn)
+    monkeypatch.setenv("VOL_SPIKE_MULT", "4.5")
+    config.invalidate()
+
+    with caplog.at_level(logging.WARNING, logger="newsbrief"):
+        config.warn_ignored_env_knobs()
+
+    assert "PG_A_STAKE" not in caplog.text
+    assert "VOL_SPIKE_MULT" in caplog.text
+
+
+def test_the_verdict_is_none_when_nothing_is_ignored(conn, monkeypatch):
+    for name, spec in common.KNOBS.items():
+        monkeypatch.delenv(spec.key(name), raising=False)
+    config.import_settings_from_env(conn)
+    config.invalidate()
+
+    assert config.ignored_env_verdict() is None
+
+
+def test_the_verdict_key_changes_when_the_ignored_set_changes(conn, monkeypatch):
+    """The episode key identifies WHICH knobs are being ignored, so fixing one
+    and breaking another is a new episode rather than a silence."""
+    for name, spec in common.KNOBS.items():
+        monkeypatch.delenv(spec.key(name), raising=False)
+    config.import_settings_from_env(conn)
+    monkeypatch.setenv("PG_A_STAKE", "9.0")
+    config.invalidate()
+    first, message = config.ignored_env_verdict()
+
+    monkeypatch.delenv("PG_A_STAKE")
+    monkeypatch.setenv("VOL_SPIKE_MULT", "4.5")
+    config.invalidate()
+    second, _ = config.ignored_env_verdict()
+
+    assert "PG_A_STAKE" in message
+    assert first != second
+
+
+def test_an_ignored_knob_alerts_once_not_once_per_boot(conn, monkeypatch):
+    """brief.py seeds on every `docker compose run --rm <mode>`, so an alert
+    without an episode key is one Telegram message per cron mode, forever."""
+    sent = []
+    monkeypatch.setattr(brief, "telegram_alert", sent.append)
+    for name, spec in common.KNOBS.items():
+        monkeypatch.delenv(spec.key(name), raising=False)
+    config.import_settings_from_env(conn)
+    monkeypatch.setenv("PG_A_STAKE", "9.0")
+    config.invalidate()
+
+    for _ in range(4):
+        brief.ignored_knobs_alert()
+
+    assert len(sent) == 1
+    assert "PG_A_STAKE" in sent[0]
+
+
+def test_a_knob_ignored_after_a_fix_alerts_again(conn, monkeypatch):
+    """The positive control for the test above: alerting once is trivially
+    satisfied by never alerting twice, which would make the first misconfigured
+    knob the only one this ever reports."""
+    sent = []
+    monkeypatch.setattr(brief, "telegram_alert", sent.append)
+    for name, spec in common.KNOBS.items():
+        monkeypatch.delenv(spec.key(name), raising=False)
+    config.import_settings_from_env(conn)
+    monkeypatch.setenv("PG_A_STAKE", "9.0")
+    config.invalidate()
+    brief.ignored_knobs_alert()
+
+    monkeypatch.delenv("PG_A_STAKE")
+    config.invalidate()
+    brief.ignored_knobs_alert()  # recovered: clears the remembered key
+
+    monkeypatch.setenv("VOL_SPIKE_MULT", "4.5")
+    config.invalidate()
+    brief.ignored_knobs_alert()
+
+    assert len(sent) == 2
+    assert "VOL_SPIKE_MULT" in sent[1]

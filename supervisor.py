@@ -485,6 +485,9 @@ def startup(*, migrate=None, connect=None) -> StartupState:
         # work and fail-open on the bot, exactly like a failed migration.
         config.ensure_seeded(conn)
         config.import_settings_from_env(conn)
+        # See brief.py's seed block: outside the import on purpose, so it speaks
+        # on an established host rather than only on a first boot.
+        config.warn_ignored_env_knobs()
         config.import_sources_from_file(conn)
         config.import_preferences_from_file(conn)
         config.import_state_from_file(conn)

@@ -258,6 +258,99 @@ def import_settings_from_env(conn) -> list[str]:
     return imported
 
 
+class IgnoredKnob(NamedTuple):
+    """A knob the environment sets and this deployment is not honouring."""
+
+    name: str
+    key: str
+    asks: str
+    in_effect: object
+    row: str | None
+
+
+def ignored_env_knobs() -> list[IgnoredKnob]:
+    """Knobs the environment asks for that are not what is in effect.
+
+    Resolution reads a row or the code default and never the environment, which
+    is deliberate and stays that way — see `knob`. What it costs is silence: on
+    any host past first boot, editing `docker-compose.yml` or `.env` and
+    restarting changes nothing, logs nothing and errors nothing. On 2026-09-07
+    that cost a rollout window, with COMPREHEND_ENABLED=1 in the host compose,
+    no row, and the pass logging "disabled by COMPREHEND_ENABLED".
+
+    The test is what the environment asks for against what is in effect, rather
+    than the presence of a row. That catches the stale row as well as the absent
+    one — an operator's edit is no less ignored for some older row existing —
+    and it stays quiet when the environment merely repeats what is already true.
+    A warning that fires on a harmless case is one the operator learns to skip.
+    """
+    rows = settings()
+    ignored = []
+    for name, spec in common.KNOBS.items():
+        key = spec.key(name)
+        raw = os.environ.get(key)
+        if raw is None or not raw.strip():
+            continue
+        in_effect = knob(name)
+        if common.knob_parses(spec, raw) and common.coerce_knob(spec, raw) == in_effect:
+            continue
+        ignored.append(IgnoredKnob(name, key, raw.strip(), in_effect, rows.get(key)))
+    return sorted(ignored, key=lambda rec: rec.key)
+
+
+def _ignored_lines(records: list[IgnoredKnob]) -> str:
+    """One line per knob, naming both values. The gap between them IS the
+    message, so neither side is ever summarised away."""
+    return "\n".join(
+        f"  {rec.key}: env asks {rec.asks}, in effect {rec.in_effect} "
+        f"({'row says ' + rec.row if rec.row is not None else 'no row'})"
+        for rec in records
+    )
+
+
+def warn_ignored_env_knobs() -> list[IgnoredKnob]:
+    """Say at boot which environment knobs are not taking effect.
+
+    Called next to `import_settings_from_env` rather than inside it, so that it
+    fires whether or not the import ran — the import returns early on any host
+    whose `settings` is already populated, which is precisely the host where a
+    knob set in the environment goes nowhere.
+    """
+    records = ignored_env_knobs()
+    if records:
+        log.warning(
+            f"{len(records)} environment knob(s) are being ignored; the settings "
+            f"row is what takes effect:\n{_ignored_lines(records)}\n"
+            "Fix the settings row, not the environment."
+        )
+    return records
+
+
+def ignored_env_verdict() -> tuple[str, str] | None:
+    """(episode key, message) when knobs are being ignored, else None.
+
+    The contract `capture.liveness` established: the key identifies the
+    MISCONFIGURATION — which knobs, asking for what — so a caller that remembers
+    the last key it sent alerts once per episode rather than once per check.
+    That matters more here than for a monitor, because `brief.py` seeds on every
+    `docker compose run --rm <mode>`: an alert keyed on nothing would be several
+    Telegram messages a day, forever, which is how an operator learns to mute
+    the channel that was supposed to tell them something.
+
+    Keyed on the requested values too, not just the names. An operator who edits
+    compose again — still ignored, now asking for something else — has a new
+    misconfiguration, and silence there would be the same trap one level up.
+    """
+    records = ignored_env_knobs()
+    if not records:
+        return None
+    key = "ignored:" + ",".join(f"{rec.key}={rec.asks}" for rec in records)
+    return key, (
+        f"{len(records)} knob(s) set in the environment are not in effect. This "
+        f"deployment reads settings rows:\n{_ignored_lines(records)}"
+    )
+
+
 # ── Runtime state ────────────────────────────────────────────────────────────
 #
 # Deliberately UNCACHED, unlike everything else in this module. The cache above

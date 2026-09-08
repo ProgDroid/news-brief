@@ -290,6 +290,31 @@ KNOBS: dict[str, Knob] = {
 }
 
 _TRUTHY = {"1", "true", "yes", "on"}
+_FALSY = {"0", "false", "no", "off"}
+
+
+def knob_parses(knob: Knob, raw: str) -> bool:
+    """Whether `raw` means anything to this knob's type.
+
+    `coerce_knob` answers with the DEFAULT for a value it cannot read, which is
+    right for a live read — a fat-fingered row must not take a job down — but it
+    makes a typo indistinguishable from agreement to anything comparing the two:
+    `PG_A_STAKE=banana` coerces to 2.0 and so equals the very default it was
+    written to override. A bool is the sharper case, because it coerces
+    ANYTHING: `banana` is simply not in `_TRUTHY`, reads False, and matches a
+    default of False. Somebody who typed it meant something.
+
+    Lives here rather than in `config` so the truthy tokens are defined once.
+    """
+    text = raw.strip().lower()
+    if knob.kind is bool:
+        return text in _TRUTHY or text in _FALSY
+    if knob.kind in (int, float):
+        try:
+            float(text)
+        except ValueError:
+            return False
+    return True
 
 
 def coerce_knob(knob: Knob, raw: str):
