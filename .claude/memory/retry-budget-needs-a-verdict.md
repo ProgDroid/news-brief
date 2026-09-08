@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: e6d626fb-1862-4525-a333-1ae4323e8d37
-  modified: 2026-09-08T06:15:20.904Z
+  modified: 2026-09-08T16:31:24.650Z
 ---
 
 **A counter that permanently retires a unit of work may only be charged by failures that actually
@@ -44,8 +44,12 @@ work**.
 4. Assert the property on the **database column**, not the tally: the column is the thing that is
    one-way. Then write a second test for the property the first cannot see — that a deferred unit
    is genuinely re-offered rather than quietly marked done.
-5. **A one-way counter with no alerting is a stop-loss you have not built.** Filed as
-   `news-brief-bqa.15`; the only signal today is a cumulative number inside an hourly log line.
+5. **A one-way counter with no alerting is a stop-loss you have not built.** `news-brief-bqa.15`,
+   BUILT 2026-09-08: `comprehend.retirement` + `brief.comprehend_retirement_alert`, once per change
+   from the hourly monitor. The design lesson that survives the bead: **report the population one
+   failure AWAY from the door alongside the count already through it.** A one-way counter can only
+   ever report a loss that already happened; the at-risk count is the same query and is the only
+   half the operator can still act on.
 
 Related: [[shared-helper-carries-first-callers-tuning]] (retry layers MULTIPLY — 3 item-level × 2
 HTTP; put the retry where budget accounting lives), [[newsbrief-comprehension-pipeline]].

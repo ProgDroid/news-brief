@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: 19b68250-ca61-4936-834b-18d6a595831c
-  modified: 2026-09-08T06:18:07.509Z
+  modified: 2026-09-08T16:31:08.383Z
 ---
 
 **`bqa.4b` CLOSED 2026-09-05.** 26 commits (`25d911f..41d7747`), ruff clean.
@@ -146,7 +146,11 @@ design rule, which generalises well beyond this project. `INTEGRATE_PROMPT_VERSI
   and because the integration SELECT is `ORDER BY i.id LIMIT 300` the SAME low-id items sit at the
   front of every pass — so a systematic failure retires the front of the queue at one attempt per
   hour. Recoverable only by hand, only if noticed: `UPDATE item_triage SET integrate_attempts = 0`.
-  There is **no alerting path**. Pre-register a stop-loss before flipping any flag that feeds it.
+  The stop-loss now EXISTS (`news-brief-bqa.15`, 2026-09-08): `comprehend.retirement(conn)` returns
+  `(key, message) | None`, and `brief.comprehend_retirement_alert` speaks once per change from the
+  hourly monitor — reporting the retired count AND the population one failure away, the at-risk
+  half being the only one still actionable. No rate, no invented threshold. See
+  [[newsbrief-capture-feature]] for the contract it copies.
 - **`Tally.failures` is declared and written by NOTHING** (grep `failures[` and `.failures`: zero
   hits). It always prints `{}`, which reads like "no failure details" rather than "field nobody
   populates", and `failed_integration` is a bare count. That is why the 172 was unattributable and

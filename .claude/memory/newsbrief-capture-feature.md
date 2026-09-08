@@ -1,11 +1,11 @@
 ---
 name: newsbrief-capture-feature
-description: Epic 2 continuous capture SHIPPED 2026-09-03 (b42.1 closed, 16 commits, 1408 tests) — default OFF behind CAPTURE_ENABLED, writes rows nothing reads yet; two follow-up beads open, one of them the alerting my own spec wrongly claimed existed
+description: Epic 2 continuous capture SHIPPED 2026-09-03 (b42.1 closed, 16 commits, 1408 tests) — ON in production since 2026-09-04; carries the reference alert contract (capture.liveness) that every other alert in this repo copies
 metadata:
   node_type: memory
   type: project
   originSessionId: c7b3e1ab-57c0-4dbc-8e99-58bd09ddc7f3
-  modified: 2026-09-03T15:50:07.699Z
+  modified: 2026-09-08T16:31:27.600Z
 ---
 
 **`news-brief-b42.1` is CLOSED.** `capture.py` polls all 26 feeds every 30 minutes as a supervisor job child, writing `outlets`/`items` plus three telemetry tables from migration 0008. Spec: `docs/superpowers/specs/2026-09-02-continuous-capture-design.md`; plan and ledger alongside it. **Default OFF** — set `NEWSBRIEF_CAPTURE_ENABLED` on the host to switch it on. **This unblocks `b42.2` (measure roll-off) and `bqa.4` (comprehension).**
@@ -23,7 +23,7 @@ metadata:
 
 **Open follow-ups:**
 
-1. **Capture has NO alerting path** (P2 bead filed 2026-09-03). Spec §10 states as fact that `monitor` raises capture health on anomaly. It was never built, and the plan's own self-review wrongly claimed it had been filed. Capture currently writes rows nobody reads; a capture degrading silently (half the feeds 403ing) is invisible. Threshold must come from `b42.2` data, not a guess.
+1. **Capture alerting is HALF built — corrected 2026-09-08.** The flat claim "capture has NO alerting path" was WRONG and was still being repeated in four artifacts days after it stopped being true ([[the-correction-didnt-propagate]] shape). `news-brief-a9q` shipped `capture.liveness` + `brief.capture_liveness_alert`, and `mode_monitor` calls it hourly: once per outage when capture goes stale or a pass dies mid-flight. `news-brief-w3q` is correctly annotated PARTIALLY DISCHARGED and stays open for the **quality** half only (feeds failing, items drying up), still waiting on `b42.2` for a measured threshold. **`capture.liveness` is now the reference contract for every alert here**: return `(episode_key, message) | None`, let the caller dedupe on the key, send BEFORE storing it, and refuse to alert on an unmeasured RATE.
 2. **`news-brief-uh0`: retention** for `items`, `feed_sightings`, `feed_polls`, `capture_runs` **and `job_runs`** — capture takes `job_runs` from ~5 to 53 rows/day and `retention.py` prunes files only.
 3. Deferred minors: a 404 classifies as `http_5xx`, and a genuinely quiet feed counts toward `feeds_failed`. Both spec-conformant, both will skew the alerting threshold in (1).
 
