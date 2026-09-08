@@ -726,3 +726,77 @@ def test_a_written_extraction_names_no_cause(kb):
     kb.commit()
 
     assert tally.failures == {}
+
+
+def test_an_event_with_no_commitment_state_is_written_as_null(kb):
+    """The end of the path, in the database. The validator accepting an absent
+    commitment_state is worthless if the INSERT then raises on it, and before
+    migration 0011 the column was NOT NULL -- so this test fails on the schema,
+    not on the code, if the migration is ever reverted."""
+    iid = _item(kb)
+    tally = comprehend.Tally()
+
+    extraction = _fresh(iid)
+    for ev in extraction["events"]:
+        ev["commitment_state"] = None
+
+    assert (
+        comprehend.write_extraction(kb, extraction, comprehend.SurfaceIndex([]), tally)
+        is True
+    )
+    kb.commit()
+
+    stored = kb.execute(
+        "SELECT e.commitment_state FROM events e "
+        "JOIN assertions a ON a.event_id = e.id WHERE a.item_id = %s",
+        (iid,),
+    ).fetchall()
+    assert stored, "the event must actually have been written"
+    assert all(row[0] is None for row in stored)
+
+
+def test_the_check_constraint_still_rejects_a_non_member_value(kb):
+    """0011 drops NOT NULL and deliberately leaves the CHECK alone, on the
+    grounds that a Postgres CHECK passes when its expression is NULL. That
+    reasoning is only safe if the constraint still REJECTS a bad value -- so
+    assert the half that must not have changed."""
+    with pytest.raises(Exception):
+        kb.execute(
+            "INSERT INTO events (summary, type, commitment_state, occurred_at) "
+            "VALUES ('s', 'action', 'pondering', now())"
+        )
+    kb.rollback()
+
+
+def test_write_extraction_tolerates_an_event_with_no_commitment_key_at_all(kb):
+    """Makes the `.get` load-bearing instead of decorative.
+
+    A mutation swapping `ev.get("commitment_state")` for `ev[...]` failed ZERO
+    tests, because _validate_item always sets the key and every other test
+    reaches this function through it. A defensive branch no test can
+    distinguish from its absence is a fix shipped on trust -- so drive the
+    path that has no validator in front of it, which is what any future caller
+    building an extraction by hand would do.
+    """
+    iid = _item(kb)
+    tally = comprehend.Tally()
+
+    extraction = _fresh(iid)
+    for ev in extraction["events"]:
+        ev.pop("commitment_state", None)
+    assert all("commitment_state" not in ev for ev in extraction["events"]), (
+        "the fixture must actually omit the key, or this asserts nothing"
+    )
+
+    assert (
+        comprehend.write_extraction(kb, extraction, comprehend.SurfaceIndex([]), tally)
+        is True
+    )
+    kb.commit()
+
+    stored = kb.execute(
+        "SELECT e.commitment_state FROM events e "
+        "JOIN assertions a ON a.event_id = e.id WHERE a.item_id = %s",
+        (iid,),
+    ).fetchall()
+    assert stored and all(row[0] is None for row in stored)

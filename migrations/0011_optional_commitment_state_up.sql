@@ -1,0 +1,26 @@
+-- `commitment_state` is a property of COMMITMENTS, not of every event, and
+-- requiring it cost 112 of 152 integration failures in the 2026-09-08 11:00
+-- pass -- 38% of all material items, dropped WHOLE, every pass, forever.
+--
+-- The failure was ours, not the model's. `_INTEGRATE_TOOL` declares
+-- required: ["standing"] on an event and nothing more, so a model omitting
+-- commitment_state obeys the schema exactly as published; `_validate_item`
+-- then rejected the entire item for it. Measured across the same corpus the
+-- model supplied `type` on 100% of events and omitted `commitment_state` on
+-- 38% -- it is discriminating, not sloppy.
+--
+-- The tempting repair is to add the field to the schema's `required` list.
+-- That is worse. Where the model DOES supply it on a factual report it emits
+-- `in_force` as filler ("Global sales of zero-emission trucks rose 86%",
+-- "Green bonds hit record high"), so forcing the field manufactures exactly
+-- the unmeasured value comprehend.write_extraction already refuses to invent
+-- for `occurred_at` -- "a model guess here would be one more unmeasured
+-- field". It would also push the enum toward one dominant value in a column
+-- scripts/score_comprehension.py scores for variance.
+--
+-- NULL means "this event is not a commitment", which is information. The
+-- CHECK below is deliberately left alone: a Postgres CHECK is satisfied when
+-- its expression evaluates to NULL, so `commitment_state IN (...)` already
+-- admits NULL and still rejects any non-member value. The gate needs no
+-- change either -- its distribution() filters `WHERE column IS NOT NULL`.
+ALTER TABLE events ALTER COLUMN commitment_state DROP NOT NULL;

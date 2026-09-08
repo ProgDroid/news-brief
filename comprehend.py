@@ -78,6 +78,12 @@ class Tally:
     # is model NON-COMPLIANCE, and a fallback that left no trace would repeat
     # exactly what made failed_integration=172 unattributable.
     unmapped_candidate: int = 0
+    # New events the model declined to give a `commitment_state`. NOT a
+    # failure: the field is a property of commitments and a factual report has
+    # none. Counted because it is now a field that is sometimes absent, and
+    # this repo's rule is that an unmeasured field gets measured -- without it
+    # nobody can tell a rare edge case from most of the corpus (migration 0011).
+    commitment_omitted: int = 0
     failures: dict = field(default_factory=dict)
 
 
@@ -1040,7 +1046,17 @@ def parse_integration_response(
         if block.get("type") == "tool_use" and block.get("name") == "emit_extraction":
             rows = block.get("input", {}).get("items")
             if not isinstance(rows, list):
-                raise ValueError("emit_extraction input missing 'items' list")
+                # Name what arrived. This fired 35 times in the 2026-09-08
+                # 11:00 pass -- 12% of items, whole batches at a time -- and
+                # the bare message could not say whether `items` was absent,
+                # was a dict, or arrived under another key. An error that
+                # cannot distinguish those is the same unactionable shape as
+                # an HTTPError that stringifies to a status code.
+                raise ValueError(
+                    "emit_extraction input missing 'items' list; "
+                    f"input keys={sorted(block.get('input', {}))} "
+                    f"items type={type(rows).__name__}"
+                )
             return [
                 p
                 for r in rows
@@ -1109,8 +1125,18 @@ def _validate_item(
             _note(tally, f"validate:event_type_{_absence(ev, 'type')}")
             _log_rejected_value("event type", ev, "type")
             return None
-        if commitment not in _COMMITMENT:
-            _note(tally, f"validate:commitment_{_absence(ev, 'commitment_state')}")
+        # ABSENT is a legitimate answer, INVALID is not. `commitment_state` is
+        # a property of commitments, and for a factual report there is none --
+        # measured 2026-09-08, the model supplied `type` on 100% of events and
+        # omitted this on 38%, dropping those items WHOLE for a field the tool
+        # schema never required. An explicit null says the same thing as an
+        # omission, so both read as absent; rejecting one spelling and not the
+        # other would reintroduce the bug for the same answer (bqa.16, 0011).
+        if commitment is None:
+            if tally is not None:
+                tally.commitment_omitted += 1
+        elif commitment not in _COMMITMENT:
+            _note(tally, "validate:commitment_unknown")
             _log_rejected_value("commitment_state", ev, "commitment_state")
             return None
         events.append(
@@ -1263,7 +1289,9 @@ def write_extraction(conn, extraction: dict, index: SurfaceIndex, tally: Tally) 
                         (
                             ev["summary"],
                             ev["type"],
-                            ev["commitment_state"],
+                            # NULL means "not a commitment". 0011 dropped the
+                            # NOT NULL; the CHECK still rejects a non-member.
+                            ev.get("commitment_state"),
                             extraction.get("published_at"),
                             _integrate_model(),
                             INTEGRATE_PROMPT_VERSION,

@@ -23,6 +23,8 @@ structurally instead of by instruction, which is what makes the liberal
 fallback below safe rather than reckless.
 """
 
+import pytest
+
 import comprehend
 
 NEW_ENTITY = {"name": "Iran", "type": "country"}
@@ -317,13 +319,6 @@ def test_an_omitted_event_type_reads_as_missing():
     }
 
 
-def test_an_omitted_commitment_state_reads_as_missing():
-    ev = {k: v for k, v in NEW_EVENT.items() if k != "commitment_state"}
-    assert _rejected_because(_labelled(events=[ev])) == {
-        "validate:commitment_missing": 1
-    }
-
-
 def test_an_explicit_null_reads_as_unknown_not_missing():
     """The discriminator is MEMBERSHIP, not a None check. A field explicitly
     set to null was supplied — the model made a choice — so it is
@@ -365,8 +360,128 @@ def test_the_rejected_value_is_logged_but_stays_out_of_the_key(caplog):
 
 def test_a_missing_field_logs_no_value_because_there_is_none(caplog):
     """Presence sibling for the logger: one that fired unconditionally would
-    satisfy the test above and emit a bare `None` on every omission."""
-    ev = {k: v for k, v in NEW_EVENT.items() if k != "commitment_state"}
+    satisfy the test above and emit a bare `None` on every omission.
+
+    Uses `type` rather than `commitment_state` as the vehicle: 0011 made an
+    absent commitment_state legitimate, so it no longer reaches a rejection at
+    all. `type` still does, which is what keeps this test about the LOGGER."""
+    ev = {k: v for k, v in NEW_EVENT.items() if k != "type"}
     with caplog.at_level("WARNING"):
         _rejected_because(_labelled(events=[ev]))
-    assert "rejected commitment_state" not in caplog.text
+    assert "rejected event type" not in caplog.text
+
+
+# --- commitment_state is optional, because it is a property of COMMITMENTS
+# --- (news-brief-bqa.16, migration 0011).
+#
+# 112 of 152 integration failures in the 11:00 pass on 2026-09-08 were
+# `validate:commitment_missing` -- 38% of all material items dropped WHOLE for
+# a field the tool schema never required. The model supplied `type` on 100% of
+# events over the same corpus, so it is discriminating rather than sloppy: for
+# a factual report there IS no commitment state.
+
+
+def test_a_new_event_without_a_commitment_state_is_accepted():
+    ev = {k: v for k, v in NEW_EVENT.items() if k != "commitment_state"}
+    got = comprehend.parse_integration_response(
+        _extraction([_labelled(events=[ev])]), {1}, {}, {}
+    )
+    assert len(got) == 1, "an omitted commitment_state must not drop the item"
+    assert got[0]["events"][0]["commitment_state"] is None
+
+
+def test_an_omitted_commitment_state_is_counted():
+    """It is now a field that is sometimes absent, and this repo measures those
+    rather than letting them go quiet. Without a count nobody can tell 'a rare
+    edge case' from 'the majority of the corpus'."""
+    tally = comprehend.Tally()
+    ev = {k: v for k, v in NEW_EVENT.items() if k != "commitment_state"}
+    comprehend.parse_integration_response(
+        _extraction([_labelled(events=[ev])]), {1}, {}, {}, tally
+    )
+    assert tally.commitment_omitted == 1
+    assert tally.failures == {}, "an omission is no longer a failure"
+
+
+def test_a_supplied_commitment_state_is_not_counted_as_omitted():
+    """Presence sibling. A counter that incremented on every event would
+    satisfy the test above while measuring nothing."""
+    tally = comprehend.Tally()
+    comprehend.parse_integration_response(
+        _extraction([_labelled(events=[dict(NEW_EVENT)])]), {1}, {}, {}, tally
+    )
+    assert tally.commitment_omitted == 0
+
+
+def test_an_invalid_commitment_state_is_still_rejected():
+    """Relaxing the field must not relax the ENUM. 'Absent' means the event is
+    not a commitment; 'pondering' means the model ignored its own schema, and
+    accepting that would write a value the CHECK constraint rejects anyway."""
+    assert _rejected_because(
+        _labelled(events=[dict(NEW_EVENT, commitment_state="pondering")])
+    ) == {"validate:commitment_unknown": 1}
+
+
+def test_an_explicit_null_commitment_state_is_accepted_as_absent():
+    """A model that writes the field as null is saying the same thing as one
+    that omits it, and dropping the item over the difference would reintroduce
+    the bug for a second spelling of the same answer."""
+    got = comprehend.parse_integration_response(
+        _extraction([_labelled(events=[dict(NEW_EVENT, commitment_state=None)])]),
+        {1},
+        {},
+        {},
+    )
+    assert len(got) == 1
+    assert got[0]["events"][0]["commitment_state"] is None
+
+
+def test_an_event_type_is_still_required():
+    """The two fields are NOT symmetric and must not be relaxed together.
+    `type` was supplied on 100% of events across the measured corpus, so an
+    absent one is a real defect rather than a category that does not apply."""
+    ev = {k: v for k, v in NEW_EVENT.items() if k != "type"}
+    assert _rejected_because(_labelled(events=[ev])) == {
+        "validate:event_type_missing": 1
+    }
+
+
+def test_a_malformed_tool_input_names_what_actually_arrived():
+    """news-brief-bqa: this fired 35 times in one pass, whole batches at a
+    time, and the bare message could not distinguish 'items was absent' from
+    'items was a dict' from 'it arrived under another key'. Same unactionable
+    shape as an HTTPError that stringifies to a status code."""
+    resp = {
+        "stop_reason": "tool_use",
+        "content": [
+            {
+                "type": "tool_use",
+                "name": "emit_extraction",
+                "input": {"extractions": {"item_id": 1}},
+            }
+        ],
+    }
+    with pytest.raises(ValueError) as exc:
+        comprehend.parse_integration_response(resp, {1}, {}, {})
+
+    message = str(exc.value)
+    assert "extractions" in message, "the key that DID arrive must be named"
+    assert "NoneType" in message, "the type that arrived under 'items' must be named"
+
+
+def test_a_wrongly_typed_items_field_is_distinguishable_from_an_absent_one():
+    """The two produce the same exception without the detail, and they are not
+    the same defect: one is a missing key, the other a shape error."""
+    resp = {
+        "stop_reason": "tool_use",
+        "content": [
+            {
+                "type": "tool_use",
+                "name": "emit_extraction",
+                "input": {"items": {"item_id": 1}},
+            }
+        ],
+    }
+    with pytest.raises(ValueError) as exc:
+        comprehend.parse_integration_response(resp, {1}, {}, {})
+    assert "dict" in str(exc.value)
