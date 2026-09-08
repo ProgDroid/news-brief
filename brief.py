@@ -4021,6 +4021,43 @@ def capture_liveness_alert(conn, now) -> None:
         log.exception("capture liveness check failed")
 
 
+COMPREHEND_ALERT_KEY = "comprehend_alert"
+
+
+def comprehend_retirement_alert(conn) -> None:
+    """Say once that comprehension has permanently dropped items, and stay
+    quiet until the number moves.
+
+    Keyed on the counts themselves, so a standing figure the operator has
+    already been told about is silent while a NEW loss speaks. A reset (the
+    documented manual recovery) drops the counts and clears the key, which arms
+    this again for whatever fails next rather than swallowing it as a repeat.
+
+    Fail-safe like every other block in the monitor: a stop-loss that cannot
+    read must not cost the volume alerts or the live exit sweep.
+    """
+    import comprehend
+
+    try:
+        verdict = comprehend.retirement(conn)
+        seen = load_state().get(COMPREHEND_ALERT_KEY)
+        if verdict is None:
+            if seen:
+                config.clear_runtime_state([COMPREHEND_ALERT_KEY])
+            return
+        key, message = verdict
+        if key == seen:
+            return
+        # Sent BEFORE the key is stored, for the reason capture_liveness_alert
+        # gives: the other order loses the alert entirely when Telegram is the
+        # thing that is down, while this order costs at most a repeat an hour
+        # later.
+        telegram_alert(f"\U0001f6d1 {message}")
+        save_state({COMPREHEND_ALERT_KEY: key})
+    except Exception:
+        log.exception("comprehend retirement check failed")
+
+
 def mode_monitor():
     """Hourly cross-asset volume-anomaly alerts + live-position exit sweep/reconcile.
 
@@ -4036,6 +4073,10 @@ def mode_monitor():
     try:
         with db.connect(connect_timeout=JOBS_DB_TIMEOUT_SECONDS) as conn:
             capture_liveness_alert(conn, datetime.now(timezone.utc))
+            # Same connection, same reason: this reports the pipeline's own
+            # silent losses, and everything below it reports what the world
+            # did (news-brief-bqa.15).
+            comprehend_retirement_alert(conn)
     except Exception as e:
         log.warning(f"Capture liveness check could not reach the database: {e}")
     alerts = run_volume_monitor()

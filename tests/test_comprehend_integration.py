@@ -915,3 +915,105 @@ def test_an_event_reachable_through_two_entities_is_still_returned_once(kb):
 
     ids = [r["id"] for r in comprehend.candidate_events(kb, [a, b], comprehend.Tally())]
     assert ids == [shared]
+
+
+# --- Stop-loss: a permanent retirement must reach the operator
+# (news-brief-bqa.15).
+#
+# integrate_attempts >= 3 retires an item PERMANENTLY, and the only signal was
+# gave_up_integration inside an hourly log line nobody reads. On 2026-09-08 it
+# stood at 48 with 59 items one failure away, and the only reason anyone
+# noticed was a hand-read tally.
+#
+# No invented threshold. capture_liveness_alert refuses to alert on quality
+# RATES, in writing, because the rate separating a bad day from a broken feed
+# has not been measured and an operator cannot tell a guessed threshold from a
+# measured one. A retirement is not a rate: it is an irreversible event that
+# can be counted exactly, and so is the population one failure away from it.
+
+
+def _strikes(kb, item_id, n, integrated=False):
+    kb.execute(
+        "UPDATE item_triage SET integrate_attempts = %s, "
+        "  integrated_at = CASE WHEN %s THEN now() ELSE NULL END, "
+        "  integrate_prompt_version = CASE WHEN %s THEN %s ELSE NULL END "
+        "WHERE item_id = %s",
+        (n, integrated, integrated, comprehend.INTEGRATE_PROMPT_VERSION, item_id),
+    )
+
+
+def _alerts(monkeypatch):
+    import brief
+
+    sent = []
+    monkeypatch.setattr(brief, "telegram_alert", lambda t: sent.append(t))
+    return sent
+
+
+def test_a_pipeline_that_has_retired_nothing_reports_nothing(kb):
+    _item(kb)
+    kb.commit()
+    assert comprehend.retirement(kb) is None
+
+
+def test_retired_items_and_items_one_strike_away_are_both_reported(kb):
+    for i in range(4):
+        _strikes(kb, _item(kb, h=f"R{i}"), 3)
+    for i in range(7):
+        _strikes(kb, _item(kb, h=f"A{i}"), 2)
+    kb.commit()
+    key, message = comprehend.retirement(kb)
+    assert key == "retired:4|risk:7"
+    assert "4" in message and "7" in message
+
+
+def test_an_item_that_already_integrated_is_not_one_strike_from_anything(kb):
+    """The at-risk count must test the predicate the integration select really
+    reads. An item that failed twice and then SUCCEEDED is never offered again,
+    so counting it would pad the warning with items in no danger at all."""
+    _strikes(kb, _item(kb, h="OK"), 2, integrated=True)
+    kb.commit()
+    assert comprehend.retirement(kb) is None
+
+
+def test_a_standing_count_alerts_once_but_a_NEW_loss_speaks_again(kb, monkeypatch):
+    """Both halves in one test on purpose. Alerting once is trivially satisfied
+    by never alerting a second time for any reason, which would make the first
+    retirement the only one this ever reports."""
+    import brief
+
+    sent = _alerts(monkeypatch)
+    _strikes(kb, _item(kb, h="R0"), 3)
+    kb.commit()
+    for _ in range(3):
+        brief.comprehend_retirement_alert(kb)
+    assert len(sent) == 1, "an unchanged count must not re-alert every hour"
+
+    _strikes(kb, _item(kb, h="R1"), 3)
+    kb.commit()
+    brief.comprehend_retirement_alert(kb)
+    assert len(sent) == 2, "a new permanent loss is a new episode"
+
+
+def test_resetting_the_counter_lets_the_next_retirement_speak(kb, monkeypatch):
+    """The reset is the documented manual recovery, so the alert state has to
+    survive it in the right direction: silent on the recovery itself, and armed
+    again for whatever fails next."""
+    import brief
+
+    sent = _alerts(monkeypatch)
+    iid = _item(kb, h="R0")
+    _strikes(kb, iid, 3)
+    kb.commit()
+    brief.comprehend_retirement_alert(kb)
+    assert len(sent) == 1
+
+    kb.execute("UPDATE item_triage SET integrate_attempts = 0")
+    kb.commit()
+    brief.comprehend_retirement_alert(kb)
+    assert len(sent) == 1, "a recovery is not itself an alert"
+
+    _strikes(kb, iid, 3)
+    kb.commit()
+    brief.comprehend_retirement_alert(kb)
+    assert len(sent) == 2, "the same count after a reset is a NEW episode"

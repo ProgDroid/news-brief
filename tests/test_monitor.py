@@ -442,3 +442,28 @@ def test_a_capture_check_that_explodes_does_not_kill_the_monitor(monkeypatch):
     monkeypatch.setattr(db, "connect", explode)
     brief.mode_monitor()
     assert len(alerts) == 1
+
+
+def test_mode_monitor_runs_the_comprehend_stop_loss(monkeypatch):
+    """Wiring is its own failure, exactly as for the capture check above:
+    comprehend.retirement can be perfect and still report to nobody if the
+    monitor never calls it (news-brief-bqa.15)."""
+    import db
+
+    monkeypatch.setattr(brief, "run_volume_monitor", lambda: [])
+    monkeypatch.setattr(brief, "capture_liveness_alert", lambda conn, now: None)
+    checked = []
+    monkeypatch.setattr(
+        brief, "comprehend_retirement_alert", lambda conn: checked.append(conn)
+    )
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(db, "connect", lambda **kw: _Conn())
+    brief.mode_monitor()
+    assert len(checked) == 1

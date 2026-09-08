@@ -449,6 +449,54 @@ def run(conn) -> Tally:
     return tally
 
 
+def retirement(conn) -> tuple[str, str] | None:
+    """(episode key, message) when items have been retired or are one failure
+    from it, else None.
+
+    The key names the SITUATION rather than the check, so a caller that
+    remembers the last key it sent speaks once per change instead of once per
+    monitor run -- the difference between one message and one every hour until
+    someone looks (news-brief-bqa.15).
+
+    No rate and no threshold. `capture.liveness` refuses to alert on quality
+    RATES because the rate separating a bad day from a broken feed has not been
+    measured, and a guessed one is indistinguishable to the operator from a
+    measured one. That reasoning holds here and the fix is to report neither:
+    both numbers below are exact counts -- of an irreversible event, and of the
+    population one failure away from it.
+
+    The at-risk half is the actionable one. `gave_up_integration` can only ever
+    report a loss that has already happened; the manual reset the operator
+    would run works while the items are still alive.
+    """
+    # Deliberately the same shape as Tally.gave_up_integration: an alert that
+    # counted a different population than the log line would make the two
+    # disagree with no way to tell which was wrong.
+    retired = conn.execute(
+        "SELECT count(*) FROM item_triage WHERE integrate_attempts >= 3"
+    ).fetchone()[0]
+    # The predicate the integration select ACTUALLY reads, plus the last
+    # strike. A guard testing a predicate its consumer does not read counts
+    # items in no danger: one that failed twice and then SUCCEEDED is never
+    # offered again, so it can never take a third strike.
+    at_risk = conn.execute(
+        "SELECT count(*) FROM item_triage "
+        "WHERE triage_prompt_version = %s AND verdict = 'material' "
+        "  AND integrate_attempts = 2 "
+        "  AND (integrated_at IS NULL OR integrate_prompt_version < %s)",
+        (TRIAGE_PROMPT_VERSION, INTEGRATE_PROMPT_VERSION),
+    ).fetchone()[0]
+    if not retired and not at_risk:
+        return None
+    return (
+        f"retired:{retired}|risk:{at_risk}",
+        f"Comprehension has permanently retired {retired} item(s) after three "
+        f"failed integration attempts, and {at_risk} more are one failure "
+        f"away. Recover the survivors with: UPDATE item_triage SET "
+        f"integrate_attempts = 0 WHERE integrate_attempts > 0;",
+    )
+
+
 def pending_triage(conn, version: int, limit: int) -> list[dict]:
     """Items with no verdict at this version, or a retryable failure.
 
