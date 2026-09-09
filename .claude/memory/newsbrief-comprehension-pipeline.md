@@ -281,3 +281,37 @@ validator" is wrong when the schema is the thing that lied.
   than superseding (1 → 2, measured), inflating exactly the corroboration figure `bqa.19` is
   waiting to read. Items that FAILED have `integrated_at` NULL and pick up a new schema with no
   bump at all, so the fix reaches everything actually broken. Deferred as `news-brief-ymk`.
+
+## 2026-09-09 — the floor failure is NOT cumulative dilution (bqa.19)
+
+**Windowed, exposure-capped cohort measurement BUILT and DEPLOYED** (`267c97a`, hardened in
+`b0a09c8`): `scripts/score_comprehension.py --cohorts --cutover <ISO> [--horizon-hours 6 12 24]`.
+Read-only, renders **no verdict and no failing exit code**, so the one-shot gate stays unspent
+for `bqa.11`. It kills two confounds together — the window scopes `events.created_at`, and the
+exposure horizon scores each event over a fixed slice of **its own life**, because corroboration
+accrues with age and a young cohort otherwise loses to a mature one however well it ranks.
+
+**FIRST LIVE RUN'S COMPARISON WAS VOID — the anchor was wrong.** See
+[[a-ledger-dates-what-it-records]]. `--cutover` is now REQUIRED; do not let anything default it.
+
+**But the individual windows stand, and they settle something.** Four windows over ~40h of
+event creation on 09-07/08 read **5.7 / 6.6 / 6.8 / 8.3%** — every one below the 10% floor.
+**So the 6.6% was NOT an artifact of averaging over a stale corpus**; fresh 7h and 13h windows
+read the same. That named cause is retired. Neither delta was distinguishable from zero
+(p=0.26, p=0.17) and the rows were nested, so nothing there speaks to the ranking either way.
+Event creation is bursty (192/140/174/46 per hour across four consecutive ~6-7h blocks), so
+±1pp between windows means nothing.
+
+**NEXT, in order:**
+1. `--cutover 2026-09-09T06:09:41Z` (the container's `.State.StartedAt`, known exactly), once
+   ~13h have elapsed. Accepts one risk: if the ranking has been live since 09-08 afternoon, the
+   control is also new-ranking and the comparison is dead — and the run cannot tell you.
+2. **`bqa.18` is now the real question**, and its probe ALREADY SHIPS in the image
+   (`scripts/probe_corroboration.py`) — it is a RUN, not a build. The ranking change targeted
+   outcome **B** (never offered). If corroboration stays ~6% under a clean anchor, the cause is
+   **A** (model declined to match) or **C** (outlets do not cover the same events). **C
+   invalidates §8.2's premise rather than its implementation.** Yesterday's probe already put
+   the DETECTED ceiling at 9.0% — below the floor — with ~30% only under an extrapolated 12%
+   detector recall. Which holds is the open question of the epic.
+
+Full write-up: `docs/2026-09-09-corroboration-cohort-measurement.md`.
