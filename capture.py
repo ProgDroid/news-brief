@@ -255,7 +255,9 @@ def rolled_off(conn, source_name: str) -> list[str]:
 
 
 DEADLINE_SECONDS = 600
-HOST_GAP_SECONDS = 5
+# HOST_GAP_SECONDS moved to common.HostSpacer (news-brief-bzo) — the brief's
+# collect-time fetch needs the same guard, and capture imports brief, so the
+# primitive cannot live here.
 
 
 def capture_sources() -> list[dict]:
@@ -287,34 +289,7 @@ def capture_sources() -> list[dict]:
     ]
 
 
-def _host(feed: dict) -> str:
-    return urlsplit(feed["url"]).netloc
-
-
-def order_by_host(feeds: list[dict]) -> list[dict]:
-    """Interleave so no two consecutive fetches hit one host.
-
-    Round-robins across per-host queues, longest queue first, which spreads the
-    heaviest host as widely as the list allows.
-    """
-    queues: dict[str, list[dict]] = {}
-    for feed in feeds:
-        queues.setdefault(_host(feed), []).append(feed)
-    ordered: list[dict] = []
-    while any(queues.values()):
-        candidates = sorted(
-            (h for h, q in queues.items() if q),
-            key=lambda h: (-len(queues[h]), h),
-        )
-        placed = next(
-            (h for h in candidates if not ordered or _host(ordered[-1]) != h),
-            candidates[0],
-        )
-        ordered.append(queues[placed].pop(0))
-    return ordered
-
-
-def run(conn) -> Tally:
+def run(conn, spacer=None) -> Tally:
     """One full pass. Bounded by DEADLINE_SECONDS so it cannot outlive its own
     fire time and trip the supervisor's overlap alert.
 
@@ -335,10 +310,10 @@ def run(conn) -> Tally:
         conn.commit()
         return tally
 
-    feeds = order_by_host(capture_sources())
+    feeds = common.order_by_host(capture_sources())
     tally.feeds_total = len(feeds)
     deadline = time.monotonic() + DEADLINE_SECONDS
-    last_fetch_at: dict[str, float] = {}
+    spacer = spacer or common.HostSpacer()
 
     for feed in feeds:
         if time.monotonic() >= deadline:
@@ -347,11 +322,7 @@ def run(conn) -> Tally:
             tally.feeds_failed += 1
             tally.failures["deadline"] = tally.failures.get("deadline", 0) + 1
             continue
-        host = _host(feed)
-        since = time.monotonic() - last_fetch_at.get(host, 0.0)
-        if host in last_fetch_at and since < HOST_GAP_SECONDS:
-            time.sleep(HOST_GAP_SECONDS - since)
-        last_fetch_at[host] = time.monotonic()
+        spacer.wait(feed)
 
         got = brief.fetch_feed_entries(feed)
         if got.failure:

@@ -352,10 +352,13 @@ def test_run_end_to_end_succeeds_one_feed_and_fails_the_other(store, monkeypatch
 
     monkeypatch.setattr(common, "CAPTURE_ENABLED", True)
     monkeypatch.setattr(capture, "capture_sources", lambda: [ok_feed, bad_feed])
-    monkeypatch.setattr(capture, "HOST_GAP_SECONDS", 0)
     monkeypatch.setattr(brief, "fetch_feed_entries", fake_fetch)
 
-    tally = capture.run(store)
+    # The two feeds sit on different hosts so nothing would space anyway, but an
+    # injected spacer says so explicitly. This replaced a `HOST_GAP_SECONDS = 0`
+    # patch that host spacing moving to common.py would have left pointing at a
+    # constant nothing reads — a dead patch that looks like a live one.
+    tally = capture.run(store, spacer=common.HostSpacer(0))
 
     assert tally.feeds_ok == 1
     assert tally.feeds_failed == 1

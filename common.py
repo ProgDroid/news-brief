@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
+from urllib.parse import urlsplit
 
 # ── Config ────────────────────────────────────────────────────────────────────
 # Required at runtime — validated in __main__ before dispatch. Read with .get()
@@ -720,3 +721,79 @@ def split_html_message(text: str, max_len: int = TELEGRAM_MAX_LEN) -> list[str]:
     if current.strip():
         chunks.append(current.strip())
     return chunks
+
+
+# ── Host spacing ──────────────────────────────────────────────────────────────
+# Lives here, not in capture.py, because both capture's poll loop and the
+# brief's collect-time fetch need it and `capture` imports `brief` at module
+# level -- so `brief` cannot import `capture` without inverting a dependency
+# that has a direction. Both already import `common`.
+
+# The self-hosted Nitter rate-limits requests that arrive close together. This
+# is the guard that actually protects a host; `order_by_host` only reduces how
+# often it has to fire. Sized for capture's 48-passes-a-day poller, which is why
+# `HostSpacer` takes it as a keyword rather than reading it directly.
+HOST_GAP_SECONDS = 5
+
+
+def feed_host(feed: dict) -> str:
+    return urlsplit(feed["url"]).netloc
+
+
+def order_by_host(feeds: list[dict]) -> list[dict]:
+    """Interleave so no two consecutive fetches hit one host.
+
+    Round-robins across per-host queues, longest queue first, which spreads the
+    heaviest host as widely as the list allows.
+
+    Interleaving is only possible when the list is host-diverse. A set dominated
+    by one host cannot be spread -- `HostSpacer` is what protects that case.
+    """
+    queues: dict[str, list[dict]] = {}
+    for feed in feeds:
+        queues.setdefault(feed_host(feed), []).append(feed)
+    ordered: list[dict] = []
+    while any(queues.values()):
+        candidates = sorted(
+            (h for h, q in queues.items() if q),
+            key=lambda h: (-len(queues[h]), h),
+        )
+        placed = next(
+            (h for h in candidates if not ordered or feed_host(ordered[-1]) != h),
+            candidates[0],
+        )
+        ordered.append(queues[placed].pop(0))
+    return ordered
+
+
+class HostSpacer:
+    """Keeps consecutive fetches of one host `gap_seconds` apart.
+
+    An object with an explicit `wait`, deliberately not a generator that sleeps
+    as it yields: `capture.run` checks its deadline BEFORE fetching, and a
+    generator would burn the gap on feeds it is about to skip. The caller decides
+    when it is actually going to make a request.
+
+    `gap_seconds` is a parameter rather than a read of HOST_GAP_SECONDS because
+    that value was chosen for capture's 48-passes-a-day poller; a second caller
+    must be able to re-derive it rather than inherit a justification written for
+    someone else. The clock and sleeper are injected so spacing can be asserted
+    in seconds instead of by making the suite sleep.
+    """
+
+    def __init__(
+        self, gap_seconds: float = HOST_GAP_SECONDS, *, clock=None, sleeper=None
+    ):
+        self._gap = gap_seconds
+        self._clock = clock or time.monotonic
+        self._sleeper = sleeper or time.sleep
+        self._last: dict[str, float] = {}
+
+    def wait(self, feed: dict) -> None:
+        host = feed_host(feed)
+        now = self._clock()
+        last = self._last.get(host)
+        if last is not None and (remaining := self._gap - (now - last)) > 0:
+            self._sleeper(remaining)
+            now += remaining
+        self._last[host] = now

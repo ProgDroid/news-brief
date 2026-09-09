@@ -234,6 +234,24 @@ RSS_FEEDS = [
         "kind": "analyst",
         "outlet": "Jacob Shapiro",
     },
+    {
+        "name": "Chase Taylor (@pineconemacro)",
+        # Explicit outlet: the feed is named for the handle, the publisher is the
+        # person. Declaration order no longer decides fetch order — the brief and
+        # capture both interleave by host — so this sits with its peers.
+        "url": f"{NITTER_BASE_URL}/pineconemacro/rss",
+        "category": "macro",
+        "kind": "analyst",
+        "outlet": "Chase Taylor",
+    },
+    {
+        "name": "@LordPos3idon",
+        # No explicit outlet on purpose: for a pseudonymous account the handle IS
+        # the publisher identity, and `outlet_for` already falls back to the name.
+        "url": f"{NITTER_BASE_URL}/LordPos3idon/rss",
+        "category": "geo",
+        "kind": "analyst",
+    },
     # ── Region-native / primary sources (added 2026-06-14) ────────────────────
     {
         "name": "Al Jazeera",
@@ -534,8 +552,11 @@ def outlet_for(feed: dict) -> str:
 
     Most feed names ARE publisher names — including the Google News proxies,
     which are named for the publisher they proxy (`Kyiv Independent`, `NHK
-    World`) rather than for Google. Seven are not, and those carry an explicit
+    World`) rather than for Google. Those that are not carry an explicit
     `outlet`.
+
+    No count here on purpose: this docstring said "seven" while the code had
+    eight, and nothing breaks when prose is wrong. The rule is the invariant.
     """
     return feed.get("outlet") or feed["name"]
 
@@ -2013,6 +2034,33 @@ def fetch_rss(feed: dict, max_items: int = 25) -> str:
     return "\n".join(lines)
 
 
+def fetch_feed_blocks(sources: list[dict], spacer=None) -> list[str]:
+    """Fetch every source, host-spaced, and return the blocks in DECLARATION order.
+
+    The two orders are deliberately different. Requests go out interleaved by
+    host and spaced by `HostSpacer`, because the documented Nitter 429 was an
+    adjacency failure and this list now carries four feeds on that host. But the
+    blocks come back in the order the sources were declared, because the joined
+    result is the LLM prompt and the input to `build_source_index` /
+    `build_source_evidence` — reordering it would move the brief's content and
+    its stored source index for reasons unrelated to the news. This function may
+    change only when requests leave the box.
+
+    Position is keyed on `id`, not on `name`: `submit` builds its list as
+    `RSS_FEEDS + feed_temp` directly rather than through `all_sources()`, so it
+    does not get that helper's name-collision overwrite and two sources really
+    can share a name.
+    """
+    spacer = spacer or common.HostSpacer()
+    position = {id(source): n for n, source in enumerate(sources)}
+    fetched: list[tuple[int, str]] = []
+    for source in common.order_by_host(sources):
+        spacer.wait(source)
+        if block := fetch_rss(source):
+            fetched.append((position[id(source)], block))
+    return [block for _, block in sorted(fetched)]
+
+
 def fetch_web_source(source: dict) -> str:
     try:
         resp = requests.get(
@@ -3204,7 +3252,7 @@ def mode_submit():
             f"Temp sources: {len(temp_sources)} ({', '.join(s['name'] for s in temp_sources)})"
         )
     feed_temp, page_temp = _split_temp_sources(temp_sources)
-    feed_blocks = [c for f in RSS_FEEDS + feed_temp if (c := fetch_rss(f))]
+    feed_blocks = fetch_feed_blocks(RSS_FEEDS + feed_temp)
     # Jacob Shapiro's "The World Isn't Ending" column has no RSS feed; scrape it
     # (fail-safe — a break just yields no block, never stalls the brief).
     if twie := fetch_mauldin_twie():

@@ -235,3 +235,72 @@ def test_a_relocated_knob_keeps_its_operator_facing_name(name, key):
     per-call-site model knobs are new names that must not collide with
     `NEWSBRIEF_MODEL`."""
     assert common.KNOBS[name].key(name) == key
+
+
+# --- Host spacing, relocated from capture.py (news-brief-bzo).
+#
+# capture imports brief at module level, so brief cannot import capture; both
+# already import common. The primitive lives here so the brief's collect-time
+# fetch and capture's poll loop share one implementation.
+
+
+def test_order_by_host_interleaves_same_host_feeds():
+    """The documented Nitter 429 was an ADJACENCY bug, so the ordering must put
+    something between two feeds that share a host."""
+    feeds = [
+        {"name": "A", "url": "https://nitter.example/a/rss"},
+        {"name": "B", "url": "https://nitter.example/b/rss"},
+        {"name": "C", "url": "https://other.example/c"},
+    ]
+    ordered = common.order_by_host(feeds)
+    hosts = [common.feed_host(f) for f in ordered]
+    assert len(ordered) == 3
+    assert all(a != b for a, b in zip(hosts, hosts[1:])), hosts
+
+
+class FakeClock:
+    """A monotonic clock the test drives, so spacing is asserted in seconds
+    rather than by watching the suite actually sleep."""
+
+    def __init__(self, t=0.0):
+        self.t = t
+
+    def __call__(self):
+        return self.t
+
+
+def _spacer(gap=5):
+    slept = []
+    clock = FakeClock()
+    spacer = common.HostSpacer(gap, clock=clock, sleeper=slept.append)
+    return spacer, slept, clock
+
+
+def test_host_spacer_sleeps_the_full_gap_between_two_fetches_of_one_host():
+    spacer, slept, _ = _spacer(gap=5)
+    spacer.wait({"url": "https://h.example/a"})
+    spacer.wait({"url": "https://h.example/b"})
+    assert slept == [5]
+
+
+def test_host_spacer_does_not_sleep_between_different_hosts():
+    spacer, slept, _ = _spacer(gap=5)
+    spacer.wait({"url": "https://one.example/a"})
+    spacer.wait({"url": "https://two.example/b"})
+    assert slept == []
+
+
+def test_host_spacer_does_not_sleep_once_the_gap_has_already_elapsed():
+    spacer, slept, clock = _spacer(gap=5)
+    spacer.wait({"url": "https://h.example/a"})
+    clock.t = 5.0
+    spacer.wait({"url": "https://h.example/b"})
+    assert slept == []
+
+
+def test_host_spacer_sleeps_only_the_remainder_when_some_time_has_passed():
+    spacer, slept, clock = _spacer(gap=5)
+    spacer.wait({"url": "https://h.example/a"})
+    clock.t = 3.0
+    spacer.wait({"url": "https://h.example/b"})
+    assert slept == [2.0]

@@ -259,26 +259,17 @@ def test_capture_polls_feeds_and_never_page_sources(monkeypatch):
     assert names == ["Baked", "UserFeed"]
 
 
-def test_no_two_consecutive_fetches_share_a_host():
-    """The documented Nitter 429 is an ADJACENCY bug, not a volume one: the two
-    X feeds sit next to each other in RSS_FEEDS, so one 429'd on most runs. At
-    48 passes a day that collision would recur 48 times a day."""
-    feeds = [
-        {"name": "A", "url": "https://nitter.example/a/rss", "category": "geo"},
-        {"name": "B", "url": "https://nitter.example/b/rss", "category": "geo"},
-        {"name": "C", "url": "https://other.example/c", "category": "geo"},
-    ]
-    ordered = capture.order_by_host(feeds)
-    hosts = [f["url"].split("/")[2] for f in ordered]
-    assert len(ordered) == 3
-    assert all(a != b for a, b in zip(hosts, hosts[1:])), hosts
-
-
 def test_the_real_feed_list_never_polls_one_host_back_to_back():
-    """Written against the real RSS_FEEDS as well as a synthetic list, because
-    this is the regression test for a production failure."""
-    ordered = capture.order_by_host(list(brief.RSS_FEEDS))
-    hosts = [f["url"].split("/")[2] for f in ordered]
+    """The regression test for a production failure: the documented Nitter 429
+    is an ADJACENCY bug, not a volume one — the X feeds sit next to each other in
+    RSS_FEEDS, so one 429'd on most runs, 48 chances a day.
+
+    Kept here against the REAL list, which is what capture orders. The synthetic
+    version of this moved to tests/test_common.py with the function itself
+    (news-brief-bzo); this one stays because it is the only test that fails when
+    a newly added feed makes the real list unspreadable."""
+    ordered = common.order_by_host(list(brief.RSS_FEEDS))
+    hosts = [common.feed_host(f) for f in ordered]
     assert len(ordered) == len(brief.RSS_FEEDS)
     assert all(a != b for a, b in zip(hosts, hosts[1:])), hosts
 
@@ -450,3 +441,47 @@ def _site_term(url: str):
     """The `site:` term, URL-encoded as it appears in the query."""
     found = re.search(r"site%3A([^&+]+)", url)
     return found.group(1) if found else None
+
+
+class _CommitOnlyConn:
+    """`run` commits per feed, so a bare object() raises AttributeError before
+    the logic under test is reached."""
+
+    def commit(self):
+        return None
+
+
+def test_a_pass_past_its_deadline_never_spaces_the_feeds_it_skips(monkeypatch):
+    """Why `HostSpacer` is an object with an explicit `wait` and not a generator
+    that sleeps as it yields (news-brief-bzo).
+
+    `run` checks its deadline BEFORE fetching. A generator would sleep on the way
+    to handing over each feed, so a pass already out of time would burn the host
+    gap on every feed it was about to record as `deadline`.
+
+    All five feeds share ONE host on purpose: with distinct hosts the spacer
+    would never sleep anyway and this test would pass against the bug.
+    """
+    feeds = [
+        {"name": f"F{i}", "url": "https://one.example/f", "category": "geo"}
+        for i in range(5)
+    ]
+    monkeypatch.setattr(capture, "capture_sources", lambda: feeds)
+    monkeypatch.setattr(capture, "DEADLINE_SECONDS", 0)
+    recorded = []
+    monkeypatch.setattr(
+        capture,
+        "record_poll",
+        lambda conn, run, name, failure, seen: recorded.append((name, failure)),
+    )
+    monkeypatch.setattr(capture, "start_run", lambda conn, enabled: 1)
+    monkeypatch.setattr(capture, "finish_run", lambda conn, run, tally: None)
+    monkeypatch.setattr(common, "CAPTURE_ENABLED", True)
+
+    waited = []
+    spacer = common.HostSpacer(5, clock=lambda: 0.0, sleeper=waited.append)
+
+    capture.run(conn=_CommitOnlyConn(), spacer=spacer)
+
+    assert len(recorded) == 5, "every feed still gets a poll row"
+    assert waited == [], "a pass past its deadline slept for feeds it never fetched"
