@@ -385,3 +385,26 @@ def test_sweep_shows_a_gap_only_one_horizon_can_see(kb):
     )
     assert rows[6]["post"] == (0.0, 1, 0)
     assert rows[24]["post"] == (1.0, 1, 1)
+
+
+# 19. The migration ledger dates MIGRATIONS, not commits. A change that ships
+# without one cannot be dated from it at all, so the anchor is offered as a
+# hint with the check spelled out -- and nothing is measured until it is
+# answered. Guessing it wrong once already produced a confident wrong table.
+def test_cohorts_mode_refuses_to_guess_the_cutover(kb, capsys):
+    code = sc.main(["--cohorts"])
+    out = capsys.readouterr().out
+    assert code == 2
+    assert "OBSERVATION" not in out
+    assert "committed before" in out
+    assert db._available("up")[-1][0] in out
+
+
+# 20. A longer horizon yields a SHORTER span, strictly inside the shorter
+# horizon's. The rows are nested samples of the same events, so agreement
+# between them is close to one observation and must not read as two.
+def test_sweep_names_the_nesting_between_horizons(kb, capsys):
+    sc.print_sweep(kb, cutover=BASE - timedelta(hours=36), horizons=[6, 12], now=BASE)
+    out = capsys.readouterr().out
+    assert "NESTED, not independent" in out
+    assert "12h" in out and "6h" in out

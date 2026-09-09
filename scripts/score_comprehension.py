@@ -287,18 +287,17 @@ def corroboration_sweep(conn, cutover, horizons, now=None):
     ]
 
 
-def print_sweep(conn, cutover, horizons, now=None, anchor_version=None):
+def print_sweep(conn, cutover, horizons, now=None):
     """Print the sweep. Deliberately renders NO verdict and no failing exit
     code: the spec-8 gate is a one-shot instrument that `bqa.11` is still
     holding, and a threshold cannot honestly be re-run after looking.
     """
     rows = corroboration_sweep(conn, cutover, horizons, now=now)
-    origin = f" (migration {anchor_version} applied_at)" if anchor_version else ""
     post_head = "post-cutover (entity rank)"
     pre_head = "pre-cutover control (recency)"
     print("=== OBSERVATION: corroboration_by_outlet by cohort (bqa.19) ===")
     print("Not the pre-registered gate, which stays unspent for bqa.11.")
-    print(f"cutover: {cutover:%Y-%m-%d %H:%M %Z}{origin}")
+    print(f"cutover: {cutover:%Y-%m-%d %H:%M %Z}")
     print(f"reference only: spec 8.2's floor is {CORROBORATION_FLOOR:.0%}")
     print()
     print(f"{'horizon':>8}  {post_head:>29}  {pre_head:>29}  {'delta':>8}")
@@ -328,6 +327,14 @@ def print_sweep(conn, cutover, horizons, now=None, anchor_version=None):
             f"spans differ per horizon; at {rows[0][0]:g}h each cohort "
             f"covers {(end - start).total_seconds() / 3600:.1f}h"
         )
+    if len(rows) > 1:
+        shortest = min(h for h, _ in rows)
+        longest = max(h for h, _ in rows)
+        print()
+        print("rows are NESTED, not independent: a longer horizon ends the")
+        print(f"window earlier, so the {longest:g}h row's events are a SUBSET of")
+        print(f"the {shortest:g}h row's. Agreement across them is close to one")
+        print("observation, not several.")
     print()
     print("Every event is scored over an identical slice of its own life and")
     print("the control spans exactly as long as the post-cutover cohort, so")
@@ -497,6 +504,36 @@ def _parse_cutover(text):
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
+def _explain_missing_cutover(conn) -> int:
+    """--cohorts without --cutover. Measure nothing, and say what to answer.
+
+    The first live run defaulted to the newest migration's applied_at and
+    produced a table whose "post-cutover" column was not the change being
+    measured: `schema_migrations` dates MIGRATIONS, and the ranking fix
+    shipped without one, so the newest migration had deployed three hours
+    BEFORE that fix was even committed. The ledger cannot date an arbitrary
+    commit, so it is offered as a hint with its validity condition attached
+    rather than silently used as an answer.
+    """
+    print("--cohorts needs --cutover: the instant the code you are measuring")
+    print("began serving. schema_migrations dates MIGRATIONS, not commits, so")
+    print("it answers this only for a change that shipped alongside one.")
+    anchor = deploy_anchor(conn)
+    if anchor is None:
+        print("\nThe migration ledger is empty, so there is no hint to offer.")
+    else:
+        version, applied = anchor
+        stamp = f"{applied:%Y-%m-%d %H:%M %Z}"
+        print(f"\nHint: migration {version} was applied {stamp}.")
+        print("Use it as the cutover ONLY if your change was committed before")
+        print(f"{stamp}. If it was committed after, it shipped in a LATER image")
+        print("and this timestamp predates the thing you want to measure.")
+        print("`git log --format='%h %cI %s' <commit>` settles it.")
+    print("\nThen re-run with: --cutover YYYY-MM-DDTHH:MM:SSZ")
+    print("A naive timestamp is read as UTC.")
+    return 2
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         description="Score the comprehension pipeline against spec section 8."
@@ -531,19 +568,9 @@ def main(argv=None) -> int:
 
     with db.connect() as conn:
         if args.cohorts:
-            version = None
-            if args.cutover:
-                cutover = _parse_cutover(args.cutover)
-            else:
-                anchor = deploy_anchor(conn)
-                if anchor is None:
-                    print(
-                        "No migration is recorded, so there is no anchor to "
-                        "read. Pass --cutover explicitly."
-                    )
-                    return 2
-                version, cutover = anchor
-            print_sweep(conn, cutover, args.horizon_hours, anchor_version=version)
+            if not args.cutover:
+                return _explain_missing_cutover(conn)
+            print_sweep(conn, _parse_cutover(args.cutover), args.horizon_hours)
             return 0
 
         failures = run_gate(conn)
