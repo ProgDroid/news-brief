@@ -7,10 +7,13 @@ and exiting inline, so tests/test_score_comprehension.py can call them
 directly against a fixture connection. `main()` is the only thing that
 prints and decides the exit code.
 
-Run:  py scripts/score_comprehension.py
+Run:  py scripts/score_comprehension.py              # the gate, one-shot
+      py scripts/score_comprehension.py --cohorts   # observation only
 """
 
+import argparse
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -25,6 +28,18 @@ MIN_DISTINCT_AT_10PCT = 2
 MAX_SINGLE_VALUE_SHARE = 0.90
 CORROBORATION_FLOOR = 0.10
 CORROBORATION_CEILING = 0.60
+
+# NOT pre-registered, and deliberately declared below the block that is: the
+# exposure horizon is a free parameter of the cohort OBSERVATION, not a
+# threshold anything passes or fails. It exists to hold event age constant
+# between two cohorts of different ages; ANY value does that, which is
+# exactly why no single one can be defended. The default is therefore a
+# SWEEP, not a number: three horizons spanning half a day either side of the
+# hourly cadence, so the reader sees the parameter move instead of trusting
+# a constant somebody picked. 6 is short enough to survive a one-day
+# post-cutover window; 24 is long enough that a next-morning follow-up from
+# a second outlet still lands inside it.
+DEFAULT_EXPOSURE_HOURS = (6.0, 12.0, 24.0)
 
 ENUMS = [
     ("events", "type"),
@@ -137,18 +152,189 @@ def by_depth_tier(conn, table, column):
     ).fetchall()
 
 
-def corroboration_by_outlet(conn):
+def corroboration_by_outlet(conn, since=None, until=None, horizon_hours=None):
     """First of spec 8.2's two directions: what fraction of events are
-    reported by 2+ distinct outlets. Returns (rate, total, multi)."""
-    row = conn.execute(
+    reported by 2+ distinct outlets. Returns (rate, total, multi).
+
+    With no arguments this is the whole-KB figure the gate reads, unchanged.
+
+    `since`/`until` scope the DENOMINATOR by `events.created_at`, half-open
+    [since, until). The candidate-ranking cutover (51c850c) left the KB
+    holding two populations, and the design spec makes the missing window a
+    requirement: a run spanning it produces a number attributable to neither.
+
+    `horizon_hours` caps each event's EXPOSURE -- only assertions written
+    within that long of the event's own creation count toward its outlet
+    count. Corroboration accrues as a second outlet's item arrives, so
+    without this a young post-cutover cohort is compared against a mature
+    pre-cutover one and the ranking change is charged for its own recency.
+    An event's creating assertion shares its transaction, hence its `now()`,
+    so every event survives the cap carrying at least one outlet.
+    """
+    where, params = [], []
+    if since is not None:
+        where.append("e.created_at >= %s")
+        params.append(since)
+    if until is not None:
+        where.append("e.created_at < %s")
+        params.append(until)
+    if horizon_hours is not None:
+        where.append("a.created_at <= e.created_at + %s")
+        params.append(timedelta(hours=horizon_hours))
+    clause = ("WHERE " + " AND ".join(where)) if where else ""
+    total, multi = conn.execute(
         "WITH per_event AS ("
-        "  SELECT a.event_id, count(DISTINCT i.outlet_id) AS outlets "
-        "  FROM assertions a JOIN items i ON i.id = a.item_id "
-        "  GROUP BY a.event_id) "
-        "SELECT count(*), count(*) FILTER (WHERE outlets >= 2) FROM per_event"
+        "  SELECT e.id, count(DISTINCT i.outlet_id) AS outlets "
+        "  FROM events e "
+        "  JOIN assertions a ON a.event_id = e.id "
+        "  JOIN items i ON i.id = a.item_id "
+        f"  {clause} "
+        "  GROUP BY e.id) "
+        "SELECT count(*), count(*) FILTER (WHERE outlets >= 2) FROM per_event",
+        params or None,
     ).fetchone()
-    total, multi = row
     return (multi / total if total else 0.0), total, multi
+
+
+def deploy_anchor(conn, version=None):
+    """The cutover timestamp, read from the ledger the SYSTEM wrote.
+
+    The ranking design spec required the cutover to be recorded on the bead
+    when it deployed. It was not, and a remembered time is exactly the recall
+    question that goes unanswered. Migrations run at container boot, so
+    `schema_migrations.applied_at` for the newest version is the moment that
+    image began serving -- an answer to recognise rather than reconstruct.
+
+    VALID ONLY IF that migration shipped in the same image as the code change
+    being measured. Confirmed for 0011 vs 51c850c: one host pull, taken after
+    both. Returns (version, applied_at), or None if the ledger is empty.
+    """
+    if version is None:
+        row = conn.execute(
+            "SELECT version, applied_at FROM schema_migrations "
+            "ORDER BY version DESC LIMIT 1"
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT version, applied_at FROM schema_migrations WHERE version = %s",
+            (version,),
+        ).fetchone()
+    return (row[0], row[1]) if row else None
+
+
+def corroboration_cohorts(conn, cutover, horizon_hours, now=None):
+    """Post-cutover corroboration against an equal-length, equal-exposure
+    pre-cutover control.
+
+    Two confounds have to die together. The window kills the cutover blend;
+    the horizon kills event age. What is left compares two rankings over
+    spans of equal length, each event scored over an identical slice of its
+    own life.
+
+    `now` defaults to the DATABASE clock, not the client's -- every timestamp
+    it is compared against was written by `now()` on that server.
+    """
+    if now is None:
+        now = conn.execute("SELECT now()").fetchone()[0]
+    post_end = now - timedelta(hours=horizon_hours)
+    if post_end <= cutover:
+        elapsed = (now - cutover).total_seconds() / 3600
+        return {
+            "measurable": False,
+            "reason": (
+                f"{elapsed:.1f}h since the cutover: the {horizon_hours:g}h "
+                f"exposure horizon has not elapsed for a single post-cutover "
+                f"event, so there is nothing to measure -- which is not a "
+                f"rate of 0.0"
+            ),
+            "horizon_hours": horizon_hours,
+            "now": now,
+            "post": None,
+            "pre": None,
+        }
+    span = post_end - cutover
+    pre_start = cutover - span
+    return {
+        "measurable": True,
+        "reason": "",
+        "horizon_hours": horizon_hours,
+        "now": now,
+        "post_span": (cutover, post_end),
+        "pre_span": (pre_start, cutover),
+        "post": corroboration_by_outlet(
+            conn, since=cutover, until=post_end, horizon_hours=horizon_hours
+        ),
+        "pre": corroboration_by_outlet(
+            conn, since=pre_start, until=cutover, horizon_hours=horizon_hours
+        ),
+    }
+
+
+def corroboration_sweep(conn, cutover, horizons, now=None):
+    """One cohort comparison per horizon, all sharing a single pinned `now`.
+
+    The horizon is a free parameter, so any single value states something
+    about the horizon as much as about the ranking. Varying it is the only
+    cheap way to tell those apart: a pre/post gap that survives 6h, 12h and
+    24h is a property of the ranking; one that appears at exactly one value
+    is a property of the constant somebody chose.
+    """
+    if now is None:
+        now = conn.execute("SELECT now()").fetchone()[0]
+    return [
+        (horizon, corroboration_cohorts(conn, cutover, horizon, now=now))
+        for horizon in horizons
+    ]
+
+
+def print_sweep(conn, cutover, horizons, now=None, anchor_version=None):
+    """Print the sweep. Deliberately renders NO verdict and no failing exit
+    code: the spec-8 gate is a one-shot instrument that `bqa.11` is still
+    holding, and a threshold cannot honestly be re-run after looking.
+    """
+    rows = corroboration_sweep(conn, cutover, horizons, now=now)
+    origin = f" (migration {anchor_version} applied_at)" if anchor_version else ""
+    post_head = "post-cutover (entity rank)"
+    pre_head = "pre-cutover control (recency)"
+    print("=== OBSERVATION: corroboration_by_outlet by cohort (bqa.19) ===")
+    print("Not the pre-registered gate, which stays unspent for bqa.11.")
+    print(f"cutover: {cutover:%Y-%m-%d %H:%M %Z}{origin}")
+    print(f"reference only: spec 8.2's floor is {CORROBORATION_FLOOR:.0%}")
+    print()
+    print(f"{'horizon':>8}  {post_head:>29}  {pre_head:>29}  {'delta':>8}")
+    for horizon, report in rows:
+        if not report["measurable"]:
+            print(f"{horizon:>7g}h  not measurable: {report['reason']}")
+            continue
+        cells = []
+        for key in ("post", "pre"):
+            rate, total, multi = report[key]
+            cells.append(
+                f"n={total} multi={multi} {rate:.1%}" if total else "no events"
+            )
+        post_rate, post_total, _ = report["post"]
+        pre_rate, pre_total, _ = report["pre"]
+        delta = (
+            f"{(post_rate - pre_rate) * 100:+.1f}pp"
+            if post_total and pre_total
+            else "--"
+        )
+        print(f"{horizon:>7g}h  {cells[0]:>29}  {cells[1]:>29}  {delta:>8}")
+    first = rows[0][1] if rows else None
+    if first is not None and first["measurable"]:
+        start, end = first["post_span"]
+        print()
+        print(
+            f"spans differ per horizon; at {rows[0][0]:g}h each cohort "
+            f"covers {(end - start).total_seconds() / 3600:.1f}h"
+        )
+    print()
+    print("Every event is scored over an identical slice of its own life and")
+    print("the control spans exactly as long as the post-cutover cohort, so")
+    print("neither event age nor window length is doing the work here. A gap")
+    print("that does not hold across horizons belongs to the horizon rather")
+    print("than to the ranking.")
+    return rows
 
 
 def score_match_rate_corroboration(conn):
@@ -302,12 +488,64 @@ def run_gate(conn) -> list[str]:
     return failures
 
 
-def main() -> int:
+def _parse_cutover(text):
+    """ISO-8601. A naive input is read as UTC, because `events.created_at` is
+    `timestamptz` and comparing it against a naive local time shifts the whole
+    window by the host offset -- silently, and in the direction nobody checks.
+    """
+    parsed = datetime.fromisoformat(text)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Score the comprehension pipeline against spec section 8."
+    )
+    parser.add_argument(
+        "--cohorts",
+        action="store_true",
+        help="OBSERVE corroboration_by_outlet on each side of the deploy "
+        "cutover instead of running the gate. Renders no verdict and no "
+        "failing exit code: the gate is one-shot and bqa.11 still holds it.",
+    )
+    parser.add_argument(
+        "--cutover",
+        help="ISO-8601 cutover for --cohorts. Defaults to the newest "
+        "migration's applied_at, which is when that image began serving.",
+    )
+    parser.add_argument(
+        "--horizon-hours",
+        type=float,
+        nargs="+",
+        default=list(DEFAULT_EXPOSURE_HOURS),
+        help="Exposure horizons per event, in hours; several are swept into "
+        f"one table (default {' '.join(f'{h:g}' for h in DEFAULT_EXPOSURE_HOURS)}). "
+        "A pre/post gap that does not hold across all of them belongs to the "
+        "horizon rather than to the ranking.",
+    )
+    args = parser.parse_args(argv)
+
     if not db.is_configured():
         print("No database configured. Export DATABASE_URL.")
         return 2
 
     with db.connect() as conn:
+        if args.cohorts:
+            version = None
+            if args.cutover:
+                cutover = _parse_cutover(args.cutover)
+            else:
+                anchor = deploy_anchor(conn)
+                if anchor is None:
+                    print(
+                        "No migration is recorded, so there is no anchor to "
+                        "read. Pass --cutover explicitly."
+                    )
+                    return 2
+                version, cutover = anchor
+            print_sweep(conn, cutover, args.horizon_hours, anchor_version=version)
+            return 0
+
         failures = run_gate(conn)
 
     print("\n" + ("GATE FAILED: " + ", ".join(failures) if failures else "GATE PASSED"))

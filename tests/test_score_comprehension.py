@@ -13,6 +13,7 @@ clean, empty-but-migrated database.
 """
 
 import math
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -207,3 +208,180 @@ def test_per_arm_breakdown_includes_tracked_claim_and_all_enums(kb):
         assert "tracked_claim" in breakdown[key]
         _, detail = breakdown[key]["tracked_claim"]
         assert detail != "no rows"
+
+
+# --- Windowed, exposure-capped corroboration (news-brief-bqa.19) -------------
+#
+# `corroboration_by_outlet` aggregates over the WHOLE KB, so a run spanning the
+# candidate-ranking cutover (51c850c) blends two systems and attributes the
+# result to neither -- the design spec calls the missing window argument a
+# requirement, not a note. Two confounds have to die together:
+#
+#   1. the cutover itself -- events matched under recency ranking vs under
+#      shared-entity ranking, and
+#   2. EVENT AGE -- corroboration accrues as a second outlet's item arrives,
+#      so a young post-cutover cohort compared against a mature pre-cutover one
+#      understates the new ranking no matter how well it works.
+#
+# (2) is why a bare `--since` is not enough. Each event is scored over a FIXED
+# exposure horizon measured from its own creation, and both cohorts are held to
+# the same one, so age stops being a variable rather than being hoped away.
+
+BASE = datetime(2026, 9, 9, 12, 0, tzinfo=timezone.utc)
+
+
+def _event_at(kb, created_at, type_="action", commitment_state="in_force"):
+    """An event with an explicit `created_at`, which `_event` cannot set."""
+    return kb.execute(
+        "INSERT INTO events (summary, type, commitment_state, occurred_at, "
+        "created_at) VALUES ('an event', %s, %s, %s, %s) RETURNING id",
+        (type_, commitment_state, created_at, created_at),
+    ).fetchone()[0]
+
+
+def _assertion_at(kb, item_id, event_id, created_at, standing="reported"):
+    kb.execute(
+        "INSERT INTO assertions (item_id, event_id, standing, created_at) "
+        "VALUES (%s, %s, %s, %s)",
+        (item_id, event_id, standing, created_at),
+    )
+
+
+# 9. A window scopes the denominator: an event created before `since` is not
+# counted at all, however well corroborated it is.
+def test_corroboration_window_excludes_events_created_outside_it(kb):
+    old, new = BASE - timedelta(days=10), BASE - timedelta(days=1)
+    e_old = _event_at(kb, old)
+    _assertion_at(kb, _item(kb, outlet_name="Reuters"), e_old, old)
+    _assertion_at(kb, _item(kb, outlet_name="AP"), e_old, old)
+    e_new = _event_at(kb, new)
+    _assertion_at(kb, _item(kb, outlet_name="AFP"), e_new, new)
+    kb.commit()
+
+    # Unscoped this KB reads 2 events, 1 multi-outlet. Scoped to the last two
+    # days it must see only the uncorroborated one.
+    rate, total, multi = sc.corroboration_by_outlet(kb, since=BASE - timedelta(days=2))
+    assert (total, multi) == (1, 0)
+    assert rate == 0.0
+
+
+# 10. The exposure horizon is what makes two cohorts of different ages
+# comparable: a second outlet arriving after it does not count.
+def test_exposure_horizon_ignores_a_second_outlet_arriving_after_it(kb):
+    born = BASE - timedelta(days=3)
+    ev = _event_at(kb, born)
+    _assertion_at(kb, _item(kb, outlet_name="Reuters"), ev, born)
+    _assertion_at(kb, _item(kb, outlet_name="AP"), ev, born + timedelta(hours=20))
+    kb.commit()
+
+    _, total_capped, multi_capped = sc.corroboration_by_outlet(kb, horizon_hours=12)
+    _, total_open, multi_open = sc.corroboration_by_outlet(kb, horizon_hours=24)
+    # The positive control matters: a horizon that drops every assertion would
+    # also report multi=0, and would be wrong for the opposite reason.
+    assert (total_capped, multi_capped) == (1, 0)
+    assert (total_open, multi_open) == (1, 1)
+
+
+# 11. The pre-cutover control cohort spans exactly as long as the post-cutover
+# one -- an unequal span reintroduces the size confound the horizon removes.
+def test_cohorts_span_equal_lengths_on_both_sides_of_the_cutover(kb):
+    cutover = BASE - timedelta(hours=36)
+    report = sc.corroboration_cohorts(kb, cutover=cutover, horizon_hours=12, now=BASE)
+    assert report["measurable"] is True
+    pre_start, pre_end = report["pre_span"]
+    post_start, post_end = report["post_span"]
+    assert post_start == cutover
+    assert post_end == BASE - timedelta(hours=12)
+    assert pre_end == cutover
+    assert (pre_end - pre_start) == (post_end - post_start)
+
+
+# 12. The maturity guard: an event too young to have lived out the horizon is
+# excluded, rather than counted as uncorroborated.
+def test_cohorts_exclude_events_younger_than_the_exposure_horizon(kb):
+    cutover = BASE - timedelta(hours=36)
+    mature = BASE - timedelta(hours=24)
+    young = BASE - timedelta(hours=2)
+    for born in (mature, young):
+        ev = _event_at(kb, born)
+        _assertion_at(kb, _item(kb, outlet_name=f"outlet-{born.hour}"), ev, born)
+    kb.commit()
+
+    report = sc.corroboration_cohorts(kb, cutover=cutover, horizon_hours=12, now=BASE)
+    _, total, _ = report["post"]
+    assert total == 1
+
+
+# 13. Too soon after the cutover is NOT MEASURABLE, never a rate of 0.0 --
+# the same discipline score_match_rate_corroboration already keeps.
+def test_cohorts_not_measurable_before_the_horizon_elapses(kb):
+    report = sc.corroboration_cohorts(
+        kb, cutover=BASE - timedelta(hours=4), horizon_hours=12, now=BASE
+    )
+    assert report["measurable"] is False
+    assert report["post"] is None
+    assert "horizon" in report["reason"]
+
+
+# 14. The cutover anchor comes from the migration ledger, which the system
+# wrote itself, rather than from a timestamp somebody remembered to record.
+def test_deploy_anchor_is_the_latest_migrations_applied_time(kb):
+    expected_version = db._available("up")[-1][0]
+    version, applied_at = sc.deploy_anchor(kb)
+    assert version == expected_version
+    row = kb.execute(
+        "SELECT applied_at FROM schema_migrations WHERE version = %s", (version,)
+    ).fetchone()
+    assert applied_at == row[0]
+
+
+# 15. Cohort mode is OBSERVATIONAL. The pre-registered gate is one-shot, so a
+# windowed look must not render a verdict that spends it.
+def test_sweep_mode_prints_no_gate_verdict(kb, capsys):
+    sc.print_sweep(kb, cutover=BASE - timedelta(hours=36), horizons=[6, 12], now=BASE)
+    out = capsys.readouterr().out
+    assert "OBSERVATION" in out
+    assert "PASS" not in out
+    assert "FAIL" not in out
+    assert "GATE" not in out
+
+
+# 16. A naive --cutover is read as UTC. The column is timestamptz and the
+# host's offset would otherwise shift the whole window silently, in the
+# direction nobody checks.
+def test_naive_cutover_is_read_as_utc():
+    assert sc._parse_cutover("2026-09-08T18:00:00") == datetime(
+        2026, 9, 8, 18, 0, tzinfo=timezone.utc
+    )
+    assert sc._parse_cutover("2026-09-08T18:00:00+02:00") == datetime(
+        2026, 9, 8, 16, 0, tzinfo=timezone.utc
+    )
+
+
+# 17. The sweep reports one cohort comparison per horizon, in the order asked
+# for, so the reader can see the parameter varying rather than trust one value.
+def test_sweep_returns_one_row_per_horizon_in_order(kb):
+    rows = sc.corroboration_sweep(
+        kb, cutover=BASE - timedelta(hours=72), horizons=[6, 12, 24], now=BASE
+    )
+    assert [h for h, _ in rows] == [6, 12, 24]
+    assert all(report["horizon_hours"] == h for h, report in rows)
+
+
+# 18. The point of sweeping: the same KB reads as uncorroborated at one
+# horizon and corroborated at another. A sweep that could not show this would
+# be three restatements of one number.
+def test_sweep_shows_a_gap_only_one_horizon_can_see(kb):
+    born = BASE - timedelta(hours=48)
+    ev = _event_at(kb, born)
+    _assertion_at(kb, _item(kb, outlet_name="Reuters"), ev, born)
+    _assertion_at(kb, _item(kb, outlet_name="AP"), ev, born + timedelta(hours=20))
+    kb.commit()
+
+    rows = dict(
+        sc.corroboration_sweep(
+            kb, cutover=BASE - timedelta(hours=72), horizons=[6, 24], now=BASE
+        )
+    )
+    assert rows[6]["post"] == (0.0, 1, 0)
+    assert rows[24]["post"] == (1.0, 1, 1)
