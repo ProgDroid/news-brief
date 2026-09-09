@@ -14,6 +14,7 @@ adjacent one.
 """
 
 import datetime as dt
+import random
 
 import pytest
 
@@ -761,3 +762,105 @@ def test_the_batch_size_comes_from_the_live_knob():
     assert pc.integrate_batch_size() == max(
         1, int(comprehend.common.COMPREHEND_INTEGRATE_BATCH)
     )
+
+
+# --- The ceiling on the FAILING 8.2 direction (news-brief-bqa.20) -----------
+#
+# The shipped ceiling was `(assertions - (events - merges)) / assertions`,
+# which is score_match_rate_corroboration -- the direction that already clears
+# 10% with no merges at all. The direction that is FAILING counts events
+# carrying assertions from 2+ distinct outlets, and merging changes both its
+# numerator and its denominator. Nothing computed it.
+
+
+def _pair(earlier_id, later_id, score=0.5):
+    return {
+        "score": score,
+        "earlier": {"event_id": earlier_id},
+        "later": {"event_id": later_id},
+        "syndicated": False,
+        "hubness": 0,
+    }
+
+
+def test_merging_two_single_outlet_events_yields_one_corroborated_event():
+    # Two events, one outlet each, joined by one pair. probable_misses only
+    # ever pairs DIFFERENT outlets, so the merged event is multi-outlet.
+    outlets = {1: {10}, 2: {20}}
+    rate, after, multi_after = pc.outlet_ceiling(
+        [_pair(1, 2)], outlets, total=2, multi=0
+    )
+    assert (after, multi_after) == (1, 1)
+    assert rate == 1.0
+
+
+def test_the_outlet_ceiling_is_not_the_match_rate_formula():
+    # 10 events, 1 already multi-outlet and OUTSIDE the cluster; one cluster of
+    # two single-outlet events. Derived by hand: 9 events remain, the surviving
+    # multi is still multi, the cluster becomes multi -> 2/9.
+    outlets = {1: {10}, 2: {20}, 3: {30, 31}}
+    rate, after, multi_after = pc.outlet_ceiling(
+        [_pair(1, 2)], outlets, total=10, multi=1
+    )
+    assert (after, multi_after) == (9, 2)
+    assert rate == pytest.approx(2 / 9)
+
+
+def test_an_already_corroborated_event_inside_a_cluster_is_not_double_counted():
+    # The clustered pair includes the ONLY already-multi event. Merging it with
+    # a single-outlet event must still leave exactly one corroborated event --
+    # adding the cluster without removing its members inflates to 2.
+    outlets = {1: {10, 11}, 2: {20}}
+    rate, after, multi_after = pc.outlet_ceiling(
+        [_pair(1, 2)], outlets, total=5, multi=1
+    )
+    assert (after, multi_after) == (4, 1)
+    assert rate == pytest.approx(1 / 4)
+
+
+# --- The shipped ranking needs a batched arm (news-brief-bqa.21) ------------
+
+
+def test_the_shipped_ranking_has_a_batched_arm():
+    # rank_entity_overlap is what 51c850c deployed; production shares one
+    # candidate list across a batch, and batching cost recency 42% -> 18%.
+    assert any("entity overlap" in name for name in pc.BATCH_STRATEGIES)
+
+
+def test_batch_entity_overlap_prefers_shared_entities_over_recency():
+    older = dt.datetime(2026, 9, 1, tzinfo=dt.timezone.utc)
+    newer = dt.datetime(2026, 9, 8, tzinfo=dt.timezone.utc)
+    pool = [
+        {"id": 1, "occurred_at": older, "summary": "shares two", "entities": {7, 8}},
+        {"id": 2, "occurred_at": newer, "summary": "shares none", "entities": {99}},
+    ]
+    batch = [{"event_id": 100, "title": "t"}]
+    ents = {100: {7, 8}}
+    fn = next(f for n, f in pc.BATCH_STRATEGIES.items() if "entity overlap" in n)
+    assert fn(pool, batch, ents, 2)[0] == 1
+
+
+# --- The bake-off's eval set must not be one arm's own signal (bqa.22) ------
+
+
+def test_the_bakeoff_sample_is_drawn_within_bands_not_off_the_top():
+    # The shipped subset was the top 800 by title-title similarity, and one arm
+    # ranks on that same signal through a paraphrase. Sampling WITHIN a band
+    # keeps the selection constant across arms.
+    lo, hi = pc.BANDS[0]
+    misses = [_pair(i, i + 1000, score=lo + i * (hi - lo) / 200) for i in range(100)]
+    sampled = pc.sample_by_band(misses, 10, random.Random(1))
+    drawn = sampled[(lo, hi)]
+    assert len(drawn) == 10
+    assert all(lo <= m["score"] < hi for m in drawn)
+    top = sorted(misses, key=lambda m: -m["score"])[:10]
+    assert sorted(m["score"] for m in drawn) != sorted(m["score"] for m in top)
+
+
+def test_every_populated_band_is_represented_in_the_sample():
+    first, second = pc.BANDS[0], pc.BANDS[1]
+    misses = [_pair(1, 2, score=first[0] + 0.01) for _ in range(5)]
+    misses += [_pair(3, 4, score=second[0] + 0.01) for _ in range(5)]
+    sampled = pc.sample_by_band(misses, 3, random.Random(1))
+    assert set(sampled) == {first, second}
+    assert all(len(v) == 3 for v in sampled.values())

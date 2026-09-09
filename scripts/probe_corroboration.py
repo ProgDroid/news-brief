@@ -79,6 +79,8 @@ FALLBACK_SEPARATOR = 0.35
 # size is REPORTED, since a silently truncated evaluation reads exactly like a
 # small corpus.
 BAKEOFF_MIN_SCORE = 0.20
+# news-brief-bqa.22: per BAND, not off the top of one arm's ranking.
+BAKEOFF_PER_BAND = 160
 BAKEOFF_MAX_PAIRS = 800
 
 # Reported bands rather than one threshold. A single number would hide exactly
@@ -582,8 +584,41 @@ def batch_reserved(pool, batch, ents, cap):
     return picked
 
 
+def batch_entity_overlap(pool, batch, ents, cap):
+    """The SHIPPED ranking (51c850c) in production's batched shape.
+
+    news-brief-bqa.21. `rank_entity_overlap` was measured single-item at 57%
+    and deployed, but it was never carried into BATCH_STRATEGIES, so the only
+    number we had for the thing actually running described a shape production
+    never uses. Batching is where the loss lives -- recency went 42% to 18% --
+    and this arm has a specific reason to suffer it: ranking on the BATCH's
+    entity union means one hub entity can dominate every slot for the whole
+    batch, which is recency's failure wearing a different hat.
+    """
+    want = set()
+    for row in batch:
+        want |= ents.get(row["event_id"], set())
+    ranked = sorted(
+        pool,
+        key=lambda e: (len(want & e["entities"]), e["occurred_at"]),
+        reverse=True,
+    )
+    return [e["id"] for e in ranked][:cap]
+
+
+# Which single-item arm each batched arm is the counterpart of. Declared
+# rather than inferred: the names do not match, and a wrong pairing quietly
+# reports one arm's dilution as another's.
+SHIPPED_RANKING = "entity overlap"
+DILUTION_PAIRS = (
+    ("entity overlap", "entity overlap, batched"),
+    ("title similarity", "similarity, batched"),
+    ("recency (today)", "recency, batched"),
+)
+
 BATCH_STRATEGIES = {
     "recency, batched": batch_recency,
+    "entity overlap, batched": batch_entity_overlap,
     "similarity, batched": batch_similarity,
     "reserved per item": batch_reserved,
 }
@@ -614,10 +649,16 @@ def batch_bake_off(conn, misses, ents, rows, cap, size):
     return results, evaluated
 
 
-def merges_from_pairs(misses) -> int:
-    """Union-find over the pair graph. Merging a cluster of k events removes
-    k-1 events, NOT C(k,2) -- counting pairs as merges is what produced a
-    1779% ceiling in the first version of this script."""
+def clusters_from_pairs(misses) -> list[set]:
+    """Connected components of the pair graph. Merging a cluster of k events
+    removes k-1 events, NOT C(k,2) -- counting pairs as merges is what
+    produced a 1779% ceiling in the first version of this script.
+
+    Returns the components themselves rather than just their sizes, because
+    the outlet direction needs to know WHICH events merged: a cluster's
+    corroboration is the union of its members' outlets, and a member that was
+    already multi-outlet must not be counted twice.
+    """
     parent = {}
 
     def find(x):
@@ -631,10 +672,101 @@ def merges_from_pairs(misses) -> int:
         a, b = find(m["earlier"]["event_id"]), find(m["later"]["event_id"])
         if a != b:
             parent[a] = b
-    sizes = defaultdict(int)
+    groups = defaultdict(set)
     for node in parent:
-        sizes[find(node)] += 1
-    return sum(size - 1 for size in sizes.values())
+        groups[find(node)].add(node)
+    return list(groups.values())
+
+
+def merges_from_pairs(misses) -> int:
+    return sum(len(c) - 1 for c in clusters_from_pairs(misses))
+
+
+def outlet_ceiling(misses, outlets_by_event, total, multi):
+    """Ceiling on `corroboration_by_outlet` -- the FAILING spec 8.2 direction.
+
+    news-brief-bqa.20. The ceiling this script shipped with was
+    `(assertions - (events - merges)) / assertions`, which is
+    `score_match_rate_corroboration`: the OTHER direction, and one that
+    already clears 10% with no merges at all. It printed "(clears)" for a
+    metric nobody is worried about while the failing one went uncomputed.
+    Same conflation that created bqa.19, surviving inside the diagnostic
+    built to investigate it.
+
+    Merging changes BOTH sides of this fraction, which is why it cannot be
+    eyeballed from the merge count: the denominator loses k-1 events per
+    cluster, and the numerator gains a cluster only if the union of its
+    members' outlets reaches two -- minus any member that was already
+    multi-outlet on its own, or it is counted twice.
+
+    `probable_misses` only ever pairs DIFFERENT outlets, so in practice every
+    cluster qualifies; the union is computed anyway rather than assumed.
+
+    Returns (rate, events_after, multi_after).
+    """
+    clusters = clusters_from_pairs(misses)
+    merges = min(sum(len(c) - 1 for c in clusters), max(0, total - 1))
+    was_multi_inside = 0
+    becomes_multi = 0
+    for cluster in clusters:
+        union = set()
+        for event_id in cluster:
+            outlets = outlets_by_event.get(event_id, set())
+            union |= outlets
+            if len(outlets) >= 2:
+                was_multi_inside += 1
+        if len(union) >= 2:
+            becomes_multi += 1
+    after = max(1, total - merges)
+    multi_after = multi - was_multi_inside + becomes_multi
+    return (multi_after / after if after else 0.0), after, multi_after
+
+
+def corroboration_by_outlet(conn, days):
+    """The failing direction, measured rather than remembered (bqa.20).
+
+    Scoped to the same window as the miss population, so the ceiling above is
+    not a windowed numerator over a whole-KB denominator (news-brief-bqa.23
+    still covers the older lines that mix the two).
+    """
+    total, multi = conn.execute(
+        "WITH per_event AS ("
+        "  SELECT e.id, count(DISTINCT i.outlet_id) AS outlets "
+        "  FROM events e "
+        "  JOIN assertions a ON a.event_id = e.id "
+        "  JOIN items i ON i.id = a.item_id "
+        "  WHERE e.created_at >= now() - make_interval(days => %s) "
+        "  GROUP BY e.id) "
+        "SELECT count(*), count(*) FILTER (WHERE outlets >= 2) FROM per_event",
+        (days,),
+    ).fetchone()
+    return (multi / total if total else 0.0), total, multi
+
+
+def sample_by_band(misses, per_band, rng):
+    """A random sample WITHIN each similarity band (news-brief-bqa.22).
+
+    The bake-off's subset was `[m for m in misses if score >= 0.20][:800]` --
+    the top 800 by title-to-title similarity -- while `rank_title_similarity`
+    sorts on title-to-summary similarity, the same signal through one
+    paraphrase step. That arm was therefore measured exactly where it is
+    strongest, and the set excluded the majority class: positives reach down
+    to p50=0.143, so most of the model's own cross-outlet merges never
+    entered it.
+
+    Sampling inside a band holds the selection constant across arms, and
+    reporting per band shows whether a lexical arm's edge survives into the
+    low-overlap bands where most true duplicates actually live.
+    """
+    by_band = defaultdict(list)
+    for miss in misses:
+        band = band_of(miss["score"])
+        if band:
+            by_band[band].append(miss)
+    return {
+        band: rng.sample(members, min(per_band, len(members)))
+        for band, members in sorted(by_band.items())
+    }
 
 
 def band_of(score: float):
@@ -750,42 +882,79 @@ def report(conn, days: int, rng=None) -> int:
             f"{1 - a / len(bucket):>7.0%}"
         )
 
+    outlets_by_event = defaultdict(set)
+    for row in rows:
+        outlets_by_event[row["event_id"]].add(row["outlet_id"])
+    base_rate, base_total, base_multi = corroboration_by_outlet(conn, days)
+
     print("\n=== Ceiling, by union-find over the pair graph ===")
+    print("corroboration_by_outlet is the FAILING 8.2 direction and the only")
+    print("one the 10% floor belongs to. An earlier version of this script")
+    print("compared the MATCH-RATE direction to that floor and printed")
+    print("'clears' -- for a number that already clears with zero merges.")
+    print(
+        f"today, scoped to {days}d: events={base_total} multi-outlet="
+        f"{base_multi} rate={base_rate:.1%}"
+    )
+    for label, subset in (
+        ("all pairs above the line", strong),
+        ("excluding syndication", [m for m in strong if not m["syndicated"]]),
+    ):
+        ceiling, after, multi_after = outlet_ceiling(
+            subset, outlets_by_event, base_total, base_multi
+        )
+        verdict = "clears" if ceiling >= 0.10 else "STILL FAILS"
+        print(
+            f"  {label:>26}: events={after:<6} multi={multi_after:<5} "
+            f"best case={ceiling:.1%}  ({verdict})"
+        )
+    print("  Syndication is the same wire copy in two feeds. Clearing the floor")
+    print("  on it alone would prove feed duplication, not confirmation.")
+    print("  THIS CEILING IS A FLOOR. The separator keeps only a fraction of")
+    print("  known positives (see the calibration block), and a detector bounds")
+    print("  duplicates from BELOW, so the true ceiling is higher by roughly")
+    print("  the reciprocal of that fraction.")
+    print("  The OTHER direction, for reference only -- it is not what the 10%")
+    print("  floor gates:")
     for label, subset in (
         ("all pairs above the line", strong),
         ("excluding syndication", [m for m in strong if not m["syndicated"]]),
     ):
         merges = min(merges_from_pairs(subset), max(0, events - 1))
-        ceiling = (assertions - (events - merges)) / assertions if assertions else 0.0
-        verdict = "clears" if ceiling >= 0.10 else "STILL FAILS"
-        print(f"  {label:>26}: merges={merges:<6} best case={ceiling:.1%}  ({verdict})")
-    print("  Syndication is the same wire copy in two feeds. Clearing the floor")
-    print("  on it alone would prove feed duplication, not confirmation.")
+        rate_after = (
+            (assertions - (events - merges)) / assertions if assertions else 0.0
+        )
+        print(f"    match rate, {label}: merges={merges:<6} -> {rate_after:.1%}")
 
     cap = comprehend.CANDIDATE_EVENT_CAP
     print("")
-    print(f"=== Ranking bake-off: recall@{cap} over known misses ===")
-    subset = [m for m in misses if m["score"] >= BAKEOFF_MIN_SCORE][:BAKEOFF_MAX_PAIRS]
-    print(f"evaluated on {len(subset)} pairs scoring >= {BAKEOFF_MIN_SCORE}")
-    if subset:
-        results, (agree, disagree) = bake_off(conn, subset, ents, cap)
-        # The control. If the Python recency arm does not reproduce the live
-        # SQL, every delta below is measured against the wrong baseline.
-        print(
-            f"baseline control: recency arm agrees with was_retrievable on "
-            f"{agree}/{agree + disagree}"
-        )
+    print(f"=== Ranking bake-off: recall@{cap}, sampled WITHIN each band ===")
+    print("The old subset was the top 800 by title-title similarity, which is")
+    print("the signal one arm ranks on -- it measured that arm where it is")
+    print("strongest and excluded the majority class (positives reach p50")
+    print("well below the separator). Sampling inside a band holds the")
+    print("selection constant across arms, and the trend ACROSS bands is the")
+    print("answer to whether a lexical edge survives into low overlap, where")
+    print("most true duplicates live.")
+    banded = sample_by_band(misses, BAKEOFF_PER_BAND, rng)
+    subset = [m for members in banded.values() for m in members]
+    print(f"evaluated on {len(subset)} pairs, <= {BAKEOFF_PER_BAND} per band")
+    header = "".join(f"{name:>18}" for name in STRATEGIES)
+    print(f"{'band':>12}{'n':>6}{header}")
+    totals = dict.fromkeys(STRATEGIES, 0)
+    for band, members in banded.items():
+        results, (agree, disagree) = bake_off(conn, members, ents, cap)
         if disagree:
-            print("  !! DISAGREEMENT: treat every number in this table as suspect.")
-        best = max(results.values()) if results else 0
-        for name, hits in sorted(results.items(), key=lambda kv: -kv[1]):
-            mark = "  <-- best" if hits == best and best else ""
-            print(
-                f"  {name:>18}: {hits:>4}/{len(subset)}  "
-                f"recall={hits / len(subset):.0%}{mark}"
-            )
-        print("  Equal budget: every strategy ranks the SAME pool into the same")
-        print("  number of slots, so a win is ranking rather than volume.")
+            print(f"  !! band {band}: recency arm disagreed with the live SQL")
+        for name in STRATEGIES:
+            totals[name] += results[name]
+        cells = "".join(
+            f"{results[name] / len(members):>18.0%}" if members else f"{'--':>18}"
+            for name in STRATEGIES
+        )
+        print(f"{band[0]:>5.2f}-{band[1]:<6.2f}{len(members):>6}{cells}")
+    print("  Equal budget: every strategy ranks the SAME pool into the same")
+    print("  number of slots, so a win is ranking rather than volume.")
 
     size = integrate_batch_size()
     print("")
@@ -801,15 +970,20 @@ def report(conn, days: int, rng=None) -> int:
             for name, hits in sorted(bresults.items(), key=lambda kv: -kv[1]):
                 mark = "  <-- best" if hits == bbest and bbest else ""
                 print(
-                    f"  {name:>20}: {hits:>4}/{evaluated}  "
+                    f"  {name:>24}: {hits:>4}/{evaluated}  "
                     f"recall={hits / evaluated:.0%}{mark}"
                 )
-            single = results.get("title similarity", 0) / len(subset)
-            batched = bresults["similarity, batched"] / evaluated
-            print(
-                f"  dilution cost: {single:.0%} single-item -> {batched:.0%} "
-                f"batched ({single - batched:+.0%})"
-            )
+            print("  dilution, per arm that has both shapes:")
+            for single_name, batch_name in DILUTION_PAIRS:
+                if single_name not in totals or batch_name not in bresults:
+                    continue
+                single = totals[single_name] / len(subset)
+                batched = bresults[batch_name] / evaluated
+                shipped = "  <-- SHIPPED" if single_name == SHIPPED_RANKING else ""
+                print(
+                    f"    {single_name:>18}: {single:.0%} single-item -> "
+                    f"{batched:.0%} batched ({batched - single:+.0%}){shipped}"
+                )
 
     print("\n=== Sample pairs -- same story or not? ===")
     for m in strong[:10]:
