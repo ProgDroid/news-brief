@@ -845,7 +845,7 @@ INTEGRATE_MAX_TOKENS = 8192
 
 
 def candidate_events(
-    conn, entity_ids: list[int], titles: list[str], tally: Tally
+    conn, entity_ids: list[int], titles: list[str], tally: Tally, *, as_of=None
 ) -> list[dict]:
     """Events sharing entities with this batch, BEST LEXICAL MATCH FIRST.
 
@@ -895,6 +895,16 @@ def candidate_events(
     rather than falling back to an unranked list, which would silently restore
     recency ordering with no downstream signal that it had happened.
 
+    `as_of` defaults to now() and exists so a diagnostic can ask "what would
+    have been offered THEN?" through this function rather than a copy of it.
+    scripts/probe_corroboration.py reimplemented this ORDER BY, its comment
+    said the two must mirror each other, and it silently stopped mirroring
+    anything the first time the ranking changed -- reporting a retired ranking
+    as though it were live (news-brief-bqa.26). Mirror the predicate, never
+    re-derive it. In production as_of is now(), so `created_at < as_of`
+    excludes only events created inside the current transaction, which are
+    this batch's own and must not be offered to it.
+
     Returns id and summary and NOTHING ELSE. events.type and
     commitment_state are scored by the pre-registered gate; sending them here
     would make every attached assertion inherit the framing by echo, and the
@@ -914,7 +924,9 @@ def candidate_events(
         "JOIN event_entities ee ON ee.event_id = e.id "
         "CROSS JOIN unnest(%s::text[]) AS t(title) "
         "WHERE ee.entity_id = ANY(%s) "
-        "  AND e.occurred_at >= now() - make_interval(days => %s) "
+        "  AND e.occurred_at >= coalesce(%s::timestamptz, now()) "
+        "                       - make_interval(days => %s) "
+        "  AND e.created_at < coalesce(%s::timestamptz, now()) "
         "GROUP BY e.id, e.summary, e.occurred_at "
         # `e.id DESC` last so the order is TOTAL. Two events with an equal
         # score and an identical occurred_at would otherwise return in whatever
@@ -923,7 +935,14 @@ def candidate_events(
         # any later gold set built against it.
         "ORDER BY best DESC, e.occurred_at DESC, e.id DESC "
         "LIMIT %s",
-        (titles, list(entity_ids), CANDIDATE_WINDOW_DAYS, CANDIDATE_EVENT_CAP + 1),
+        (
+            titles,
+            list(entity_ids),
+            as_of,
+            CANDIDATE_WINDOW_DAYS,
+            as_of,
+            CANDIDATE_EVENT_CAP + 1,
+        ),
     ).fetchall()
     if len(rows) > CANDIDATE_EVENT_CAP:
         tally.candidate_cap_hit += 1

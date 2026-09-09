@@ -998,6 +998,73 @@ def test_no_titles_offers_no_candidates_rather_than_an_unranked_list(kb):
     assert comprehend.candidate_events(kb, [a], [], comprehend.Tally()) == []
 
 
+def test_candidate_events_as_of_excludes_events_created_after_it(kb):
+    """`as_of` is what lets a diagnostic ask "what would have been offered
+    then?" through the SAME function production runs, rather than a copy of it
+    that drifts (news-brief-bqa.26). Defaulting to now() keeps production
+    unchanged."""
+    a = _entity(kb, "Ukraine")
+    existed = _event(kb, a, summary="Russian drones strike Odesa port", days_ago=5)
+    later = _event(kb, a, summary="Russian drones strike Odesa harbour", days_ago=4)
+    kb.execute(
+        "UPDATE events SET created_at = now() - interval '5 days' WHERE id = %s",
+        (existed,),
+    )
+    kb.execute(
+        "UPDATE events SET created_at = now() - interval '1 hour' WHERE id = %s",
+        (later,),
+    )
+    kb.commit()
+
+    title = ["Russian drones strike Odesa port overnight"]
+    cutoff = kb.execute("SELECT now() - interval '2 days'").fetchone()[0]
+    ids = [
+        r["id"]
+        for r in comprehend.candidate_events(
+            kb, [a], title, comprehend.Tally(), as_of=cutoff
+        )
+    ]
+    assert ids == [existed], "an event created after as_of did not exist yet"
+    # Positive control: without as_of BOTH are offered, so the assertion above
+    # is about the cutoff and not about the fixture being empty.
+    both = comprehend.candidate_events(kb, [a], title, comprehend.Tally())
+    assert {r["id"] for r in both} == {existed, later}
+
+
+def test_candidate_events_as_of_anchors_the_occurred_at_window(kb):
+    """The window is measured from as_of, not from now.
+
+    The fixture STRADDLES the boundary on purpose: the event occurred 14.5
+    days ago, which is inside a window anchored at as_of (1 day ago, reaching
+    back 15.5 days) and outside one anchored at now (reaching back 14). An
+    earlier version made the event a day old and asserted the empty case --
+    which the `created_at < as_of` filter satisfied on its own, so the window
+    anchor was never exercised and a mutation anchoring it to now changed
+    nothing. Found by that mutation, not by reading.
+    """
+    a = _entity(kb, "Ukraine")
+    ev = _event(kb, a, summary="Russian drones strike Odesa port", days_ago=1)
+    kb.execute(
+        "UPDATE events SET occurred_at = now() - make_interval(days => %s, hours => 12), "
+        "created_at = now() - make_interval(days => %s) WHERE id = %s",
+        (comprehend.CANDIDATE_WINDOW_DAYS, comprehend.CANDIDATE_WINDOW_DAYS + 1, ev),
+    )
+    kb.commit()
+
+    title = ["Russian drones strike Odesa port overnight"]
+    as_of = kb.execute("SELECT now() - interval '1 day'").fetchone()[0]
+    assert [
+        r["id"]
+        for r in comprehend.candidate_events(
+            kb, [a], title, comprehend.Tally(), as_of=as_of
+        )
+    ] == [ev], "inside the window once it is anchored at as_of"
+    assert comprehend.candidate_events(kb, [a], title, comprehend.Tally()) == [], (
+        "and outside it when anchored at now -- which is what makes the "
+        "assertion above about the anchor rather than about the fixture"
+    )
+
+
 # --- Stop-loss: a permanent retirement must reach the operator
 # (news-brief-bqa.15).
 #

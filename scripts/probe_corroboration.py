@@ -337,31 +337,33 @@ def probable_misses(rows, ents, threshold, counts=None):
 
 def was_retrievable(conn, miss, ents) -> bool:
     """Could candidate_events have offered the earlier event when the later one
-    was created? Deliberately GENEROUS: the ideal entity set, no entity cap.
-    `created_at <` is what makes this a reconstruction rather than a query
-    about today."""
+    was created? It ASKS candidate_events, rather than reproducing its ORDER BY
+    (news-brief-bqa.26).
+
+    The reimplementation this replaces ordered by `occurred_at DESC` and
+    carried a comment saying the ordering must mirror production, because
+    "ordering IS the mechanism under investigation". Production moved to entity
+    overlap on 2026-09-08 and to trigram similarity on 2026-09-09; the
+    reconstruction moved neither time, so the A/B and hub tables described a
+    retired ranking while reading as current. Nothing failed, and the bake-off
+    control could not notice because both of its sides were recency.
+
+    Still deliberately GENEROUS, which is what makes a miss decisive: the ideal
+    entity set from event_entities, with no entity cap. It ranks against the
+    later item's title ALONE rather than a batch -- the single-item upper bound
+    the batch-dilution table exists to measure the shortfall from.
+    """
     entity_ids = list(ents.get(miss["later"]["event_id"], ()))
     if not entity_ids:
         return False
-    rows = conn.execute(
-        # occurred_at is in the select list because SELECT DISTINCT requires
-        # every ORDER BY expression to be. The ORDER BY must mirror
-        # candidate_events: ordering IS the mechanism under investigation.
-        "SELECT DISTINCT e.id, e.occurred_at FROM events e "
-        "JOIN event_entities ee ON ee.event_id = e.id "
-        "WHERE ee.entity_id = ANY(%s) "
-        "  AND e.occurred_at >= %s::timestamptz - make_interval(days => %s) "
-        "  AND e.created_at < %s "
-        "ORDER BY e.occurred_at DESC LIMIT %s",
-        (
-            entity_ids,
-            miss["later"]["created_at"],
-            comprehend.CANDIDATE_WINDOW_DAYS,
-            miss["later"]["created_at"],
-            comprehend.CANDIDATE_EVENT_CAP,
-        ),
-    ).fetchall()
-    return miss["earlier"]["event_id"] in {r[0] for r in rows}
+    offered = comprehend.candidate_events(
+        conn,
+        entity_ids,
+        [miss["later"]["title"]],
+        comprehend.Tally(),
+        as_of=miss["later"]["created_at"],
+    )
+    return miss["earlier"]["event_id"] in {e["id"] for e in offered}
 
 
 # How many slots each arm of the hybrid gets. They sum to CANDIDATE_EVENT_CAP
@@ -487,7 +489,14 @@ def rank_pg_trgm(pool, miss, ents, conn=None):
     if conn is None:
         raise ValueError("rank_pg_trgm scores in Postgres and needs a connection")
     scores = trgm_scores(conn, miss["later"]["title"], [e["summary"] for e in pool])
-    return _by_score(pool, scores)
+    # Mirrors `ORDER BY best DESC, e.occurred_at DESC, e.id DESC` exactly.
+    # Tie-breaking any other way would make the control below disagree with
+    # production on ties, which is noise dressed as a finding.
+    ordered = sorted(
+        zip(scores, pool),
+        key=lambda sp: (-sp[0], -sp[1]["occurred_at"].timestamp(), -sp[1]["id"]),
+    )
+    return [event for _, event in ordered]
 
 
 def batch_pg_trgm(pool, batch, ents, cap, conn=None):
@@ -518,9 +527,15 @@ def bake_off(conn, misses, ents, cap):
     """recall@cap per strategy: of the duplicates we know exist, how many would
     each ranking have put in front of the model?
 
-    Returns (results, agreement) where `agreement` is the control: the recency
-    arm must reproduce was_retrievable's verdict. A bake-off whose baseline
-    disagrees with the live query is measuring an adjacent system.
+    Returns (results, agreement) where `agreement` is the control: the arm
+    standing in for PRODUCTION must reproduce was_retrievable's verdict. A
+    bake-off whose baseline disagrees with the live query is measuring an
+    adjacent system.
+
+    It compares the pg_trgm arm, not recency. Comparing recency against a
+    recency reconstruction was symmetric -- both sides moved together, so the
+    control stayed green through two ranking changes and could not have caught
+    either (news-brief-bqa.26).
     """
     results = {name: 0 for name in STRATEGIES}
     agree = disagree = 0
@@ -533,7 +548,9 @@ def bake_off(conn, misses, ents, cap):
             top = {e["id"] for e in fn(pool, miss, ents, conn=conn)[:cap]}
             if target in top:
                 results[name] += 1
-        baseline = target in {e["id"] for e in rank_recency(pool, miss, ents)[:cap]}
+        baseline = target in {
+            e["id"] for e in rank_pg_trgm(pool, miss, ents, conn=conn)[:cap]
+        }
         if baseline == was_retrievable(conn, miss, ents):
             agree += 1
         else:

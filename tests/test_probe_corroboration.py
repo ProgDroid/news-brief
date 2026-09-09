@@ -237,9 +237,11 @@ def test_a_nearby_duplicate_was_retrievable(kb):
 
 
 def test_an_event_created_LATER_could_not_have_been_offered(kb):
-    """What makes this a reconstruction rather than a query about today. The
-    live candidate_events has no created_at filter because it runs in the
-    present; without one here every duplicate would look retrievable."""
+    """What makes this a reconstruction rather than a query about today.
+    candidate_events now takes an as_of (news-brief-bqa.26) and filters
+    `created_at < as_of`; in production that is now(), so it excludes nothing
+    but this batch's own writes. Here it is what stops every duplicate from
+    looking retrievable in hindsight."""
     reuters, ap = _outlet(kb, "Reuters"), _outlet(kb, "AP")
     now = dt.datetime.now(dt.timezone.utc)
     iran = _entity(kb, "Iran")
@@ -258,17 +260,25 @@ def test_an_event_created_LATER_could_not_have_been_offered(kb):
     # when the EARLIER one was created. It did not exist yet.
     backwards = {
         "earlier": {"event_id": late},
-        "later": {"event_id": early, "created_at": now - dt.timedelta(hours=2)},
+        "later": {
+            "event_id": early,
+            "title": "Iran resumes enrichment Fordow",
+            "created_at": now - dt.timedelta(hours=2),
+        },
     }
     assert pc.was_retrievable(kb, backwards, ents) is False
 
 
-def test_the_cap_pushes_an_older_duplicate_out_of_reach(kb):
-    """THE thesis of this whole investigation, asserted directly rather than
-    argued. candidate_events offers the CANDIDATE_EVENT_CAP most RECENT events
-    sharing an entity. Bury a genuine duplicate under that many newer events on
-    the same hub entity and it becomes unreachable -- not because the matcher
-    is weak, but because it is never shown the answer.
+def test_the_cap_still_buries_a_duplicate_that_shares_no_vocabulary(kb):
+    """The thesis, restated for the ranking that now runs. Under recency ANY
+    older duplicate fell off the cap, which is what this test used to assert;
+    under trigram similarity a duplicate the item READS like survives burial
+    (see test_was_retrievable_follows_the_live_ranking_not_recency), and only
+    one sharing no vocabulary is still lost.
+
+    That is a narrower failure mode than the old one, and it is the one left
+    to fix: positives reach p50=0.143, so most true duplicates do share little
+    vocabulary.
     """
     reuters, ap = _outlet(kb, "Reuters"), _outlet(kb, "AP")
     now = dt.datetime.now(dt.timezone.utc)
@@ -283,11 +293,10 @@ def test_the_cap_pushes_an_older_duplicate_out_of_reach(kb):
     _link(kb, old, iran)
     _assert(kb, _item(kb, reuters, "Iran resumes enrichment Fordow", "h-old"), old)
 
-    # Bury it: CAP newer events on the same entity, all more recent.
     for n in range(pc.comprehend.CANDIDATE_EVENT_CAP):
         filler = _event(
             kb,
-            f"Unrelated Iran development {n}",
+            f"Sanctions relief talks stall in round {n}",
             occurred_at=now - dt.timedelta(hours=n + 1),
             created_at=now - dt.timedelta(hours=n + 1),
         )
@@ -295,16 +304,26 @@ def test_the_cap_pushes_an_older_duplicate_out_of_reach(kb):
 
     new = _event(kb, "Iran restarted enrichment", occurred_at=now, created_at=now)
     _link(kb, new, iran)
-    _assert(kb, _item(kb, ap, "Iran resumes enrichment Fordow", "h-new"), new)
+    _assert(kb, _item(kb, ap, "Sanctions relief talks stall in Vienna", "h-new"), new)
     kb.commit()
 
     ents = pc.entities_by_event(kb, 7)
     miss = {
         "earlier": {"event_id": old},
-        "later": {"event_id": new, "created_at": now + dt.timedelta(seconds=1)},
+        # The FILLERS match this title and the duplicate does not, so the
+        # burial is decisive rather than a coin flip. An earlier version gave
+        # every candidate a near-zero score, which made the ordering noise and
+        # the duplicate survived by luck -- a flaky test dressed as a passing
+        # one.
+        "later": {
+            "event_id": new,
+            "title": "Sanctions relief talks stall in Vienna",
+            "created_at": now + dt.timedelta(seconds=1),
+        },
     }
     assert pc.was_retrievable(kb, miss, ents) is False, (
-        "the duplicate must be out of reach once CAP newer events bury it"
+        "with no lexical signal to lift it, the older duplicate is still the "
+        "row that falls off the end"
     )
 
 
@@ -333,7 +352,11 @@ def test_the_same_duplicate_IS_reachable_when_nothing_buries_it(kb):
     ents = pc.entities_by_event(kb, 7)
     miss = {
         "earlier": {"event_id": old},
-        "later": {"event_id": new, "created_at": now + dt.timedelta(seconds=1)},
+        "later": {
+            "event_id": new,
+            "title": "Iran resumes enrichment Fordow",
+            "created_at": now + dt.timedelta(seconds=1),
+        },
     }
     assert pc.was_retrievable(kb, miss, ents) is True
 
@@ -991,3 +1014,81 @@ def test_batch_pg_trgm_is_registered_and_ranks_on_the_best_batch_match(kb):
     ]
     fn = next(f for n, f in pc.BATCH_STRATEGIES.items() if "trgm" in n)
     assert fn(pool, batch, {}, 2, conn=kb)[0] == 1
+
+
+# --- The reconstruction mirrors production (news-brief-bqa.26) -------------
+#
+# was_retrievable reimplemented candidate_events' ORDER BY, and its own comment
+# said the two must mirror each other. That broke silently when the ranking
+# changed -- twice -- and the bake-off's control could not notice, because both
+# of its sides were recency. A symmetric control cannot see a term sitting on
+# both sides of it.
+
+
+def _buried_by_recency(kb):
+    """A lexical match buried under a full cap of newer unrelated events.
+    Recency cannot offer it; the live ranking can. Returns (old, miss, ents)."""
+    reuters, ap = _outlet(kb, "Reuters"), _outlet(kb, "AP")
+    now = dt.datetime.now(dt.timezone.utc)
+    iran = _entity(kb, "Iran")
+    old = _event(
+        kb,
+        "Iran resumed enrichment",
+        occurred_at=now - dt.timedelta(days=2),
+        created_at=now - dt.timedelta(days=2),
+    )
+    _link(kb, old, iran)
+    _assert(kb, _item(kb, reuters, "Iran resumes enrichment Fordow", "h-old"), old)
+    for n in range(comprehend.CANDIDATE_EVENT_CAP):
+        filler = _event(
+            kb,
+            f"Unrelated Iran development {n}",
+            occurred_at=now - dt.timedelta(hours=n + 1),
+            created_at=now - dt.timedelta(hours=n + 1),
+        )
+        _link(kb, filler, iran)
+    new = _event(kb, "Iran restarted enrichment", occurred_at=now, created_at=now)
+    _link(kb, new, iran)
+    _assert(kb, _item(kb, ap, "Iran resumes enrichment Fordow", "h-new"), new)
+    kb.commit()
+    miss = {
+        "score": 0.9,
+        "earlier": {"event_id": old},
+        "later": {
+            "event_id": new,
+            "title": "Iran resumes enrichment Fordow",
+            "created_at": now + dt.timedelta(seconds=1),
+        },
+    }
+    return old, miss, pc.entities_by_event(kb, 7)
+
+
+def test_was_retrievable_follows_the_live_ranking_not_recency(kb):
+    """The whole bead in one assertion. The match is older than a full cap of
+    fillers, so a recency reconstruction reports NOT OFFERED -- which is what
+    it did for two rankings after production stopped using recency."""
+    _old, miss, ents = _buried_by_recency(kb)
+    assert pc.was_retrievable(kb, miss, ents) is True
+
+
+def test_the_python_arm_reproduces_the_live_query_ordering(kb):
+    """The contract the bake-off's control encodes: the arm standing in for
+    production must return what production returns, in the same order. If
+    either side moves alone, this fails -- which is what the old control could
+    not do."""
+    old, miss, ents = _buried_by_recency(kb)
+    pool = pc.candidate_pool(kb, miss, ents)
+    cap = comprehend.CANDIDATE_EVENT_CAP
+    arm = [e["id"] for e in pc.rank_pg_trgm(pool, miss, ents, conn=kb)][:cap]
+    live = [
+        r["id"]
+        for r in comprehend.candidate_events(
+            kb,
+            list(ents.get(miss["later"]["event_id"], ())),
+            [miss["later"]["title"]],
+            comprehend.Tally(),
+            as_of=miss["later"]["created_at"],
+        )
+    ]
+    assert arm == live
+    assert old in live, "the fixture must contain the match, or this is vacuous"
