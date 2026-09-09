@@ -374,7 +374,9 @@ def run(conn) -> Tally:
             if entity_ids
             else []
         )
-        cand_events = candidate_events(conn, entity_ids, tally)
+        cand_events = candidate_events(
+            conn, entity_ids, [it["title"] for it in batch], tally
+        )
 
         try:
             extractions = parse_integration_response(
@@ -842,77 +844,86 @@ CANDIDATE_WINDOW_DAYS = 14
 INTEGRATE_MAX_TOKENS = 8192
 
 
-def candidate_events(conn, entity_ids: list[int], tally: Tally) -> list[dict]:
-    """Events sharing entities with this batch, MOST SHARED FIRST.
+def candidate_events(
+    conn, entity_ids: list[int], titles: list[str], tally: Tally
+) -> list[dict]:
+    """Events sharing entities with this batch, BEST LEXICAL MATCH FIRST.
 
-    Ranked by how many of the batch's entities the event carries, then by
-    recency. Recency alone was the ranking until 2026-09-08 and it was the
-    worst available choice: measured recall@30 of 15% in production's batched
-    shape, against 57% for this ordering (news-brief-bqa.18).
+    Ranked by trigram similarity between the batch's item titles and the
+    event's summary, recency breaking ties. Matching one of these is the only
+    way corroboration is ever recorded, so this ordering decides whether the
+    event layer can justify itself at all (spec 8.2).
 
-    The mechanism it fixes: for a hub entity -- Iran carried 491 events in one
-    7-day window -- 30 recency slots cover a few hours, so a duplicate reported
-    the same evening is never shown to the model and corroboration cannot be
-    recorded at all. The measured A/B split by entity frequency was monotonic
-    and broke exactly at this cap: below 30 events per entity the duplicate was
-    offered 100% of the time, above 100 events only 33%. Recall therefore
-    collapsed precisely on the busiest entities, which is where cross-outlet
-    overlap is most likely and where spec 8.2's corroboration floor -- the
-    existence test for the whole event layer -- has to find its signal.
+    THE ORDERING HAS CHANGED TWICE, AND THE NUMBERS ARE WHY.
 
-    RANKING IN SQL IS DELIBERATE, and that part still holds: Postgres orders
-    the full in-window set, so there is no pool to bound and no truncation to
-    reintroduce the burial above at a larger n.
+    Recency was the ranking until 2026-09-08 and was the worst arm available:
+    for a hub entity -- Iran carried 578 events in one 7-day window -- 30
+    recency slots cover a few hours, so a duplicate reported the same evening
+    was never shown to the model. Measured 13% batched recall@30.
 
-    THE REST OF THIS PARAGRAPH WAS WRONG AND IS CORRECTED HERE (2026-09-09,
-    news-brief-bqa.24). It said a lexical ranking measured "slightly higher"
-    and that the comparison was confounded because the evaluation set was
-    selected by title similarity -- the same signal that ranking used -- while
-    this ordering was "the one arm that selection did not flatter". Both
-    claims were true when written and neither survives measurement.
+    Entity overlap replaced it and roughly doubled that, to 28%. But the
+    comparison that chose it was confounded: the evaluation set was the top
+    800 pairs by title similarity, which is the signal the arm it lost to
+    ranks on, so the lexical arm was measured only where it was strongest.
 
-    The confound was removed (news-brief-bqa.22): the bake-off now samples
-    WITHIN each similarity band, so the selection is constant across arms.
-    Lexical ranking did not merely survive that; it won by more. Batched --
-    the shape THIS function actually runs in -- lexical scores 48% recall@30
-    against this ordering's 29%, a 1.67x gain. And in the LOWEST band, where
-    lexical detection is worthless and where the September review specifically
-    predicted lexical ranking would underperform, it scores 48% against 23%.
-    The edge is largest exactly where it was predicted to vanish.
+    That confound was removed on 2026-09-09 (news-brief-bqa.22): the bake-off
+    now samples WITHIN each similarity band, holding the selection constant
+    across arms. Lexical ranking did not merely survive it -- it won by more,
+    and it won in EVERY band, including the lowest one where lexical DETECTION
+    is worthless and where the review had specifically predicted it would
+    underperform. In production's batched shape, on 418 pairs:
 
-    This ordering is therefore an interim, not a conclusion. The switch is
-    held only until pg_trgm's similarity -- a trigram signal, NOT the token
-    Jaccard the 48% was measured with -- has been measured on the same banded
-    set, because shipping the arm nobody measured is the mistake
-    news-brief-bqa.21 already records. Migration 0012 makes that function
-    available; scripts/probe_corroboration.py carries the arm.
+        pg_trgm          184/418 = 44.0%      <- this ordering
+        entity overlap   115/418 = 27.5%      +16.5pp, z=4.98, p=6.4e-07
+        recency           56/418 = 13.4%
+
+    Token Jaccard scored 48.8%, and that margin over pg_trgm is +4.8pp at
+    z=1.39, p=0.165 -- NOT distinguishable from zero. It is not taken, because
+    it must rank a pool fetched into Python, and the only thing available to
+    bound that pool is recency: it would reintroduce the exact burial above at
+    a larger n, in exchange for a gain the measurement cannot confirm exists.
+
+    RANKING IN SQL IS THEREFORE STILL DELIBERATE, and now cheap: Postgres
+    orders the full in-window set through pg_trgm (migration 0012, a trusted
+    contrib extension present in the running image), so there is no pool, no
+    truncation, and no function crossing the production/diagnostic boundary.
+
+    `titles` is REQUIRED and ranks against the WHOLE batch, by best match to
+    any of its items. One candidate list serves every item in the batch, so
+    ranking on the first title alone would bury every other item's story --
+    recency's failure wearing a different hat. Empty titles offer NOTHING
+    rather than falling back to an unranked list, which would silently restore
+    recency ordering with no downstream signal that it had happened.
 
     Returns id and summary and NOTHING ELSE. events.type and
     commitment_state are scored by the pre-registered gate; sending them here
     would make every attached assertion inherit the framing by echo, and the
     gate would measure the prompt rather than the model.
     """
-    if not entity_ids:
+    titles = [t for t in (titles or []) if t]
+    if not entity_ids or not titles:
         return []
     rows = conn.execute(
-        # count(DISTINCT ee.entity_id) is the number of THIS BATCH's entities
-        # the event carries, because the WHERE clause admits no others. GROUP BY
-        # also supplies the de-duplication SELECT DISTINCT used to provide: an
-        # event reachable through two of the batch's entities appears once.
-        "SELECT e.id, e.summary, count(DISTINCT ee.entity_id) AS shared "
+        # CROSS JOIN unnest multiplies each event by the batch's titles and the
+        # GROUP BY collapses it back, so `best` is the strongest match to ANY
+        # item. GROUP BY also supplies the de-duplication SELECT DISTINCT used
+        # to provide: an event reachable through two of the batch's entities
+        # appears once.
+        "SELECT e.id, e.summary, max(similarity(t.title, e.summary)) AS best "
         "FROM events e "
         "JOIN event_entities ee ON ee.event_id = e.id "
+        "CROSS JOIN unnest(%s::text[]) AS t(title) "
         "WHERE ee.entity_id = ANY(%s) "
         "  AND e.occurred_at >= now() - make_interval(days => %s) "
         "GROUP BY e.id, e.summary, e.occurred_at "
-        # `e.id DESC` last so the order is TOTAL. Two events with equal overlap
-        # and an identical occurred_at would otherwise return in whatever order
-        # the plan happened to produce, making the offered list irreproducible
-        # for a fixed corpus -- which defeats both debugging and any later gold
-        # set built against it.
-        "ORDER BY shared DESC, e.occurred_at DESC, e.id DESC "
+        # `e.id DESC` last so the order is TOTAL. Two events with an equal
+        # score and an identical occurred_at would otherwise return in whatever
+        # order the plan happened to produce, making the offered list
+        # irreproducible for a fixed corpus -- which defeats both debugging and
+        # any later gold set built against it.
+        "ORDER BY best DESC, e.occurred_at DESC, e.id DESC "
         "LIMIT %s",
-        (list(entity_ids), CANDIDATE_WINDOW_DAYS, CANDIDATE_EVENT_CAP + 1),
+        (titles, list(entity_ids), CANDIDATE_WINDOW_DAYS, CANDIDATE_EVENT_CAP + 1),
     ).fetchall()
     if len(rows) > CANDIDATE_EVENT_CAP:
         tally.candidate_cap_hit += 1

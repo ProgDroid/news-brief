@@ -48,7 +48,9 @@ def test_candidate_events_are_found_through_shared_entities(kb):
     ent = _entity(kb)
     ev = _event(kb, ent)
     kb.commit()
-    got = comprehend.candidate_events(kb, [ent], comprehend.Tally())
+    got = comprehend.candidate_events(
+        kb, [ent], ["a headline that matches no summary here"], comprehend.Tally()
+    )
     assert [c["id"] for c in got] == [ev]
 
 
@@ -56,7 +58,12 @@ def test_candidate_events_outside_the_window_are_excluded(kb):
     ent = _entity(kb)
     _event(kb, ent, days_ago=comprehend.CANDIDATE_WINDOW_DAYS + 5)
     kb.commit()
-    assert comprehend.candidate_events(kb, [ent], comprehend.Tally()) == []
+    assert (
+        comprehend.candidate_events(
+            kb, [ent], ["a headline that matches no summary here"], comprehend.Tally()
+        )
+        == []
+    )
 
 
 def test_candidate_events_carry_ONLY_id_and_summary(kb):
@@ -73,7 +80,9 @@ def test_candidate_events_carry_ONLY_id_and_summary(kb):
     ent = _entity(kb)
     _event(kb, ent)
     kb.commit()
-    got = comprehend.candidate_events(kb, [ent], comprehend.Tally())
+    got = comprehend.candidate_events(
+        kb, [ent], ["a headline that matches no summary here"], comprehend.Tally()
+    )
     assert set(got[0]) == {"id", "summary"}
 
 
@@ -84,7 +93,9 @@ def test_the_integration_prompt_never_mentions_a_candidate_enum_value(kb):
     ent = _entity(kb)
     _event(kb, ent)
     kb.commit()
-    events = comprehend.candidate_events(kb, [ent], comprehend.Tally())
+    events = comprehend.candidate_events(
+        kb, [ent], ["a headline that matches no summary here"], comprehend.Tally()
+    )
     req = comprehend.build_integration_request(
         [{"id": 1, "title": "t", "body": "b", "outlet": "Reuters"}],
         [{"id": ent, "name": "Ukraine", "type": "country"}],
@@ -106,7 +117,9 @@ def test_hitting_the_candidate_cap_is_counted(kb):
         _event(kb, ent, summary=f"Event {i}")
     kb.commit()
     tally = comprehend.Tally()
-    got = comprehend.candidate_events(kb, [ent], tally)
+    got = comprehend.candidate_events(
+        kb, [ent], ["a headline that matches no summary here"], tally
+    )
     assert len(got) == comprehend.CANDIDATE_EVENT_CAP
     assert tally.candidate_cap_hit == 1
 
@@ -130,7 +143,9 @@ def test_candidates_fan_in_across_entities_and_a_shared_event_appears_once(kb):
     )
     kb.commit()
 
-    rows = comprehend.candidate_events(kb, [a, b], comprehend.Tally())
+    rows = comprehend.candidate_events(
+        kb, [a, b], ["a headline that matches no summary here"], comprehend.Tally()
+    )
     ids = [r["id"] for r in rows]
     assert sorted(ids) == sorted([only_a, only_b, shared]), (
         "all three must come back: an implementation matching only "
@@ -154,7 +169,9 @@ def test_candidates_come_back_newest_first(kb):
     middle = _event(kb, e, summary="middle", days_ago=5)
     kb.commit()
 
-    rows = comprehend.candidate_events(kb, [e], comprehend.Tally())
+    rows = comprehend.candidate_events(
+        kb, [e], ["a headline that matches no summary here"], comprehend.Tally()
+    )
     assert [r["id"] for r in rows] == [newest, middle, oldest], (
         "newest first; the insertion order above is deliberately not the "
         "expected order, so a missing ORDER BY cannot pass by coincidence"
@@ -524,7 +541,9 @@ def test_an_event_this_pipeline_CREATED_can_be_retrieved_as_a_candidate(kb):
     kb.commit()
 
     entity_id = kb.execute("SELECT id FROM entities").fetchone()[0]
-    candidates = comprehend.candidate_events(kb, [entity_id], comprehend.Tally())
+    candidates = comprehend.candidate_events(
+        kb, [entity_id], ["a headline that matches no summary here"], comprehend.Tally()
+    )
     assert len(candidates) == 1, (
         "an event this pipeline just created must be offerable as a candidate, "
         "or corroboration is impossible no matter how well the matcher works"
@@ -848,58 +867,26 @@ def _link_event(kb, event_id, entity_id):
     )
 
 
-def test_a_more_shared_event_outranks_a_more_recent_one(kb):
-    """The whole change in one assertion. Recency ranked the newer event first
-    and, on a hub entity, that is how a duplicate reported the same evening
-    never reached the model at all: 30 recency slots cover a few hours.
-
-    The two events are deliberately ordered so that recency and overlap
-    DISAGREE -- if they agreed, this would pass under the old ordering too.
-    """
-    a, b, c = _entity(kb, "Ukraine"), _entity(kb, "Russia"), _entity(kb, "France")
-    shared_but_old = _event(kb, a, summary="A and B meet", days_ago=6)
-    _link_event(kb, shared_but_old, b)
-    recent_but_narrow = _event(kb, c, summary="C does something", days_ago=1)
-    kb.commit()
-
-    rows = comprehend.candidate_events(kb, [a, b, c], comprehend.Tally())
-    assert [r["id"] for r in rows] == [shared_but_old, recent_but_narrow], (
-        "two shared entities must outrank one, even six days older"
-    )
-
-
-def test_events_with_EQUAL_overlap_still_come_back_newest_first(kb):
-    """Presence sibling. Without it, the test above is satisfied by an ORDER BY
-    that dropped recency altogether -- and recency is still the right
-    tie-break, since nothing else distinguishes equally-connected events."""
-    a = _entity(kb, "Ukraine")
-    oldest = _event(kb, a, summary="oldest", days_ago=10)
-    newest = _event(kb, a, summary="newest", days_ago=1)
-    middle = _event(kb, a, summary="middle", days_ago=5)
-    kb.commit()
-
-    rows = comprehend.candidate_events(kb, [a], comprehend.Tally())
-    assert [r["id"] for r in rows] == [newest, middle, oldest]
-
-
-def test_the_cap_keeps_the_shared_event_and_drops_recent_unrelated_ones(kb):
-    """The mechanism at the cap, which is where it actually bites. Bury a
-    two-entity event under CANDIDATE_EVENT_CAP newer single-entity ones: under
-    recency it falls off the end, which is the measured 15% recall. It must now
-    survive, and the returned list must still be exactly the cap."""
+def test_the_cap_keeps_the_matching_event_and_drops_recent_unrelated_ones(kb):
+    """The mechanism at the cap, which is where it actually bites. Bury the
+    lexical match under CANDIDATE_EVENT_CAP newer unrelated events: under
+    recency it falls off the end, which is the measured 13% batched recall. It
+    must now survive, and the returned list must still be exactly the cap."""
     a, b = _entity(kb, "Ukraine"), _entity(kb, "Russia")
-    buried = _event(kb, a, summary="A and B meet", days_ago=9)
+    buried = _event(kb, a, summary="Russian drones strike Odesa port", days_ago=9)
     _link_event(kb, buried, b)
     for i in range(comprehend.CANDIDATE_EVENT_CAP):
         _event(kb, a, summary=f"noise {i}", days_ago=1)
     kb.commit()
 
     tally = comprehend.Tally()
-    rows = comprehend.candidate_events(kb, [a, b], tally)
+    rows = comprehend.candidate_events(
+        kb, [a, b], ["Russian drones strike Odesa port overnight"], tally
+    )
     assert len(rows) == comprehend.CANDIDATE_EVENT_CAP
     assert tally.candidate_cap_hit == 1
     assert rows[0]["id"] == buried, (
-        "the event sharing BOTH entities must lead; under recency it was the "
+        "the event the item READS like must lead; under recency it was the "
         "one row that fell off the end"
     )
 
@@ -913,8 +900,102 @@ def test_an_event_reachable_through_two_entities_is_still_returned_once(kb):
     _link_event(kb, shared, b)
     kb.commit()
 
-    ids = [r["id"] for r in comprehend.candidate_events(kb, [a, b], comprehend.Tally())]
+    ids = [
+        r["id"]
+        for r in comprehend.candidate_events(
+            kb, [a, b], ["a headline that matches no summary here"], comprehend.Tally()
+        )
+    ]
     assert ids == [shared]
+
+
+# --- Trigram ranking (news-brief-bqa.24) -----------------------------------
+#
+# Measured 2026-09-09 on a banded eval set no arm selected, in production's
+# BATCHED shape: pg_trgm 184/418 = 44.0% against entity overlap's 115/418 =
+# 27.5%. +16.5pp, z=4.98, p=6.4e-07, a 1.60x gain, and it beat entity overlap
+# in EVERY band. Token Jaccard scored 48.8%, but that margin over pg_trgm is
+# +4.8pp at z=1.39, p=0.165 -- not distinguishable from zero -- and it would
+# cost the Python-side pool whose only available bound is recency, which is
+# the exact burial this ranking exists to prevent.
+
+
+def test_a_lexically_matching_event_outranks_a_more_shared_one(kb):
+    """The whole change in one assertion, and the inverse of the test it
+    replaces. The two signals are deliberately arranged to DISAGREE: if they
+    agreed this would pass under the ordering being replaced.
+    """
+    # Every fallback ordering must point at the WRONG answer, or the test
+    # passes with the ranking removed. The match is OLDER and inserted FIRST,
+    # so both tie-breaks -- occurred_at DESC and e.id DESC -- favour the decoy.
+    # Caught by mutation: an earlier version gave both events days_ago=1 and
+    # passed under pure recency, by insertion order.
+    a, b = _entity(kb, "Ukraine"), _entity(kb, "Russia")
+    shares_one = _event(kb, a, summary="Russian drones strike Odesa port", days_ago=5)
+    shares_two = _event(kb, a, summary="wheat export corridor talks stall", days_ago=1)
+    _link_event(kb, shares_two, b)
+    kb.commit()
+
+    rows = comprehend.candidate_events(
+        kb, [a, b], ["Russian drones strike Odesa port overnight"], comprehend.Tally()
+    )
+    assert rows[0]["id"] == shares_one, (
+        "the event that READS like the item must lead, even though the other "
+        "carries both of the batch's entities"
+    )
+
+
+def test_equally_similar_events_still_come_back_newest_first(kb):
+    """Presence sibling. Without it the test above is satisfied by an ORDER BY
+    that dropped recency altogether, and recency is still the right tie-break
+    when nothing lexical separates two candidates."""
+    a = _entity(kb, "Ukraine")
+    oldest = _event(kb, a, summary="identical wording", days_ago=10)
+    newest = _event(kb, a, summary="identical wording", days_ago=1)
+    middle = _event(kb, a, summary="identical wording", days_ago=5)
+    kb.commit()
+
+    rows = comprehend.candidate_events(
+        kb, [a], ["identical wording"], comprehend.Tally()
+    )
+    assert [r["id"] for r in rows] == [newest, middle, oldest]
+
+
+def test_the_best_match_across_the_batch_wins_not_only_the_first_item(kb):
+    """One candidate list serves the whole batch, so ranking on the first
+    item's title alone buries every other item's story -- the same failure
+    recency had, wearing a different hat. Mirrors batch_pg_trgm, which is the
+    arm the 44% was actually measured on.
+
+    The match is the OLDEST event and the filler fills the cap exactly, so
+    ranking on the first title alone does not merely demote it: it drops it.
+    """
+    a = _entity(kb, "Ukraine")
+    for i in range(comprehend.CANDIDATE_EVENT_CAP):
+        _event(kb, a, summary=f"unrelated filler {i}", days_ago=1)
+    second_items_story = _event(
+        kb, a, summary="Uber to exit Nigeria after twelve years", days_ago=9
+    )
+    kb.commit()
+
+    rows = comprehend.candidate_events(
+        kb,
+        [a],
+        ["Ukraine grain corridor update", "Uber to exit Nigeria after 12 years"],
+        comprehend.Tally(),
+    )
+    assert rows[0]["id"] == second_items_story
+
+
+def test_no_titles_offers_no_candidates_rather_than_an_unranked_list(kb):
+    """A batch with nothing to rank against must offer nothing. Falling back
+    to an unranked list would silently restore recency ordering -- the worst
+    arm measured, 13% batched -- and no downstream signal could tell."""
+    a = _entity(kb, "Ukraine")
+    _event(kb, a, summary="something", days_ago=1)
+    kb.commit()
+
+    assert comprehend.candidate_events(kb, [a], [], comprehend.Tally()) == []
 
 
 # --- Stop-loss: a permanent retirement must reach the operator
