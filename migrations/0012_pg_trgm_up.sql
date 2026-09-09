@@ -1,0 +1,25 @@
+-- Trigram similarity, so a lexical candidate ranking can be ORDER BY in the
+-- same query that already selects candidates.
+--
+-- news-brief-bqa.24. The 2026-09-08 review rejected lexical ranking on
+-- architecture rather than on evidence: it needed the whole candidate pool
+-- fetched and sorted in Python, whatever bounded that pool could only be
+-- truncated by recency -- reintroducing at a larger n exactly the burial the
+-- ranking was meant to fix -- and it made comprehend.py export tokens() and
+-- similarity() so a diagnostic script could import them, inverting the
+-- dependency so production became a consumer of a debug tool's API.
+--
+-- pg_trgm answers all three: Postgres orders the full in-window set in the
+-- index, there is no pool and nothing to truncate, and no function crosses
+-- the production/diagnostic boundary.
+--
+-- It is CONTRIB, not third-party: verified 2026-09-09 against
+-- postgres:18-alpine, the image already running in production, where
+-- CREATE EXTENSION succeeds with no image swap. That is what separates this
+-- from news-brief-bqa.7, where pgvector needs a different base image.
+--
+-- This migration only makes the function AVAILABLE. It changes no ranking and
+-- no query, so applying it cannot alter what the model is offered -- the
+-- switch is a separate change, made only after the arm has been measured
+-- (bqa.21's lesson: do not deploy a ranking nobody measured).
+CREATE EXTENSION IF NOT EXISTS pg_trgm;

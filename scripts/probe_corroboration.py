@@ -401,14 +401,14 @@ def candidate_pool(conn, miss, ents):
     ]
 
 
-def rank_recency(pool, miss, ents):
+def rank_recency(pool, miss, ents, conn=None):
     """The incumbent. Reproducing it in Python is what makes the bake-off
     trustworthy: if it disagrees with was_retrievable's SQL, every other
     strategy's number is measured against the wrong baseline."""
     return sorted(pool, key=lambda e: e["occurred_at"], reverse=True)
 
 
-def rank_entity_overlap(pool, miss, ents):
+def rank_entity_overlap(pool, miss, ents, conn=None):
     """Most entities in common, recency breaking ties. The hypothesis: an event
     sharing three actors with this item is likelier to BE this item's event
     than an unrelated one that happens to be newer."""
@@ -420,7 +420,7 @@ def rank_entity_overlap(pool, miss, ents):
     )
 
 
-def rank_title_similarity(pool, miss, ents):
+def rank_title_similarity(pool, miss, ents, conn=None):
     """Lexical ranking, despite lexical DETECTION being weak here. Ranking is
     an easier problem than detection: it needs the true match to beat its
     neighbours, not to clear an absolute line."""
@@ -428,7 +428,7 @@ def rank_title_similarity(pool, miss, ents):
     return sorted(pool, key=lambda e: similarity(title, e["summary"]), reverse=True)
 
 
-def rank_hybrid(pool, miss, ents):
+def rank_hybrid(pool, miss, ents, conn=None):
     """Reserved slots per signal. Hedges instead of betting the cap on one
     ranking being right about every kind of event."""
     arms = (rank_entity_overlap, rank_title_similarity, rank_recency)
@@ -447,10 +447,69 @@ def rank_hybrid(pool, miss, ents):
     return picked
 
 
+def trgm_scores(conn, text, summaries):
+    """pg_trgm similarity for every candidate at once, computed IN POSTGRES.
+
+    Deliberately not reimplemented in Python. This is the exact predicate an
+    `ORDER BY similarity(...)` ranking would use, and a Python re-derivation
+    of trigram similarity would be a second implementation free to drift from
+    the one production runs -- measuring the wrong thing while looking right.
+    """
+    summaries = list(summaries)
+    if not summaries:
+        return []
+    rows = conn.execute(
+        "SELECT similarity(%s, s.summary) "
+        "FROM unnest(%s::text[]) WITH ORDINALITY AS s(summary, idx) "
+        "ORDER BY s.idx",
+        (text, summaries),
+    ).fetchall()
+    return [float(r[0]) for r in rows]
+
+
+def _by_score(items, scores, key=lambda x: x):
+    """Descending by score, ties broken by original position. sorted() over
+    (score, dict) pairs would compare the dicts on a tie and raise."""
+    order = sorted(range(len(items)), key=lambda i: (-scores[i], i))
+    return [key(items[i]) for i in order]
+
+
+def rank_pg_trgm(pool, miss, ents, conn=None):
+    """Lexical ranking as production could actually run it (bqa.24).
+
+    The 48% batched recall that makes the case for a lexical ranking was
+    measured with this module's token-Jaccard `similarity()`. pg_trgm is a
+    DIFFERENT signal -- character trigrams, so "Iran"/"Iranian" score high,
+    and so does a shared "- Reuters" suffix. This arm exists so the predicate
+    that would SHIP is the predicate that gets MEASURED, rather than
+    inheriting a number earned by its cousin (news-brief-bqa.21).
+    """
+    if conn is None:
+        raise ValueError("rank_pg_trgm scores in Postgres and needs a connection")
+    scores = trgm_scores(conn, miss["later"]["title"], [e["summary"] for e in pool])
+    return _by_score(pool, scores)
+
+
+def batch_pg_trgm(pool, batch, ents, cap, conn=None):
+    """One list ranked by the BEST trigram match to any item in the batch --
+    the same shape batch_similarity uses, so the two stay comparable and the
+    difference between them is the SIGNAL rather than the strategy."""
+    if conn is None:
+        raise ValueError("batch_pg_trgm scores in Postgres and needs a connection")
+    summaries = [e["summary"] for e in pool]
+    best = [0.0] * len(pool)
+    for row in batch:
+        for i, score in enumerate(trgm_scores(conn, row["title"], summaries)):
+            if score > best[i]:
+                best[i] = score
+    return _by_score(pool, best, key=lambda e: e["id"])[:cap]
+
+
 STRATEGIES = {
     "recency (today)": rank_recency,
     "entity overlap": rank_entity_overlap,
     "title similarity": rank_title_similarity,
+    "pg_trgm (SQL)": rank_pg_trgm,
     "hybrid 10/10/10": rank_hybrid,
 }
 
@@ -471,7 +530,7 @@ def bake_off(conn, misses, ents, cap):
             continue
         target = miss["earlier"]["event_id"]
         for name, fn in STRATEGIES.items():
-            top = {e["id"] for e in fn(pool, miss, ents)[:cap]}
+            top = {e["id"] for e in fn(pool, miss, ents, conn=conn)[:cap]}
             if target in top:
                 results[name] += 1
         baseline = target in {e["id"] for e in rank_recency(pool, miss, ents)[:cap]}
@@ -536,14 +595,14 @@ def candidate_pool_for(conn, entity_ids, at):
     ]
 
 
-def batch_recency(pool, batch, ents, cap):
+def batch_recency(pool, batch, ents, cap, conn=None):
     """Production today: one list, ordered by recency, shared by the batch."""
     return [
         e["id"] for e in sorted(pool, key=lambda e: e["occurred_at"], reverse=True)
     ][:cap]
 
 
-def batch_similarity(pool, batch, ents, cap):
+def batch_similarity(pool, batch, ents, cap, conn=None):
     """One list ranked by the BEST similarity to any item in the batch. The
     simplest adaptation of the winning single-item ranking, and the one that
     dilution would hurt: five items compete for the same 30 slots."""
@@ -556,7 +615,7 @@ def batch_similarity(pool, batch, ents, cap):
     return [e["id"] for e in scored][:cap]
 
 
-def batch_reserved(pool, batch, ents, cap):
+def batch_reserved(pool, batch, ents, cap, conn=None):
     """Slots reserved PER ITEM, so a loud item cannot crowd out a quiet one.
     Each item gets cap // len(batch) picks ranked against its own title; any
     remainder is filled by the batch-wide ranking, so the budget is identical."""
@@ -584,7 +643,7 @@ def batch_reserved(pool, batch, ents, cap):
     return picked
 
 
-def batch_entity_overlap(pool, batch, ents, cap):
+def batch_entity_overlap(pool, batch, ents, cap, conn=None):
     """The SHIPPED ranking (51c850c) in production's batched shape.
 
     news-brief-bqa.21. `rank_entity_overlap` was measured single-item at 57%
@@ -610,8 +669,15 @@ def batch_entity_overlap(pool, batch, ents, cap):
 # rather than inferred: the names do not match, and a wrong pairing quietly
 # reports one arm's dilution as another's.
 SHIPPED_RANKING = "entity overlap"
+# The arms that score in Postgres and therefore cannot run in a pure test.
+# Named here rather than inferred, so the CI-safe tests can assert that the
+# set they skip is EXACTLY this one -- a new SQL-scored arm then fails those
+# tests instead of quietly escaping their coverage.
+SQL_SCORED = frozenset({"pg_trgm (SQL)", "pg_trgm, batched"})
+
 DILUTION_PAIRS = (
     ("entity overlap", "entity overlap, batched"),
+    ("pg_trgm (SQL)", "pg_trgm, batched"),
     ("title similarity", "similarity, batched"),
     ("recency (today)", "recency, batched"),
 )
@@ -620,6 +686,7 @@ BATCH_STRATEGIES = {
     "recency, batched": batch_recency,
     "entity overlap, batched": batch_entity_overlap,
     "similarity, batched": batch_similarity,
+    "pg_trgm, batched": batch_pg_trgm,
     "reserved per item": batch_reserved,
 }
 
@@ -644,7 +711,7 @@ def batch_bake_off(conn, misses, ents, rows, cap, size):
         evaluated += 1
         target = miss["earlier"]["event_id"]
         for name, fn in BATCH_STRATEGIES.items():
-            if target in fn(pool, batch, ents, cap):
+            if target in fn(pool, batch, ents, cap, conn=conn):
                 results[name] += 1
     return results, evaluated
 

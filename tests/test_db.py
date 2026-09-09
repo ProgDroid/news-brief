@@ -50,6 +50,7 @@ def test_up_creates_the_expected_tables(conn):
         "0009_comprehension",
         "0010_sampled_promotion",
         "0011_optional_commitment_state",
+        "0012_pg_trgm",
     ]
     assert {
         "schema_migrations",

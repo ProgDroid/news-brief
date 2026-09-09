@@ -560,10 +560,17 @@ def test_every_strategy_returns_the_whole_pool_or_the_hybrid_budget():
     now = dt.datetime.now(dt.timezone.utc)
     pool = [_pool(1, now - dt.timedelta(hours=i), eid=i) for i in range(50)]
     ents = {99: {0}}
+    skipped = set()
     for name, fn in pc.STRATEGIES.items():
+        if name in pc.SQL_SCORED:
+            skipped.add(name)
+            continue
         got = fn(pool, _miss(), ents)
         expected = sum(pc.HYBRID_SPLIT) if "hybrid" in name else len(pool)
         assert len(got) == expected, name
+    # The skip is bounded: a new SQL-scored arm must be declared, or this
+    # fails rather than silently leaving the arm untested.
+    assert skipped == pc.SQL_SCORED & set(pc.STRATEGIES)
 
 
 def test_the_bakeoff_baseline_reproduces_the_live_query(kb):
@@ -722,8 +729,32 @@ def test_every_batch_strategy_respects_the_cap():
         for i in range(50)
     ]
     batch = [_batch_row(f"t{i}", 100 + i, now) for i in range(5)]
+    skipped = set()
     for name, fn in pc.BATCH_STRATEGIES.items():
+        if name in pc.SQL_SCORED:
+            skipped.add(name)
+            continue
         assert len(fn(pool, batch, {}, 30)) <= 30, name
+    assert skipped == pc.SQL_SCORED & set(pc.BATCH_STRATEGIES)
+
+
+def test_the_sql_scored_arms_hold_the_same_budget_contract(kb):
+    """What the two tests above can no longer cover without a database. Same
+    properties, same pool shape -- the SQL arms are not exempt from the budget
+    contract, they just cannot be checked in a pure test."""
+    now = dt.datetime.now(dt.timezone.utc)
+    pool = [
+        {
+            "id": i,
+            "occurred_at": now - dt.timedelta(hours=i),
+            "summary": f"summary number {i}",
+            "entities": set(),
+        }
+        for i in range(50)
+    ]
+    assert len(pc.rank_pg_trgm(pool, _miss(), {}, conn=kb)) == len(pool)
+    batch = [_batch_row(f"title {i}", 100 + i, now) for i in range(5)]
+    assert len(pc.batch_pg_trgm(pool, batch, {}, 30, conn=kb)) <= 30
 
 
 def test_batch_neighbours_excludes_the_pair_itself():
@@ -864,3 +895,99 @@ def test_every_populated_band_is_represented_in_the_sample():
     sampled = pc.sample_by_band(misses, 3, random.Random(1))
     assert set(sampled) == {first, second}
     assert all(len(v) == 3 for v in sampled.values())
+
+
+# --- Trigram ranking, measured before it is shipped (news-brief-bqa.24) -----
+#
+# The 48% batched recall that makes the case for lexical ranking was measured
+# with THIS module's similarity(): token Jaccard over a stopword-filtered set.
+# pg_trgm's similarity() is a different signal -- trigrams, so "Iran"/"Iranian"
+# score high (helpful) and a shared "- Reuters" suffix also scores high (not
+# helpful, and the probe separates syndication for exactly that reason).
+#
+# Shipping pg_trgm on the strength of a token-Jaccard number would repeat
+# news-brief-bqa.21: deploying an arm nobody measured. So the arm exists here
+# first, computing similarity in the DATABASE -- the exact predicate the
+# ranking would use, not a Python re-derivation of it.
+
+
+def test_pg_trgm_is_available_after_migrations(kb):
+    # Migration 0012. If this fails the extension is not in the image, and
+    # every trigram number below is unobtainable in production.
+    assert kb.execute("SELECT similarity('abc', 'abc')").fetchone()[0] == 1.0
+
+
+def test_trgm_scores_reproduces_postgres_for_every_candidate(kb):
+    title = "Iran declares prohibited zone near Hormuz"
+    summaries = [
+        "Iran says it will declare prohibited zone near Strait of Hormuz",
+        "Uber to exit Nigeria after twelve years",
+        "",
+    ]
+    got = pc.trgm_scores(kb, title, summaries)
+    expected = [
+        kb.execute("SELECT similarity(%s, %s)", (title, s)).fetchone()[0]
+        for s in summaries
+    ]
+    assert got == expected
+
+
+def test_pg_trgm_ranks_the_paraphrase_above_a_newer_unrelated_event(kb):
+    # The whole point of a lexical ranking: the older paraphrase must beat the
+    # newer stranger, which is exactly where recency loses.
+    older = dt.datetime(2026, 9, 1, tzinfo=dt.timezone.utc)
+    newer = dt.datetime(2026, 9, 8, tzinfo=dt.timezone.utc)
+    # The unrelated event is FIRST on purpose: _by_score breaks ties by
+    # original position, so an arm that scores nothing would return id 2 and
+    # fail. Only a ranking that reads the text can put id 1 in front.
+    pool = [
+        {
+            "id": 2,
+            "occurred_at": newer,
+            "summary": "Uber to exit Nigeria after twelve years of operations",
+            "entities": set(),
+        },
+        {
+            "id": 1,
+            "occurred_at": older,
+            "summary": "Iran says it will declare a prohibited zone near Hormuz",
+            "entities": set(),
+        },
+    ]
+    miss = {
+        "later": {
+            "event_id": 100,
+            "title": "Iran declares prohibited zone near Strait of Hormuz",
+        }
+    }
+    ranked = pc.rank_pg_trgm(pool, miss, {}, conn=kb)
+    assert [e["id"] for e in ranked][0] == 1
+
+
+def test_batch_pg_trgm_is_registered_and_ranks_on_the_best_batch_match(kb):
+    # Registered, so the batched table reports it; and ranked on the BEST match
+    # across the batch, so a second item's story is not buried by the first.
+    assert any("trgm" in name for name in pc.BATCH_STRATEGIES)
+    older = dt.datetime(2026, 9, 1, tzinfo=dt.timezone.utc)
+    newer = dt.datetime(2026, 9, 8, tzinfo=dt.timezone.utc)
+    # Same trap, same fix: the unrelated event sits at pool[0].
+    pool = [
+        {
+            "id": 2,
+            "occurred_at": newer,
+            "summary": "wholly unrelated market wrap for the trading session",
+            "entities": set(),
+        },
+        {
+            "id": 1,
+            "occurred_at": older,
+            "summary": "Uber to exit Nigeria after twelve years of operations",
+            "entities": set(),
+        },
+    ]
+    batch = [
+        {"event_id": 100, "title": "Iran declares prohibited zone"},
+        {"event_id": 101, "title": "Uber to exit Nigeria after 12 years"},
+    ]
+    fn = next(f for n, f in pc.BATCH_STRATEGIES.items() if "trgm" in n)
+    assert fn(pool, batch, {}, 2, conn=kb)[0] == 1

@@ -860,14 +860,32 @@ def candidate_events(conn, entity_ids: list[int], tally: Tally) -> list[dict]:
     overlap is most likely and where spec 8.2's corroboration floor -- the
     existence test for the whole event layer -- has to find its signal.
 
-    RANKING IN SQL IS DELIBERATE. A lexical ranking measured slightly higher,
-    but it needed the whole pool fetched and sorted in Python, and whatever
-    bounded that pool could only be truncated by recency -- reintroducing this
-    exact burial at a larger n. Postgres orders the full set, so there is
-    nothing to truncate and that failure mode cannot occur. The lexical
-    comparison was also confounded: the evaluation set was selected by title
-    similarity, the same signal that ranking used, while this ordering is the
-    one arm that selection did not flatter.
+    RANKING IN SQL IS DELIBERATE, and that part still holds: Postgres orders
+    the full in-window set, so there is no pool to bound and no truncation to
+    reintroduce the burial above at a larger n.
+
+    THE REST OF THIS PARAGRAPH WAS WRONG AND IS CORRECTED HERE (2026-09-09,
+    news-brief-bqa.24). It said a lexical ranking measured "slightly higher"
+    and that the comparison was confounded because the evaluation set was
+    selected by title similarity -- the same signal that ranking used -- while
+    this ordering was "the one arm that selection did not flatter". Both
+    claims were true when written and neither survives measurement.
+
+    The confound was removed (news-brief-bqa.22): the bake-off now samples
+    WITHIN each similarity band, so the selection is constant across arms.
+    Lexical ranking did not merely survive that; it won by more. Batched --
+    the shape THIS function actually runs in -- lexical scores 48% recall@30
+    against this ordering's 29%, a 1.67x gain. And in the LOWEST band, where
+    lexical detection is worthless and where the September review specifically
+    predicted lexical ranking would underperform, it scores 48% against 23%.
+    The edge is largest exactly where it was predicted to vanish.
+
+    This ordering is therefore an interim, not a conclusion. The switch is
+    held only until pg_trgm's similarity -- a trigram signal, NOT the token
+    Jaccard the 48% was measured with -- has been measured on the same banded
+    set, because shipping the arm nobody measured is the mistake
+    news-brief-bqa.21 already records. Migration 0012 makes that function
+    available; scripts/probe_corroboration.py carries the arm.
 
     Returns id and summary and NOTHING ELSE. events.type and
     commitment_state are scored by the pre-registered gate; sending them here
