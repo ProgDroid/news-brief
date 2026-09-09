@@ -95,3 +95,29 @@ exists to remove.
 once inside the patch script (`assert s.count(old) == 1`). Four mutations, four predictions of
 "exactly one failing test", four hits — and unlike the earlier sed that silently hit three
 functions, a wrong anchor now refuses to apply instead of quietly widening the experiment.
+
+## An OVERSHOOT usually means you broke the code, not that the tests are strong (2026-09-09)
+
+Two mutations reported **22** and **10** failing tests. That reads as excellent coverage and proved
+nothing: both had deleted a `%s` placeholder while the params tuple still supplied it, so every
+query raised before reaching an assertion. **A mutation that breaks the STATEMENT tests nothing
+about its MEANING.**
+
+- **A mutation must leave the code runnable.** Preserve arity, placeholder count, and types; change
+  only the semantics. Rewritten to keep the placeholders in place, the same two scored 2 and 1.
+- **Check the failure MODE, not just the count.** Assertion failures are signal; import errors,
+  `TypeError`, and database exceptions mean the experiment did not run. A count without that check
+  is `pipe-eats-the-exit-code` wearing different clothes.
+- **A big number is a smell.** If a one-line change fails a fifth of the suite, suspect the harness
+  before congratulating the tests.
+
+**Predicting ZERO in advance is legitimate and worth doing.** One guard was short-circuit only —
+`CROSS JOIN unnest('{}')` returns no rows with or without it — so the mutation could not fail
+anything. Saying so before running turned a would-be embarrassment into a stated limit, and the
+test still earns its place against a *future* fallback, which is the risk the docstring names.
+
+**An UNDERSHOOT is the interesting one.** A prediction of 3 that scored 2 found a vacuous test
+([[tests-asserting-less-than-their-name]]); the survivor was the headline assertion, passing with
+the feature removed. **When fewer tests fail than predicted, suspect the tests, not the
+prediction.** When more fail, suspect the mutation.
+

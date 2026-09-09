@@ -88,3 +88,25 @@ Sibling of [[backtest-nonstationarity-check]] — that one is about regime insta
 over time, traps 1–2 about dependence across observations, traps 3–4 about the
 measurement design itself letting a wrong number look right. Context:
 [[trading-retrospective-2026-08-16]], [[newsbrief-kb-architecture-2026-08-29]].
+
+## Trap 7: the OUTCOME metric cannot attribute the change; the MECHANISM metric can
+
+Measured 2026-09-09. `corroboration_by_outlet` is the pre-registered existence test for the event
+layer, so it was the obvious thing to watch after a ranking change. It cannot answer that question
+at this corpus size, and the arithmetic says so before any run:
+
+- event rate ~139/hour, base rate 6.5%; a ~7h cohort each side resolves **3.2pp at best**
+- merging EVERY duplicate the detector can see is worth **+0.25pp**
+- so the instrument needed an effect ~13x larger than the entire ceiling
+- 1pp would need ~2.9 days per side; 0.5pp, ~11 days
+
+Meanwhile `recall@30` — the mechanism the ranking actually changes — was measurable directly on
+n=413 with band stratification, and separated the arms at z=4.98.
+
+**Compute the smallest effect your measurement can resolve BEFORE running it, and compare that to
+the largest effect available.** If the second is smaller than the first, the run is theatre, and a
+null result will be misread as evidence of no effect. **Prefer the metric closest to the mechanism
+you changed;** keep the outcome metric as the gate it was registered as, not as an attribution
+tool. Watch also for a base rate DRIFTING under you: this one fell 6.64% -> 6.49% -> 6.43% across
+three corpus sizes, so waiting for more data made the gate harder, not easier.
+

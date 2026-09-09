@@ -32,3 +32,32 @@ metadata:
 - **A test that breaks LOUDLY when the world moves is self-maintaining; one that breaks silently is worse than absent.** `tests/test_scheduler.py:259` parametrizes over `scheduler.SCHEDULES`, so adding a schedule extends coverage automatically and can never go stale — that is the working template `news-brief-5db` asks the migration tests to copy.
 
 Related: [[tdd-plan-fixtures-drift-from-contracts]] (fixtures using fields the real function lacks — adjacent but distinct), [[subagent-review-stalls]] (dispatch practices), [[newsbrief-capture-feature]].
+
+## 2026-09-09: THREE more in one session, and all three had the same shape
+
+Every one was written by me, in the same session, minutes after writing the previous one. None was
+found by reading. All three were found by mutation, immediately.
+
+**The shape: a FALLBACK ordering that happened to agree with the correct answer.**
+
+- A ranking test put the correct event at `pool[0]`, and the tie-break was original position. An
+  arm that scored the empty string still returned the right id. Green.
+- A second gave both events the same `days_ago`, so reverting the ranking to pure recency still
+  passed via the `e.id DESC` tie-break. Green.
+- A third asserted a duplicate was buried by the cap, but every candidate scored near zero, so the
+  ordering was noise and the duplicate survived by luck — a FLAKY test that happened to be passing.
+
+**The rule that prevents all three: when a test asserts an ordering, arrange the fixture so that
+EVERY fallback ordering points at the WRONG answer.** Make the correct answer the oldest, or the
+first inserted, or the lowest id — whatever the tie-breaks favour, give it to the decoy. If the
+test can pass with the ranking deleted, it is testing the fixture.
+
+**Fourth, distinct shape, same session: a test satisfied by a different predicate than the one it
+names.** A window-anchor test asserted the empty case using a one-day-old event, which a separate
+`created_at` filter excluded on its own. The anchor was never exercised. **Make the fixture
+straddle the boundary of the ONE predicate under test**, and prove it by mutating that predicate
+alone. See [[reconstruction-drifts-from-production]].
+
+**Reading review saturates.** Three careful passes over these tests found nothing; the mutation
+run found each in seconds. Budget the mutation, not the re-read.
+

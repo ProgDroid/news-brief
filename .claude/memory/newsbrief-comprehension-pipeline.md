@@ -302,6 +302,9 @@ read the same. That named cause is retired. Neither delta was distinguishable fr
 Event creation is bursty (192/140/174/46 per hour across four consecutive ~6-7h blocks), so
 ±1pp between windows means nothing.
 
+**SUPERSEDED — both items below were done the same day; read the next section.** Kept only
+because the reasoning still holds: the cutover, and why `bqa.18` was a run rather than a build.
+
 **NEXT, in order:**
 1. `--cutover 2026-09-09T06:09:41Z` (the container's `.State.StartedAt`, known exactly), once
    ~13h have elapsed. Accepts one risk: if the ranking has been live since 09-08 afternoon, the
@@ -315,3 +318,46 @@ Event creation is bursty (192/140/174/46 per hour across four consecutive ~6-7h 
    detector recall. Which holds is the open question of the epic.
 
 Full write-up: `docs/2026-09-09-corroboration-cohort-measurement.md`.
+
+## 2026-09-09 (late) — bqa.18 ANSWERED, ranking switched, and the ceiling is 6.7%
+
+**`bqa.18` CLOSED. The diagnostic discriminated all three outcomes.** **B (never offered)
+dominates and is concentrated exactly where predicted**: by entity frequency, 0% never-offered
+below 100 events per entity, 48% at 100-500, **78% at 500+**, every miss carrying the Iran hub.
+**C is REFUTED** — outlets DO cover the same events: the model itself merged 899 cross-outlet item
+pairs in a 7-day window, and it is NOT mostly syndication (87 of 90 merges survive excluding it).
+A dominates only at low hub counts, a minority of volume.
+
+**RANKING SWITCHED TO pg_trgm (`9c40935`), and the September design decision is REVERSED.**
+Measured batched, on an eval set no arm selected: pg_trgm **44.0%** vs the shipped entity overlap
+**27.5%** — +16.5pp, z=4.98, p=6.4e-07, 1.60x — winning in EVERY band. Token Jaccard scored 48.8%
+but the margin is +4.8pp at **p=0.165, indistinguishable from zero**, and it needs a Python pool
+whose only bound is recency. **The red-team's specific prediction — that lexical ranking's edge was
+an artifact of a similarity-selected eval set and would vanish in low-overlap bands — is refuted:
+the edge is LARGEST there (48% vs 23%).** Caveat carried forward: in the biggest band Jaccard still
+leads pg_trgm 42 vs 33, so revisit it first if the deployed ranking underperforms 44%.
+
+**`pg_trgm` is CONTRIB and works in the stock `postgres:18-alpine` already running** — verified,
+no image swap, which is exactly what separates it from `bqa.7`/pgvector. Migration **0012**.
+
+**THE CEILING ON THE FAILING DIRECTION IS 6.7%, against a 6.4% base. It fails.** Merging all 90
+detected merges adds **FOUR** multi-outlet events; excluding syndication, 87 merges add **ONE**. My
+hand estimate of ~9.1% was wrong because it assumed 90 DISJOINT pairs. Two structural readings fit
+and the probe cannot yet tell them apart (`bqa.25`): few large clusters (so the union-find ceiling
+is dominated by transitive closure, which understates) or many small clusters of ALREADY-corroborated
+events (more discouraging). **The base rate is also DRIFTING DOWN as the corpus grows — 6.64% ->
+6.49% -> 6.43% — so waiting for more data makes the gate harder, not easier.**
+
+**`bqa.26` CLOSED: the probe's A/B and hub tables had been describing a RETIRED ranking.**
+`was_retrievable` reimplemented the old `ORDER BY` and never moved; it now calls
+`candidate_events` with an `as_of`. Anything quoted from those tables before `ba72cac` is recency's
+behaviour, not production's — see [[reconstruction-drifts-from-production]].
+
+**`bqa.19` is NOT closable by measurement.** [[analysis-stats-traps]] trap 7: corroboration cannot
+A/B a ranking change at this corpus size — ~3.2pp resolvable against +0.25pp available. Use
+`recall@30` for attribution and keep corroboration as the gate it was registered as.
+
+**OPEN:** `bqa.25` (cluster structure behind the 6.7%), `bqa.23` (whole-KB counts over a 7-day
+label), `bqa.11` still blocked, and the separator is STILL an arbitrary 0.35 — the negative class
+needs pairs 5+ days apart and the KB is younger. Re-run the calibration once it spans five days.
+
