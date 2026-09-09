@@ -138,3 +138,100 @@ match) or **C** (outlets do not cover the same events) — and C invalidates §8
 rather than its implementation. Yesterday's probe already put the *detected* ceiling at
 9.0%, below the floor, with ~30% only under an extrapolated 12% detector recall. Which of
 those holds is the open question of the epic.
+
+---
+
+## 6. The clean-anchor run, and where the pre-registration lost
+
+Run at 19:00 local on 2026-09-09 with `--cutover 2026-09-09T06:09:41Z`, 12.8h elapsed.
+
+| horizon | post-cutover (entity rank) | pre-cutover control (recency) | delta |
+|---|---|---|---|
+| 6h | n=370, multi=10, **2.7%** | n=270, multi=9, **3.3%** | −0.6pp |
+| 12h | no events | n=48, multi=2, 4.2% | — |
+| 24h | not measurable | | |
+
+### 6.1 What held, and what did not
+
+| pre-registered | actual | |
+|---|---|---|
+| no significant difference between cohorts | −0.6pp, z ≈ −0.44 | held |
+| both cohorts read **5–8%** | **2.7% and 3.3%** | **lost** |
+| ~948 events per cohort at 6h | **370 and 270** | **lost, by 2.6–3.5×** |
+| falsifier: post above 9.7% | 2.7% | not triggered |
+
+The directional prediction held. Both quantitative ones lost, and the second is the
+informative one.
+
+### 6.2 The event-rate figure had a generator, and the generator is the defect
+
+The pre-registration required checking observed counts against the 139/hour rate before
+believing a surprising result. Applying it to the *unsurprising* one: post is 370/6.3h ≈
+**59/hour**, control is 270/6.3h ≈ **43/hour**.
+
+The control's 43/hour is not noise. It lands on the **46/hour overnight block** §4 already
+measured — because at 12.8h elapsed, the 6h-horizon windows are post ≈ 06:09→12:27 UTC and
+control ≈ 23:50→06:09 UTC. **The control cohort is the overnight trough by construction.**
+
+139/hour was computed by averaging 3597 events over 25.8h of a series §4 had *already
+recorded as bursty* — 192 / 140 / 174 / 46 per hour. Averaging a bursty series and applying
+the mean to one 6-hour window is the error, and correcting 139 to 59 would not fix it: the
+same arithmetic re-emits a wrong number at every future cutover. This is
+`the-prediction-had-a-generator` — **the program is the defect, the number only its
+symptom.** Any cohort comparison anchored at a fixed hour places its control in a
+systematically different volume regime from its post arm.
+
+### 6.3 The two errors partly cancelled, so the conclusion survives
+
+- predicted: p ≈ 6.5%, n ≈ 948/948 → SE ≈ 1.13pp, MDE ≈ **3.2pp**
+- actual: p ≈ 3%, n = 370/270 → SE ≈ 1.37pp, MDE ≈ **3.8pp**
+
+n came in 2.6× low, but p came in 2× low as well, and a lower base rate shrinks the
+variance. The derived quantity — the only thing the argument rested on — moved 3.2 → 3.8pp.
+So the structural conclusion is unchanged and marginally stronger: the run resolves ~3.8pp
+against a detected-duplicate ceiling of **+0.25pp**.
+
+Worth recording as a pattern: two wrong inputs produced a nearly-right derived figure. Had
+only the MDE been checked, both errors would have passed unnoticed.
+
+### 6.4 A second, independent reason this metric cannot A/B a ranking
+
+Both cohorts read roughly half the 5.7–8.3% of §4's windows, and they moved **together**. A
+change hitting both arms is not the ranking.
+
+The candidate is volume. Corroboration requires a *second outlet to publish on the same
+event within the horizon*, so a low-volume window mechanically yields fewer multi-outlet
+events. The two arms here differ in volume by 37% (59 vs 43/hour).
+
+So `corroboration_by_outlet` is not merely underpowered here — **it moves with news volume,
+and any two time windows differ in volume.** No anchor hygiene or elapsed time fixes that,
+because the confound is a property of comparing two periods at all.
+
+## 7. Verdict on bqa.19
+
+The acceptance criterion: *"`corroboration_by_outlet` is measured after the ranking change
+has run for a full window, and either clears 10% or the shortfall is attributed to a named
+cause rather than to an unmeasured one."*
+
+**Clause 1 is satisfied.** A 6.3h post-cutover cohort against an equal-length control on an
+exactly-known cutover. That is what was missing in §3.
+
+**Clause 2 is satisfied by attribution, not by clearing.** The named cause is not the
+ranking: merging **every duplicate the detector can see** moves corroboration to 6.7%
+(`bqa.25`), which is itself **below the 10% floor**. The floor is unreachable through this
+mechanism, so the shortfall was never something a ranking change could close. The ranking
+change is not thereby shown to be worthless — `recall@30` says it works — it is shown to be
+measured by the wrong instrument.
+
+**Closed on that basis.** Three things carry forward:
+
+1. **`bqa.11` holds a gate now known to sit above the measured ceiling.** Firing the
+   pre-registered 10% test would spend a one-shot pre-registration on a question whose
+   answer is already determined. That wants a decision before it runs, not after.
+2. **`bqa.25` is the live question** — whether the 6.7% ceiling is few-large-clusters or
+   many-small-already-corroborated decides whether the ceiling means anything, and points
+   at `bqa.18`'s outcome C, which would invalidate §8.2's premise rather than its
+   implementation.
+3. **Attribute ranking changes with `recall@30`**, not with corroboration. Corroboration
+   remains §8.2's existence test for the event layer; it is not an A/B instrument at this
+   corpus size, for the two independent reasons in §6.3 and §6.4.
