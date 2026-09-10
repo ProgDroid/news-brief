@@ -433,14 +433,20 @@ def close_live_position(row, reason):
         return False
     cost = row.get("cost_basis") or 0.0
     row["realized_return"] = (sale["proceeds"] / cost - 1.0) if cost else 0.0
+    # closed_date is computed FIRST because last_mark reads it. It used to read
+    # row.get("closed_date") three lines before the assignment below, so on an
+    # open row -- every row this function is ever called on -- it was None. The
+    # tell was a repaired row and a natively closed one DISAGREEING on that one
+    # field (measured 2026-09-10: 3501950 had the date, 2243896 had null).
+    closed = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     row["last_mark"] = {
-        "date": row.get("closed_date"),
+        "date": closed,
         "price": sale["sale_price"],
         "proceeds": sale["proceeds"],
     }
     row["status"] = "closed"
     row["close_reason"] = reason
-    row["closed_date"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    row["closed_date"] = closed
     log.info(f"LIVE CLOSE {row['id']} reason={reason} proceeds={sale['proceeds']}")
     return True
 

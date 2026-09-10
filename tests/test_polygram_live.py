@@ -830,3 +830,24 @@ def test_sell_position_success_false_is_not_a_sale(monkeypatch, caplog):
         assert polygram_live.sell_position("3501950", "No", 1.0) is None
     assert not [r for r in caplog.records if r.levelname == "ERROR"]
     assert any("REFUSED" in r.getMessage() for r in caplog.records)
+
+
+def test_close_stamps_last_mark_with_TODAYS_date_not_None(monkeypatch):
+    """last_mark read row["closed_date"] three lines before it was assigned, so
+    on an open row -- the only kind this is called on -- it was always None. The
+    tell was live: a row repaired by script carried the date and a natively
+    closed one carried null, for the same day."""
+    monkeypatch.setattr(
+        polygram_live,
+        "list_positions",
+        lambda: [{"marketId": "1", "outcome": "No", "shares": 2.0}],
+    )
+    monkeypatch.setattr(
+        polygram_live, "_pg_request", lambda *a, **k: dict(MEASURED_SELL_2026_09_10)
+    )
+    row = {"id": "r", "instrument": "1", "outcome": "No", "cost_basis": 2.0}
+    assert polygram_live.close_live_position(row, "manual") is True
+    assert row["last_mark"]["date"] is not None
+    assert row["last_mark"]["date"] == row["closed_date"], (
+        "the mark and the close must agree on when it happened"
+    )

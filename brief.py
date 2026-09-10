@@ -4053,14 +4053,13 @@ def mode_pgdiag():
             shown = {
                 k: v
                 for k, v in v0.items()
-                # The sell path's identifier is named here rather than matched
-                # by shape: it is `position_key`, which contains no "id" and so
-                # was invisible to this filter for the whole time it mattered.
-                # Bound to polygram_live's constant so the probe cannot drift
-                # off the field close_live_position actually reads.
-                if k == polygram_live._VENUE_POSITION_ID
-                or "id" in k.lower()
-                or k.lower() in {"outcome", "shares", "status"}
+                # NO FILTER AT ALL, deliberately. The previous version kept
+                # `position_key` plus anything matching a name pattern, which
+                # still presupposes which fields matter. It cost the answer once
+                # already, and again on 2026-09-10: `totalInvested` and
+                # `avgPrice` -- the venue's OWN record of dollars committed, and
+                # the only things that can settle whether `amount` is dollars or
+                # a share count -- were in the key list and had no value shown.
             }
             out.append(
                 "venue position fields: "
