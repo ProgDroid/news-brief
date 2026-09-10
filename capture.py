@@ -17,7 +17,7 @@ Spec: docs/superpowers/specs/2026-09-02-continuous-capture-design.md
 import hashlib
 import time
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 
 import brief
@@ -180,6 +180,10 @@ class Tally:
     # (migration 0008 is already applied), so these live in the log line only.
     items_already: int = 0
     items_failed: int = 0
+    # Same -- no column, log only. A skip is neither a failure nor a poll, so it
+    # needs its own name: "28 feeds, 3 ok" with no third number is exactly the
+    # ambiguity capture_runs exists to remove.
+    feeds_not_due: int = 0
     sources_dropped: int = 0
     failures: dict | None = None
 
@@ -351,7 +355,58 @@ def poll_interval_minutes(feed: dict) -> int:
     return min(declared, max_poll_interval_minutes())
 
 
-def run(conn, spacer=None) -> Tally:
+def due_feeds(conn, feeds: list[dict], now) -> list[dict]:
+    """The feeds whose interval has elapsed since their last ATTEMPT.
+
+    Last attempt rather than last success, deliberately. Keying on success would
+    retry a broken feed every tick until it recovered: the worst possible
+    response to a 429, and pointless against a 403, which
+    `source-fetch-failure-modes` says must never be retried. Attempt-keying makes
+    a feed's request rate equal its interval regardless of health, and
+    `failing_feeds` -- not the retry -- is what reports the breakage.
+
+    A `deadline` row is NOT an attempt. `run` writes one for a feed the pass ran
+    out of time to reach, so nothing left the box -- counting it would let a pass
+    that skipped a feed consume that feed's slot, doubling its real gap while
+    feed_polls still shows a row per interval and every downstream reader reports
+    the cadence as honoured.
+
+    HALF A TICK OF SLACK, and it is load-bearing rather than a fudge. Due-ness is
+    evaluated on the scheduler's discrete grid -- `previous_fire` snaps capture to
+    a fixed 30-minute boundary (scheduler.py:96) -- while `polled_at` defaults to
+    Postgres now() taken MID-pass. So a feed polled five seconds into the 11:30
+    pass shows 29m55s elapsed at the 12:00 fire, and a bare `>= interval` would
+    find it not due and defer it a whole tick. With no keys set at all that
+    silently halves the fleet's cadence to 60 minutes -- the opposite of the
+    "behaviour identical to today" this phase promises. Half a tick is the correct
+    rounding for a threshold sampled on a grid: it makes `interval == nominal`
+    fire every tick, and `interval == k * nominal` fire every k-th.
+
+    FAILS OPEN. Any error and every feed is due, which is today's behaviour.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT source_name, max(polled_at) FROM feed_polls "
+            "WHERE failure IS DISTINCT FROM 'deadline' GROUP BY source_name"
+        ).fetchall()
+        last_attempt = {name: at for name, at in rows}
+    except Exception as e:
+        log.warning(f"Capture: due-check unavailable, polling every feed ({e})")
+        return list(feeds)
+
+    slack = timedelta(minutes=_interval_minutes() / 2)
+    due = []
+    for feed in feeds:
+        at = last_attempt.get(feed["name"])
+        if at is None:
+            due.append(feed)
+            continue
+        if now - at + slack >= timedelta(minutes=poll_interval_minutes(feed)):
+            due.append(feed)
+    return due
+
+
+def run(conn, spacer=None, now=None) -> Tally:
     """One full pass. Bounded by DEADLINE_SECONDS so it cannot outlive its own
     fire time and trip the supervisor's overlap alert.
 
@@ -363,6 +418,10 @@ def run(conn, spacer=None) -> Tally:
     is what "capture is cheap and irreversible" has to mean in practice.
     """
     enabled = bool(common.CAPTURE_ENABLED)
+    # Injectable for the same reason `spacer` is: the store tests pin time at a
+    # fixed NOW and insert poll rows relative to it, so a wall-clock read would
+    # see every fixture row as days stale and poll everything.
+    now = now or datetime.now(timezone.utc)
     tally = Tally()
     run_id = start_run(conn, enabled)
     conn.commit()
@@ -372,8 +431,12 @@ def run(conn, spacer=None) -> Tally:
         conn.commit()
         return tally
 
-    feeds = common.order_by_host(capture_sources())
-    tally.feeds_total = len(feeds)
+    sources = capture_sources()
+    tally.feeds_total = len(sources)
+    # Due-ness first, ordering second: order_by_host must interleave the set
+    # actually being fetched, not the full list.
+    feeds = common.order_by_host(due_feeds(conn, sources, now))
+    tally.feeds_not_due = len(sources) - len(feeds)
     deadline = time.monotonic() + DEADLINE_SECONDS
     spacer = spacer or common.HostSpacer()
 
@@ -431,6 +494,7 @@ def run(conn, spacer=None) -> Tally:
         f"{tally.feeds_failed} failed ({kinds or 'none'}), "
         f"{tally.items_seen} items seen, {tally.items_new} new, "
         f"{tally.items_already} already held, {tally.items_failed} failed, "
+        f"{tally.feeds_not_due} not due, "
         f"{tally.sources_dropped} sources dropped"
     )
     return tally

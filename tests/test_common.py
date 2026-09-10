@@ -304,3 +304,23 @@ def test_host_spacer_sleeps_only_the_remainder_when_some_time_has_passed():
     clock.t = 3.0
     spacer.wait({"url": "https://h.example/b"})
     assert slept == [2.0]
+
+
+def test_host_spacer_keeps_a_constant_gap_across_three_fetches_of_one_host():
+    """Two waits cannot distinguish a constant gap from a compounding one. On a
+    frozen fake clock this implementation returns [5, 10], which is an artifact
+    of the fake -- a real clock advances while sleeping. The sleeper here
+    advances the clock as a real one does, which is what a spacer test must
+    model."""
+    waited = []
+    clock = FakeClock()
+
+    def sleeper(seconds):
+        waited.append(seconds)
+        clock.t += seconds
+
+    spacer = common.HostSpacer(5, clock=clock, sleeper=sleeper)
+    for _ in range(3):
+        spacer.wait({"url": "https://one.example/f"})
+
+    assert waited == [5, 5]

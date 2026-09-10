@@ -859,3 +859,146 @@ def test_a_drought_alerts_once_not_once_an_hour(store, monkeypatch):
 
     assert len(sent) == 1
     assert "new items" in sent[0]
+
+
+# --- due_feeds (news-brief-b42.5 Phase 1).
+
+SLOW = {"name": "Slow", "url": "https://slow.example/rss", "poll_every_minutes": 120}
+DEFAULT = {"name": "Default", "url": "https://default.example/rss"}
+
+
+def test_a_feed_polled_inside_its_interval_is_not_due(store):
+    run = _run(store, minutes_ago=1)
+    _poll(store, run, "Slow", minutes_ago=10)
+    store.commit()
+    assert capture.due_feeds(store, [SLOW], NOW) == []
+
+
+def test_a_feed_polled_longer_ago_than_its_interval_is_due(store):
+    """The presence sibling. Without it, the test above passes against a
+    due_feeds that returns nothing at all."""
+    run = _run(store, minutes_ago=200)
+    _poll(store, run, "Slow", minutes_ago=130)
+    store.commit()
+    assert capture.due_feeds(store, [SLOW], NOW) == [SLOW]
+
+
+def test_a_feed_sitting_exactly_on_the_boundary_is_due(store):
+    """The boundary, and it is NOT `interval` -- the half-tick slack moves it to
+    `interval - slack`. For a 120-minute feed at a 30-minute tick that is 105
+    minutes, where elapsed + slack == interval exactly.
+
+    Found by the mutation run: the first version of this test used 120 and sat
+    15 minutes clear of the edge, so flipping >= to > changed nothing and the
+    mutation failed zero tests. A boundary test written before the boundary
+    moved stops being a boundary test without ever failing."""
+    boundary = 120 - capture._interval_minutes() // 2
+    run = _run(store, minutes_ago=200)
+    _poll(store, run, "Slow", minutes_ago=boundary)
+    store.commit()
+    assert capture.due_feeds(store, [SLOW], NOW) == [SLOW]
+
+
+def test_a_feed_one_minute_short_of_the_boundary_is_not_due(store):
+    """The other side of it, so the pair pins the edge rather than one half."""
+    boundary = 120 - capture._interval_minutes() // 2
+    run = _run(store, minutes_ago=200)
+    _poll(store, run, "Slow", minutes_ago=boundary - 1)
+    store.commit()
+    assert capture.due_feeds(store, [SLOW], NOW) == []
+
+
+def test_a_declared_interval_is_never_polled_MORE_often_than_declared(store):
+    """The slack rounds to the nearest tick; it must not round down to an
+    earlier one. An interval that is not a whole number of ticks is what
+    discriminates -- for exact multiples a half-tick and a full-tick slack fire
+    on the SAME tick, which is why the full-tick mutation failed zero tests
+    until this existed.
+
+    75 minutes is 2.5 ticks. At two ticks elapsed the feed has waited 60 minutes
+    against a declared 75, so it must not be due."""
+    odd = {"name": "Odd", "url": "https://odd.example/rss", "poll_every_minutes": 75}
+    run = _run(store, minutes_ago=200)
+    _poll(store, run, "Odd", minutes_ago=capture._interval_minutes() * 2)
+    store.execute(
+        "UPDATE feed_polls SET polled_at = polled_at + interval '5 seconds' "
+        "WHERE source_name = 'Odd'"
+    )
+    store.commit()
+    assert capture.due_feeds(store, [odd], NOW) == []
+
+
+def test_a_feed_that_has_never_been_polled_is_due(store):
+    assert capture.due_feeds(store, [SLOW], NOW) == [SLOW]
+
+
+def test_a_feed_with_no_declared_interval_is_due_after_nominal(store):
+    """A feed nobody has tuned behaves exactly as it does today."""
+    run = _run(store, minutes_ago=INTERVAL + 5)
+    _poll(store, run, "Default", minutes_ago=INTERVAL + 1)
+    store.commit()
+    assert capture.due_feeds(store, [DEFAULT], NOW) == [DEFAULT]
+
+
+def test_a_failed_poll_still_counts_as_an_attempt(store):
+    """Due-ness is keyed on the last ATTEMPT, not the last success. Keying on
+    success would retry a broken feed every tick until it recovered -- the worst
+    response to a 429, and pointless against a 403, which must never be
+    retried."""
+    run = _run(store, minutes_ago=1)
+    _poll(store, run, "Slow", failure="http_403", minutes_ago=10)
+    store.commit()
+    assert capture.due_feeds(store, [SLOW], NOW) == []
+
+
+def test_a_deadline_row_does_NOT_count_as_an_attempt(store):
+    """`run` writes a deadline row for a feed the pass ran out of time to reach.
+    Nothing left the box, so it is not an attempt. Counting it would let a
+    skipped pass consume the feed's slot -- doubling its real gap while
+    feed_polls still shows a row per interval and every downstream reader
+    reports the cadence as honoured. Silent by construction."""
+    run = _run(store, minutes_ago=1)
+    _poll(store, run, "Slow", failure="deadline", minutes_ago=10)
+    store.commit()
+    assert capture.due_feeds(store, [SLOW], NOW) == [SLOW]
+
+
+def test_with_no_keys_set_every_feed_is_due_on_every_scheduler_tick(store):
+    """THE REGRESSION TEST FOR SPEC 10.1's SAFETY PROPERTY: with no feed
+    declaring an interval, behaviour must be identical to today.
+
+    It is not automatic. previous_fire snaps capture to a fixed 30-minute grid
+    (scheduler.py:96) while polled_at defaults to Postgres now() taken MID-pass,
+    so a feed polled five seconds into the previous pass shows 29m55s elapsed at
+    the next fire. A bare `>= interval` finds it NOT due and defers it a whole
+    tick, halving the fleet's cadence to 60 minutes with zero keys set.
+
+    The seconds here are the point -- do not round them away."""
+    run = _run(store, minutes_ago=INTERVAL)
+    _poll(store, run, "Default", minutes_ago=INTERVAL)
+    # The previous pass reached this feed five seconds after it started.
+    store.execute(
+        "UPDATE feed_polls SET polled_at = %s WHERE source_name = 'Default'",
+        (NOW - timedelta(minutes=INTERVAL) + timedelta(seconds=5),),
+    )
+    store.commit()
+
+    assert capture.due_feeds(store, [DEFAULT], NOW) == [DEFAULT], (
+        "an untuned feed missed its tick: the fleet just halved its cadence"
+    )
+
+
+def test_a_slowed_feed_fires_every_kth_tick_and_not_more_often(store):
+    """The control for the slack: it must not be so generous that a 120-minute
+    feed fires early. At four ticks of 30 minutes, it is due at the fourth and
+    at no earlier one."""
+    run = _run(store, minutes_ago=200)
+    for ticks, expected in ((1, []), (2, []), (3, []), (4, [SLOW])):
+        store.execute("DELETE FROM feed_polls WHERE source_name = 'Slow'")
+        _poll(store, run, "Slow", minutes_ago=INTERVAL * ticks)
+        store.execute(
+            "UPDATE feed_polls SET polled_at = polled_at + interval '5 seconds' "
+            "WHERE source_name = 'Slow'"
+        )
+        store.commit()
+        assert capture.due_feeds(store, [SLOW], NOW) == expected, f"{ticks} ticks"

@@ -1,6 +1,7 @@
 """Unit tests for continuous capture (news-brief-b42.1). No network, no DB."""
 
 import re
+from datetime import datetime, timezone
 
 import brief
 import capture
@@ -586,3 +587,49 @@ def test_every_declared_interval_in_the_real_list_is_within_range():
                 < declared
                 <= capture.max_poll_interval_minutes()
             ), f["name"]
+
+
+def test_the_due_check_fails_open_when_the_table_cannot_be_read():
+    """Every failure in this subsystem degrades to today's behaviour. The worst
+    case spends requests, the only resource it was ever optimising.
+
+    Lives here rather than in test_capture_store.py: it needs no database, and
+    that module's skipmark would hide it from every local pytest run."""
+
+    class _BrokenConn:
+        def execute(self, *a, **kw):
+            raise RuntimeError("relation feed_polls does not exist")
+
+    feeds = [
+        {"name": "A", "url": "https://a.example/rss", "poll_every_minutes": 120},
+        {"name": "B", "url": "https://b.example/rss"},
+    ]
+    assert capture.due_feeds(_BrokenConn(), feeds, datetime.now(timezone.utc)) == feeds
+
+
+def test_feeds_total_still_counts_every_source_not_just_the_due_ones(monkeypatch):
+    """feeds_total is persisted to capture_runs and read by the health surface.
+    Redefining it as "the due ones" would silently change what every historical
+    row means."""
+    feeds = [
+        {"name": f"F{i}", "url": f"https://h{i}.example/f", "category": "geo"}
+        for i in range(5)
+    ]
+    monkeypatch.setattr(capture, "capture_sources", lambda: feeds)
+    monkeypatch.setattr(capture, "due_feeds", lambda conn, fs, now: fs[:2])
+    monkeypatch.setattr(common, "CAPTURE_ENABLED", True)
+    monkeypatch.setattr(capture, "start_run", lambda conn, enabled: 1)
+    monkeypatch.setattr(capture, "finish_run", lambda conn, run, tally: None)
+    monkeypatch.setattr(
+        capture, "record_poll", lambda conn, run, name, failure, seen: None
+    )
+    monkeypatch.setattr(
+        brief,
+        "fetch_feed_entries",
+        lambda f: brief.FeedFetch(entries=[], failure="http_403"),
+    )
+
+    tally = capture.run(conn=_CommitOnlyConn(), spacer=common.HostSpacer(0))
+
+    assert tally.feeds_total == 5, "every source is still counted"
+    assert tally.feeds_not_due == 3
