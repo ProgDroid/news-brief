@@ -1363,6 +1363,68 @@ def _pgdiag_env(monkeypatch, *, event_id="evt"):
     return brief, sent
 
 
+# The venue-position dump has to answer "what identifies a position here", and
+# for a month it could not (news-brief-8fy). It printed venue[0] ONLY, filtered
+# to keys whose name contains "id" -- so a real 2026-09-10 run reported
+# marketId/tokenId/userId and nothing else, which is consistent with both "there
+# is no position id" and "the id is called something without 'id' in it", and
+# says nothing at all about positions 1 and 2. A filtered view of one sample is
+# the weakest possible basis for an absence claim, and an absence claim is
+# exactly what this probe exists to support.
+
+
+def _pgdiag_with_positions(monkeypatch, positions):
+    brief, sent = _pgdiag_env(monkeypatch)
+    monkeypatch.setattr(polygram_live, "list_positions", lambda: positions)
+    return brief, sent
+
+
+def test_pgdiag_dumps_EVERY_venue_position_not_just_the_first(monkeypatch):
+    """n=1 cannot support a claim about the response shape. The real run had
+    three positions and reported one."""
+    brief, sent = _pgdiag_with_positions(
+        monkeypatch,
+        [
+            {"marketId": "1", "outcome": "No"},
+            {"marketId": "2", "outcome": "Yes", "positionId": "p2"},
+        ],
+    )
+    brief.mode_pgdiag()
+    assert "positionId" in sent[0], (
+        "a field present only on the SECOND position must still be reported"
+    )
+
+
+def test_pgdiag_dumps_keys_whose_names_do_not_contain_id(monkeypatch):
+    """The filter that hid the answer. A position identifier called 'ref',
+    'key', 'slug' or 'hash' was invisible to the old view, so 'no id field'
+    could never be concluded from it."""
+    brief, sent = _pgdiag_with_positions(
+        monkeypatch, [{"marketId": "1", "outcome": "No", "ref": "abc", "slug": "x-y"}]
+    )
+    brief.mode_pgdiag()
+    assert "ref" in sent[0] and "slug" in sent[0]
+
+
+def test_pgdiag_dumps_key_NAMES_without_their_values(monkeypatch):
+    """Keys answer the shape question exactly. Values are unbounded, can carry
+    account detail, and this report goes to Telegram."""
+    brief, sent = _pgdiag_with_positions(
+        monkeypatch,
+        [{"marketId": "1", "outcome": "No", "userId": "SOMETHING-PRIVATE"}],
+    )
+    brief.mode_pgdiag()
+    # Scoped to the line under test. The older `venue position fields:` line
+    # deliberately shows truncated VALUES so field types are visible, so a
+    # message-wide assertion here would be testing that line instead of this one.
+    keys_lines = [
+        ln for ln in sent[0].splitlines() if ln.startswith("venue position keys")
+    ]
+    assert keys_lines, "the key dump must be present at all"
+    assert "userId" in keys_lines[0]
+    assert "SOMETHING-PRIVATE" not in keys_lines[0]
+
+
 def test_pgdiag_reports_a_healthy_seam(monkeypatch):
     brief, sent = _pgdiag_env(monkeypatch)
     brief.mode_pgdiag()

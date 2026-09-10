@@ -3964,6 +3964,20 @@ def mode_pgdiag():
         # one close_live_position/reconcile_live_book depend on) is unverified
         # against real data. An int marketId where we store a str would make every
         # row look like an orphan here and, worse, look SETTLED to reconcile.
+        # EVERY position, and EVERY key name. The filtered single-sample view
+        # this replaces could not answer the one question it was built for --
+        # "what identifies a position here" -- because it printed venue[0] only
+        # and kept just the keys whose NAME contains "id". The 2026-09-10 run
+        # reported marketId/tokenId/userId, which is equally consistent with
+        # "there is no position id" and "it is called something else", and said
+        # nothing whatever about positions 1 and 2 (news-brief-8fy).
+        #
+        # Key names, not values: the names settle the shape question exactly,
+        # while the values are unbounded, carry account detail, and this report
+        # goes to Telegram.
+        for i, p in enumerate(venue):
+            if isinstance(p, dict):
+                out.append(f"venue position keys[{i}]: {sorted(p)}")
         if venue and isinstance(venue[0], dict):
             v0 = venue[0]
             shown = {
