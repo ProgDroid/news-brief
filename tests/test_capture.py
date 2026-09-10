@@ -485,3 +485,104 @@ def test_a_pass_past_its_deadline_never_spaces_the_feeds_it_skips(monkeypatch):
 
     assert len(recorded) == 5, "every feed still gets a poll row"
     assert waited == [], "a pass past its deadline slept for feeds it never fetched"
+
+
+# --- Per-feed poll intervals (news-brief-b42.5 Phase 1).
+
+
+def _native(**extra):
+    return {"name": "N", "url": "https://example.com/rss", **extra}
+
+
+def _google_news(**extra):
+    return {
+        "name": "GN",
+        "url": "https://news.google.com/rss/search?q=when:2d+site%3Aexample.com",
+        **extra,
+    }
+
+
+def test_a_feed_with_no_declared_interval_polls_at_nominal():
+    assert capture.poll_interval_minutes(_native()) == capture._interval_minutes()
+
+
+def test_a_declared_interval_is_honoured():
+    assert capture.poll_interval_minutes(_native(poll_every_minutes=90)) == 90
+
+
+def test_a_declared_interval_above_the_ceiling_is_clamped():
+    assert (
+        capture.poll_interval_minutes(_native(poll_every_minutes=9999))
+        == capture.max_poll_interval_minutes()
+    )
+
+
+def test_the_ceiling_is_derived_from_nominal_rather_than_hardcoded():
+    """Spec section 3.2. The evidence bound is nominal x MAX_GAP_FACTOR = 45
+    minutes, so what the measurement fixes is the EXTRAPOLATION FACTOR, not an
+    absolute number. A hardcoded 120 silently collapses every declared interval
+    if capture is ever retimed to 60, and makes the valid range empty at 120."""
+    assert capture.max_poll_interval_minutes() == capture._interval_minutes() * 4
+    assert capture.max_poll_interval_minutes() > capture._interval_minutes()
+
+
+def test_a_declared_interval_below_nominal_falls_back_to_nominal():
+    """The scheduler tick is the floor: a smaller number is a promise the
+    schedule cannot keep."""
+    assert capture.poll_interval_minutes(_native(poll_every_minutes=5)) == (
+        capture._interval_minutes()
+    )
+
+
+def test_a_non_integer_declared_interval_falls_back_to_nominal():
+    """Fail open: a bad value means today's behaviour, never a crash in the poll
+    loop. `True` is included because bool is an int subclass and would otherwise
+    be read as a one-minute interval."""
+    assert capture.poll_interval_minutes(_native(poll_every_minutes="fast")) == (
+        capture._interval_minutes()
+    )
+    assert capture.poll_interval_minutes(_native(poll_every_minutes=True)) == (
+        capture._interval_minutes()
+    )
+
+
+def test_a_rank_ordered_feed_is_never_slowed_even_when_it_declares_an_interval():
+    """Google News returns RELEVANCE-ranked results under a 100-entry cap, so an
+    item missing from a poll may never have departed: turnover is unmeasurable
+    in principle, and such a feed stays at nominal whatever it declares."""
+    assert capture.poll_interval_minutes(_google_news(poll_every_minutes=120)) == (
+        capture._interval_minutes()
+    )
+
+
+def test_a_native_feed_declaring_THE_SAME_interval_is_slowed():
+    """The control for the test above. Without it, an implementation that never
+    slows anything passes the pinned-feed assertion."""
+    assert capture.poll_interval_minutes(_native(poll_every_minutes=120)) == 120
+
+
+def test_no_rank_ordered_feed_in_the_real_list_declares_an_interval():
+    """Self-maintaining: a ninth Google News proxy tests itself. The two control
+    assertions keep it honest -- without them it passes on a predicate that is
+    constantly False."""
+    assert any(capture.rank_ordered(f) for f in brief.RSS_FEEDS), "control failed"
+    assert any(not capture.rank_ordered(f) for f in brief.RSS_FEEDS), "control failed"
+    for f in brief.RSS_FEEDS:
+        if capture.rank_ordered(f):
+            assert capture.POLL_INTERVAL_KEY not in f, (
+                f"{f['name']} is relevance-ranked and cannot carry an interval"
+            )
+
+
+def test_every_declared_interval_in_the_real_list_is_within_range():
+    """VACUOUS TODAY, and kept knowingly: no feed declares an interval until
+    rollout. It is the assertion that fires when someone pastes a 240 back in."""
+    for f in brief.RSS_FEEDS:
+        declared = f.get(capture.POLL_INTERVAL_KEY)
+        if declared is not None:
+            assert isinstance(declared, int) and not isinstance(declared, bool), f
+            assert (
+                capture._interval_minutes()
+                < declared
+                <= capture.max_poll_interval_minutes()
+            ), f["name"]

@@ -289,6 +289,68 @@ def capture_sources() -> list[dict]:
     ]
 
 
+# ── Per-feed poll cadence (news-brief-b42.5 Phase 1) ──────────────────────────
+# An optional key on a feed dict rather than a table: `capture_url`, `outlet` and
+# `kind` already work this way, and this phase deliberately adds no schema. The
+# measured intervals and their provenance are Phase 2.
+
+POLL_INTERVAL_KEY = "poll_every_minutes"
+
+# How far beyond the observed evidence an interval may be extrapolated.
+#
+# `poll_pairs` (scripts/measure_roll_off.py:151) discards every pair wider than
+# nominal x MAX_GAP_FACTOR, so every turnover figure behind these intervals is
+# measured over spans of at most 45 minutes. The b42.2 summary's 240 was a 5.3x
+# extrapolation beyond ANY observation; 4x nominal is 2.7x, and the request
+# saving has no beneficiary, so there is no reason to buy more of it with
+# extrapolation risk. Spec section 3.2.
+#
+# A FACTOR, not an absolute: the evidence bound itself scales with nominal, so a
+# hardcoded ceiling would leave the reasoning behind the moment capture is
+# retimed -- silently collapsing every declared interval at nominal 60, and
+# making the valid range empty at nominal 120.
+MAX_INTERVAL_FACTOR = 4
+
+
+def max_poll_interval_minutes() -> int:
+    return _interval_minutes() * MAX_INTERVAL_FACTOR
+
+
+def rank_ordered(feed: dict) -> bool:
+    """Is this feed's window ordered by RELEVANCE rather than by time?
+
+    Google News returns relevance-ranked results under a 100-entry cap, so an
+    item's absence from a poll does not mean it departed -- turnover is
+    unmeasurable in principle, not merely unmeasured, and such a feed can never
+    be slowed on the strength of a measurement.
+
+    Derived from the URL rather than a list of names, which would be one new
+    proxy away from being silently wrong. NOT the same set as "carries a
+    capture_url": eight feeds are Google News proxies, only four have an
+    override.
+    """
+    return common.feed_host(feed) == "news.google.com"
+
+
+def poll_interval_minutes(feed: dict) -> int:
+    """How often this feed should be polled, in minutes.
+
+    Fails open in every direction: an absent key, a non-integer, a bool, a
+    rank-ordered feed, or anything at or below the scheduler tick all yield
+    nominal -- exactly today's behaviour. The only way to be slowed is to declare
+    a valid interval above nominal and not be relevance-ranked.
+    """
+    nominal = _interval_minutes()
+    if rank_ordered(feed):
+        return nominal
+    declared = feed.get(POLL_INTERVAL_KEY)
+    if not isinstance(declared, int) or isinstance(declared, bool):
+        return nominal
+    if declared <= nominal:
+        return nominal
+    return min(declared, max_poll_interval_minutes())
+
+
 def run(conn, spacer=None) -> Tally:
     """One full pass. Bounded by DEADLINE_SECONDS so it cannot outlive its own
     fire time and trip the supervisor's overlap alert.
