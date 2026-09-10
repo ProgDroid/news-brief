@@ -306,10 +306,20 @@ def _match_position(venue_positions, market_id, outcome):
     return None
 
 
-def _match_position_id(venue_positions, market_id, outcome):
-    """Find the venue positionId for a book row by (marketId, outcome)."""
-    pos = _match_position(venue_positions, market_id, outcome)
-    return pos.get("id") if pos else None
+# What /trade/positions calls the thing /trade/sell asks for as `positionId`.
+# MEASURED on the live venue 2026-09-10, across all three open positions, after
+# a year in which the response shape had never been seen: the payload carries
+# avgPrice, chainDrift, chainShares, chainStatus, currentPrice, image, isLost,
+# marketId, marketResolved, marketTitle, outcome, position_key, realizedPnl,
+# resolvedTitle, shares, tokenId, totalInvested, unrealizedPnl, userId,
+# winningOutcome -- and NO `id` and NO `positionId`, which is what this code
+# spent that year reading (news-brief-8fy).
+#
+# position_key is the only field naming the POSITION rather than the market
+# (marketId), the outcome token (tokenId) or the account (userId). It is also
+# the only snake_case key in an otherwise camelCase response, which reads like a
+# server-side composite rather than a venue-native field.
+_VENUE_POSITION_ID = "position_key"
 
 
 def close_live_position(row, reason):
@@ -326,18 +336,17 @@ def close_live_position(row, reason):
     if pos is None:
         log.warning(f"Live close: {row['id']} not on venue; leaving to reconcile")
         return False
-    pos_id = pos.get("id")
+    pos_id = pos.get(_VENUE_POSITION_ID)
     if pos_id is None:
         # The venue HOLDS this position; we simply cannot name it. Still fail
-        # closed -- selling needs an id we do not have -- but say which fact
-        # this is, and NAME THE FIELDS the response actually carried. That is
-        # the single thing needed to fix it, and a month of hourly warnings
-        # never once contained it: `sell_position` calls this `positionId`,
-        # `/trade/positions` was never verified against a real position because
-        # until 2026-08-11 none had ever existed.
+        # closed -- selling needs an identifier we do not have -- but say which
+        # fact this is, and NAME THE FIELDS the response actually carried. That
+        # is the single thing needed to fix it, and 424 hourly warnings never
+        # once contained it.
         log.warning(
-            f"Live close: {row['id']} IS held by the venue but carries no 'id' "
-            f"field, so it cannot be sold. Fields present: {sorted(pos)}"
+            f"Live close: {row['id']} IS held by the venue but carries no "
+            f"{_VENUE_POSITION_ID!r}, so it cannot be sold. "
+            f"Fields present: {sorted(pos)}"
         )
         return False
     sale = sell_position(pos_id)

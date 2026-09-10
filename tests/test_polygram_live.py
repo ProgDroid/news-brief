@@ -294,21 +294,26 @@ def _live_row(market_id="mkt_b", outcome="No"):
     }
 
 
-def test_match_position_id():
+def test_match_position_picks_the_row_for_the_right_OUTCOME():
+    """Both legs of a market are open at once, so matching the market alone
+    would sell the wrong side."""
     venue = [
-        {"id": "pos_x", "marketId": "mkt_b", "outcome": "No"},
-        {"id": "pos_y", "marketId": "mkt_b", "outcome": "Yes"},
+        {"position_key": "pk_no", "marketId": "mkt_b", "outcome": "No"},
+        {"position_key": "pk_yes", "marketId": "mkt_b", "outcome": "Yes"},
     ]
-    assert polygram_live._match_position_id(venue, "mkt_b", "No") == "pos_x"
-    assert polygram_live._match_position_id(venue, "mkt_z", "No") is None
+    assert polygram_live._match_position(venue, "mkt_b", "No")["position_key"] == (
+        "pk_no"
+    )
+    assert polygram_live._match_position(venue, "mkt_z", "No") is None
 
 
-def test_match_position_id_tolerates_venue_type_and_case_drift():
-    # We store market_id as the STRING the search returned ('2774057'); nothing has
-    # ever verified what type /trade/positions echoes back, because no live position
-    # has ever existed. An int here (or "NO" for "No") silently breaks the join.
-    venue = [{"id": "pos_x", "marketId": 2774057, "outcome": "NO"}]
-    assert polygram_live._match_position_id(venue, "2774057", "No") == "pos_x"
+def test_match_position_tolerates_venue_type_and_case_drift():
+    # We store market_id as the STRING the search returned ('2774057'). The live
+    # response was finally measured on 2026-09-10 and echoes a str -- but the
+    # normalisation stays, because that was unverified for a year and the failing
+    # direction is silent: reconcile reads an unmatched row as SETTLED.
+    venue = [{"position_key": "pk", "marketId": 2774057, "outcome": "NO"}]
+    assert polygram_live._match_position(venue, "2774057", "No")["position_key"] == "pk"
 
 
 def test_reconcile_keeps_a_position_the_venue_still_holds_under_type_drift(monkeypatch):
@@ -317,7 +322,7 @@ def test_reconcile_keeps_a_position_the_venue_still_holds_under_type_drift(monke
     monkeypatch.setattr(
         polygram_live,
         "list_positions",
-        lambda: [{"id": "pos_x", "marketId": 2774057, "outcome": "NO"}],
+        lambda: [{"position_key": "pk", "marketId": 2774057, "outcome": "NO"}],
     )
     row = _live_row()
     row["instrument"] = "2774057"
@@ -327,16 +332,36 @@ def test_reconcile_keeps_a_position_the_venue_still_holds_under_type_drift(monke
     assert row["status"] == "open"
 
 
-def test_close_live_position_sells_and_stamps(monkeypatch):
+def test_close_live_position_sells_using_the_venues_position_key(monkeypatch):
+    """The identifier that actually reaches /trade/sell, which the previous
+    version of this test discarded -- it accepted `pid` and never looked at it,
+    so it passed just as happily while close_live_position read a key the venue
+    has never sent (news-brief-8fy). Measured field set, 2026-09-10:
+    avgPrice, chainDrift, chainShares, chainStatus, currentPrice, image, isLost,
+    marketId, marketResolved, marketTitle, outcome, position_key, realizedPnl,
+    resolvedTitle, shares, tokenId, totalInvested, unrealizedPnl, userId,
+    winningOutcome -- and position_key is the only one that names the POSITION
+    rather than the market, the token or the account."""
+    sold = []
     monkeypatch.setattr(
         polygram_live,
         "list_positions",
-        lambda: [{"id": "pos_x", "marketId": "mkt_b", "outcome": "No"}],
+        lambda: [
+            {
+                "position_key": "pk_real",
+                "marketId": "mkt_b",
+                "outcome": "No",
+                "tokenId": "11134447534296978",
+                "userId": "someone",
+                "shares": 6.25,
+            }
+        ],
     )
     monkeypatch.setattr(
         polygram_live,
         "sell_position",
-        lambda pid, shares=None: {
+        lambda pid, shares=None: sold.append(pid)
+        or {
             "proceeds": 6.0,
             "sale_price": 0.96,
             "profit": 1.0,
@@ -347,6 +372,10 @@ def test_close_live_position_sells_and_stamps(monkeypatch):
     )
     row = _live_row()
     assert polygram_live.close_live_position(row, "target") is True
+    assert sold == ["pk_real"], (
+        "the venue must be handed position_key -- tokenId names the outcome "
+        "token and marketId the market, and neither identifies THIS holding"
+    )
     assert row["status"] == "closed" and row["close_reason"] == "target"
     # realized_return = proceeds/cost_basis - 1 = 6.0/5.0 - 1 = 0.20
     assert abs(row["realized_return"] - 0.20) < 1e-9

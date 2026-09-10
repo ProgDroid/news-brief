@@ -3983,7 +3983,14 @@ def mode_pgdiag():
             shown = {
                 k: v
                 for k, v in v0.items()
-                if "id" in k.lower() or k.lower() in {"outcome", "shares", "status"}
+                # The sell path's identifier is named here rather than matched
+                # by shape: it is `position_key`, which contains no "id" and so
+                # was invisible to this filter for the whole time it mattered.
+                # Bound to polygram_live's constant so the probe cannot drift
+                # off the field close_live_position actually reads.
+                if k == polygram_live._VENUE_POSITION_ID
+                or "id" in k.lower()
+                or k.lower() in {"outcome", "shares", "status"}
             }
             out.append(
                 "venue position fields: "

@@ -1425,6 +1425,24 @@ def test_pgdiag_dumps_key_NAMES_without_their_values(monkeypatch):
     assert "SOMETHING-PRIVATE" not in keys_lines[0]
 
 
+def test_pgdiag_shows_the_VALUE_of_the_field_used_to_sell(monkeypatch):
+    """The key dump names position_key; it does not show what is in it. The
+    venue docs give positionId as an opaque "pos_abc123"-shaped string, so the
+    value is what confirms this field is that identifier rather than, say, a
+    composite of userId and marketId. Bound to polygram_live's own constant so
+    the probe cannot drift off the field the sell path actually reads."""
+    brief, sent = _pgdiag_with_positions(
+        monkeypatch,
+        [{"marketId": "1", "outcome": "No", "position_key": "pos_abc123"}],
+    )
+    brief.mode_pgdiag()
+    typed = [
+        ln for ln in sent[0].splitlines() if ln.startswith("venue position fields")
+    ]
+    assert typed, "the typed line must still be present"
+    assert f"{polygram_live._VENUE_POSITION_ID}=pos_abc123" in typed[0]
+
+
 def test_pgdiag_reports_a_healthy_seam(monkeypatch):
     brief, sent = _pgdiag_env(monkeypatch)
     brief.mode_pgdiag()
