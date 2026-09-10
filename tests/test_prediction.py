@@ -1348,6 +1348,9 @@ def _pgdiag_env(monkeypatch, *, event_id="evt"):
     # holds a frozen `from trading import polygram_login` copy, so patching
     # trading.polygram_login does NOT divert _pg_request (see the module-attr rule).
     monkeypatch.setattr(polygram_live, "list_positions", lambda: [])
+    # Same reason as list_positions: unstubbed, the /trade/history shape probe
+    # reaches the real venue and the network guard fails the test.
+    monkeypatch.setattr(polygram_live, "trade_history", lambda: [])
     monkeypatch.setattr(brief, "load_book", lambda: {"positions": []})
     sent = []
     monkeypatch.setattr(brief, "telegram_send_long", lambda t: sent.append(t))
@@ -1659,3 +1662,32 @@ def test_paper_prediction_row_records_the_venue_label(monkeypatch):
         book, [{"topic": "x"}], "2026-08-05", set(), (cands, matches)
     )
     assert n == 1 and book["positions"][0]["outcome"] == "Up"
+
+
+# ── /trade/history: the last unmeasured shape in the live seam ────────────────
+
+
+def test_pgdiag_enumerates_EVERY_history_key(monkeypatch):
+    """backfill_settled reaches for `proceeds` on records keyed by (marketId,
+    outcome) -- three names taken from documentation and never observed. The
+    probe must therefore report what IS there, not confirm what we expect: a
+    name-matching filter is what hid `position_key` for a year."""
+    brief, sent = _pgdiag_env(monkeypatch)
+    monkeypatch.setattr(
+        polygram_live,
+        "trade_history",
+        lambda: [{"market_ref": "1", "side": "sell", "netUsd": 1.8, "ts": 99}],
+    )
+    brief.mode_pgdiag()
+    for key in ("market_ref", "side", "netUsd", "ts"):
+        assert key in sent[0], f"{key} must be reported even though nothing reads it"
+
+
+def test_pgdiag_says_history_is_unreadable_rather_than_empty(monkeypatch):
+    """None is a FAILED read. Reporting it as '0 records' would license the
+    conclusion that there is no history to backfill from."""
+    brief, sent = _pgdiag_env(monkeypatch)
+    monkeypatch.setattr(polygram_live, "trade_history", lambda: None)
+    brief.mode_pgdiag()
+    assert "UNREADABLE" in sent[0]
+    assert "0 record" not in sent[0]

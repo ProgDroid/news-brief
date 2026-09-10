@@ -633,3 +633,73 @@ def test_feeds_total_still_counts_every_source_not_just_the_due_ones(monkeypatch
 
     assert tally.feeds_total == 5, "every source is still counted"
     assert tally.feeds_not_due == 3
+
+
+# ── bare quote-tweets (news-brief-grc) ────────────────────────────────────────
+
+# MEASURED from the live Nitter at aegyptvault.local:5678 on 2026-09-10, item
+# guid 2098067254663581699. Nitter puts the author's OWN words in <title> and
+# the quoted tweet in <description>, so a quote-tweet with no added comment has
+# an empty title by construction.
+QT_DESCRIPTION = (
+    "<hr/>\n<blockquote>\n<b>Clash Report (@clashreport)</b>\n<p>\n"
+    "<p>Yemen\u2019s Houthis seized Zuqar Island in the southern Red Sea after "
+    "rocket attacks and a boat-borne ground assault, according to a Yemeni "
+    "military source. <br>\n<br>\nSource: AFP</p>\n"
+    '<img src="http://x/pic/media%2FHR3B2bhaIAAWyCA.jpg" />\n</p>\n'
+    '<footer>\n\u2014 <cite><a href="http://x/clashreport/status/1">q</a></cite>\n'
+    "</footer>\n</blockquote>"
+)
+
+
+def test_entry_from_derives_an_attributed_title_for_a_bare_quote_tweet():
+    e = brief._entry_from(
+        {"title": "", "link": "http://x/a/status/1#m", "summary": QT_DESCRIPTION}
+    )
+    assert e["title"], "a quote-tweet carries readable text and must not be titleless"
+    # Provenance: the words are Clash Report's, not the amplifying account's.
+    assert e["title"].startswith("QT Clash Report (@clashreport): ")
+    assert "Zuqar Island" in e["title"]
+    # The author must appear once, not twice: it is also the first line of the
+    # tag-stripped body, which is where the excerpt is taken from.
+    assert e["title"].count("Clash Report") == 1
+    # The body is untouched: production logs it with its leading newlines
+    # intact, and only the TITLE is derived.
+    assert e["summary"].lstrip().startswith("Clash Report (@clashreport)")
+    assert "Zuqar Island" in e["summary"]
+
+
+def test_entry_from_leaves_a_real_title_alone():
+    e = brief._entry_from(
+        {"title": "  Simpler times  ", "link": "http://x/1", "summary": "<p>body</p>"}
+    )
+    assert e["title"] == "Simpler times"
+
+
+def test_entry_from_has_no_title_when_there_is_nothing_to_read():
+    """A media-only post strips to nothing. It stays titleless so store_items
+    still skips it -- deriving a title from an empty body would manufacture a
+    row with no content in it."""
+    e = brief._entry_from(
+        {"title": "", "link": "http://x/1", "summary": '<img src="http://x/p.jpg"/>'}
+    )
+    assert e["title"] == ""
+
+
+def test_derived_title_drops_nitters_footer_permalink():
+    """A short quote used to run the excerpt into the <footer><cite> link, so
+    the headline ended in a raw status URL. The body keeps it; the title does
+    not. MEASURED case: guid 2098060529344622911, 2026-09-10."""
+    short_qt = (
+        "<hr/>\n<blockquote>\n<b>Rick Palacios Jr. (@RickPalaciosJr)</b>\n"
+        "<p><p>7% mortgage rates officially back today.</p></p>\n<footer>\n"
+        '\u2014 <cite><a href="http://x/RickPalaciosJr/status/2">http://x/'
+        "RickPalaciosJr/status/2</a></cite>\n</footer>\n</blockquote>"
+    )
+    e = brief._entry_from({"title": "", "link": "http://x/1", "summary": short_qt})
+    assert e["title"] == (
+        "QT Rick Palacios Jr. (@RickPalaciosJr): 7% mortgage rates officially "
+        "back today."
+    )
+    assert "http" not in e["title"]
+    assert "status/2" in e["summary"], "the body still carries the permalink"

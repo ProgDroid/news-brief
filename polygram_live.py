@@ -143,9 +143,11 @@ def place_market_order(event_id, market_id, token_id, outcome, amount):
 def sell_position(market_id, outcome, shares):
     """Sell a live position via POST /trade/sell. Returns normalized sale or None.
 
-    THE DOCS AND THE RUNNING API DISAGREE, AND THE API WINS. The published page
-    (read 2026-09-10) gives `positionId` as the only required field with
-    `shares` optional, "omit for full sell". Asked exactly that, the venue said:
+    THE DOCS AND THE RUNNING API DISAGREE, AND THE API WINS -- on both halves.
+
+    THE REQUEST. The published page (read 2026-09-10) gives `positionId` as the
+    only required field with `shares` optional, "omit for full sell". Asked
+    exactly that, the venue said:
 
         sent={'positionId': 'fm_ferreira1996-2774057-No'}
         400 {"error":"marketId, outcome, and a valid positive shares amount
@@ -156,30 +158,80 @@ def sell_position(market_id, outcome, shares):
     and nothing more. `positionId` is deliberately not resent even though the
     docs demand it: the server may well have produced this error BY failing to
     resolve that value, and re-sending it risks reproducing this exact 400.
-
     Still no `side`. That is a /trade/place requirement and the error does not
-    ask for it; the two write endpoints take different payloads and the symmetry
-    remains tempting and wrong.
+    ask for it; the two write endpoints take different payloads.
+
+    THE RESPONSE, MEASURED 2026-09-10 closing 3501950/No -- the first live close
+    this code ever drove to completion:
+
+        {'success': True, 'sold': 2.022221, 'price': 0.9165,
+         'proceeds': 1.8033655465, 'remainingShares': 0, 'balance': 49.593235}
+
+    FLAT. No `sale` wrapper, and no `status`, no `profit`, no `fee` anywhere.
+    This function spent that time reading a nested {"sale": {"status":
+    "completed", "sharesSold": ..., "salePrice": ..., "profit": ..., "fee":
+    ...}} -- a shape the venue has never sent -- so that completed real-money
+    sale parsed as a failure, close_live_position returned False, and the book
+    row was never closed (news-brief-sb0). Note /trade/place DOES nest under
+    `order`: the two write endpoints genuinely differ, and the symmetry is as
+    tempting and as wrong here as it was for `side` and for `position_key`.
+
+    `success` is the only completion signal on offer; there is no status string
+    to check. Fields the venue does not send are NOT invented -- `profit` and
+    `fee` are absent from the return rather than synthesised, and the one caller
+    needs neither: realized_return is computed from proceeds against our own
+    cost_basis, and the venue nets its fees out of proceeds before reporting.
     """
     body = {"marketId": market_id, "outcome": outcome, "shares": shares}
     data = _pg_request("POST", "/trade/sell", json_body=body)
-    sale = (data or {}).get("sale") if isinstance(data, dict) else None
     label = f"{market_id}/{outcome}"
-    if not isinstance(sale, dict) or sale.get("status") != "completed":
-        log.warning(f"PolyGram sell not completed for {label}: {data}")
+    if not isinstance(data, dict) or data.get("success") is not True:
+        # Three outcomes, not one. "The request never landed" moved no money.
+        # "The venue said success=false" is an explicit refusal, and we take it
+        # at its word. "A 2xx we cannot read" is the dangerous one: the venue
+        # accepted the order, so capital may ALREADY have moved while this row
+        # stays open for a retry that would sell it again. Collapsing the third
+        # into the first is exactly what made 2026-09-10's real sale look like a
+        # failure, so it is the one that shouts. Mirrors place_market_order.
+        if data is None:
+            log.warning(
+                f"PolyGram sell REJECTED for {label} — request never succeeded; "
+                f"see the preceding response body"
+            )
+        elif isinstance(data, dict) and data.get("success") is False:
+            log.warning(f"PolyGram sell REFUSED for {label}: success=false — {data}")
+        else:
+            log.error(
+                f"PolyGram sell returned an UNRECOGNISED payload for {label}: "
+                f"{data} — if this sold, capital moved with no book row, and a "
+                f"retry would sell again (run pgdiag)"
+            )
         return None
     try:
-        return {
-            "shares_sold": float(sale["sharesSold"]),
-            "sale_price": float(sale["salePrice"]),
-            "proceeds": float(sale["proceeds"]),
-            "profit": float(sale["profit"]),
-            "fee": float(sale.get("fee") or 0.0),
-            "status": sale["status"],
+        sale = {
+            "shares_sold": float(data["sold"]),
+            "sale_price": float(data["price"]),
+            "proceeds": float(data["proceeds"]),
+            "remaining_shares": float(data.get("remainingShares") or 0.0),
         }
     except (KeyError, TypeError, ValueError) as e:
-        log.warning(f"PolyGram sale parse failed for {label}: {e}")
+        # success was True, so this is a sale we cannot read, not a sale that
+        # did not happen. Same severity as an unrecognised payload.
+        log.error(
+            f"PolyGram sale parse failed for {label}: {e} — payload {data}. The "
+            f"venue reported success, so capital moved with no book row (run pgdiag)"
+        )
         return None
+    if sale["remaining_shares"] > 0:
+        # A real sale of PART of the holding. Returned, because the money moved
+        # and the proceeds must be recorded, but said out loud: the caller is
+        # about to stamp a close on a position the venue still holds.
+        log.warning(
+            f"PolyGram PARTIAL sell for {label}: sold {sale['shares_sold']} of "
+            f"{shares} requested, {sale['remaining_shares']} still held at the "
+            f"venue — the book is about to close a position that still exists"
+        )
+    return sale
 
 
 def list_positions():

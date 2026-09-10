@@ -45,3 +45,27 @@ of these three was diagnosed in a single probe each; guessing would have produce
 blanket retry that fixed exactly one of them. Tehran Times and Mehr also tested clean
 (30 entries each) if the Iranian slot ever needs a broadcaster's framing rather than a
 wire's. Related: [[direct-page-temp-sources]], [[mauldin-twie-wix-warmup-scrape]].
+
+
+## A titleless entry is a FEED SHAPE, not a broken entry (news-brief-grc, 2026-09-10)
+
+`Capture: entry with no title or url skipped` on a Nitter feed is **not** an image-only
+post and is **not** a fault. Nitter puts the author's OWN words in `<title>` and the quoted
+tweet in `<description>`, so a **bare quote-tweet -- amplified with no added comment --
+arrives with an empty title by construction** while its body carries the whole story.
+Retweets do NOT hit this: Nitter synthesises `RT by @x: Image` as a title for those.
+
+Measured across all four Nitter feeds: 76 items, 2 blank titles (2.6%), **both quote-tweets**;
+the classifier had live branches for media-only and empty-body and found neither. The two
+lost items were a Clash Report wire on the Houthis seizing Zuqar Island and Rick Palacios Jr
+on 7% mortgage rates -- exactly the material the brief exists to catch.
+
+`brief._entry_from` now derives `QT <quoted author>: <excerpt>` from the blockquote, with
+Nitter's `<footer><cite>` permalink stripped (on a short quote the excerpt otherwise runs
+into it and the headline ends in a raw status URL). **The store_items guard was deliberately
+left alone**: the fix belongs at the layer that knows the feed's shape, so a genuinely
+contentless entry is still refused and the brief's render path gets the title for free.
+
+General shape: **a guard that requires a TITLE is really asking whether there is CONTENT**,
+and those come apart in any format where the headline is optional. `content_hash` already
+excludes title for its own reasons, so the storage layer disagreed with the guard above it.

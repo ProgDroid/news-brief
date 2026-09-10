@@ -26,7 +26,7 @@ metadata:
 
 **2026-08-09 — THE 400 IS SOLVED AND THE FIX IS PUSHED (e144668, dfff949 → origin/main, deploy triggered; 683 tests, ruff+format green by exit code).** The venue's own body, once 8459093 started logging it, named the cause outright: `{"error":"marketId, outcome, side, and amount are required"}` against a sent body carrying `eventId/marketId/tokenId/outcome/amount`. **`side` was simply absent** — user confirmed from the venue docs it is `"buy"`/`"sell"`, i.e. the DIRECTION of the trade, not which outcome (`outcome` already names that). Sleeve A is always `"buy"`; it never shorts, it exits via `/trade/sell`. **The `outcome`-label fix (ef45c45) was NOT the cause** — it was a real latent bug and worth keeping, but the 400 survived it; do not record ef45c45 as the resolution.
 
-**`POST /trade/sell` needs ONLY `positionId`** (docs-confirmed same session); `shares` optional, omitted ⇒ sell all. **Deliberately no `side` on sell** — that is a `/trade/place` requirement, and the two write endpoints having different payloads is the kind of asymmetry that invites a symmetric "fix". `sell_position`'s existing parser already matched the documented response field-for-field (`sharesSold/salePrice/proceeds/profit/fee/status`), so nothing changed but the docstring. **PARTLY REFUTED 2026-09-10 — the OPEN path works; the EXIT path has NEVER ONCE SUCCEEDED.** Counted in the host log with working controls: `LIVE OPEN` 7, `not on venue` 424, `LIVE CLOSE` (the success line) **0**. The earlier note here said "the exit path has now run for real" and retired the $2 round trip on that basis; nothing had measured it, and 2026-08-16's confirmation covered opening. Cause is news-brief-8fy: `close_live_position` looked up `p["id"]` on a `/trade/positions` response that carries **no `id` and no `positionId`** — measured fields are `marketId(str)`, `outcome(str)`, `shares(float)`, `tokenId(str)`, `userId(str)`. So the docs' promise that /trade/positions supplies the positionId does NOT hold against the live API. **The $2 round trip is live again as the only end-to-end proof of the exit path — it may be re-proposed.** Note `/close` in Telegram routes live rows through the same function, so there is currently NO working automated exit; selling must be done by hand on polygram.ink. Historical context for why it was ever open: at the time of writing `/trade/sell` had never run against the venue (zero live positions had ever existed), which is also why the book↔venue join bug below went unnoticed for so long.
+**`POST /trade/sell` needs ONLY `positionId`** (docs-confirmed same session); `shares` optional, omitted ⇒ sell all. **Deliberately no `side` on sell** — that is a `/trade/place` requirement, and the two write endpoints having different payloads is the kind of asymmetry that invites a symmetric "fix". ~~`sell_position`'s existing parser already matched the documented response field-for-field (`sharesSold/salePrice/proceeds/profit/fee/status`), so nothing changed but the docstring.~~ **THIS SENTENCE WAS THE BUG (see the 2026-09-10 section at the end): matching the DOCS field-for-field is not matching the API, and the venue has never sent one of those six names.** **PARTLY REFUTED 2026-09-10 — the OPEN path works; the EXIT path has NEVER ONCE SUCCEEDED.** Counted in the host log with working controls: `LIVE OPEN` 7, `not on venue` 424, `LIVE CLOSE` (the success line) **0**. The earlier note here said "the exit path has now run for real" and retired the $2 round trip on that basis; nothing had measured it, and 2026-08-16's confirmation covered opening. Cause is news-brief-8fy: `close_live_position` looked up `p["id"]` on a `/trade/positions` response that carries **no `id` and no `positionId`** — measured fields are `marketId(str)`, `outcome(str)`, `shares(float)`, `tokenId(str)`, `userId(str)`. So the docs' promise that /trade/positions supplies the positionId does NOT hold against the live API. **The $2 round trip is live again as the only end-to-end proof of the exit path — it may be re-proposed.** Note `/close` in Telegram routes live rows through the same function, so there is currently NO working automated exit; selling must be done by hand on polygram.ink. Historical context for why it was ever open: at the time of writing `/trade/sell` had never run against the venue (zero live positions had ever existed), which is also why the book↔venue join bug below went unnoticed for so long.
 
 **Second bug found while reading the exit path, and it was the dangerous one.** The book↔venue join compared our stored STRING `market_id` against whatever `/trade/positions` echoes, unverified because no live position has ever existed. Failure is asymmetric: `close_live_position` merely refuses to sell (safe, logs), but **`reconcile_live_book` reads an unmatched row as SETTLED and closes it in the book while the capital is still at the venue** — permanently invisible, since nothing ever re-adopts an unknown venue position. Proven, not theorised: stashing the fix made the new test stamp `close_reason:'settled'` on a held position. Now joined through `polygram_live.venue_key(market_id, outcome)` → `(str(id), outcome.casefold())`, used by both callers AND pgdiag (which had the same raw join and would have reported false orphans). pgdiag now also prints `/trade/positions` field names WITH their Python types — the check that would have caught both this and the missing `side`.
 
@@ -72,3 +72,54 @@ normalising and hoping.
 
 **Still unproven end to end**: `LIVE CLOSE` has never once appeared in this deployment
 (`LIVE OPEN` 7, failure line 424). news-brief-uvo is the $2 round trip that would settle it.
+
+
+## 2026-09-10, later: the exit path DID complete -- and the book threw it away (sb0)
+
+**`LIVE CLOSE` is no longer 0 because the venue refuses to sell. It sells fine.** A `/close`
+at 17:57 UTC on `2026-09-01:prediction:3501950:NO:live` executed for real. `POST /trade/sell`
+answered, and this is the MEASURED shape:
+
+```
+{'success': True, 'sold': 2.022221, 'price': 0.9165,
+ 'proceeds': 1.8033655465, 'remainingShares': 0, 'balance': 49.593235}
+```
+
+**FLAT. No `sale` wrapper, and no `status`, no `profit`, no `fee` anywhere.** `sell_position`
+was reading a nested `{"sale": {"status": "completed", "sharesSold", "salePrice", "profit",
+"fee"}}` -- **six field names, not one of which the venue has ever sent** -- so a completed
+real-money sale parsed as a failure, `close_live_position` returned False, and the row was
+never closed. A retry 19s later found it gone (it had been sold), and the 18:00 monitor
+reconciled it as `close_reason="settled"`, `realized_return=None`. The proceeds and the real
+exit reason were lost.
+
+**The rule this cost, stated generally: response shapes are per-ENDPOINT, and a sibling
+endpoint's shape is not evidence.** `/trade/place` genuinely DOES nest under `order`. On this
+same API: `/trade/place` needs `side` and `/trade/sell` does not; `/trade/positions` has no id
+at all while the docs promise `positionId`; `/trade/place` nests and `/trade/sell` is flat.
+Three different asymmetries, each of which invited a symmetric "fix" and each of which cost a
+separate incident. **Measure the endpoint you are calling.**
+
+**And the tests were confirming the fiction.** `tests/test_polygram_live.py` hard-coded the
+nested payload in two fixtures. A suite cannot falsify the assumption it was written from --
+see [[tdd-plan-fixtures-drift-from-contracts]]. Every external-shape fixture in that file is
+now **dated with when it was measured** (`MEASURED_SELL_2026_09_10`), which is the only thing
+that distinguishes an observation from a guess after the fact.
+
+**Fixed:** `sell_position` parses the measured flat payload; `success` is the only completion
+signal on offer, so it is what is checked. `profit` and `fee` are **absent from the return
+rather than synthesised** -- inventing a field the venue does not send is the habit that caused
+this. Three outcomes are now distinguished where there was one: request-never-landed (warning),
+explicit `success=false` (warning), and **a 2xx we cannot read (ERROR, "capital moved with no
+book row, and a retry would sell again")**. A partial fill is returned AND logged. Mutation-
+audited: reverting the completion predicate fails exactly 4 tests.
+
+**Still open:** `backfill_settled` keys `/trade/history` on a raw `(marketId, outcome)` tuple,
+bypassing `venue_key()` which every other join uses -- and `/trade/history`'s shape has never
+been observed either (`data["history"] or data["trades"]`, a `proceeds` field: all guessed).
+`news-brief-8lb` adds an ENUMERATING probe to `pgdiag`; `news-brief-qiz` fixes the join once
+that has measured it. Do not fix the field names blind.
+
+**`news-brief-uvo` (the $2 round trip) is effectively ANSWERED by this incident** -- a real
+close ran end to end at the venue. What was never proven was the BOOKKEEPING, which is exactly
+what broke.

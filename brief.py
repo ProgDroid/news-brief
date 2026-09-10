@@ -2012,18 +2012,69 @@ def _failure_for_exception(exc) -> str:
     return _failure_for_status(status) if status else "malformed"
 
 
+# A derived title is an excerpt, so it needs a length. 160 leaves room for the
+# "QT <author>: " prefix inside a headline that still reads as one.
+_DERIVED_TITLE_CHARS = 160
+
+# Nitter renders a quoted tweet as <blockquote><b>Author (@handle)</b>...; the
+# <b> is the only place the quoted account is named. Read it BEFORE the tags are
+# stripped, because stripping is what destroys the boundary.
+_QUOTED_AUTHOR_RE = re.compile(r"<blockquote>.*?<b>(.*?)</b>", re.S | re.I)
+
+
+def _title_from_body(raw_html: str) -> str:
+    """A title for an entry whose feed gave it none, or "" if there is nothing
+    to read.
+
+    Nitter puts the author's OWN words in <title> and the quoted tweet in
+    <description>, so a quote-tweet with no added comment arrives titleless by
+    construction and capture.store_items drops it -- 2 of 76 sampled Nitter
+    items on 2026-09-10, both carrying real content (news-brief-grc).
+
+    The quoted account is named in the title rather than left implicit: these
+    items are stored under the AMPLIFYING outlet, and a bare excerpt would read
+    as that outlet's own words. Returning "" for an empty body is the point of
+    the function -- a media-only post has nothing to title, and manufacturing
+    one would put a contentless row into the KB.
+    """
+    author_match = _QUOTED_AUTHOR_RE.search(raw_html or "")
+    author = (
+        re.sub(r"<[^>]+>", "", author_match.group(1)).strip() if author_match else ""
+    )
+    # Nitter closes a quote block with <footer><cite><a>permalink</a></cite>.
+    # It is navigation, not content, and on a short quote the excerpt runs
+    # straight into it -- a headline ending in a raw status URL. The full
+    # `summary` keeps it; only the title drops it.
+    body = re.sub(r"<footer>.*?</footer>", " ", raw_html or "", flags=re.S | re.I)
+    body = re.sub(r"<[^>]+>", "", body).strip()
+    # The author is also the first line of the stripped body; drop it there so
+    # the name appears once, not twice.
+    if author and body.startswith(author):
+        body = body[len(author) :].strip()
+    body = " ".join(body.split())
+    if not body:
+        return ""
+    if len(body) > _DERIVED_TITLE_CHARS:
+        cut = (
+            body[:_DERIVED_TITLE_CHARS].rsplit(" ", 1)[0] or body[:_DERIVED_TITLE_CHARS]
+        )
+        body = cut + "…"
+    return f"QT {author}: {body}" if author else body
+
+
 def _entry_from(entry) -> dict:
     """One feedparser entry, normalized. `summary` is the FULL stripped text —
     the 400-char cap is a prompt-budget concern and stays in the renderer."""
-    summary = re.sub(
-        r"<[^>]+>", "", entry.get("summary", entry.get("description", "")).strip()
-    )
+    raw_html = entry.get("summary", entry.get("description", "")).strip()
+    summary = re.sub(r"<[^>]+>", "", raw_html)
     parsed_date = entry.get("published_parsed")
     published_at = (
         datetime(*parsed_date[:6], tzinfo=timezone.utc) if parsed_date else None
     )
     return {
-        "title": entry.get("title", "").strip(),
+        # Falls back to the body only when the feed supplied no title at all;
+        # a real title is never overridden.
+        "title": entry.get("title", "").strip() or _title_from_body(raw_html),
         "url": entry.get("link", ""),
         "summary": summary,
         "published_raw": entry.get("published", ""),
@@ -4084,6 +4135,36 @@ def mode_pgdiag():
         )
     else:
         out.append("no candidate had a side inside the band right now")
+    # ── /trade/history: the shape backfill_settled depends on ────────────────
+    # backfill_settled is the fallback that fills realized_return on a row the
+    # venue settled without us, and it reached for `proceeds` on records keyed
+    # by (marketId, outcome) -- all three guessed from documentation, none ever
+    # observed. That fallback failed silently on 2026-09-10 (news-brief-sb0),
+    # and it is the last unmeasured shape in this seam.
+    #
+    # ENUMERATE, never name-match. A probe that picks fields by name pattern
+    # presupposes what the answer is CALLED, which is precisely how
+    # `position_key` stayed invisible for a year: it contains no "id".
+    hist = polygram_live.trade_history()
+    if hist is None:
+        out.append("❌ /trade/history UNREADABLE — backfill_settled can never fire")
+    elif not hist:
+        out.append("⚠️ /trade/history returned 0 records; shape still unknown")
+    else:
+        h0 = hist[0]
+        out.append(f"✅ /trade/history: {len(hist)} record(s)")
+        if isinstance(h0, dict):
+            out.append("history record[0] ALL keys: " + ", ".join(sorted(h0)))
+            out.append(
+                "history record[0] values: "
+                + ", ".join(
+                    f"{k}={str(v)[:20]}({type(v).__name__})"
+                    for k, v in sorted(h0.items())
+                )
+            )
+        else:
+            out.append(f"⚠️ history record[0] is {type(h0).__name__}, not a dict")
+
     out.append("(read-only: no orders placed, book untouched)")
     telegram_send_long("\n".join(out))
 

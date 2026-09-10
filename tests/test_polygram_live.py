@@ -1,5 +1,6 @@
 import importlib
 
+import pytest
 import requests
 
 import common
@@ -130,14 +131,11 @@ def test_sell_position_full(monkeypatch):
         captured["body"] = json_body
         return {
             "success": True,
-            "sale": {
-                "sharesSold": 161.29,
-                "salePrice": 0.72,
-                "proceeds": 116.13,
-                "profit": 14.13,
-                "fee": 1.16,
-                "status": "completed",
-            },
+            "sold": 161.29,
+            "price": 0.72,
+            "proceeds": 116.13,
+            "remainingShares": 0,
+            "balance": 500.0,
         }
 
     monkeypatch.setattr(polygram_live, "_pg_request", fake)
@@ -147,7 +145,8 @@ def test_sell_position_full(monkeypatch):
         "outcome": "No",
         "shares": 1.0,
     }
-    assert r["proceeds"] == 116.13 and r["status"] == "completed"
+    assert r["proceeds"] == 116.13
+    assert r["shares_sold"] == 161.29 and r["sale_price"] == 0.72
 
 
 def test_list_positions_empty_on_failure(monkeypatch):
@@ -388,14 +387,11 @@ def test_sell_position_sends_the_fields_the_VENUE_requires(monkeypatch):
             {"path": path, "body": json_body}
         )
         or {
-            "sale": {
-                "status": "completed",
-                "sharesSold": 1.0,
-                "salePrice": 0.5,
-                "proceeds": 0.5,
-                "profit": 0.0,
-                "fee": 0.0,
-            }
+            "success": True,
+            "sold": 1.0,
+            "price": 0.5,
+            "proceeds": 0.5,
+            "remainingShares": 0,
         },
     )
     polygram_live.sell_position("2774057", "No", 2.02325)
@@ -709,3 +705,128 @@ def test_place_rejection_and_unrecognised_fill_log_differently(monkeypatch, capl
     with caplog.at_level("WARNING", logger="newsbrief"):
         assert polygram_live.place_market_order("e", "m", "t", "No", 2.0) is None
     assert "UNRECOGNISED" in caplog.text and "capital is at the venue" in caplog.text
+
+
+# ── /trade/sell: the shape the venue actually sends ───────────────────────────
+
+# MEASURED on the live venue 2026-09-10, closing 3501950/No -- the first live
+# close this code has ever driven to completion. Dated deliberately: a fixture
+# for an EXTERNAL system records what was observed on a day, and a suite cannot
+# falsify the assumption it was written from (news-brief-8fy).
+MEASURED_SELL_2026_09_10 = {
+    "success": True,
+    "sold": 2.022221,
+    "price": 0.9165,
+    "proceeds": 1.8033655465,
+    "remainingShares": 0,
+    "balance": 49.593235,
+}
+
+
+def test_sell_position_parses_the_MEASURED_flat_payload(monkeypatch):
+    """The venue answers FLAT. No `sale` wrapper, no status/profit/fee."""
+    monkeypatch.setattr(
+        polygram_live,
+        "_pg_request",
+        lambda *a, **k: dict(MEASURED_SELL_2026_09_10),
+    )
+    r = polygram_live.sell_position("3501950", "No", 2.022221)
+    assert r is not None, "a completed real-money sale must not parse as failure"
+    assert r["shares_sold"] == 2.022221
+    assert r["sale_price"] == 0.9165
+    assert r["proceeds"] == 1.8033655465
+    assert r["remaining_shares"] == 0.0
+
+
+def test_sell_position_unrecognised_payload_says_capital_may_have_moved(
+    monkeypatch, caplog
+):
+    """A 2xx body we cannot read is NOT the same event as a refused request:
+    the venue accepted the order, so money may already have moved. It must
+    never be logged as the quiet warning a rejection gets."""
+    monkeypatch.setattr(
+        polygram_live, "_pg_request", lambda *a, **k: {"weird": "shape"}
+    )
+    with caplog.at_level("WARNING"):
+        assert polygram_live.sell_position("3501950", "No", 1.0) is None
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert errors, "an unreadable 2xx sell body must log at ERROR"
+    assert "capital" in errors[0].getMessage().lower()
+    assert "{'weird': 'shape'}" in errors[0].getMessage()
+
+
+def test_sell_position_request_failure_is_not_reported_as_capital_moved(
+    monkeypatch, caplog
+):
+    """_pg_request already logged the body. None means nothing was sold, so
+    this path must stay a warning -- crying ERROR on every network blip is how
+    a real capital-moved line stops being read."""
+    monkeypatch.setattr(polygram_live, "_pg_request", lambda *a, **k: None)
+    with caplog.at_level("WARNING"):
+        assert polygram_live.sell_position("3501950", "No", 1.0) is None
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
+    assert any("REJECTED" in r.getMessage() for r in caplog.records)
+
+
+def test_sell_position_reports_a_partial_fill(monkeypatch, caplog):
+    """remainingShares > 0 is a real sale of part of the holding. Return it --
+    the money moved -- but say so, because the book is about to record a close
+    for a position the venue still holds."""
+    payload = dict(MEASURED_SELL_2026_09_10, sold=1.0, remainingShares=1.022221)
+    monkeypatch.setattr(polygram_live, "_pg_request", lambda *a, **k: payload)
+    with caplog.at_level("WARNING"):
+        r = polygram_live.sell_position("3501950", "No", 2.022221)
+    assert r is not None and r["remaining_shares"] == 1.022221
+    assert any("partial" in x.getMessage().lower() for x in caplog.records)
+
+
+def test_close_live_position_stamps_the_book_from_the_measured_payload(monkeypatch):
+    """End to end: the exact venue reply that produced no book row on 2026-09-10
+    must now close the row and record what it sold for."""
+    monkeypatch.setattr(
+        polygram_live,
+        "list_positions",
+        lambda: [
+            {
+                "marketId": "3501950",
+                "outcome": "No",
+                "shares": 2.022221,
+                # Shape only; the real key is <userId>-<marketId>-<outcome>.
+                "position_key": "acct-3501950-No",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        polygram_live,
+        "_pg_request",
+        lambda *a, **k: dict(MEASURED_SELL_2026_09_10),
+    )
+    row = {
+        "id": "2026-09-01:prediction:3501950:NO:live",
+        "instrument": "3501950",
+        "outcome": "No",
+        "shares": 2.022221,
+        "cost_basis": 2.0,
+        "status": "open",
+    }
+    assert polygram_live.close_live_position(row, "exit") is True
+    assert row["status"] == "closed"
+    assert row["close_reason"] == "exit"
+    assert row["realized_return"] == pytest.approx(1.8033655465 / 2.0 - 1.0)
+    assert row["last_mark"]["proceeds"] == 1.8033655465
+    assert row["last_mark"]["price"] == 0.9165
+
+
+def test_sell_position_success_false_is_not_a_sale(monkeypatch, caplog):
+    """An explicit refusal is taken at its word: no sale, and no ERROR either.
+    The loud line is reserved for a 2xx we cannot READ, where money may have
+    moved -- if every non-sale shouted, that distinction would be worthless."""
+    monkeypatch.setattr(
+        polygram_live,
+        "_pg_request",
+        lambda *a, **k: dict(MEASURED_SELL_2026_09_10, success=False),
+    )
+    with caplog.at_level("WARNING"):
+        assert polygram_live.sell_position("3501950", "No", 1.0) is None
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
+    assert any("REFUSED" in r.getMessage() for r in caplog.records)
