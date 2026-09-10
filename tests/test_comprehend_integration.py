@@ -1167,6 +1167,69 @@ def test_resetting_the_counter_lets_the_next_retirement_speak(kb, monkeypatch):
     assert len(sent) == 2, "the same count after a reset is a NEW episode"
 
 
+# --- The double-wrap (news-brief-19i), measured 2026-09-10.
+#
+# `items shape=dict keys=['items'] first_value=list` -- the model wrapped the
+# array twice, emitting input={"items": {"items": [...]}}. The content is well
+# formed; only the nesting is wrong, so discarding the batch spends an
+# 8192-token generation to throw away a correct answer, exactly as the
+# JSON-string case did.
+#
+# Narrow on purpose, like that one: unwrap ONE level, only when the inner dict's
+# single key is `items`, and only when its value is a list. Anything else stays
+# a batch failure and keeps its shape diagnostic.
+
+
+def _wrapped(rows):
+    return {
+        "stop_reason": "tool_use",
+        "content": [
+            {"type": "tool_use", "name": "emit_extraction", "input": {"items": rows}}
+        ],
+    }
+
+
+def test_a_doubly_wrapped_items_array_is_recovered():
+    tally = comprehend.Tally()
+    got = comprehend.parse_integration_response(
+        _wrapped({"items": [dict(EMPTY, item_id=7)]}), {7}, {}, {}, tally
+    )
+    assert [e["item_id"] for e in got] == [7]
+    assert tally.items_double_wrapped == 1, (
+        "counted, never silently absorbed -- a recovery that leaves no trace "
+        "hides continuing non-compliance behind a healthy failure count"
+    )
+
+
+def test_a_dict_that_is_not_the_double_wrap_is_still_refused():
+    """The bound. Unwrapping any single-key dict would turn a genuinely
+    malformed response into a silent empty extraction, which advances the item
+    and loses it."""
+    with pytest.raises(ValueError):
+        comprehend.parse_integration_response(
+            _wrapped({"rows": [dict(EMPTY, item_id=7)]}), {7}, {}, {}
+        )
+
+
+def test_a_wrapper_whose_value_is_not_a_list_is_still_refused():
+    with pytest.raises(ValueError):
+        comprehend.parse_integration_response(
+            _wrapped({"items": {"item_id": 7}}), {7}, {}, {}
+        )
+
+
+def test_the_single_wrap_still_parses_untouched():
+    """Presence sibling. An implementation that unwrapped unconditionally would
+    break the normal shape, and every other test here would still pass because
+    they go through write_batch rather than this function."""
+    tally = comprehend.Tally()
+    got = comprehend.parse_integration_response(
+        _wrapped([dict(EMPTY, item_id=7)]), {7}, {}, {}, tally
+    )
+    assert [e["item_id"] for e in got] == [7]
+    assert tally.items_double_wrapped == 0
+
+
 # --- Naming the SHAPE of a response the parser refused (news-brief-19i).
 #
 # `items type=dict` recurred nine times in the 2026-09-10 host logs and not one

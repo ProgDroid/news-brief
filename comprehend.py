@@ -106,6 +106,12 @@ class Tally:
     # were recovered. Model NON-COMPLIANCE, not a failure -- counted so a
     # healthy failure count cannot hide it continuing.
     items_json_string: int = 0
+    # Batches whose `items` arrived wrapped a SECOND time -- {"items": {"items":
+    # [...]}} -- and were recovered. Measured 2026-09-10 (news-brief-19i). Held
+    # apart from items_json_string because they are different non-compliances
+    # with different fixes: one is an encoding mistake, this is a nesting one,
+    # and a single counter could not say which was continuing.
+    items_double_wrapped: int = 0
     failures: dict = field(default_factory=dict)
 
 
@@ -1321,6 +1327,30 @@ def parse_integration_response(
                     # healthy failure count.
                     if tally is not None:
                         tally.items_json_string += 1
+            # The model also WRAPS THE ARRAY TWICE: measured 2026-09-10 as
+            # `items shape=dict keys=['items'] first_value=list`, i.e.
+            # input={"items": {"items": [...]}}. Same family as the JSON-string
+            # case above -- the content is well formed and only the packaging is
+            # wrong, so refusing the batch spends an 8192-token generation to
+            # discard a correct answer.
+            #
+            # Narrow for the same reason that one is. Unwrapping ANY single-key
+            # dict would turn a genuinely malformed response into a silent empty
+            # extraction, which advances the item and loses it for good; the key
+            # must be `items` and its value must already be a list.
+            #
+            # parse_triage_response is again deliberately left alone:
+            # failed_triage has been 0 across every measured pass, including
+            # 2026-09-10, so there is nothing to fix and a speculative copy
+            # would be an untested branch.
+            if (
+                isinstance(rows, dict)
+                and list(rows) == ["items"]
+                and isinstance(rows["items"], list)
+            ):
+                rows = rows["items"]
+                if tally is not None:
+                    tally.items_double_wrapped += 1
             if not isinstance(rows, list):
                 # Name what arrived. This fired 35 times in the 2026-09-08
                 # 11:00 pass -- 12% of items, whole batches at a time -- and
