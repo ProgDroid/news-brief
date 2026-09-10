@@ -121,3 +121,38 @@ test still earns its place against a *future* fallback, which is the risk the do
 the feature removed. **When fewer tests fail than predicted, suspect the tests, not the
 prediction.** When more fail, suspect the mutation.
 
+
+## A boundary test stops being one when the BOUNDARY MOVES (2026-09-10)
+
+Shipping `b42.5` Phase 1. Five pre-registered mutations, **two failed zero tests**, and neither was
+a weak test when it was written — the code moved underneath both.
+
+**1. The boundary relocated and the test kept its old literal.** `due_feeds` originally compared
+`now - polled_at >= interval`, so the boundary for a 120-minute feed sat at 120, and the test
+inserted a poll at exactly `minutes_ago=120`. Then a half-tick of slack was added — `now - at +
+slack >= interval` — which moved the true edge to `interval - slack` = **105**. The test now sat
+fifteen minutes clear of the edge, so flipping `>=` to `>` changed its answer not at all. It kept
+passing the whole time and never signalled that it had stopped testing anything.
+
+**The tell is that a boundary test names a number the implementation also names.** When the
+comparison gains a term, every literal in every test written against the old comparison is
+silently stale. Derive the boundary in the test (`120 - _interval_minutes() // 2`) instead of
+writing it out, and add the one-minute-short sibling so the pair pins the edge from both sides.
+
+**2. Two candidate constants can be indistinguishable ON THE INPUTS YOU CHOSE.** Widening the
+slack from half a tick to a full tick failed nothing — and that was *correct* for the values under
+test. For any interval that is a whole number of ticks, `j*nominal - δ + nominal/2 >= k*nominal`
+and the full-tick version both first hold at `j == k`. They diverge only on NON-multiples: a
+declared 75 minutes polls every 90 under half-tick and every **60** under full-tick, i.e. more
+often than declared. The discriminating test had to use 75; no amount of care with 30/60/90/120
+could have found it.
+
+**How to apply:** when a mutation changes a constant rather than a branch, ask *on which inputs do
+the two values disagree* before believing a zero. If the answer is "none of the ones I test", the
+mutation is not weak evidence of good coverage — it is no evidence at all, and the test set is
+missing the case that separates them. Same family as `a-control-that-agrees-with-the-bug-proves-
+nothing`, one level up: here the control agreed with the mutant because the *arithmetic* made them
+equal, not because the probe was broken.
+
+Both gaps were invisible to three red-team reading passes over the same plan. Only running the
+mutations found them — the saturation point [[tests-asserting-less-than-their-name]] names.

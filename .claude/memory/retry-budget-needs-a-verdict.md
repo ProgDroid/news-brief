@@ -53,3 +53,28 @@ work**.
 
 Related: [[shared-helper-carries-first-callers-tuning]] (retry layers MULTIPLY — 3 item-level × 2
 HTTP; put the retry where budget accounting lives), [[newsbrief-comprehension-pipeline]].
+
+
+## Relaxing a fail-closed rule REPLACES its bound, never removes it (2026-09-10, news-brief-h8p)
+
+The rule here generalised cleanly: a batch whose *response* could not be parsed judged nothing
+either, so it must not charge `integrate_attempts` — 45 items were retired in one day for an
+`items type=dict` that said nothing about them.
+
+**But the test standing in the way was not an oversight, and its docstring said so:**
+
+> Without it a classifier answering 'transient' to everything passes both tests above, and a
+> permanently-malformed batch re-pays an 8192-token generation every hour forever because nothing
+> ever retires it.
+
+That is the bound that keeps the deferral honest. It was **replaced** — a budgeted
+`integrate_defers` column that converts back into a charge at a ceiling — not deleted. **When a
+test blocks the change you are making, read its docstring for the failure it was buying: relaxing
+the rule means re-buying that protection some other way, and deleting the test spends the protection
+without noticing.**
+
+Two specifics worth keeping. **The ceiling's default must survive being wrong about the rate**:
+at 3x the measured per-batch failure rate, ten consecutive misses is still ~1e-6, so the argument
+does not rest on the hand-count. And **do not put two different no-verdict causes on one counter**:
+transport (self-clearing) stayed uncapped precisely because one long outage on a shared ceiling
+would walk the corpus to the cap and let the next unrelated fault charge immediately.

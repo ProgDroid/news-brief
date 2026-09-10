@@ -61,3 +61,18 @@ alone. See [[reconstruction-drifts-from-production]].
 **Reading review saturates.** Three careful passes over these tests found nothing; the mutation
 run found each in seconds. Budget the mutation, not the re-read.
 
+
+## The argument the test accepted and never looked at (2026-09-10, news-brief-8fy)
+
+`test_close_live_position_sells_and_stamps` stubbed the venue with
+`lambda pid, shares=None: {...a completed sale...}` — it **took the position identifier and
+discarded it**. So it asserted the row was closed and the return stamped, while being blind to
+*which position was sold*. The production code was handing the venue `p["id"]` on a response that
+has no `id` field, and this test passed the whole time.
+
+**A stub parameter that is accepted and never asserted is a hole shaped exactly like the bug.** The
+test name said "sells"; the only thing it could not see was what was sold. Capture the argument
+(`sold.append(pid)`) and pin it — that one line fails on day one.
+
+Same family as the others here, with a sharper tell: **scan test doubles for parameters that appear
+in the signature and nowhere in the body.** That is mechanically greppable, unlike most vacuity.
