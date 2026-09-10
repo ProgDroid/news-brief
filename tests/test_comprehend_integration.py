@@ -1165,3 +1165,69 @@ def test_resetting_the_counter_lets_the_next_retirement_speak(kb, monkeypatch):
     kb.commit()
     brief.comprehend_retirement_alert(kb)
     assert len(sent) == 2, "the same count after a reset is a NEW episode"
+
+
+# --- Naming the SHAPE of a response the parser refused (news-brief-19i).
+#
+# `items type=dict` recurred nine times in the 2026-09-10 host logs and not one
+# line said WHICH dict it was. An items-keyed-by-index, a single item emitted
+# bare, and the array nested one level deeper are three different recoveries,
+# and the error as written could not discriminate them -- so the fix could only
+# have been guessed. These tests pin that the message separates them.
+
+
+def test_a_dict_keyed_by_index_is_named_by_its_keys():
+    shape = comprehend._shape_of({"0": {"item_id": 1}, "1": {"item_id": 2}})
+    assert "'0'" in shape and "'1'" in shape
+
+
+def test_a_single_item_emitted_bare_is_named_by_its_FIELDS():
+    """The discriminating half. The test above passes for any implementation
+    that prints keys at all; this one fails unless the two dicts produce
+    different text, which is the only property that makes the log actionable."""
+    indexed = comprehend._shape_of({"0": {"item_id": 1}})
+    bare = comprehend._shape_of({"item_id": 1, "entities": [], "events": []})
+    assert "'item_id'" in bare and "'entities'" in bare
+    assert bare != indexed
+
+
+def test_the_shape_names_the_type_of_what_is_inside():
+    """Separates a dict of items from a dict whose values are the arrays --
+    the nested-one-level-deeper case -- without printing either."""
+    assert "list" in comprehend._shape_of({"items": [{"item_id": 1}]})
+    assert "dict" in comprehend._shape_of({"0": {"item_id": 1}})
+
+
+def test_the_shape_never_prints_the_content_it_describes():
+    """A diagnostic that dumps news text into the log is a different bug. The
+    keys answer the shape question exactly; the bodies answer nothing and are
+    unbounded."""
+    body = "SOMETHING-THAT-MUST-NOT-BE-LOGGED"
+    shape = comprehend._shape_of({"0": {"item_id": 1, "summary": body}})
+    assert body not in shape
+
+
+def test_a_dict_with_many_keys_is_bounded_AND_says_it_was_bounded():
+    """A silently truncated list of keys reads as a complete one, which is how
+    an eyeballed audit ends up measuring the renderer instead of the data."""
+    shape = comprehend._shape_of({str(i): {} for i in range(60)})
+    assert len(shape) < 500
+    assert "more" in shape
+
+
+def test_the_shape_reaches_the_error_the_operator_actually_reads():
+    """The property, not the helper. _shape_of could be perfect and still never
+    be called; this drives the real parser down the real refusal path."""
+    resp = {
+        "stop_reason": "tool_use",
+        "content": [
+            {
+                "type": "tool_use",
+                "name": "emit_extraction",
+                "input": {"items": {"0": {"item_id": 1}}},
+            }
+        ],
+    }
+    with pytest.raises(ValueError) as caught:
+        comprehend.parse_integration_response(resp, {1}, {}, {})
+    assert "'0'" in str(caught.value)

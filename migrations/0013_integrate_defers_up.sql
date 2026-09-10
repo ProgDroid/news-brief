@@ -1,0 +1,23 @@
+-- A no-verdict budget, held apart from the one-way door (news-brief-h8p).
+--
+-- integrate_attempts >= 3 retires an item PERMANENTLY, and until now BOTH
+-- batch-level failure paths charged it. On 2026-09-10 nine integration batches
+-- died on `emit_extraction input missing 'items' list; items type=dict` -- 45
+-- items charged across five of nine passes for a fault that obtained no
+-- verdict about any of them, and because the integration SELECT is
+-- `ORDER BY i.id` that loss lands on the OLDEST corpus rather than at random.
+--
+-- The deferral cannot be free, though: a batch the model mangles
+-- deterministically would re-pay an 8192-token generation every hour with
+-- nothing able to retire it. So a no-verdict failure spends THIS counter, and
+-- only when it is exhausted does the failure convert to a charge against
+-- integrate_attempts. Two columns rather than one because they answer
+-- different questions -- "how often did we fail to get an answer" is an
+-- operational fact about the extractor, "how many times was this item judged
+-- and found wanting" is a fact about the item.
+--
+-- DEFAULT 0 rather than NULL: every existing row has, by construction, been
+-- deferred zero times, and a nullable counter would make `>= ceiling` silently
+-- false for the whole back catalogue.
+ALTER TABLE item_triage
+    ADD COLUMN integrate_defers INTEGER NOT NULL DEFAULT 0;

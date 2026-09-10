@@ -277,6 +277,16 @@ KNOBS: dict[str, Knob] = {
     # DEADLINE_SECONDS, which the tally reports.
     "COMPREHEND_INTEGRATE_TIMEOUT": Knob(int, 300),
     "COMPREHEND_TRIAGE_TIMEOUT": Knob(int, 90),
+    # How many times one item may be spared by a batch failure that judged
+    # nothing before such a failure starts charging integrate_attempts instead
+    # (news-brief-h8p). The default is a guess BOUNDED BY MEASUREMENT rather
+    # than a round number: the 2026-09-10 host logs put unreadable responses at
+    # 9 batches in 121 integration calls, so ten consecutive misses for one
+    # item is ~5e-12 if they are independent. Reaching the ceiling therefore
+    # means they are NOT independent -- the item's own content is provoking it
+    # -- which is exactly the case a ceiling should retire. A row, so the host
+    # can retune it once the shape faults are fixed and the rate moves.
+    "COMPREHEND_MAX_DEFERS": Knob(int, 10),
     "TRIAGE_MODEL": Knob(str, "", env="NEWSBRIEF_TRIAGE_MODEL"),
     "INTEGRATE_MODEL": Knob(str, "", env="NEWSBRIEF_INTEGRATE_MODEL"),
     # How long a job child may run before the supervisor stops it, in minutes;

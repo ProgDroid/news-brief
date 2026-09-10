@@ -56,6 +56,18 @@ class Tally:
     # host fault as a weak extractor -- the same confound that made
     # news-brief-uer a gate-validity bug rather than deferrable polish.
     deferred_transport: int = 0
+    # Items whose batch died on the RESPONSE rather than on the network: the
+    # model answered and the answer could not be read. Apart from
+    # deferred_transport because the two implicate different fixes -- a host
+    # fault is waited out, an unreadable response is a prompt or a parser
+    # problem -- and apart from failed_integration for the reason above: no
+    # verdict about these items was obtained either (news-brief-h8p).
+    deferred_response: int = 0
+    # Items charged an attempt only because their defer budget was exhausted.
+    # The signal that a shape fault has stopped being bad luck and started
+    # being a property of the item, which is the one case where charging a
+    # no-verdict failure is the right answer.
+    defer_cap_hit: int = 0
     gave_up_triage: int = 0
     gave_up_integration: int = 0
     entities_created: int = 0
@@ -140,6 +152,45 @@ def _log_rejected_value(label: str, obj: dict, field_name: str) -> None:
     """
     if field_name in obj:
         log.warning(f"Comprehend: rejected {label} {obj[field_name]!r}")
+
+
+# How many keys of a refused container the diagnostic may name. Twelve because
+# the question it answers is "which shape is this", and every candidate shape
+# is distinguishable inside a dozen keys; a batch is 5 items, so an
+# items-keyed-by-index dict fits whole.
+_SHAPE_KEY_CAP = 12
+
+
+def _shape_of(value) -> str:
+    """Name a refused value's SHAPE without printing its content.
+
+    `items type=dict` recurred nine times on 2026-09-10 and the logs could not
+    say whether the dict was items keyed by index, one item emitted bare, or
+    the array nested a level deeper -- three different recoveries, so the fix
+    could only have been guessed (news-brief-19i).
+
+    Keys and types, never values: the keys settle the shape question exactly,
+    while a truncated dump of news text answers it only by luck and puts
+    unbounded article content in the log.
+    """
+    if isinstance(value, dict):
+        keys = sorted(map(str, value))
+        more = len(keys) - _SHAPE_KEY_CAP
+        # Named, not silently cut. A truncated list of keys reads exactly like
+        # a complete one, which is how an eyeballed audit ends up measuring the
+        # renderer rather than the data.
+        tail = f" +{more} more" if more > 0 else ""
+        inner = next(iter(value.values()), None)
+        return (
+            f"dict keys={keys[:_SHAPE_KEY_CAP]}{tail} "
+            f"first_value={type(inner).__name__}"
+        )
+    if isinstance(value, list):
+        head = type(value[0]).__name__ if value else "empty"
+        return f"list len={len(value)} first={head}"
+    if isinstance(value, str):
+        return f"str len={len(value)}"
+    return type(value).__name__
 
 
 def _is_transient(exc: BaseException) -> bool:
@@ -401,13 +452,48 @@ def run(conn) -> Tally:
                 )
                 conn.commit()
                 continue
-            tally.failed_integration += len(batch)
-            _note(tally, f"batch:{type(exc).__name__}", len(batch))
-            log.warning("Comprehend: integration batch failed", exc_info=True)
-            conn.execute(
+            # Nor did THIS batch obtain a verdict. The model answered and the
+            # answer could not be read, which is a statement about the response
+            # -- the prompt, the tool schema, the parser -- and not about any
+            # item in the batch. Measured 2026-09-10: nine batches lost to
+            # `items type=dict`, 45 items charged for it.
+            #
+            # But the deferral is BUDGETED, unlike transport's. A network fault
+            # clears on its own; a response the model mangles because of what
+            # this item contains does not, and an unbudgeted defer would re-pay
+            # an 8192-token generation every hour with nothing able to retire
+            # it. So the ceiling converts the failure back into a charge, and
+            # the three-strike door still closes behind it.
+            #
+            # Charge FIRST, then defer. The other order walks a row onto the
+            # ceiling and charges it in the same pass, which raises the
+            # effective ceiling by one every time and never reaches it.
+            ids = [it["id"] for it in batch]
+            ceiling = int(common.COMPREHEND_MAX_DEFERS)
+            charged = conn.execute(
                 "UPDATE item_triage SET integrate_attempts = integrate_attempts + 1 "
-                "WHERE item_id = ANY(%s)",
-                ([it["id"] for it in batch],),
+                "WHERE item_id = ANY(%s) AND integrate_defers >= %s "
+                "RETURNING item_id",
+                (ids, ceiling),
+            ).fetchall()
+            deferred = conn.execute(
+                "UPDATE item_triage SET integrate_defers = integrate_defers + 1 "
+                "WHERE item_id = ANY(%s) AND integrate_defers < %s "
+                "RETURNING item_id",
+                (ids, ceiling),
+            ).fetchall()
+            if charged:
+                tally.failed_integration += len(charged)
+                tally.defer_cap_hit += len(charged)
+                _note(tally, f"batch_capped:{type(exc).__name__}", len(charged))
+            if deferred:
+                tally.deferred_response += len(deferred)
+                _note(tally, f"batch:{type(exc).__name__}", len(deferred))
+            log.warning(
+                f"Comprehend: integration batch failed; "
+                f"{len(deferred)} deferred, {len(charged)} charged at the "
+                f"defer ceiling of {ceiling}",
+                exc_info=True,
             )
             conn.commit()
             continue
@@ -1242,10 +1328,22 @@ def parse_integration_response(
                 # was a dict, or arrived under another key. An error that
                 # cannot distinguish those is the same unactionable shape as
                 # an HTTPError that stringifies to a status code.
+                #
+                # The type alone was not enough either. `items type=dict`
+                # recurred nine times on 2026-09-10 and no log line anywhere
+                # said whether the dict was an item keyed by index, a single
+                # item emitted bare, or the array nested one level deeper --
+                # three different recoveries, and the host logs could not
+                # discriminate them (news-brief-19i). So name the SHAPE.
+                #
+                # Keys, not content: a bounded key list answers the shape
+                # question exactly, while a truncated dump of news text would
+                # cut mid-structure and answer it only by luck.
                 raise ValueError(
                     "emit_extraction input missing 'items' list; "
                     f"input keys={sorted(block.get('input', {}))} "
-                    f"items type={type(rows).__name__}"
+                    f"items type={type(rows).__name__} "
+                    f"items shape={_shape_of(rows)}"
                 )
             return [
                 p

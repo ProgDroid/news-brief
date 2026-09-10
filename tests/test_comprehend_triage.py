@@ -1398,32 +1398,201 @@ def test_an_item_deferred_by_a_transport_failure_is_offered_again(kb, monkeypatc
     assert second.assertions_written == 1
 
 
-def test_a_response_the_parser_rejects_still_charges_the_item(kb, monkeypatch):
-    """Presence sibling, and the bound on the deferral. Without it a classifier
-    answering 'transient' to everything passes both tests above, and a
-    permanently-malformed batch re-pays an 8192-token generation every hour
-    forever because nothing ever retires it."""
+def _shape_is_wrong(_req):
+    """A response whose emit_extraction block is absent: the parser raises, and
+    NOTHING in the batch was ever judged. Stands in for the shape family the
+    2026-09-10 host logs measured at 9 batches in 121 calls -- `items` arriving
+    as a dict rather than an array."""
+    return {"stop_reason": "tool_use", "content": []}
+
+
+def _defers(kb, item_id):
+    return kb.execute(
+        "SELECT integrate_defers FROM item_triage WHERE item_id = %s", (item_id,)
+    ).fetchone()[0]
+
+
+def _attempts(kb, item_id):
+    return kb.execute(
+        "SELECT integrate_attempts FROM item_triage WHERE item_id = %s", (item_id,)
+    ).fetchone()[0]
+
+
+def test_a_response_shape_failure_leaves_the_items_lifetime_budget_intact(
+    kb, monkeypatch
+):
+    """news-brief-h8p. The same rule as the transport test above, applied to the
+    other way a batch can die without judging anything.
+
+    A response the parser cannot read is a statement about the RESPONSE, not
+    about any item in the batch. Measured in the 2026-09-10 host logs: 5, 10 and
+    10 items per pass charged for an `items type=dict` that said nothing about
+    them, in 5 of 9 passes. Asserted on the DATABASE columns rather than the
+    tally, because integrate_attempts is the thing that is one-way.
+    """
     monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
     item_id = _tracked_material(kb)
+    monkeypatch.setattr(comprehend, "call_integration", _shape_is_wrong)
 
-    monkeypatch.setattr(
-        comprehend,
-        "call_integration",
-        lambda _req: {"stop_reason": "tool_use", "content": []},
+    tally = comprehend.run(kb)
+    kb.commit()
+
+    assert _attempts(kb, item_id) == 0
+    assert _defers(kb, item_id) == 1, (
+        "the deferral must be COUNTED somewhere, or a permanently-bad batch "
+        "re-pays an 8192-token generation every hour with nothing to retire it"
+    )
+    assert tally.deferred_response == 1
+    assert tally.failed_integration == 0, (
+        "no verdict about this item was obtained; counting it as an extraction "
+        "failure misattributes a shape fault as a weak extractor"
+    )
+    assert tally.defer_cap_hit == 0
+    assert tally.failures == {"batch:ValueError": 1}
+
+
+def test_an_item_deferred_by_a_response_shape_failure_is_offered_again(kb, monkeypatch):
+    """The PROPERTY, not its mechanism. The assertion above restates the
+    implementation; this drives run()'s real integration SELECT a second time
+    and fails if the deferred item does not come back."""
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
+    item_id = _tracked_material(kb)
+    monkeypatch.setattr(comprehend, "call_integration", _shape_is_wrong)
+    comprehend.run(kb)
+    kb.commit()
+
+    offered = []
+
+    def recovered(req):
+        offered.append(req)
+        return {
+            "stop_reason": "tool_use",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "emit_extraction",
+                    "input": {
+                        "items": [
+                            {
+                                "item_id": item_id,
+                                "entities": [
+                                    {
+                                        "name": "Ukraine",
+                                        "type": "country",
+                                        "aliases": [],
+                                    }
+                                ],
+                                "events": [
+                                    {
+                                        "summary": "Ukraine talks resumed.",
+                                        "type": "action",
+                                        "commitment_state": "in_force",
+                                        "standing": "reported",
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                }
+            ],
+        }
+
+    monkeypatch.setattr(comprehend, "call_integration", recovered)
+    second = comprehend.run(kb)
+    kb.commit()
+
+    assert len(offered) == 1, "the deferred item must be re-offered"
+    assert second.assertions_written == 1
+
+
+def test_the_defer_budget_is_BOUNDED_so_a_permanently_bad_batch_still_retires(
+    kb, monkeypatch
+):
+    """The bound that keeps the deferral honest, and the reason this is a
+    counter rather than a free pass.
+
+    Without it, a classifier answering 'defer' to every non-transport failure
+    passes both tests above while a batch the model mangles deterministically
+    re-pays its generation every hour forever, with nothing that can ever
+    retire it. At the ceiling the failure converts to a charge, so the
+    three-strike door still closes.
+    """
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_MAX_DEFERS", 2)
+    item_id = _tracked_material(kb)
+    monkeypatch.setattr(comprehend, "call_integration", _shape_is_wrong)
+
+    for _ in range(2):
+        comprehend.run(kb)
+        kb.commit()
+    assert (_defers(kb, item_id), _attempts(kb, item_id)) == (2, 0), (
+        "below the ceiling nothing may be charged"
     )
 
     tally = comprehend.run(kb)
     kb.commit()
 
-    assert (
-        kb.execute(
-            "SELECT integrate_attempts FROM item_triage WHERE item_id = %s", (item_id,)
-        ).fetchone()[0]
-        == 1
+    assert _attempts(kb, item_id) == 1, "at the ceiling the failure charges"
+    assert _defers(kb, item_id) == 2, (
+        "and it must not ALSO defer -- a row charged and deferred in the same "
+        "pass would raise the ceiling one pass at a time and never reach it"
     )
+    assert tally.defer_cap_hit == 1
     assert tally.failed_integration == 1
-    assert tally.deferred_transport == 0
-    assert tally.failures == {"batch:ValueError": 1}
+    assert tally.deferred_response == 0
+    assert tally.failures == {"batch_capped:ValueError": 1}
+
+
+def test_an_item_past_the_defer_ceiling_is_retired_by_the_three_strike_door(
+    kb, monkeypatch
+):
+    """The end of the story, driven through run()'s real SELECT. The ceiling is
+    worth nothing if the charges it permits never actually retire anything."""
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_MAX_DEFERS", 0)
+    item_id = _tracked_material(kb)
+    monkeypatch.setattr(comprehend, "call_integration", _shape_is_wrong)
+
+    for _ in range(3):
+        comprehend.run(kb)
+        kb.commit()
+    assert _attempts(kb, item_id) == 3
+
+    monkeypatch.setattr(
+        comprehend,
+        "call_integration",
+        lambda _req: pytest.fail("a retired item was offered again"),
+    )
+    comprehend.run(kb)
+
+
+def test_a_transport_failure_does_NOT_spend_the_defer_budget(kb, monkeypatch):
+    """The two no-verdict paths stay distinct. A DNS outage is temporary and
+    self-clearing, so charging it against a ceiling would let one long outage
+    walk every item in the corpus up to the point where the next shape fault
+    charges immediately -- reintroducing news-brief-bqa.13 through the back
+    door."""
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
+    item_id = _tracked_material(kb)
+
+    def dns_is_dead(_req):
+        raise comprehend.requests.exceptions.ConnectionError("name resolution failed")
+
+    monkeypatch.setattr(comprehend, "call_integration", dns_is_dead)
+    tally = comprehend.run(kb)
+    kb.commit()
+
+    assert _defers(kb, item_id) == 0
+    assert _attempts(kb, item_id) == 0
+    assert tally.deferred_transport == 1
+    assert tally.deferred_response == 0
+
+
+def test_the_defer_ceiling_is_a_settings_knob_not_a_constant():
+    """This repo's rule is that configuration is a settings row. The shipped
+    default is a guess bounded by measurement, and the host must be able to
+    retune it from real failure rates without a redeploy."""
+    assert "COMPREHEND_MAX_DEFERS" in comprehend.common.KNOBS
 
 
 def test_an_entityless_item_is_never_re_offered(kb, monkeypatch):
