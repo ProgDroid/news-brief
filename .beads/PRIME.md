@@ -13,9 +13,26 @@ Before saying "done" or "complete":
 
 ## Core rules
 
-- **Task tracking is bd, always.** No TodoWrite, no TaskCreate, no markdown TODO
-  lists. File the issue before writing the code.
+- **Durable task tracking is bd, always.** File the issue before writing the
+  code. Anything that must survive the session is a bead, never a markdown TODO.
+- **TodoWrite is NOT durable task tracking, and is NOT banned.** It carries
+  *within-turn execution structure* — the checklist a skill tells you to work
+  through. The two are different layers: bd is *what work exists*, TodoWrite is
+  *how a procedure gets followed*. Banning it does not move that state into bd,
+  it deletes it, and it silently disables `systematic-debugging`,
+  `test-driven-development` and `verification-before-completion` — whose absence
+  showed up here on 2026-09-10 as `the-filter-presupposed-the-answer` (a probe
+  that selected DB fields by name pattern for a month; the answer was
+  `position_key`). Use both.
 - **bd owns WORK STATE ONLY** — issues, dependencies, what is ready next.
+- **A close that retires a verification action must name the observation that
+  measured it.** Ask: *which observation would differ if this were false?* If
+  there isn't one, the status is `deferred`, not `closed`. Measured cost of
+  skipping it: the "$2 round trip" was retired 2026-08-16 on a line nothing had
+  measured. The exit path had never once succeeded — `LIVE OPEN` 7,
+  `not on venue` 424, `LIVE CLOSE` **0** — and 25 days passed before anyone
+  counted. A note that closes a verification removes the thing that would have
+  corrected it, which is worse than a merely wrong note.
 - **Memory is FILES, not `bd remember`.** Learnings go to
   `~/.claude/projects/<key>/memory/`; the `sync-memory.sh` Stop hook copies them
   into `.claude/memory/` for git. The bd migration was investigated and **dropped**:
@@ -38,6 +55,12 @@ Before saying "done" or "complete":
 - `--parent=<id>` for a child of an epic; inherits parent labels.
 - `--acceptance=` / `--design=` / `--notes=` for the structured fields;
   `--validate` checks they are present.
+- `-l/--labels` (comma-separated). **`bleeding` is reserved** for anything whose
+  cost ACCRUES while the issue sits open — money, data loss, silent corruption.
+  Priority encodes importance; it does not encode a running meter, which is how
+  news-brief-5qb ("a live position stuck unsellable is invisible outside an
+  hourly log line") sat at P2 while 424 failed closes accumulated. Check
+  `bd list --label bleeding` before picking work off `bd ready`.
 
 `bd update <id> --claim` · `bd update <id> --title/--description/--notes/--design`
 `bd close <id1> <id2> …` · `bd close <id> --reason="…"` · `bd close <id> --suggest-next`

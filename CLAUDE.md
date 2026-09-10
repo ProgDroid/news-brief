@@ -18,7 +18,9 @@ bd close <id>         # Complete work
 
 ### Rules
 
-- Use `bd` for ALL task tracking — do NOT use TodoWrite, TaskCreate, or markdown TODO lists
+- Use `bd` for all DURABLE task tracking: file the issue before writing the code.
+  **TodoWrite is a different layer and is NOT banned here** — stated once, in
+  `.beads/PRIME.md`, and again below under "Task tracking vs. execution structure".
 - Run `bd prime` for detailed command reference and session close protocol
 - Use `bd` for WORK STATE only: issues, dependencies, what is ready next.
 - **Memory is files, not `bd remember`.** Stated once, in `.beads/PRIME.md`, which
@@ -56,6 +58,52 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
 - Do not commit or push without clear authority from the active profile or the current user request.
 - If a required sync or push is blocked, stop and report the exact command and error.
 <!-- END BEADS INTEGRATION -->
+
+<!-- Added 2026-09-10, deliberately OUTSIDE the managed block, for the same reason
+     the Memory section below sits out here: `bd setup claude` rewrites everything
+     between the BEGIN/END markers wholesale. -->
+
+## Task tracking vs. execution structure
+
+The generated Beads block bans `TodoWrite`. **That ban is overridden here** — which the
+block itself sanctions: *"Explicit user or orchestrator instructions override this Beads
+block"*, and it calls itself *"task-tracking guidance, not permission to override"*.
+
+They are two different layers and the ban conflates them:
+
+| | Owns | Lifetime |
+|---|---|---|
+| **bd** | what work exists, dependencies, what is ready next | across sessions |
+| **TodoWrite** | how a procedure gets followed — the checklist a skill hands you | within the turn |
+
+Banning `TodoWrite` does not move that state into bd. It deletes it, and with it the
+enforcement mechanism of every Superpowers skill — `superpowers:using-superpowers` says
+*"If it has a checklist, create a todo per item."* Without it, `systematic-debugging`,
+`test-driven-development` and `verification-before-completion` degrade from procedures
+that get worked through into text that gets read.
+
+**This is not theoretical.** Two failures here trace to it: bugs chased without ever being
+filed as bugs, and `the-filter-presupposed-the-answer` (2026-09-10) — a diagnostic that
+selected DB fields with `if "id" in k.lower()`, ran for a month, and never found
+`position_key` because the field it was hunting is by definition the one that broke the
+naming convention.
+
+**File the issue before writing the code** — that part of the Beads rule is right and is
+what earns bd its place. Then use `TodoWrite` for the procedure that does the work.
+
+### After any `bd setup claude` or beads upgrade
+
+The managed block is regenerated wholesale, so the in-block pointer above can silently
+revert with no diff-time warning. Check after any upgrade:
+
+```sh
+sh .beads/check-block.sh     # 0 = ok, 1 = the override was clobbered, 2 = UNKNOWN
+```
+
+That check is a script rather than a grep line in this file on purpose. Two earlier
+versions were written inline here and both matched their own documentation — see the
+script's header comment. Verified against a deliberately reverted copy, so it is known
+to discriminate rather than merely known to pass.
 
 <!-- Moved out of the BEADS INTEGRATION block on 2026-09-06. It lived inside
      lines that `bd setup claude` owns and rewrites wholesale, and it is not part
