@@ -289,13 +289,27 @@ def venue_key(market_id, outcome):
     return (str(market_id), str(outcome).casefold())
 
 
-def _match_position_id(venue_positions, market_id, outcome):
-    """Find the venue positionId for a book row by (marketId, outcome)."""
+def _match_position(venue_positions, market_id, outcome):
+    """The venue position a book row refers to, or None if the venue holds none.
+
+    Returns the whole dict rather than an id because "the venue does not hold
+    this" and "the venue holds it under a field name we do not read" are
+    different facts needing different fixes, and collapsing both into None is
+    how a held position came to be reported as absent every hour for a month
+    (news-brief-8fy). reconcile_live_book joins on this same key and reached the
+    opposite verdict the whole time, which is what made the log line impossible.
+    """
     want = venue_key(market_id, outcome)
     for p in venue_positions or []:
         if venue_key(p.get("marketId"), p.get("outcome")) == want:
-            return p.get("id")
+            return p
     return None
+
+
+def _match_position_id(venue_positions, market_id, outcome):
+    """Find the venue positionId for a book row by (marketId, outcome)."""
+    pos = _match_position(venue_positions, market_id, outcome)
+    return pos.get("id") if pos else None
 
 
 def close_live_position(row, reason):
@@ -308,9 +322,23 @@ def close_live_position(row, reason):
     if venue is None:
         log.warning(f"Live close skipped (positions unreadable): {row['id']}")
         return False
-    pos_id = _match_position_id(venue, row["instrument"], row["outcome"])
-    if pos_id is None:
+    pos = _match_position(venue, row["instrument"], row["outcome"])
+    if pos is None:
         log.warning(f"Live close: {row['id']} not on venue; leaving to reconcile")
+        return False
+    pos_id = pos.get("id")
+    if pos_id is None:
+        # The venue HOLDS this position; we simply cannot name it. Still fail
+        # closed -- selling needs an id we do not have -- but say which fact
+        # this is, and NAME THE FIELDS the response actually carried. That is
+        # the single thing needed to fix it, and a month of hourly warnings
+        # never once contained it: `sell_position` calls this `positionId`,
+        # `/trade/positions` was never verified against a real position because
+        # until 2026-08-11 none had ever existed.
+        log.warning(
+            f"Live close: {row['id']} IS held by the venue but carries no 'id' "
+            f"field, so it cannot be sold. Fields present: {sorted(pos)}"
+        )
         return False
     sale = sell_position(pos_id)
     if sale is None:

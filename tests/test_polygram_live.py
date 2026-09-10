@@ -375,6 +375,79 @@ def test_reconcile_skips_on_failed_read(monkeypatch):
     assert row["status"] == "open"  # NEVER mass-settle on a failed read
 
 
+# --- Two refusals that must not wear the same message (news-brief-8fy).
+#
+# 'Live close: ...:NO:live not on venue; leaving to reconcile' logged hourly for
+# a MONTH against a position opened 2026-08-11. It could not have been true as
+# written: reconcile_live_book runs seconds later in the same lock, over the
+# same venue read, and settles anything the venue no longer holds -- so a row
+# genuinely absent from the venue would have been closed on the first pass.
+#
+# The two functions match on DIFFERENT fields. reconcile joins on
+# (marketId, outcome) and matched; close looked up p['id'] and did not. One
+# venue response, two verdicts, and the operator was shown the wrong one.
+#
+# Every test above hardcodes {"id": "pos_x"}, authored from the same inference
+# as the code it covers, so none of them could ever have caught this.
+
+
+def _held(market_id="mkt_b", outcome="No", **extra):
+    """A venue position the book row really matches on (marketId, outcome)."""
+    return {"marketId": market_id, "outcome": outcome, **extra}
+
+
+def test_a_position_the_venue_does_not_hold_is_reported_as_ABSENT(monkeypatch, caplog):
+    monkeypatch.setattr(polygram_live, "list_positions", lambda: [])
+    row = _live_row()
+    with caplog.at_level("WARNING", logger="newsbrief"):
+        assert polygram_live.close_live_position(row, "target") is False
+    assert "not on venue" in caplog.text
+    assert row["status"] == "open"
+
+
+def test_a_position_the_venue_HOLDS_is_never_reported_as_absent(monkeypatch, caplog):
+    """The discriminating half, and the whole bug. The venue holds this
+    position -- reconcile agrees, and declines to settle it -- so calling it
+    'not on venue' sends the operator hunting for a position that is right
+    there with real capital in it."""
+    monkeypatch.setattr(polygram_live, "list_positions", lambda: [_held()])
+    row = _live_row()
+    with caplog.at_level("WARNING", logger="newsbrief"):
+        assert polygram_live.close_live_position(row, "target") is False
+    assert "not on venue" not in caplog.text
+    assert row["status"] == "open", "still fail-closed: it must not sell blind"
+
+
+def test_an_unidentifiable_position_NAMES_the_fields_it_actually_carried(
+    monkeypatch, caplog
+):
+    """The self-diagnosing part. A month of logs never once said what the venue
+    called its id, which is the single fact needed to fix this -- the same
+    unactionable shape as an HTTPError that stringifies to a status code."""
+    monkeypatch.setattr(
+        polygram_live,
+        "list_positions",
+        lambda: [_held(positionId="pos_x", shares=6.25)],
+    )
+    with caplog.at_level("WARNING", logger="newsbrief"):
+        polygram_live.close_live_position(_live_row(), "target")
+    assert "positionId" in caplog.text
+    assert "shares" in caplog.text
+
+
+def test_reconcile_does_NOT_settle_a_position_close_could_not_identify(
+    monkeypatch,
+):
+    """The contradiction, pinned. These two ran seconds apart over the same
+    venue read for a month and disagreed; whatever close decides, a position
+    the venue still holds must never be booked as settled."""
+    monkeypatch.setattr(polygram_live, "list_positions", lambda: [_held()])
+    row = _live_row()
+    book = {"positions": [row]}
+    assert polygram_live.reconcile_live_book(book) == 0
+    assert row["status"] == "open" and row["close_reason"] is None
+
+
 def test_backfill_settled_fills_realized(monkeypatch):
     monkeypatch.setattr(
         polygram_live,
