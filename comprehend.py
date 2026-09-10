@@ -244,11 +244,27 @@ def _timed_post(request: dict, label: str, timeout: int, max_attempts: int) -> d
             f"{time.monotonic() - started:.1f}s (timeout={timeout}s)"
         )
         raise
+    # INPUT tokens, not just output. This logged `out=` alone until 2026-09-10,
+    # which meant the number that actually sizes the bill was never written
+    # down: on 2026-09-08 this pipeline spent 5.14M Sonnet tokens in a day, 51x
+    # its own baseline, and the only instrument that could say so was the
+    # billing console three days later.
+    #
+    # The cache counters are here for the reason the API docs give: a zero
+    # cache_read across repeated identical prefixes is the signature of a silent
+    # invalidator, and a cache that quietly stops being read is indistinguishable
+    # from one that was never configured -- unless someone is counting.
+    #
+    # `.get` throughout, never `[...]`: telemetry must not be able to break the
+    # call it measures. A missing field would otherwise turn a cosmetic gap into
+    # a failed integration batch.
     usage = resp.get("usage") or {}
     log.info(
         f"Comprehend: {label} call took {time.monotonic() - started:.1f}s "
         f"(timeout={timeout}s) stop_reason={resp.get('stop_reason')} "
-        f"out={usage.get('output_tokens')}"
+        f"in={usage.get('input_tokens')} out={usage.get('output_tokens')} "
+        f"cache_read={usage.get('cache_read_input_tokens')} "
+        f"cache_write={usage.get('cache_creation_input_tokens')}"
     )
     return resp
 
@@ -1250,6 +1266,22 @@ def build_integration_request(
         f"title={clean(it['title'])!r}\n  body={clean(it.get('body'))!r}"
         for it in items
     )
+    # NO PROMPT CACHING HERE, AND IT IS NOT AN OVERSIGHT. The cacheable prefix
+    # is `system` + `tools` = 2,796 chars, about 777 tokens (measured
+    # 2026-09-10). Claude Sonnet 5's minimum cacheable prefix is 1024 tokens, so
+    # a `cache_control` marker would be accepted and then silently do nothing --
+    # no error, `cache_creation_input_tokens: 0`, and a saving that exists only
+    # on paper.
+    #
+    # Worth ~$0.50/day if it worked, at ~320 calls a day. Revisit only if the
+    # prefix crosses 1024 tokens or the model changes: Claude Opus 5's minimum
+    # is 512, where this prefix WOULD cache. The per-model minimums are not
+    # monotonic across generations, so check the current one rather than
+    # assuming a newer model is more permissive.
+    #
+    # The request shape is already cache-ready if that day comes: caching is a
+    # prefix match rendered tools -> system -> messages, and every volatile
+    # value (candidates, item text) is in `messages`, after everything static.
     return {
         "model": _integrate_model(),
         "max_tokens": INTEGRATE_MAX_TOKENS,

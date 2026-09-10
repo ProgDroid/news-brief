@@ -178,3 +178,67 @@ def test_a_failure_the_request_itself_caused_still_charges_the_item(exc):
     the test above for free, and would turn a permanently-malformed batch into
     a loop that re-pays an 8192-token generation every hour and never retires."""
     assert comprehend._is_transient(exc) is False
+
+
+# --- What a call COST, which nothing recorded (news-brief-cost).
+#
+# _timed_post logged `out=` and nothing else, so the number that determines the
+# bill -- input tokens -- was never written down. On 2026-09-08 this pipeline
+# spent 5.14M Sonnet tokens in a day, 51x its own baseline, and the only way to
+# find out was the billing console three days later. Same shape as every other
+# gap found this week: the diagnosis was blocked by a missing instrument rather
+# than by a hard bug.
+
+
+def _usage_response(usage):
+    return {"stop_reason": "tool_use", "content": [], "usage": usage}
+
+
+def test_a_call_logs_its_INPUT_tokens_not_just_its_output(monkeypatch, caplog):
+    monkeypatch.setattr(
+        brief,
+        "_post_messages",
+        lambda req, timeout, max_attempts: _usage_response(
+            {"input_tokens": 4321, "output_tokens": 99}
+        ),
+    )
+    with caplog.at_level("INFO", logger="newsbrief"):
+        comprehend._timed_post({"model": "x"}, "integration", 300, 1)
+    assert "4321" in caplog.text, "input tokens are the number that sizes the bill"
+    assert "99" in caplog.text
+
+
+def test_a_call_logs_its_CACHE_tokens_so_a_dead_cache_is_visible(monkeypatch, caplog):
+    """A cache that silently stops being read looks exactly like one that was
+    never configured, and the API guidance is explicit: a zero cache_read across
+    repeated identical prefixes means a silent invalidator. That is only
+    checkable if the number is written down."""
+    monkeypatch.setattr(
+        brief,
+        "_post_messages",
+        lambda req, timeout, max_attempts: _usage_response(
+            {
+                "input_tokens": 10,
+                "output_tokens": 20,
+                "cache_read_input_tokens": 777,
+                "cache_creation_input_tokens": 31,
+            }
+        ),
+    )
+    with caplog.at_level("INFO", logger="newsbrief"):
+        comprehend._timed_post({"model": "x"}, "integration", 300, 1)
+    assert "777" in caplog.text and "31" in caplog.text
+
+
+def test_a_response_without_usage_still_logs_rather_than_raising(monkeypatch, caplog):
+    """Presence sibling and a fail-safe. Telemetry must never be able to break
+    the call it is measuring -- a KeyError here would turn a missing field into
+    a failed integration batch, which is the opposite of the point."""
+    monkeypatch.setattr(
+        brief,
+        "_post_messages",
+        lambda req, timeout, max_attempts: {"stop_reason": "tool_use", "content": []},
+    )
+    with caplog.at_level("INFO", logger="newsbrief"):
+        comprehend._timed_post({"model": "x"}, "integration", 300, 1)
+    assert "integration call took" in caplog.text
