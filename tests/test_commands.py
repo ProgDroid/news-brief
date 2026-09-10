@@ -985,6 +985,64 @@ def test_close_ticker_routes_live_to_venue_sell(monkeypatch, tmp_path):
     assert live["status"] == "closed"
 
 
+def test_close_reports_a_live_row_it_could_NOT_sell(monkeypatch, tmp_path):
+    """A ticker can match a live row and a paper row at once. When the paper one
+    closes and the live sell fails, the old message said "Closed 1 position(s)"
+    and nothing else -- an unqualified success while real capital stayed at the
+    venue, with the failure visible only in a log line nobody reads.
+
+    Latent rather than witnessed: the 2026-09-10 /close closed a paper row and
+    was truthful. It is the same class as news-brief-8fy itself -- a real-money
+    path whose failure does not reach where the operator looks.
+    """
+    import polygram_live
+
+    live = {
+        "id": "L",
+        "status": "open",
+        "execution": "live",
+        "instrument": "m",
+        "outcome": "No",
+    }
+    paper = {"id": "P", "status": "open", "execution": "paper", "instrument": "m"}
+    book = {"positions": [live, paper]}
+    monkeypatch.setattr(brief, "load_book", lambda: book)
+    monkeypatch.setattr(brief, "save_book", lambda b: None)
+    monkeypatch.setattr(brief.trading, "BOOK_FILE", tmp_path / "book.json")
+    monkeypatch.setattr(brief, "_pos_ticker", lambda p: "m")
+    monkeypatch.setattr(brief, "_close_position_at_market", lambda p, day, r: True)
+    monkeypatch.setattr(polygram_live, "close_live_position", lambda p, r: False)
+    sent = []
+    monkeypatch.setattr(brief, "telegram_send", lambda t: sent.append(t))
+
+    brief._close_ticker("m")
+
+    assert sent, "the command must say something"
+    msg = sent[0]
+    assert "L" in msg, "the row that did NOT close must be named"
+    assert "1" in msg, "and the one that did must still be reported"
+
+
+def test_close_says_plainly_when_everything_closed(monkeypatch, tmp_path):
+    """Presence sibling. A message that always mentions failures would make the
+    happy path unreadable, and an operator who learns to skim it is back where
+    they started."""
+    paper = {"id": "P", "status": "open", "execution": "paper", "instrument": "m"}
+    book = {"positions": [paper]}
+    monkeypatch.setattr(brief, "load_book", lambda: book)
+    monkeypatch.setattr(brief, "save_book", lambda b: None)
+    monkeypatch.setattr(brief.trading, "BOOK_FILE", tmp_path / "book.json")
+    monkeypatch.setattr(brief, "_pos_ticker", lambda p: "m")
+    monkeypatch.setattr(brief, "_close_position_at_market", lambda p, day, r: True)
+    sent = []
+    monkeypatch.setattr(brief, "telegram_send", lambda t: sent.append(t))
+
+    brief._close_ticker("m")
+
+    assert "P" not in sent[0], "nothing failed, so nothing may be named as failed"
+    assert "1" in sent[0]
+
+
 def test_predict_wizard_thesis_to_market(monkeypatch):
     monkeypatch.setattr(common, "PG_LIVE_ENABLED", True)
     monkeypatch.setattr(common, "PG_B_ENABLED", True)

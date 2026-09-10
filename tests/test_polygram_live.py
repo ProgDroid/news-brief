@@ -141,8 +141,12 @@ def test_sell_position_full(monkeypatch):
         }
 
     monkeypatch.setattr(polygram_live, "_pg_request", fake)
-    r = polygram_live.sell_position("pos_1")
-    assert captured["body"] == {"positionId": "pos_1"}
+    r = polygram_live.sell_position("mkt_1", "No", 1.0)
+    assert captured["body"] == {
+        "marketId": "mkt_1",
+        "outcome": "No",
+        "shares": 1.0,
+    }
     assert r["proceeds"] == 116.13 and r["status"] == "completed"
 
 
@@ -286,6 +290,7 @@ def _live_row(market_id="mkt_b", outcome="No"):
         "outcome": outcome,
         "side_index": 1,
         "entry_price": 0.80,
+        "shares": 6.25,
         "cost_basis": 5.0,
         "status": "open",
         "realized_return": None,
@@ -332,53 +337,165 @@ def test_reconcile_keeps_a_position_the_venue_still_holds_under_type_drift(monke
     assert row["status"] == "open"
 
 
-def test_close_live_position_sells_using_the_venues_position_key(monkeypatch):
-    """The identifier that actually reaches /trade/sell, which the previous
-    version of this test discarded -- it accepted `pid` and never looked at it,
-    so it passed just as happily while close_live_position read a key the venue
-    has never sent (news-brief-8fy). Measured field set, 2026-09-10:
-    avgPrice, chainDrift, chainShares, chainStatus, currentPrice, image, isLost,
-    marketId, marketResolved, marketTitle, outcome, position_key, realizedPnl,
-    resolvedTitle, shares, tokenId, totalInvested, unrealizedPnl, userId,
-    winningOutcome -- and position_key is the only one that names the POSITION
-    rather than the market, the token or the account."""
-    sold = []
-    monkeypatch.setattr(
-        polygram_live,
-        "list_positions",
-        lambda: [
-            {
-                "position_key": "pk_real",
-                "marketId": "mkt_b",
-                "outcome": "No",
-                "tokenId": "11134447534296978",
-                "userId": "someone",
-                "shares": 6.25,
-            }
-        ],
-    )
-    monkeypatch.setattr(
-        polygram_live,
-        "sell_position",
-        lambda pid, shares=None: sold.append(pid)
-        or {
+def _venue_pos(shares=6.25, market_id="mkt_b", outcome="No"):
+    """The measured /trade/positions shape (2026-09-10), trimmed to what the
+    close path reads."""
+    return {
+        "position_key": "someone-mkt_b-No",
+        "marketId": market_id,
+        "outcome": outcome,
+        "shares": shares,
+        "tokenId": "11134447534296978",
+        "userId": "someone",
+    }
+
+
+def _completed_sale(recorder):
+    def sell(market_id, outcome, shares):
+        recorder.append((market_id, outcome, shares))
+        return {
             "proceeds": 6.0,
             "sale_price": 0.96,
             "profit": 1.0,
             "fee": 0.05,
             "shares_sold": 6.25,
             "status": "completed",
+        }
+
+    return sell
+
+
+def test_sell_position_sends_the_fields_the_VENUE_requires(monkeypatch):
+    """The docs and the running API disagree, and the API wins.
+
+    Docs (read 2026-09-10): positionId required, shares optional, "omit for
+    full sell". The live venue, asked exactly that:
+
+        sent={'positionId': 'fm_ferreira1996-2774057-No'}
+        400 {"error":"marketId, outcome, and a valid positive shares amount
+             are required"}
+
+    This venue's 400s enumerate the COMPLETE required set -- that is how the
+    missing `side` field was found on /trade/place -- so the body is those
+    three fields and nothing else. positionId is deliberately NOT resent: the
+    server may have produced this very error by failing to resolve it.
+    """
+    sent = {}
+    monkeypatch.setattr(
+        polygram_live,
+        "_pg_request",
+        lambda m, path, params=None, json_body=None: sent.update(
+            {"path": path, "body": json_body}
+        )
+        or {
+            "sale": {
+                "status": "completed",
+                "sharesSold": 1.0,
+                "salePrice": 0.5,
+                "proceeds": 0.5,
+                "profit": 0.0,
+                "fee": 0.0,
+            }
         },
     )
-    row = _live_row()
-    assert polygram_live.close_live_position(row, "target") is True
-    assert sold == ["pk_real"], (
-        "the venue must be handed position_key -- tokenId names the outcome "
-        "token and marketId the market, and neither identifies THIS holding"
+    polygram_live.sell_position("2774057", "No", 2.02325)
+    assert sent["path"] == "/trade/sell"
+    assert sent["body"] == {
+        "marketId": "2774057",
+        "outcome": "No",
+        "shares": 2.02325,
+    }
+
+
+def test_close_live_position_sells_the_VENUES_share_count(monkeypatch):
+    """The venue is authoritative about what is actually held. The book records
+    what we think we bought, and "a valid positive shares amount" is exactly
+    what a drifted book figure would fail."""
+    sold = []
+    monkeypatch.setattr(
+        polygram_live, "list_positions", lambda: [_venue_pos(shares=2.02325)]
     )
-    assert row["status"] == "closed" and row["close_reason"] == "target"
-    # realized_return = proceeds/cost_basis - 1 = 6.0/5.0 - 1 = 0.20
-    assert abs(row["realized_return"] - 0.20) < 1e-9
+    monkeypatch.setattr(polygram_live, "sell_position", _completed_sale(sold))
+    row = _live_row()
+    row["shares"] = 99.0  # a stale book figure
+
+    assert polygram_live.close_live_position(row, "target") is True
+    assert sold[0][2] == 2.02325, "the VENUE's share count must be sold"
+
+
+def test_close_live_position_echoes_the_venues_own_id_and_outcome(monkeypatch):
+    """Send back exactly what the venue told us it holds. The book stores the
+    market id as the string /search returned and the outcome in its own case;
+    echoing the venue's values removes the type/case drift from the write path
+    entirely, instead of normalising and hoping."""
+    sold = []
+    monkeypatch.setattr(
+        polygram_live,
+        "list_positions",
+        lambda: [_venue_pos(market_id="2774057", outcome="No")],
+    )
+    monkeypatch.setattr(polygram_live, "sell_position", _completed_sale(sold))
+    row = _live_row(market_id=2774057, outcome="NO")
+
+    assert polygram_live.close_live_position(row, "target") is True
+    assert sold[0][0] == "2774057" and sold[0][1] == "No"
+
+
+def test_a_book_versus_venue_share_disagreement_is_reported(monkeypatch, caplog):
+    """Not a rate, so it needs no measured threshold: this is an exact
+    disagreement between two records of the same holding, and any real
+    difference is a fact about our book being wrong."""
+    sold = []
+    monkeypatch.setattr(
+        polygram_live, "list_positions", lambda: [_venue_pos(shares=2.02325)]
+    )
+    monkeypatch.setattr(polygram_live, "sell_position", _completed_sale(sold))
+    row = _live_row()
+    row["shares"] = 2.5
+
+    with caplog.at_level("WARNING", logger="newsbrief"):
+        assert polygram_live.close_live_position(row, "target") is True
+    # On the RECORDS, not on a keyword. Keying this pair to a word the message
+    # also chooses means renaming the message silently retires the test -- the
+    # mutation run caught exactly that.
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1, [r.getMessage() for r in warnings]
+    assert "2.02325" in warnings[0].getMessage()
+    assert "2.5" in warnings[0].getMessage()
+    assert sold[0][2] == 2.02325, (
+        "the disagreement is reported, not acted on -- refusing to sell would "
+        "strand real capital over a bookkeeping error"
+    )
+
+
+def test_share_counts_that_AGREE_do_not_warn(monkeypatch, caplog):
+    """Presence sibling. Without it, a warn-on-everything implementation passes
+    the test above, and the signal is worthless."""
+    monkeypatch.setattr(
+        polygram_live, "list_positions", lambda: [_venue_pos(shares=6.25)]
+    )
+    monkeypatch.setattr(polygram_live, "sell_position", _completed_sale([]))
+    row = _live_row()
+    row["shares"] = 6.25
+
+    with caplog.at_level("WARNING", logger="newsbrief"):
+        assert polygram_live.close_live_position(row, "target") is True
+    assert [r.getMessage() for r in caplog.records if r.levelname == "WARNING"] == []
+
+
+def test_float_representation_noise_is_not_a_disagreement(monkeypatch, caplog):
+    """0.1+0.2 != 0.3 in binary. An exact == would make this alert fire on
+    arithmetic rather than on anything about the position."""
+    monkeypatch.setattr(
+        polygram_live, "list_positions", lambda: [_venue_pos(shares=0.1 + 0.2)]
+    )
+    monkeypatch.setattr(polygram_live, "sell_position", _completed_sale([]))
+    row = _live_row()
+    row["shares"] = 0.3
+
+    with caplog.at_level("WARNING", logger="newsbrief"):
+        polygram_live.close_live_position(row, "target")
+    assert [r.getMessage() for r in caplog.records if r.levelname == "WARNING"] == []
 
 
 def test_close_live_position_false_when_unmatchable(monkeypatch):
@@ -447,21 +564,28 @@ def test_a_position_the_venue_HOLDS_is_never_reported_as_absent(monkeypatch, cap
     assert row["status"] == "open", "still fail-closed: it must not sell blind"
 
 
-def test_an_unidentifiable_position_NAMES_the_fields_it_actually_carried(
+def test_an_unsellable_position_NAMES_the_fields_it_actually_carried(
     monkeypatch, caplog
 ):
-    """The self-diagnosing part. A month of logs never once said what the venue
-    called its id, which is the single fact needed to fix this -- the same
-    unactionable shape as an HTTPError that stringifies to a status code."""
+    """The self-diagnosing part. 424 hourly warnings never once said what the
+    venue response actually contained, which is the single fact needed to fix
+    it -- the same unactionable shape as an HTTPError that stringifies to a
+    status code.
+
+    What makes a position unsellable has moved since: from "carries no id" to
+    "carries no usable share count", because `shares` is what /trade/sell
+    rejects. The naming requirement is the part that matters, and it survives
+    the move.
+    """
     monkeypatch.setattr(
         polygram_live,
         "list_positions",
-        lambda: [_held(positionId="pos_x", shares=6.25)],
+        lambda: [_held(tokenId="tok_x", marketTitle="Will X happen?")],
     )
     with caplog.at_level("WARNING", logger="newsbrief"):
-        polygram_live.close_live_position(_live_row(), "target")
-    assert "positionId" in caplog.text
-    assert "shares" in caplog.text
+        assert polygram_live.close_live_position(_live_row(), "target") is False
+    assert "tokenId" in caplog.text
+    assert "marketTitle" in caplog.text
 
 
 def test_reconcile_does_NOT_settle_a_position_close_could_not_identify(

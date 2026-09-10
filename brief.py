@@ -1326,17 +1326,36 @@ def _close_ticker(tkr: str) -> None:
         day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         # Live rows hold real capital at the venue: sell there, never paper-mark.
         closed_n = 0
+        failed = []
         for p in matches:
             if p.get("execution") == "live":
-                if polygram_live.close_live_position(p, "manual"):
-                    closed_n += 1
-            elif _close_position_at_market(p, day, "manual"):
+                ok = polygram_live.close_live_position(p, "manual")
+            else:
+                ok = _close_position_at_market(p, day, "manual")
+            if ok:
                 closed_n += 1
+            else:
+                failed.append(p)
         if closed_n:
             save_book(book)
+        if closed_n and not failed:
             telegram_send(
                 f"✅ Closed {closed_n} position(s) for "
                 f"<b>{html.escape(tkr)}</b> (manual)."
+            )
+        elif closed_n:
+            # A ticker can match a live row and a paper row at once. Reporting
+            # only the successes made "Closed 1 position(s)" a truthful sentence
+            # and a misleading message: real capital stayed at the venue and the
+            # failure existed solely in a log line. Same class as the bug that
+            # produced it -- a money path whose failure never reaches the
+            # operator (news-brief-8fy).
+            telegram_send(
+                f"⚠️ Closed {closed_n} position(s) for "
+                f"<b>{html.escape(tkr)}</b>, but {len(failed)} FAILED and "
+                f"are still open: "
+                + ", ".join(html.escape(str(p.get("id"))) for p in failed)
+                + ". Live rows hold real capital — check the logs."
             )
         else:
             telegram_send(f"⚠️ Couldn't close {html.escape(tkr)} — left open.")

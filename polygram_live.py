@@ -4,6 +4,7 @@ Reuses trading.py's JWT/token-file auth. Every network helper returns None on
 any non-2xx / parse / network error; callers treat None as "did not happen".
 """
 
+import math
 from datetime import datetime, timezone
 
 import requests
@@ -139,22 +140,33 @@ def place_market_order(event_id, market_id, token_id, outcome, amount):
         return None
 
 
-def sell_position(position_id, shares=None):
+def sell_position(market_id, outcome, shares):
     """Sell a live position via POST /trade/sell. Returns normalized sale or None.
 
-    `positionId` is the ONLY required field (venue docs, confirmed 2026-08-09);
-    omitting `shares` sells the whole position. Deliberately no `side` here — that
-    is a /trade/place requirement, and this endpoint identifies the position by its
-    venue id instead. Recorded because the two write endpoints take different
-    payloads and the symmetry is tempting to assume.
+    THE DOCS AND THE RUNNING API DISAGREE, AND THE API WINS. The published page
+    (read 2026-09-10) gives `positionId` as the only required field with
+    `shares` optional, "omit for full sell". Asked exactly that, the venue said:
+
+        sent={'positionId': 'fm_ferreira1996-2774057-No'}
+        400 {"error":"marketId, outcome, and a valid positive shares amount
+             are required"}
+
+    This venue's 400s enumerate the COMPLETE required set -- that is how the
+    missing `side` field on /trade/place was found -- so the body is those three
+    and nothing more. `positionId` is deliberately not resent even though the
+    docs demand it: the server may well have produced this error BY failing to
+    resolve that value, and re-sending it risks reproducing this exact 400.
+
+    Still no `side`. That is a /trade/place requirement and the error does not
+    ask for it; the two write endpoints take different payloads and the symmetry
+    remains tempting and wrong.
     """
-    body = {"positionId": position_id}
-    if shares is not None:
-        body["shares"] = shares
+    body = {"marketId": market_id, "outcome": outcome, "shares": shares}
     data = _pg_request("POST", "/trade/sell", json_body=body)
     sale = (data or {}).get("sale") if isinstance(data, dict) else None
+    label = f"{market_id}/{outcome}"
     if not isinstance(sale, dict) or sale.get("status") != "completed":
-        log.warning(f"PolyGram sell not completed for {position_id}: {data}")
+        log.warning(f"PolyGram sell not completed for {label}: {data}")
         return None
     try:
         return {
@@ -166,7 +178,7 @@ def sell_position(position_id, shares=None):
             "status": sale["status"],
         }
     except (KeyError, TypeError, ValueError) as e:
-        log.warning(f"PolyGram sale parse failed for {position_id}: {e}")
+        log.warning(f"PolyGram sale parse failed for {label}: {e}")
         return None
 
 
@@ -336,20 +348,35 @@ def close_live_position(row, reason):
     if pos is None:
         log.warning(f"Live close: {row['id']} not on venue; leaving to reconcile")
         return False
-    pos_id = pos.get(_VENUE_POSITION_ID)
-    if pos_id is None:
-        # The venue HOLDS this position; we simply cannot name it. Still fail
-        # closed -- selling needs an identifier we do not have -- but say which
-        # fact this is, and NAME THE FIELDS the response actually carried. That
-        # is the single thing needed to fix it, and 424 hourly warnings never
-        # once contained it.
+    held = pos.get("shares")
+    if not isinstance(held, (int, float)) or held <= 0:
+        # The venue holds this position but will not say how much of it, and
+        # /trade/sell rejects anything but "a valid positive shares amount".
+        # Fail closed and name what arrived -- guessing the size of a real-money
+        # sell from our own book is how the book becomes the venue's problem.
         log.warning(
-            f"Live close: {row['id']} IS held by the venue but carries no "
-            f"{_VENUE_POSITION_ID!r}, so it cannot be sold. "
-            f"Fields present: {sorted(pos)}"
+            f"Live close: {row['id']} IS held by the venue but its shares are "
+            f"{held!r}, so it cannot be sold. Fields present: {sorted(pos)}"
         )
         return False
-    sale = sell_position(pos_id)
+    # Two records of one holding. A difference is not a rate needing a measured
+    # threshold -- it is an exact disagreement, and any real one means our book
+    # is wrong about real capital. Reported, never acted on: refusing to sell
+    # over a bookkeeping error would strand the position instead.
+    booked = row.get("shares")
+    if isinstance(booked, (int, float)) and not math.isclose(
+        held, booked, rel_tol=1e-9
+    ):
+        log.warning(
+            f"Live close: {row['id']} book and venue DISAGREE on size -- venue "
+            f"{held}, book {booked}. Selling the venue's figure; the book is "
+            f"the one that is wrong."
+        )
+    # position_key is logged, not sent: the venue rejects it (see sell_position).
+    log.info(
+        f"Live close: selling {row['id']} ({pos.get(_VENUE_POSITION_ID)}) shares={held}"
+    )
+    sale = sell_position(pos["marketId"], pos["outcome"], held)
     if sale is None:
         return False
     cost = row.get("cost_basis") or 0.0
