@@ -4145,25 +4145,62 @@ def mode_pgdiag():
     # ENUMERATE, never name-match. A probe that picks fields by name pattern
     # presupposes what the answer is CALLED, which is precisely how
     # `position_key` stayed invisible for a year: it contains no "id".
-    hist = polygram_live.trade_history()
-    if hist is None:
-        out.append("❌ /trade/history UNREADABLE — backfill_settled can never fire")
-    elif not hist:
-        out.append("⚠️ /trade/history returned 0 records; shape still unknown")
+    # Call _pg_request DIRECTLY. trade_history() returns None precisely when
+    # `history` and `trades` are both absent -- i.e. exactly when the key names
+    # are wrong, which is the fact this probe exists to establish. Asking it
+    # would presuppose the answer, which is the same mistake that hid
+    # `position_key` for a year, made one level up (news-brief-8lb).
+    raw = polygram_live._pg_request("GET", "/trade/history")
+    if raw is None:
+        out.append(
+            "❌ /trade/history: the REQUEST failed (non-2xx, network, or "
+            "unparseable body). _pg_request logged the status and the body to "
+            "this run's stdout — read the container log, it is not in here."
+        )
     else:
-        h0 = hist[0]
-        out.append(f"✅ /trade/history: {len(hist)} record(s)")
-        if isinstance(h0, dict):
-            out.append("history record[0] ALL keys: " + ", ".join(sorted(h0)))
+        records = None
+        if isinstance(raw, dict):
+            out.append(f"/trade/history 2xx, top-level keys: {', '.join(sorted(raw))}")
+            for k in sorted(raw):
+                v = raw[k]
+                size = f"[{len(v)}]" if isinstance(v, (list, dict, str)) else ""
+                out.append(f"  {k}={type(v).__name__}{size} {str(v)[:48]}")
+            # By SHAPE, not by name: the first list of dicts, whatever it is
+            # called. That is the whole question.
+            records = next(
+                (
+                    v
+                    for _, v in sorted(raw.items())
+                    if isinstance(v, list) and v and isinstance(v[0], dict)
+                ),
+                None,
+            )
+        elif isinstance(raw, list):
+            out.append(f"/trade/history 2xx, bare list of {len(raw)}")
+            records = raw if raw and isinstance(raw[0], dict) else None
+        else:
+            out.append(f"/trade/history 2xx, but it is a {type(raw).__name__}")
+
+        if records:
+            out.append(f"✅ records found by shape: {len(records)}")
+            out.append("  record[0] ALL keys: " + ", ".join(sorted(records[0])))
             out.append(
-                "history record[0] values: "
+                "  record[0]: "
                 + ", ".join(
                     f"{k}={str(v)[:20]}({type(v).__name__})"
-                    for k, v in sorted(h0.items())
+                    for k, v in sorted(records[0].items())
                 )
             )
         else:
-            out.append(f"⚠️ history record[0] is {type(h0).__name__}, not a dict")
+            out.append("⚠️ no list-of-dicts anywhere in the response")
+
+        # What PRODUCTION makes of this exact payload, via the real function.
+        if polygram_live._parse_trade_history(raw) is None:
+            out.append(
+                "🚨 trade_history() reads this payload as None, so "
+                "backfill_settled CANNOT fire: the records are not under "
+                "`history` or `trades`. Fix the key from the list above."
+            )
 
     out.append("(read-only: no orders placed, book untouched)")
     telegram_send_long("\n".join(out))

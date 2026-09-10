@@ -1349,8 +1349,9 @@ def _pgdiag_env(monkeypatch, *, event_id="evt"):
     # trading.polygram_login does NOT divert _pg_request (see the module-attr rule).
     monkeypatch.setattr(polygram_live, "list_positions", lambda: [])
     # Same reason as list_positions: unstubbed, the /trade/history shape probe
-    # reaches the real venue and the network guard fails the test.
-    monkeypatch.setattr(polygram_live, "trade_history", lambda: [])
+    # reaches the real venue and the network guard fails the test. It calls
+    # _pg_request directly now -- stubbing trade_history would no longer divert it.
+    monkeypatch.setattr(polygram_live, "_pg_request", lambda *a, **k: {"history": []})
     monkeypatch.setattr(brief, "load_book", lambda: {"positions": []})
     sent = []
     monkeypatch.setattr(brief, "telegram_send_long", lambda t: sent.append(t))
@@ -1667,27 +1668,101 @@ def test_paper_prediction_row_records_the_venue_label(monkeypatch):
 # ── /trade/history: the last unmeasured shape in the live seam ────────────────
 
 
-def test_pgdiag_enumerates_EVERY_history_key(monkeypatch):
-    """backfill_settled reaches for `proceeds` on records keyed by (marketId,
-    outcome) -- three names taken from documentation and never observed. The
-    probe must therefore report what IS there, not confirm what we expect: a
-    name-matching filter is what hid `position_key` for a year."""
+def test_pgdiag_finds_the_records_under_a_key_NOBODY_GUESSED(monkeypatch):
+    """THE test. trade_history() only knows `history` and `trades`, both guessed
+    from a docs page that has been wrong three times on this endpoint family. If
+    the venue calls it anything else, the probe must still report the records --
+    otherwise it answers "unreadable" to the one question it exists to settle
+    (news-brief-8lb, reopened after exactly that happened live)."""
     brief, sent = _pgdiag_env(monkeypatch)
     monkeypatch.setattr(
         polygram_live,
-        "trade_history",
-        lambda: [{"market_ref": "1", "side": "sell", "netUsd": 1.8, "ts": 99}],
+        "_pg_request",
+        lambda m, path, **k: {
+            "ok": True,
+            "results": [
+                {
+                    "market_ref": "1",
+                    "netUsd": 1.8,
+                    "settlementNote": "padding so the preview truncates",
+                    "distinctiveTailKey": "zzz",
+                }
+            ],
+        }
+        if path == "/trade/history"
+        else None,
     )
     brief.mode_pgdiag()
-    for key in ("market_ref", "side", "netUsd", "ts"):
-        assert key in sent[0], f"{key} must be reported even though nothing reads it"
+    assert "results" in sent[0], "the real records key must be named"
+    assert "records found by shape: 1" in sent[0]
+    # This key sits PAST the 48-char top-level value preview, so it can only
+    # reach the message through the record[0] dump. Without it the assertions
+    # below pass on the preview alone -- measured: a mutation replacing the
+    # by-shape lookup with raw.get("history") left this test green.
+    assert "distinctiveTailKey" in sent[0]
+    assert "backfill_settled CANNOT fire" in sent[0], (
+        "the probe must say production cannot read this payload"
+    )
 
 
-def test_pgdiag_says_history_is_unreadable_rather_than_empty(monkeypatch):
-    """None is a FAILED read. Reporting it as '0 records' would license the
-    conclusion that there is no history to backfill from."""
+def test_pgdiag_does_not_call_the_request_failed_when_it_2xxd(monkeypatch):
+    """The bug this replaces: an unrecognised 2xx was reported identically to a
+    failed request. Two different facts, two different fixes."""
     brief, sent = _pgdiag_env(monkeypatch)
-    monkeypatch.setattr(polygram_live, "trade_history", lambda: None)
+    monkeypatch.setattr(
+        polygram_live,
+        "_pg_request",
+        lambda m, path, **k: {"surprise": 1} if path == "/trade/history" else None,
+    )
     brief.mode_pgdiag()
-    assert "UNREADABLE" in sent[0]
-    assert "0 record" not in sent[0]
+    assert "the REQUEST failed" not in sent[0]
+    assert "surprise" in sent[0], "an unrecognised payload is still dumped in full"
+
+
+def test_pgdiag_reports_a_genuinely_failed_history_request(monkeypatch):
+    """None from _pg_request is a FAILED read, and the status/body went to the
+    log rather than into this message -- so the probe must point at the log."""
+    brief, sent = _pgdiag_env(monkeypatch)
+    monkeypatch.setattr(polygram_live, "_pg_request", lambda *a, **k: None)
+    brief.mode_pgdiag()
+    assert "the REQUEST failed" in sent[0]
+    assert "container log" in sent[0]
+
+
+def test_pgdiag_reads_a_bare_list_response(monkeypatch):
+    brief, sent = _pgdiag_env(monkeypatch)
+    monkeypatch.setattr(
+        polygram_live,
+        "_pg_request",
+        lambda m, path, **k: [{"marketId": "1", "proceeds": 1.8}]
+        if path == "/trade/history"
+        else None,
+    )
+    brief.mode_pgdiag()
+    assert "bare list of 1" in sent[0]
+    assert "proceeds" in sent[0]
+    # A bare list IS what _parse_trade_history accepts, so production can read it.
+    assert "backfill_settled CANNOT fire" not in sent[0]
+
+
+def test_trade_history_shouts_when_a_2xx_carries_no_recognised_records(
+    monkeypatch, caplog
+):
+    """In PRODUCTION, not just in pgdiag. A silent None here is how the
+    backfill for news-brief-sb0 sat broken and unremarked."""
+    monkeypatch.setattr(
+        polygram_live, "_pg_request", lambda *a, **k: {"results": [{"a": 1}]}
+    )
+    with caplog.at_level("WARNING"):
+        assert polygram_live.trade_history() is None
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert errors, "an unreadable 2xx must not return a silent None"
+    assert "results" in errors[0].getMessage(), "name the keys that WERE there"
+
+
+def test_trade_history_stays_quiet_when_the_request_simply_failed(monkeypatch, caplog):
+    """_pg_request already logged that one; a second line would be noise."""
+    monkeypatch.setattr(polygram_live, "_pg_request", lambda *a, **k: None)
+    with caplog.at_level("WARNING"):
+        assert polygram_live.trade_history() is None
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]

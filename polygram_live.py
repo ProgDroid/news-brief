@@ -468,13 +468,42 @@ def reconcile_live_book(book):
     return n
 
 
-def trade_history():
-    """Trade execution history via GET /trade/history. Returns the list, or None on failed read."""
-    data = _pg_request("GET", "/trade/history")
+def _parse_trade_history(data):
+    """The records list inside a /trade/history payload, or None if unrecognised.
+
+    Split out of trade_history so pgdiag can ask what PRODUCTION makes of a payload
+    it is already holding, instead of re-deriving the same logic beside it. A
+    control that reimplements its subject moves whenever the subject moves and
+    cannot notice -- mirror the predicate, never re-derive it.
+
+    BOTH key names are GUESSES from the docs page, never observed. Keep that in
+    mind when reading a None: it means "not under `history` or `trades`", which is
+    not the same as "no records".
+    """
     if isinstance(data, dict):
         items = data.get("history") or data.get("trades")
         return items if isinstance(items, list) else None
     return data if isinstance(data, list) else None
+
+
+def trade_history():
+    """Trade execution history via GET /trade/history. The list, or None.
+
+    None is DELIBERATELY two things to the caller -- backfill_settled must no-op on
+    either -- but they are not the same event, so the shape failure says so out
+    loud. Returning a silent None on a 2xx is how the fallback for news-brief-sb0
+    sat broken and unremarked; a fail-closed path needs a status, not a count.
+    """
+    data = _pg_request("GET", "/trade/history")
+    items = _parse_trade_history(data)
+    if items is None and data is not None:
+        shape = sorted(data) if isinstance(data, dict) else type(data).__name__
+        log.error(
+            f"PolyGram /trade/history returned 2xx but no records list under "
+            f"`history` or `trades`; top level is {shape} — backfill_settled "
+            f"cannot fire and both key names are unverified guesses (run pgdiag)"
+        )
+    return items
 
 
 def backfill_settled(book):
