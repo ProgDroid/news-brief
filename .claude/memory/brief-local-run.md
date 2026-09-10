@@ -115,3 +115,16 @@ then re-run once. Clean re-run here went straight back to 1833 passed.
 Related trap the same session: stopping the `--rm` test container between runs DELETES it, so a
 later suite silently SKIPS the whole DB layer instead of failing. A skip is not a pass; restart
 the container and confirm the count moved.
+
+
+### I wrote the note above and then did it again, within the hour (2026-09-10)
+
+Stopped the `--rm` test container as part of a session close-out, kept working, and the next full
+suite hung at 19% with `EEEE` -- exactly the failure recorded above, exactly bead `5qd`. Writing
+the memory did not prevent the repeat, because the mistake happens during *tidying up*, when
+nobody is reading memories.
+
+**So tie it to the ritual, not to recall: stop the database only when the session is genuinely
+ending, and if you keep working afterwards, restart it before the next `pytest`.** Tell: a suite
+that hangs rather than fails, or a sudden block of `E`s in a run that passed minutes ago.
+Confirm with `docker ps` -- an empty list at exit 0 is ABSENT, not unknown.
