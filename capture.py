@@ -576,12 +576,14 @@ def liveness(conn, now) -> tuple[str, str] | None:
 HISTORY_DAYS = 7
 
 
-def failing_feeds(conn, now) -> tuple[str, str] | None:
+def failing_feeds(conn, now, feeds=None) -> tuple[str, str] | None:
     """(episode key, message) for feeds that are being polled and never work.
 
-    The tolerance is `STALE_AFTER_INTERVALS`, reused rather than copied — this
-    is the same question `liveness` asks, one level down, and a second constant
-    would be a knob tracking a knob.
+    The tolerance is PER FEED (news-brief-b42.5): each feed's own interval times
+    `STALE_AFTER_INTERVALS`, reused rather than copied — this is the same
+    question `liveness` asks, one level down, and a second constant would be a
+    knob tracking a knob. An untuned or unknown feed falls back to nominal, so
+    it keeps exactly the tolerance it had before per-feed cadence existed.
 
     Two distinctions the filter exists for, both ABSENT versus UNKNOWN:
 
@@ -593,8 +595,24 @@ def failing_feeds(conn, now) -> tuple[str, str] | None:
         message as "never", because rendering it as an age prints a confident
         wrong number — the failure `feed_health`'s docstring already names.
     """
-    tolerance = timedelta(minutes=_interval_minutes() * STALE_AFTER_INTERVALS)
-    cutoff = now - tolerance
+    # Per-feed now (news-brief-b42.5 Phase 1). STALE_AFTER_INTERVALS is reused
+    # rather than copied -- the question is still "three missed polls", and three
+    # missed polls of a 120-minute feed is six hours. A single global cutoff
+    # would leave a slowed feed inside its own window for only part of its cycle
+    # and invisible for the rest: the monitoring regression per-feed cadence
+    # would otherwise ship (spec section 1.3).
+    #
+    # `feeds` is a parameter so the tolerance source is explicit and testable,
+    # and so this alerting path does not read sources.json off the volume as a
+    # hidden side effect.
+    by_name = {f["name"]: f for f in (capture_sources() if feeds is None else feeds)}
+    nominal = _interval_minutes()
+
+    def _cutoff(source_name):
+        feed = by_name.get(source_name)
+        minutes = poll_interval_minutes(feed) if feed else nominal
+        return now - timedelta(minutes=minutes * STALE_AFTER_INTERVALS)
+
     rows = conn.execute(
         "WITH ok AS ("
         "  SELECT source_name, max(polled_at) AS last_ok FROM feed_polls "
@@ -610,11 +628,11 @@ def failing_feeds(conn, now) -> tuple[str, str] | None:
         "ORDER BY o.last_ok ASC NULLS FIRST, p.source_name"
     ).fetchall()
 
-    failing = [
-        (name, last_ok, fails, kind)
-        for name, last_try, last_ok, fails, kind in rows
-        if last_try > cutoff and (last_ok is None or last_ok < cutoff)
-    ]
+    failing = []
+    for name, last_try, last_ok, fails, kind in rows:
+        cutoff = _cutoff(name)
+        if last_try > cutoff and (last_ok is None or last_ok < cutoff):
+            failing.append((name, last_ok, fails, kind))
     if not failing:
         return None
 
@@ -622,12 +640,13 @@ def failing_feeds(conn, now) -> tuple[str, str] | None:
         f"   {name[:24]:<26}"
         + (f"last ok {_duration(now - last_ok)} ago" if last_ok else "never succeeded")
         + f", {fails} failures since ({kind})"
+        + f", tolerance {_duration(now - _cutoff(name))}"
         for name, last_ok, fails, kind in failing
     ]
     return (
         "failing:" + ",".join(sorted(name for name, _, _, _ in failing)),
-        f"{len(failing)} feed(s) have not polled successfully in "
-        f"{_duration(tolerance)}:\n" + "\n".join(lines),
+        f"{len(failing)} feed(s) have not polled successfully within their own "
+        f"cadence:\n" + "\n".join(lines),
     )
 
 

@@ -1002,3 +1002,65 @@ def test_a_slowed_feed_fires_every_kth_tick_and_not_more_often(store):
         )
         store.commit()
         assert capture.due_feeds(store, [SLOW], NOW) == expected, f"{ticks} ticks"
+
+
+# --- failing_feeds per-feed tolerance (news-brief-b42.5 Phase 1).
+
+SLOW_TOLERANCE = 120 * capture.STALE_AFTER_INTERVALS
+
+
+def test_a_slowed_feed_is_not_alerted_inside_three_of_its_own_intervals(store):
+    """Three hours of failure on a 120-minute feed is one and a half missed
+    polls -- not yet news. Under the old global 90-minute tolerance this would
+    have alerted."""
+    run = _run(store, minutes_ago=1)
+    _poll(store, run, "Slow", minutes_ago=180)
+    _poll(store, run, "Slow", failure="http_500", minutes_ago=5)
+    store.commit()
+    assert capture.failing_feeds(store, NOW, feeds=[SLOW]) is None
+
+
+def test_a_slowed_feed_IS_alerted_beyond_three_of_its_own_intervals(store):
+    """The presence sibling, and the point of the task: the tolerance moved, it
+    did not disappear."""
+    run = _run(store, minutes_ago=1)
+    _poll(store, run, "Slow", minutes_ago=SLOW_TOLERANCE + 60)
+    _poll(store, run, "Slow", failure="http_500", minutes_ago=5)
+    store.commit()
+    verdict = capture.failing_feeds(store, NOW, feeds=[SLOW])
+    assert verdict is not None
+    assert "Slow" in verdict[1]
+
+
+def test_an_untuned_feed_keeps_todays_ninety_minute_tolerance(store):
+    """Unknown interval falls back to nominal, so an untuned feed behaves exactly
+    as it does now. Two separate feeds rather than two histories for one: the
+    CTE takes max(polled_at) over successes, and a second, OLDER success cannot
+    lower a max."""
+    run = _run(store, minutes_ago=1)
+    _poll(store, run, "Recent", minutes_ago=TOLERANCE - 10)
+    _poll(store, run, "Recent", failure="http_500", minutes_ago=5)
+    _poll(store, run, "Stale", minutes_ago=TOLERANCE + 10)
+    _poll(store, run, "Stale", failure="http_500", minutes_ago=5)
+    store.commit()
+
+    recent = {"name": "Recent", "url": "https://recent.example/rss"}
+    stale = {"name": "Stale", "url": "https://stale.example/rss"}
+    verdict = capture.failing_feeds(store, NOW, feeds=[recent, stale])
+
+    assert verdict is not None
+    assert "Stale" in verdict[1]
+    assert "Recent" not in verdict[1]
+
+
+def test_a_feed_absent_from_the_source_list_falls_back_to_nominal(store):
+    """A poll row for a source no longer configured still gets judged, at
+    nominal. It must not crash on the missing lookup, and it must not become
+    un-alertable."""
+    run = _run(store, minutes_ago=1)
+    _poll(store, run, "Ghost", minutes_ago=TOLERANCE + 10)
+    _poll(store, run, "Ghost", failure="http_500", minutes_ago=5)
+    store.commit()
+    verdict = capture.failing_feeds(store, NOW, feeds=[])
+    assert verdict is not None
+    assert "Ghost" in verdict[1]
