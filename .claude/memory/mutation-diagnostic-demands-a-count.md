@@ -156,3 +156,28 @@ equal, not because the probe was broken.
 
 Both gaps were invisible to three red-team reading passes over the same plan. Only running the
 mutations found them — the saturation point [[tests-asserting-less-than-their-name]] names.
+
+
+## A mutation that REWORDS is not a mutation (2026-09-10, news-brief-8fy)
+
+Pre-registered five, four matched, and the fifth failed **zero** tests. Following the rule
+above -- when the count undershoots, suspect the tests -- both halves turned out to be wrong.
+
+**The mutation was bad.** It changed a log message's wording, not its behaviour. Rewording
+*should* fail nothing. **A mutation has to delete or invert something the code DOES**; editing a
+string literal tests your phrasing, and a zero there is meaningless rather than reassuring.
+
+**And the tests were weak in a way only that revealed.** The disagreement pair asserted on the
+word `"disagree"` appearing (or not) in the log text -- **a word the implementation itself
+chooses**. Rename the message and the presence sibling passes vacuously forever, having silently
+stopped discriminating anything. Same shape as the boundary literal that stopped being a
+boundary: the test names a value the implementation also names, so the two drift together.
+
+Rewritten to assert on the **log RECORDS** -- exactly one WARNING carrying both numbers when the
+sizes differ, zero when they agree. Re-run with a corrected mutation (delete the check outright)
+it fails 1, and with its neighbour (warn on everything) it fails 2, which is what the pair was
+supposed to have been doing.
+
+**How to apply:** before believing a zero, ask whether the mutation removed BEHAVIOUR. And when
+a test asserts on log text, assert on records and counts, never on a phrase the source can
+freely rewrite.

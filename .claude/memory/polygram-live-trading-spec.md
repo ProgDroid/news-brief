@@ -43,3 +43,32 @@ metadata:
 **Calibration (starts day one, machine-generation DEFERRED to spec #2):** shadow-log EVERY thesis (score vs market-implied Brier-skill, discrimination-first); **resolution-aware retention** (keep payload until resolve_by+grace+scored, then prune to compact scored summary — NOT the flat `NEWSBRIEF_RETENTION_DAYS` sweep, which would delete unresolved theses); pre-registered kill/keep/promote gate (~1yr out, real-time-only, be patient). Machine-proposed theses (propose-then-confirm) + earned auto-open = spec #2, gated on the scorecard (see [[self-improving-trading-roadmap]]).
 
 **Paper-data findings that drove it (n≈21 closed, one hot Hormuz window, directional not proof):** 9/9 closed resolution NO-favorite bets positive (favorite-longshot bias, NOT forecasting); disasters = cheap YES longshots (−97% to −100%); `entry_spread` up to 0.50 on longshots vs ~0 on favorites (spread is the #1 killer); repricing is fast/capturable and holding ate the −97% tail; median fade only +3.2% (thin → need Sleeve B for asymmetry). Clock confound cleared = fully contemporaneous. Relates to [[multi-asset-trading-build]] ("live exec = future want" now being built), [[polygram-candidate-search-fix]], [[sentiment-sizing-null-decided]] (why launch fixed-stake).
+
+
+## RESOLVED 2026-09-10: the sell payload, and the docs that were wrong (8fy)
+
+**`POST /trade/sell` takes `{marketId, outcome, shares}`.** Not `positionId`. The published
+docs page says otherwise -- `positionId` required, `shares` optional, "omit for full sell" --
+and the running API answered:
+
+```
+sent={'positionId': '<userId>-<marketId>-<outcome>'}   # the position_key
+400 {"error":"marketId, outcome, and a valid positive shares amount are required"}
+```
+
+**This venue's 400s enumerate the COMPLETE required set** (that is how the missing `side` on
+`/trade/place` was found), so treat the body as authoritative and the docs as stale. Second time
+the docs have lost to the live API on this endpoint family; **do not design a payload here from
+the docs page again -- send a deliberately incomplete body and read the error.**
+
+`/trade/positions` returns no id of any kind. Its identifier is **`position_key`**, a
+`{userId}-{marketId}-{outcome}` composite -- and `/trade/sell` will not accept it, so it is
+logged and never sent.
+
+All three sell values come from the VENUE's response, not the book: it knows what is actually
+held, and "a valid positive shares amount" is what a drifted book figure fails. Echoing back
+`marketId`/`outcome` also removes type and case drift from the write path entirely instead of
+normalising and hoping.
+
+**Still unproven end to end**: `LIVE CLOSE` has never once appeared in this deployment
+(`LIVE OPEN` 7, failure line 424). news-brief-uvo is the $2 round trip that would settle it.

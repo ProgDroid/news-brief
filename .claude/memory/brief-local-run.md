@@ -99,3 +99,19 @@ up the full suite is **1680 passed, 0 skipped**; with none it is **1313 passed, 
 and exits 0 either way. So `361 skipped` is not a warning sign to interpret — it is the exact
 signature of "no `DATABASE_URL`, and you have tested none of the database layer". Read the skip
 count before believing a green run, and pre-register both numbers when a change touches DB code.
+
+
+## Two pytest runs cannot share one Postgres (2026-09-10)
+
+180 errors and 10 failures out of nowhere, on code that had just passed. Cause: a full-suite run
+was still going in the background when a second was started against the same container. The DB
+fixtures do `DROP SCHEMA public CASCADE` per test, so **concurrent suites destroy each other's
+schema mid-run** and the failures are scattered, plausible and completely fictitious.
+
+**Tell: a sudden mass failure with errors (not just failures) spread across unrelated modules.**
+Before debugging any of it, check whether another pytest is running -- `TaskStop` the older one,
+then re-run once. Clean re-run here went straight back to 1833 passed.
+
+Related trap the same session: stopping the `--rm` test container between runs DELETES it, so a
+later suite silently SKIPS the whole DB layer instead of failing. A skip is not a pass; restart
+the container and confirm the count moved.
