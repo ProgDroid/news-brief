@@ -1766,3 +1766,29 @@ def test_trade_history_stays_quiet_when_the_request_simply_failed(monkeypatch, c
     with caplog.at_level("WARNING"):
         assert polygram_live.trade_history() is None
     assert not [r for r in caplog.records if r.levelname == "ERROR"]
+
+
+def test_pgdiag_dumps_EVERY_history_record_not_just_the_first(monkeypatch):
+    """The same lesson as test_pgdiag_dumps_EVERY_venue_position_not_just_the_first,
+    relearned per-endpoint: this probe shipped dumping record[0] only, so the BUY
+    orders that settle what `amount` means sat unshown in a response we had
+    already fetched. n=1 cannot support a claim about a response shape."""
+    brief, sent = _pgdiag_env(monkeypatch)
+    monkeypatch.setattr(
+        polygram_live,
+        "_pg_request",
+        lambda m, path, **k: {
+            "orders": [
+                {"id": "a", "side": "sell", "amount": 1.77},
+                {"id": "b", "side": "buy", "amount": 2.0, "onlyOnTheBuy": "ZZZ"},
+            ],
+            "total": 2,
+        }
+        if path == "/trade/history"
+        else None,
+    )
+    brief.mode_pgdiag()
+    assert "record[1]" in sent[0], "the second record must be dumped"
+    assert "onlyOnTheBuy" in sent[0], (
+        "a field present only on the BUY is exactly what was being missed"
+    )

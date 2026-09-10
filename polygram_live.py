@@ -487,7 +487,11 @@ def _parse_trade_history(data):
     not the same as "no records".
     """
     if isinstance(data, dict):
-        items = data.get("history") or data.get("trades")
+        # `orders` is MEASURED (2026-09-10): {"orders": [...], "total": 5}.
+        # `history` and `trades` were the docs-derived guesses this code ran on
+        # for a year without ever matching; kept only as inert fallbacks, and
+        # trade_history() shouts if all three miss.
+        items = data.get("orders") or data.get("history") or data.get("trades")
         return items if isinstance(items, list) else None
     return data if isinstance(data, list) else None
 
@@ -512,6 +516,26 @@ def trade_history():
     return items
 
 
+def sale_proceeds(record):
+    """Dollars returned by one filled sell order, or None if unreadable.
+
+    /trade/history has NO `proceeds` field. backfill_settled reached for one for
+    a year and could only ever have produced None. MEASURED 2026-09-10 on the
+    sell of 2243896: `amount` is the GROSS value of the trade, equal to
+    shares * fillPrice to the last decimal, and the venue nets `totalFee` out of
+    it:
+
+        amount 1.7740742174999997 - totalFee 0.05 = 1.7240742174999997
+
+    which is the proceeds figure /trade/sell returned for that same order,
+    exactly. So proceeds are DERIVED here, never read.
+    """
+    try:
+        return float(record["amount"]) - float(record.get("totalFee") or 0.0)
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def backfill_settled(book):
     """Fill realized_return on settled live rows from /trade/history. None history ⇒ no-op.
 
@@ -530,18 +554,42 @@ def backfill_settled(book):
         return 0
     by_key = {}
     for h in hist:
-        if isinstance(h, dict):
-            by_key.setdefault((h.get("marketId"), h.get("outcome")), h)
-    n = 0
-    for p in pending:
-        h = by_key.get((p.get("instrument"), p.get("outcome")))
-        if not h:
+        if not isinstance(h, dict):
             continue
-        try:
-            proceeds = float(h.get("proceeds"))
-        except (TypeError, ValueError):
+        # BUYS ARE IN HERE TOO. The old join took the first record for a
+        # (marketId, outcome) pair regardless of direction, so the opening buy
+        # could supply the "proceeds" of the close. `side` and `status` are
+        # measured fields; anything else is not a completed sale.
+        if h.get("side") != "sell" or h.get("status") != "filled":
+            continue
+        key = venue_key(h.get("marketId"), h.get("outcome"))
+        # Latest wins: a market can be traded more than once, and the close we
+        # are backfilling is the most recent sale, not the first.
+        prev = by_key.get(key)
+        if prev is None or str(h.get("createdAt") or "") >= str(
+            prev.get("createdAt") or ""
+        ):
+            by_key[key] = h
+    n = 0
+    missing = []
+    for p in pending:
+        h = by_key.get(venue_key(p.get("instrument"), p.get("outcome")))
+        if not h:
+            # A row the venue RESOLVED rather than sold has no sell order at
+            # all, so this is ordinary, not a fault -- but it is also the whole
+            # reason seven rows still carry no return, so say which.
+            missing.append(p.get("id"))
+            continue
+        proceeds = sale_proceeds(h)
+        if proceeds is None:
+            missing.append(p.get("id"))
             continue
         cost = p.get("cost_basis") or 0.0
         p["realized_return"] = (proceeds / cost - 1.0) if cost else 0.0
         n += 1
+    if missing:
+        log.info(
+            f"Backfill: no filled sell in /trade/history for {len(missing)} settled "
+            f"row(s): {missing[:5]} — resolved markets produce no sell order"
+        )
     return n

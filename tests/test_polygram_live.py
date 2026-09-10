@@ -598,11 +598,24 @@ def test_reconcile_does_NOT_settle_a_position_close_could_not_identify(
 
 
 def test_backfill_settled_fills_realized(monkeypatch):
+    """Fixture was invented: it carried `type: "settlement"` and `proceeds`,
+    neither of which /trade/history has ever returned, and the code matched it
+    field for field. Rewritten 2026-09-10 to the measured order shape; the
+    intent -- backfill stamps realized_return from history -- is unchanged, and
+    2.55 gross minus the 0.05 fee is still 2.50 net."""
     monkeypatch.setattr(
         polygram_live,
         "trade_history",
         lambda: [
-            {"marketId": "m", "outcome": "No", "type": "settlement", "proceeds": 2.5}
+            {
+                "marketId": "m",
+                "outcome": "No",
+                "side": "sell",
+                "status": "filled",
+                "amount": 2.55,
+                "totalFee": 0.05,
+                "createdAt": "2026-09-10T18:23:07.000Z",
+            }
         ],
     )
     row = {
@@ -851,3 +864,122 @@ def test_close_stamps_last_mark_with_TODAYS_date_not_None(monkeypatch):
     assert row["last_mark"]["date"] == row["closed_date"], (
         "the mark and the close must agree on when it happened"
     )
+
+
+# ── /trade/history, as the venue actually answers it ──────────────────────────
+
+# MEASURED 2026-09-10 via pgdiag: {"orders": [...], "total": 5}. This is the
+# sell of 2243896, verbatim but trimmed to the fields anything reads. There is
+# no `proceeds` key -- backfill_settled reached for one for a year.
+MEASURED_SELL_ORDER = {
+    "id": "TRD-1789064588659-a1ee10dd",
+    "marketId": "2243896",
+    "outcome": "No",
+    "side": "sell",
+    "status": "filled",
+    "shares": 2.021737,
+    "fillPrice": 0.8775,
+    "amount": 1.7740742174999997,
+    "spreadFee": 0.04,
+    "tradeFee": 0.01,
+    "totalFee": 0.05,
+    "createdAt": "2026-09-10T18:23:07.000Z",
+}
+
+
+def test_sale_proceeds_derives_what_the_sell_endpoint_reported():
+    """amount is GROSS (shares * fillPrice) and the venue nets totalFee out of
+    it. The target is the proceeds /trade/sell returned for this same order."""
+    assert polygram_live.sale_proceeds(MEASURED_SELL_ORDER) == pytest.approx(
+        1.7240742174999997, abs=1e-12
+    )
+    assert MEASURED_SELL_ORDER["shares"] * MEASURED_SELL_ORDER["fillPrice"] == (
+        pytest.approx(MEASURED_SELL_ORDER["amount"], abs=1e-12)
+    ), "amount is gross value, not net"
+
+
+def test_parse_trade_history_reads_the_MEASURED_orders_key():
+    got = polygram_live._parse_trade_history(
+        {"orders": [MEASURED_SELL_ORDER], "total": 1}
+    )
+    assert got == [MEASURED_SELL_ORDER]
+
+
+def test_backfill_never_takes_a_BUY_for_the_close(monkeypatch):
+    """The join used to take the first record for a (marketId, outcome) pair
+    regardless of direction, and history carries the opening buy too -- so the
+    buy could supply the 'proceeds' of the sale."""
+    buy = dict(
+        MEASURED_SELL_ORDER,
+        id="TRD-buy",
+        side="buy",
+        amount=999.0,
+        # LATER than the sell, deliberately. Dated earlier, the "latest wins"
+        # tiebreak excludes the buy on its own and the side filter can be
+        # deleted with this test still green -- measured, it was.
+        createdAt="2026-09-11T00:00:00.000Z",
+    )
+    monkeypatch.setattr(
+        polygram_live, "trade_history", lambda: [buy, MEASURED_SELL_ORDER]
+    )
+    book = {
+        "positions": [
+            {
+                "id": "r",
+                "execution": "live",
+                "close_reason": "settled",
+                "realized_return": None,
+                "instrument": "2243896",
+                "outcome": "No",
+                "cost_basis": 2.0,
+            }
+        ]
+    }
+    assert polygram_live.backfill_settled(book) == 1
+    assert book["positions"][0]["realized_return"] == pytest.approx(
+        1.7240742174999997 / 2.0 - 1.0
+    )
+
+
+def test_backfill_joins_through_venue_key_not_a_raw_tuple(monkeypatch):
+    """The book stores the venue's own label; a raw tuple compare breaks on case
+    or on an int marketId, which every other join here normalises away."""
+    order = dict(MEASURED_SELL_ORDER, marketId=2243896, outcome="NO")
+    monkeypatch.setattr(polygram_live, "trade_history", lambda: [order])
+    book = {
+        "positions": [
+            {
+                "id": "r",
+                "execution": "live",
+                "close_reason": "settled",
+                "realized_return": None,
+                "instrument": "2243896",
+                "outcome": "No",
+                "cost_basis": 2.0,
+            }
+        ]
+    }
+    assert polygram_live.backfill_settled(book) == 1
+
+
+def test_backfill_says_which_rows_had_no_sell_order(monkeypatch, caplog):
+    """A resolved market produces no sell order, which is ordinary -- and is
+    also why seven rows still carry no return. Naming them is the difference
+    between 'nothing to do' and 'seven rows are unrecoverable this way'."""
+    monkeypatch.setattr(polygram_live, "trade_history", lambda: [MEASURED_SELL_ORDER])
+    book = {
+        "positions": [
+            {
+                "id": "orphan",
+                "execution": "live",
+                "close_reason": "settled",
+                "realized_return": None,
+                "instrument": "9999",
+                "outcome": "No",
+                "cost_basis": 2.0,
+            }
+        ]
+    }
+    with caplog.at_level("INFO"):
+        assert polygram_live.backfill_settled(book) == 0
+    assert any("orphan" in r.getMessage() for r in caplog.records)

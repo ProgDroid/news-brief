@@ -4183,13 +4183,24 @@ def mode_pgdiag():
         if records:
             out.append(f"✅ records found by shape: {len(records)}")
             out.append("  record[0] ALL keys: " + ", ".join(sorted(records[0])))
-            out.append(
-                "  record[0]: "
-                + ", ".join(
-                    f"{k}={str(v)[:20]}({type(v).__name__})"
-                    for k, v in sorted(records[0].items())
+            # EVERY record, not just the first. This repo already has a test
+            # forcing that for /trade/positions, written because dumping
+            # venue[0] hid `position_key` for a month -- and this probe was
+            # then written to dump record[0], leaving the BUY orders that
+            # settle news-brief-rhg sitting unshown in the same response.
+            for idx, rec in enumerate(records[:10]):
+                if not isinstance(rec, dict):
+                    out.append(f"  record[{idx}] is {type(rec).__name__}")
+                    continue
+                out.append(
+                    f"  record[{idx}]: "
+                    + ", ".join(
+                        f"{k}={str(v)[:20]}({type(v).__name__})"
+                        for k, v in sorted(rec.items())
+                    )
                 )
-            )
+            if len(records) > 10:
+                out.append(f"  (+{len(records) - 10} more not shown)")
         else:
             out.append("⚠️ no list-of-dicts anywhere in the response")
 
