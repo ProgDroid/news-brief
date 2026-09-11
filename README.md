@@ -75,7 +75,7 @@ and neither should you start one by hand. Its command menu auto-registers with T
 | `/reset` | Clear all focus/mute/note overrides (asks for [Yes]/[No] confirmation first) |
 | `/status` | Show current overrides |
 | `/help` | Command list |
-| `/watch <symbol>` | Track an instrument for volume alerts (crypto/equity inferred from symbol; prediction markets need an explicit market id) |
+| `/watch <symbol>` | Track an instrument for volume alerts |
 | `/unwatch [symbol]` | Stop watching an instrument. No arg → pick from a button list |
 | `/pin <topic>` | Always show a topic, even when quiet (one-liner minimum). Default pins: ukraine, iran, korea, japan, china. |
 | `/unpin [topic]` | Make a topic dynamic again. No arg → pick from a button list |
@@ -156,18 +156,16 @@ position (deduped per ticker+direction). Positions are:
   (`reversal`), or manually via `/close TICKER`.
 
 After delivering the brief, the `collect` job also posts a **daily trade update**: positions
-opened today, prediction-market suggestions, and a summary of open positions with their
-last-known marks.
+opened today and a summary of open positions with their last-known marks.
 
 When a position closes it is stamped with a per-asset-class round-trip cost **haircut**, a
 **net return** (return minus haircut), the **benchmark return** over the same window (the market
 index for the asset class — equity → S&P 500 (Yahoo `^GSPC`, Alpaca `SPY` ETF fallback),
-crypto → BTC, prediction → a naive `0`
-baseline, captured at open), and the **edge** (net return minus benchmark).
+crypto → BTC baseline, captured at open), and the **edge** (net return minus benchmark).
 
 The weekly job marks the book to market and posts a **performance report** — net hit-rate, net
 return, and edge over benchmark, both overall and broken down by `asset_class`, `confidence`,
-`play_type`, and `thesis_ref` — percentages only, no monetary figures. Chronically-wrong theses
+and `thesis_ref` — percentages only, no monetary figures. Chronically-wrong theses
 are flagged for manual `/mute`/`/thesis`, and the report shows a **per-asset-class go-live
 readiness gate** status. Each weekly run also appends to `paper/gate_history.json` (per-week
 per-asset mean edge), which the gate uses for its sustained-window check.
@@ -222,7 +220,7 @@ cp .env.example .env
 
 **Most of the tuning knobs below are seed values, not live configuration.** As of
 phase 2 the non-secret knobs — `MODEL`/`NEWSBRIEF_MODEL`, `T212_BASE_URL`,
-`APCA_DATA_URL`, and the whole `PG_*`, `HAIRCUT_BPS_*`, `GATE_*` and `VOL_*`
+`APCA_DATA_URL`, and the whole `HAIRCUT_BPS_*`, `GATE_*` and `VOL_*`
 families — live in the `settings` table and are read from there at runtime,
 through a cache of about a minute. These variables are copied into rows **once**,
 on the first boot where `settings` is empty, and are inert afterwards: editing one
@@ -231,7 +229,7 @@ deployment, change the row:
 
 ```bash
 docker compose exec -T postgres psql -U newsbrief -d newsbrief \
-  -c "INSERT INTO settings (key, user_id, value) VALUES ('PG_A_ENABLED', NULL, '1')
+  -c "INSERT INTO settings (key, user_id, value) VALUES ('BRIEF_MEMORY_ENABLED', NULL, '1')
       ON CONFLICT (key) WHERE user_id IS NULL DO UPDATE SET value = EXCLUDED.value"
 ```
 
@@ -262,7 +260,6 @@ written into every `pg_dump` on the appdata volume.
 | `NITTER_BASE_URL` | no | Self-hosted Nitter base URL for X/Twitter feeds (default `http://nitter:8080`) |
 | `HAIRCUT_BPS_EQUITY` | no | Per-asset round-trip cost haircut in basis points, applied to returns — equity (default `10`) |
 | `HAIRCUT_BPS_CRYPTO` | no | Cost haircut in bps — crypto (default `26`) |
-| `HAIRCUT_BPS_PREDICTION` | no | Cost haircut in bps — prediction (default `200`; uses the real PolyGram half-spread when available) |
 | `GATE_MIN_TRADES` | no | Go-live readiness gate: minimum closed trades per asset class (default `30`) |
 | `GATE_MIN_HIT_RATE` | no | Go-live gate: minimum net hit-rate (default `0.55`) |
 | `GATE_SUSTAINED_EVALS` | no | Go-live gate: number of consecutive weekly evals the gate must pass (default `2`) |
@@ -331,12 +328,7 @@ job, so it cannot double-run:
 
 ```sh
 docker compose run --rm newsbrief collect    # force a collect now
-docker compose run --rm newsbrief pgdiag     # PolyGram live-seam probe (see below)
 ```
-
-**`pgdiag` is not a Postgres tool** — the `pg` is PolyGram. It is a read-only probe of the live
-prediction-market seam and it will tell you nothing about the ledger. For that, query Postgres
-with the command above.
 
 The cutover from the old five-service, host-cron layout — including the rollback — is written up
 in [`docs/runbooks/2026-08-31-supervisor-cutover.md`](docs/runbooks/2026-08-31-supervisor-cutover.md).
@@ -398,12 +390,11 @@ news-brief/
 │   ├── signals-YYYY-MM-DD.json
 │   └── signals-log.jsonl
 └── paper/
-    ├── book.json              # Open + closed paper positions (equity + crypto + prediction)
+    ├── book.json              # Open + closed paper positions (equity + crypto)
     ├── paper-book.json        # Legacy equity-only book, kept as backup after one-time migration
     ├── ticker_map.json        # Manual T212→neutral symbol overrides (equity)
     ├── crypto_ticker_map.json # Manual crypto-ticker→Kraken-pair overrides
     ├── instruments-cache.json
-    ├── polygram_token.json    # PolyGram JWT (prediction markets), refreshed on 401
     └── gate_history.json      # Per-week per-asset mean edge, for the go-live gate's sustained-window check
 ```
 

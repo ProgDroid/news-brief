@@ -1,6 +1,6 @@
 # What a live buy actually costs: the venue rule the book never saw
 
-2026-09-11. Beads: `news-brief-rhg` (fix built; closes when the repair below has run),
+2026-09-11. Beads: `news-brief-rhg` (closed 2026-09-11; repairs applied, then the whole feature retired — see 2026-09-11-prediction-trading-retired.md),
 `news-brief-p3v` (measured — the question it asked is answered), `news-brief-9tq` (measured — six payouts; repair below).
 
 ## The measurement

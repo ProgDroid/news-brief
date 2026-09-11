@@ -1,5 +1,7 @@
 # PolyGram Live Foundation — Implementation Plan
 
+> **RETIRED 2026-09-11.** Prediction-market trading was removed from news-brief (bead `news-brief-oh4`; record in `docs/2026-09-11-prediction-trading-retired.md`). Kept as history; it no longer describes the code.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build the shared real-money execution/funding/safety rails on polygram.ink — a `polygram_live.py` write layer, `execution`/`sleeve` book fields, kill-switch + exposure caps, and fill/reconcile plumbing — that both trading sleeves will later ride. No strategy logic here.

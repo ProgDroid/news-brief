@@ -1,5 +1,7 @@
 # Phase 3: PolyGram Read Client + Claude Matcher + Prediction Lifecycle — Implementation Plan
 
+> **RETIRED 2026-09-11.** Prediction-market trading was removed from news-brief (bead `news-brief-oh4`; record in `docs/2026-09-11-prediction-trading-retired.md`). Kept as history; it no longer describes the code.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add prediction markets (PolyGram) as the third paper-traded asset class — a read-only PolyGram client, a Claude matcher mapping the day's signals to live markets, and a prediction lifecycle (open → mark-to-market → close) that reuses the shared return math and forks only on the close trigger by `play_type` — wired into the live `collect` cron silently.

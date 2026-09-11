@@ -1,5 +1,7 @@
 # Self-Improving Trading — Staged-Autonomy Roadmap
 
+> **RETIRED 2026-09-11.** Prediction-market trading was removed from news-brief (bead `news-brief-oh4`; record in `docs/2026-09-11-prediction-trading-retired.md`). Kept as history; it no longer describes the code.
+
 **Date:** 2026-06-25
 **Status:** Roadmap (living). Stage A in active brainstorming; B–D are placeholders to be
 designed when their entry gate is met.

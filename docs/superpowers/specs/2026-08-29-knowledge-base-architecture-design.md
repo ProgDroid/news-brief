@@ -472,7 +472,7 @@ thesis formation with no chat UI to build, and the same interface serves develop
 2. *Configuration.* Settings in the database, read at runtime. This eliminates the documented
    `env-var-needs-compose-passthrough` class of bug, where a new knob is invisible inside the
    container until the compose anchor declares it and a fail-closed flag then silently no-ops.
-3. *Trading monitoring.* PolyGram positions, exposure, caps, and thesis-versus-market results.
+3. *Trading monitoring.* PolyGram positions, exposure, caps, and thesis-versus-market results (retired).
 
 **Review queue.** Staleness and `review_required` falsifiers produce a short list — "5 claims are
 past due, confirm or kill." Designed as a 90-second queue that gets cleared, not a corpus to
@@ -493,7 +493,7 @@ reasoning is preserved, but it must not be built yet, for two reasons:
 
 Revisit once theses exist and have started resolving.
 
-**PolyGram: unchanged.** Live, working, out of scope here.
+**PolyGram: retired 2026-09-11** (docs/2026-09-11-prediction-trading-retired.md).
 
 **Equity paper book: re-founded on theses, not dropped.** What is dead is the reactive daily book
 — open on a headline signal, score daily, reverse on contrary news (the reversal rule cost
@@ -565,7 +565,7 @@ deleted.
 ## 11. What survives from the current codebase
 
 - `common.py` — Telegram transport, atomic writes, HTML sanitisation, file locking
-- `trading.py` — market data fetch, portfolio weights, PolyGram live path, volume detection
+- `trading.py` — market data fetch, portfolio weights, PolyGram live path (retired), volume detection
   (re-pointed per §8)
 - `brief_memory.py::reconcile_ledger` — becomes the claim-extraction pass (§4.1)
 - Source definitions, perspective tagging, `state_funded` flags — the tagging already produces

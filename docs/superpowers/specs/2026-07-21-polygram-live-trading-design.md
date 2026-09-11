@@ -1,5 +1,7 @@
 # PolyGram Live Trading — Design
 
+> **RETIRED 2026-09-11.** Prediction-market trading was removed from news-brief (bead `news-brief-oh4`; record in `docs/2026-09-11-prediction-trading-retired.md`). Kept as history; it no longer describes the code.
+
 **Date:** 2026-07-21
 **Status:** Approved (brainstorm complete) → ready for implementation plan(s)
 **Scope note:** One design, expected to decompose into ≥3 implementation plans (shared foundation → Sleeve A → Sleeve B). Equity & crypto stay **paper**; only prediction (polygram.ink) goes **live**.
