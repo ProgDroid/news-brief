@@ -196,31 +196,31 @@ def _settings(conn) -> dict:
 def test_imports_only_the_knobs_the_environment_actually_sets(conn, monkeypatch):
     """Writing every knob would freeze today's defaults into rows, and a later
     change to a default in code would then be overridden by a row nobody chose."""
-    monkeypatch.setenv("PG_A_ENABLED", "1")
+    monkeypatch.setenv("BRIEF_MEMORY_ENABLED", "1")
     monkeypatch.setenv("VOL_SPIKE_MULT", "3.5")
-    monkeypatch.delenv("PG_B_ENABLED", raising=False)
+    monkeypatch.delenv("CLAIM_VERIFY_ENABLED", raising=False)
 
     imported = config.import_settings_from_env(conn)
 
-    assert set(imported) >= {"PG_A_ENABLED", "VOL_SPIKE_MULT"}
-    assert "PG_B_ENABLED" not in _settings(conn)
+    assert set(imported) >= {"BRIEF_MEMORY_ENABLED", "VOL_SPIKE_MULT"}
+    assert "CLAIM_VERIFY_ENABLED" not in _settings(conn)
 
 
 def test_the_importer_runs_only_while_settings_is_empty(conn, monkeypatch):
     """Emptiness is the idempotence guard, which is what makes rollback mean
     'keep the compose anchor' rather than 'restore a backup'."""
-    monkeypatch.setenv("PG_A_ENABLED", "1")
+    monkeypatch.setenv("BRIEF_MEMORY_ENABLED", "1")
     config.import_settings_from_env(conn)
 
-    monkeypatch.setenv("PG_A_STAKE", "9.0")
+    monkeypatch.setenv("GATE_MIN_HIT_RATE", "9.0")
     assert config.import_settings_from_env(conn) == []
-    assert "PG_A_STAKE" not in _settings(conn)
+    assert "GATE_MIN_HIT_RATE" not in _settings(conn)
 
 
 def test_a_knob_reads_from_its_row(conn, monkeypatch):
-    monkeypatch.setenv("PG_A_STAKE", "7.5")
+    monkeypatch.setenv("GATE_MIN_HIT_RATE", "7.5")
     config.import_settings_from_env(conn)
-    assert config.knob("PG_A_STAKE") == 7.5
+    assert config.knob("GATE_MIN_HIT_RATE") == 7.5
 
 
 def test_a_knob_with_no_row_is_its_default_not_the_environment(conn, monkeypatch):
@@ -229,9 +229,9 @@ def test_a_knob_with_no_row_is_its_default_not_the_environment(conn, monkeypatch
     would go on being silently invisible — the exact bug this phase retires,
     only now with a database making it look deliberate."""
     config.import_settings_from_env(conn)  # empty environment: imports nothing
-    monkeypatch.setenv("PG_A_STAKE", "99.0")
+    monkeypatch.setenv("GATE_MIN_HIT_RATE", "99.0")
     config.invalidate()
-    assert config.knob("PG_A_STAKE") == common.KNOBS["PG_A_STAKE"].default
+    assert config.knob("GATE_MIN_HIT_RATE") == common.KNOBS["GATE_MIN_HIT_RATE"].default
 
 
 def test_the_env_name_is_the_stored_key_where_they_differ(conn, monkeypatch):
@@ -245,14 +245,14 @@ def test_the_env_name_is_the_stored_key_where_they_differ(conn, monkeypatch):
 
 def test_a_changed_setting_lands_without_a_restart(conn, monkeypatch):
     """Success criterion 8, for knobs rather than identity."""
-    monkeypatch.setenv("PG_A_STAKE", "2.0")
+    monkeypatch.setenv("GATE_MIN_HIT_RATE", "2.0")
     config.import_settings_from_env(conn)
-    assert config.knob("PG_A_STAKE") == 2.0
+    assert config.knob("GATE_MIN_HIT_RATE") == 2.0
 
-    conn.execute("UPDATE settings SET value = '4.0' WHERE key = 'PG_A_STAKE'")
+    conn.execute("UPDATE settings SET value = '4.0' WHERE key = 'GATE_MIN_HIT_RATE'")
     conn.commit()
     monkeypatch.setattr(config, "TTL_SECONDS", 0)
-    assert config.knob("PG_A_STAKE") == 4.0
+    assert config.knob("GATE_MIN_HIT_RATE") == 4.0
 
 
 def test_per_user_rows_are_not_read_as_global(conn, monkeypatch):
@@ -262,12 +262,12 @@ def test_per_user_rows_are_not_read_as_global(conn, monkeypatch):
     config.ensure_seeded(conn)
     user_id = conn.execute("SELECT id FROM users").fetchone()[0]
     conn.execute(
-        "INSERT INTO settings (key, user_id, value) VALUES ('PG_A_STAKE', %s, '99')",
+        "INSERT INTO settings (key, user_id, value) VALUES ('GATE_MIN_HIT_RATE', %s, '99')",
         (user_id,),
     )
     conn.commit()
     config.invalidate()
-    assert config.knob("PG_A_STAKE") == common.KNOBS["PG_A_STAKE"].default
+    assert config.knob("GATE_MIN_HIT_RATE") == common.KNOBS["GATE_MIN_HIT_RATE"].default
 
 
 def test_the_documented_upsert_command_works(conn, monkeypatch):
@@ -280,16 +280,16 @@ def test_the_documented_upsert_command_works(conn, monkeypatch):
     a belief, and this one is the answer to "how do I turn a sleeve on".
     """
     upsert = (
-        "INSERT INTO settings (key, user_id, value) VALUES ('PG_A_ENABLED', NULL, %s) "
+        "INSERT INTO settings (key, user_id, value) VALUES ('BRIEF_MEMORY_ENABLED', NULL, %s) "
         "ON CONFLICT (key) WHERE user_id IS NULL DO UPDATE SET value = EXCLUDED.value"
     )
     conn.execute(upsert, ("1",))
     conn.execute(upsert, ("0",))
     conn.commit()
 
-    assert _settings(conn) == {"PG_A_ENABLED": "0"}
+    assert _settings(conn) == {"BRIEF_MEMORY_ENABLED": "0"}
     config.invalidate()
-    assert config.knob("PG_A_ENABLED") is False
+    assert config.knob("BRIEF_MEMORY_ENABLED") is False
 
 
 # ── Sources ──────────────────────────────────────────────────────────────────
@@ -694,27 +694,27 @@ def test_an_env_knob_with_no_row_is_reported_with_both_values(conn, monkeypatch)
     something else. What the operator asked for and what is running both have to
     appear, because the point of the message is the gap between them."""
     config.import_settings_from_env(conn)  # empty environment: imports nothing
-    monkeypatch.setenv("PG_A_STAKE", "9.0")
+    monkeypatch.setenv("GATE_MIN_HIT_RATE", "9.0")
     config.invalidate()
 
-    rec = _ignored()["PG_A_STAKE"]
+    rec = _ignored()["GATE_MIN_HIT_RATE"]
 
     assert rec.asks == "9.0"
-    assert rec.in_effect == common.KNOBS["PG_A_STAKE"].default
+    assert rec.in_effect == common.KNOBS["GATE_MIN_HIT_RATE"].default
     assert rec.row is None
 
 
 def test_a_knob_whose_row_backs_the_environment_is_not_reported(conn, monkeypatch):
     """The silence that matters, with its presence sibling in the same call: a
     detector that reports nothing at all would also pass the first assertion."""
-    monkeypatch.setenv("PG_A_STAKE", "7.5")
+    monkeypatch.setenv("GATE_MIN_HIT_RATE", "7.5")
     config.import_settings_from_env(conn)
     monkeypatch.setenv("VOL_SPIKE_MULT", "4.5")  # set after the import: no row
     config.invalidate()
 
     ignored = _ignored()
 
-    assert "PG_A_STAKE" not in ignored
+    assert "GATE_MIN_HIT_RATE" not in ignored
     assert "VOL_SPIKE_MULT" in ignored
 
 
@@ -723,14 +723,18 @@ def test_an_environment_repeating_the_default_is_not_reported(conn, monkeypatch)
     is doing exactly what the environment asks. Warning here would train them to
     ignore the warning."""
     config.import_settings_from_env(conn)
-    monkeypatch.setenv("PG_A_STAKE", str(common.KNOBS["PG_A_STAKE"].default))
-    monkeypatch.setenv("PG_A_ENABLED", "1")  # presence sibling: default is False
+    monkeypatch.setenv(
+        "GATE_MIN_HIT_RATE", str(common.KNOBS["GATE_MIN_HIT_RATE"].default)
+    )
+    monkeypatch.setenv(
+        "BRIEF_MEMORY_ENABLED", "1"
+    )  # presence sibling: default is False
     config.invalidate()
 
     ignored = _ignored()
 
-    assert "PG_A_STAKE" not in ignored
-    assert "PG_A_ENABLED" in ignored
+    assert "GATE_MIN_HIT_RATE" not in ignored
+    assert "BRIEF_MEMORY_ENABLED" in ignored
 
 
 def test_a_row_that_disagrees_with_the_environment_is_reported_as_stale(
@@ -739,12 +743,12 @@ def test_a_row_that_disagrees_with_the_environment_is_reported_as_stale(
     """The case the bead's title misses. An operator editing compose on an
     established host is no less ignored for the row existing -- and this is the
     likelier shape once every knob has been imported once."""
-    monkeypatch.setenv("PG_A_STAKE", "2.0")
+    monkeypatch.setenv("GATE_MIN_HIT_RATE", "2.0")
     config.import_settings_from_env(conn)
-    monkeypatch.setenv("PG_A_STAKE", "5.0")
+    monkeypatch.setenv("GATE_MIN_HIT_RATE", "5.0")
     config.invalidate()
 
-    rec = _ignored()["PG_A_STAKE"]
+    rec = _ignored()["GATE_MIN_HIT_RATE"]
 
     assert rec.asks == "5.0"
     assert rec.in_effect == 2.0
@@ -758,10 +762,10 @@ def test_a_value_that_will_not_coerce_is_reported_rather_than_silently_defaulted
     typo'd knob would otherwise compare EQUAL to the default and stay silent --
     the same invisible no-op, arrived at from the other direction."""
     config.import_settings_from_env(conn)
-    monkeypatch.setenv("PG_A_STAKE", "banana")
+    monkeypatch.setenv("GATE_MIN_HIT_RATE", "banana")
     config.invalidate()
 
-    assert "PG_A_STAKE" in _ignored()
+    assert "GATE_MIN_HIT_RATE" in _ignored()
 
 
 def test_an_unparseable_boolean_is_reported_though_it_coerces_to_false(
@@ -770,34 +774,34 @@ def test_an_unparseable_boolean_is_reported_though_it_coerces_to_false(
     """A bool coerces anything: `banana` is simply not in _TRUTHY, so it reads
     False and equals the default. An operator who typed it meant something."""
     config.import_settings_from_env(conn)
-    monkeypatch.setenv("PG_A_ENABLED", "banana")
-    monkeypatch.setenv("PG_B_ENABLED", "off")  # a real falsy token: silent
+    monkeypatch.setenv("BRIEF_MEMORY_ENABLED", "banana")
+    monkeypatch.setenv("CLAIM_VERIFY_ENABLED", "off")  # a real falsy token: silent
     config.invalidate()
 
     ignored = _ignored()
 
-    assert "PG_A_ENABLED" in ignored
-    assert "PG_B_ENABLED" not in ignored
+    assert "BRIEF_MEMORY_ENABLED" in ignored
+    assert "CLAIM_VERIFY_ENABLED" not in ignored
 
 
 def test_the_boot_warning_names_the_knob_and_both_values(conn, monkeypatch, caplog):
     config.import_settings_from_env(conn)
-    monkeypatch.setenv("PG_A_STAKE", "9.0")
+    monkeypatch.setenv("GATE_MIN_HIT_RATE", "9.0")
     config.invalidate()
 
     with caplog.at_level(logging.WARNING, logger="newsbrief"):
         config.warn_ignored_env_knobs()
 
     message = caplog.text
-    assert "PG_A_STAKE" in message
+    assert "GATE_MIN_HIT_RATE" in message
     assert "9.0" in message
-    assert str(common.KNOBS["PG_A_STAKE"].default) in message
+    assert str(common.KNOBS["GATE_MIN_HIT_RATE"].default) in message
 
 
 def test_the_boot_warning_says_nothing_about_a_knob_that_agrees(
     conn, monkeypatch, caplog
 ):
-    monkeypatch.setenv("PG_A_STAKE", "7.5")
+    monkeypatch.setenv("GATE_MIN_HIT_RATE", "7.5")
     config.import_settings_from_env(conn)
     monkeypatch.setenv("VOL_SPIKE_MULT", "4.5")
     config.invalidate()
@@ -805,7 +809,7 @@ def test_the_boot_warning_says_nothing_about_a_knob_that_agrees(
     with caplog.at_level(logging.WARNING, logger="newsbrief"):
         config.warn_ignored_env_knobs()
 
-    assert "PG_A_STAKE" not in caplog.text
+    assert "GATE_MIN_HIT_RATE" not in caplog.text
     assert "VOL_SPIKE_MULT" in caplog.text
 
 
@@ -824,16 +828,16 @@ def test_the_verdict_key_changes_when_the_ignored_set_changes(conn, monkeypatch)
     for name, spec in common.KNOBS.items():
         monkeypatch.delenv(spec.key(name), raising=False)
     config.import_settings_from_env(conn)
-    monkeypatch.setenv("PG_A_STAKE", "9.0")
+    monkeypatch.setenv("GATE_MIN_HIT_RATE", "9.0")
     config.invalidate()
     first, message = config.ignored_env_verdict()
 
-    monkeypatch.delenv("PG_A_STAKE")
+    monkeypatch.delenv("GATE_MIN_HIT_RATE")
     monkeypatch.setenv("VOL_SPIKE_MULT", "4.5")
     config.invalidate()
     second, _ = config.ignored_env_verdict()
 
-    assert "PG_A_STAKE" in message
+    assert "GATE_MIN_HIT_RATE" in message
     assert first != second
 
 
@@ -845,14 +849,14 @@ def test_an_ignored_knob_alerts_once_not_once_per_boot(conn, monkeypatch):
     for name, spec in common.KNOBS.items():
         monkeypatch.delenv(spec.key(name), raising=False)
     config.import_settings_from_env(conn)
-    monkeypatch.setenv("PG_A_STAKE", "9.0")
+    monkeypatch.setenv("GATE_MIN_HIT_RATE", "9.0")
     config.invalidate()
 
     for _ in range(4):
         brief.ignored_knobs_alert()
 
     assert len(sent) == 1
-    assert "PG_A_STAKE" in sent[0]
+    assert "GATE_MIN_HIT_RATE" in sent[0]
 
 
 def test_a_knob_ignored_after_a_fix_alerts_again(conn, monkeypatch):
@@ -864,11 +868,11 @@ def test_a_knob_ignored_after_a_fix_alerts_again(conn, monkeypatch):
     for name, spec in common.KNOBS.items():
         monkeypatch.delenv(spec.key(name), raising=False)
     config.import_settings_from_env(conn)
-    monkeypatch.setenv("PG_A_STAKE", "9.0")
+    monkeypatch.setenv("GATE_MIN_HIT_RATE", "9.0")
     config.invalidate()
     brief.ignored_knobs_alert()
 
-    monkeypatch.delenv("PG_A_STAKE")
+    monkeypatch.delenv("GATE_MIN_HIT_RATE")
     config.invalidate()
     brief.ignored_knobs_alert()  # recovered: clears the remembered key
 

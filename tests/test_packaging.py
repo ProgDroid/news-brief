@@ -244,8 +244,8 @@ def test_the_anchor_parser_sees_a_variable_that_is_read():
     an absence is satisfied for free by a parser that returns nothing -- so this
     pins a variable that must appear on BOTH sides, and would fail if either
     derivation silently stopped finding anything."""
-    assert "PG_A_ENABLED" in _anchor_variables()
-    assert "PG_A_ENABLED" in _consumed_variables()
+    assert "BRIEF_MEMORY_ENABLED" in _anchor_variables()
+    assert "BRIEF_MEMORY_ENABLED" in _consumed_variables()
     assert "ANTHROPIC_API_KEY" in _consumed_variables()
 
 
@@ -253,11 +253,11 @@ def test_the_consumed_scan_reaches_into_shipped_packages():
     """The second presence control, for the half of the image that is not a
     top-level module.
 
-    PG_A_ENABLED above proves the scan finds SOMETHING, which a top-level-only
+    BRIEF_MEMORY_ENABLED above proves the scan finds SOMETHING, which a top-level-only
     glob satisfies. This pins a variable read exclusively from a shipped
     package -- BIGDATA_API_KEY, read once in enrichment/config.py and held in
     no settings row because it is a credential. Narrow the glob back to
-    `REPO_ROOT.glob("*.py")` and this fails while PG_A_ENABLED still passes,
+    `REPO_ROOT.glob("*.py")` and this fails while BRIEF_MEMORY_ENABLED still passes,
     which is the distinction the earlier control could not draw.
     """
     assert _copy_listed_packages(), (
