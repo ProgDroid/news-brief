@@ -219,8 +219,13 @@ def test_open_live_position_writes_truthful_row(monkeypatch):
     assert row["asset_class"] == "prediction" and row["venue"] == "polygram"
     assert row["instrument"] == "mkt_b" and row["event_id"] == "evt_a"
     assert row["outcome"] == "No" and row["side_index"] == 1
-    assert row["entry_price"] == 0.62 and row["shares"] == 8.06
-    assert row["cost_basis"] == 5.0 and row["fees"]["total_fee"] == 0.10
+    # Until 2026-09-11 this asserted entry_price == fill_price and cost_basis ==
+    # amount. Both were the docs' story; the wallet and nine real fills disagreed
+    # (see MEASURED_BUY_2026_09_01). entry_price is amount/shares, cost is amount
+    # plus the separately debited fee, and the venue's fillPrice is kept as its own.
+    assert row["fill_price"] == 0.62 and row["shares"] == 8.06
+    assert abs(row["entry_price"] - 5.0 / 8.06) < 1e-12
+    assert abs(row["cost_basis"] - 5.10) < 1e-12 and row["fees"]["total_fee"] == 0.10
     assert row["status"] == "open" and row["source_kind"] == "wire"
     assert book["positions"][-1] is row
 
@@ -983,3 +988,120 @@ def test_backfill_says_which_rows_had_no_sell_order(monkeypatch, caplog):
     with caplog.at_level("INFO"):
         assert polygram_live.backfill_settled(book) == 0
     assert any("orphan" in r.getMessage() for r in caplog.records)
+
+
+# /trade/history record for the 2026-09-01 buy of 3501950/No, read 2026-09-11 via
+# pgdiag. The wallet showed TWO debits for it: $2.00 (the buy) and $0.06 (the fee),
+# so cost is amount + totalFee. And shares is NOT amount/fillPrice (that would be
+# 2.168): across all nine $2 buys on record, shares = 2 + 0.0205/fillPrice, so the
+# price PAID per share was ~0.989 whatever the venue displayed. `_fill()` above,
+# with 8.06 shares at 0.62 for $5, encodes the fiction this measurement replaced.
+MEASURED_BUY_2026_09_01 = {
+    "order_id": "TRD-1788238900313-6c",
+    "fill_price": 0.9224999999999999,
+    "shares": 2.022221,
+    "spread_fee": 0.05,
+    "trade_fee": 0.01,
+    "total_fee": 0.06,
+    "status": "filled",
+}
+
+
+def _open(monkeypatch, *, sleeve="A", amount=2.0, fill=None, band_hi=0.92):
+    monkeypatch.setattr(common, "PG_LIVE_ENABLED", True)
+    monkeypatch.setattr(common, "PG_A_BAND_HI", band_hi)
+    monkeypatch.setattr(polygram_live, "cap_ok", lambda *a, **k: True)
+    monkeypatch.setattr(
+        polygram_live,
+        "place_market_order",
+        lambda *a, **k: dict(fill or MEASURED_BUY_2026_09_01),
+    )
+    book = {"positions": []}
+    return polygram_live.open_live_position(
+        book,
+        sleeve=sleeve,
+        event_id="evt",
+        market_id="3501950",
+        token_id="0x1",
+        outcome="No",
+        side_index=1,
+        amount=amount,
+        topic="q",
+        source_id=None,
+        source_kind="unknown",
+        source_perspective=None,
+        live_exposure=0.0,
+    )
+
+
+def test_open_live_position_records_the_price_PAID_not_the_venues_fill(monkeypatch):
+    row = _open(monkeypatch)
+    assert row["fill_price"] == 0.9224999999999999  # the venue's number, kept
+    assert abs(row["entry_price"] - 2.0 / 2.022221) < 1e-9  # what a share cost us
+    assert abs(row["cost_basis"] - 2.06) < 1e-9  # what left the wallet
+    # A return computed from these must agree with the wallet: the measured sale
+    # of this position brought back 1.8033655, a -12.46% round trip, not -9.83%.
+    assert abs(1.8033655465 / row["cost_basis"] - 1 - (-0.124580)) < 1e-5
+
+
+def test_a_sleeve_A_fill_that_landed_above_the_band_is_flagged_and_logged(
+    monkeypatch, caplog
+):
+    caplog.set_level("ERROR", logger="newsbrief")
+    row = _open(monkeypatch)  # paid 0.989 against a 0.92 ceiling
+    assert row["above_band"] is True
+    errs = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert len(errs) == 1
+    assert "ABOVE" in errs[0].message and "0.989" in errs[0].message
+    assert "3501950" in errs[0].message
+
+
+def test_a_sleeve_A_fill_inside_the_band_is_not_flagged(monkeypatch, caplog):
+    caplog.set_level("ERROR", logger="newsbrief")
+    inside = dict(MEASURED_BUY_2026_09_01, shares=2.5)  # 2/2.5 = 0.80, in band
+    row = _open(monkeypatch, fill=inside)
+    assert row["above_band"] is False
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
+
+
+def test_a_sleeve_B_fill_carries_no_band_verdict(monkeypatch, caplog):
+    caplog.set_level("ERROR", logger="newsbrief")
+    row = _open(monkeypatch, sleeve="B")  # discretionary: there is no band
+    assert "above_band" not in row
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
+
+
+def test_backfill_stamps_the_proceeds_it_used_into_last_mark(monkeypatch):
+    """A natively closed row carries last_mark.proceeds (close_live_position); a
+    row backfilled from history must carry the same field, or the two disagree
+    on the one number a repair would need to re-derive the return from."""
+    monkeypatch.setattr(
+        polygram_live,
+        "trade_history",
+        lambda: [
+            {
+                "marketId": "m",
+                "outcome": "No",
+                "side": "sell",
+                "status": "filled",
+                "amount": 1.94307871875,
+                "fillPrice": 0.960375,
+                "totalFee": 0.06,
+                "createdAt": "2026-09-10T15:00:24.000Z",
+            }
+        ],
+    )
+    row = {
+        "execution": "live",
+        "status": "closed",
+        "close_reason": "settled",
+        "instrument": "m",
+        "outcome": "No",
+        "cost_basis": 2.06,
+        "realized_return": None,
+        "last_mark": None,
+    }
+    assert polygram_live.backfill_settled({"positions": [row]}) == 1
+    assert abs(row["last_mark"]["proceeds"] - 1.88307871875) < 1e-9
+    assert row["last_mark"]["price"] == 0.960375
+    assert row["last_mark"]["date"] == "2026-09-10"

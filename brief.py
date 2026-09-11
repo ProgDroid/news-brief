@@ -1239,9 +1239,15 @@ def _predict_commit(chat_id: str) -> None:
             "brier": None,
         }
     )
-    telegram_edit_text(
-        w["msg_id"], f"✅ Opened <b>{w['outcome']}</b> @ {entry:.2f}. Logged.", []
-    )
+    # The receipt says what a share COST (row["entry_price"] = amount/shares), not
+    # the displayed price `entry` -- those differed by ~7c on every real fill
+    # (measured 2026-09-11), and this message is the only place the operator
+    # sees the trade they just paid for.
+    receipt = f"✅ Opened <b>{w['outcome']}</b> @ {row['entry_price']:.2f}"
+    if row.get("fill_price") is not None:
+        receipt += f" (fill {row['fill_price']:.2f})"
+    receipt += f", ${row.get('cost_basis', w['stake']):g} all-in. Logged."
+    telegram_edit_text(w["msg_id"], receipt, [])
     _WIZARD.pop(chat_id, None)
 
 

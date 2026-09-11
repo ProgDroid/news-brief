@@ -475,3 +475,49 @@ def test_sleeve_a_block_reports_a_crash():
         {"state": "crashed", "error": "TypeError: bad <thing>"},
     )
     assert "CRASHED" in out and "TypeError: bad &lt;thing&gt;" in out
+
+
+def test_a_live_row_shows_the_price_paid_and_names_a_fill_above_the_band():
+    """entry_price is what a share actually cost; fill_price is the venue's
+    number. Both go on the line, because their gap is the venue's take and
+    the operator has no other place to see it."""
+    book = {
+        "positions": [
+            _pred_row(
+                execution="live",
+                sleeve="A",
+                topic="Fed cuts rates in September?",
+                ticker="991",
+                instrument="991",
+                cost_basis=2.06,
+                entry_price=0.98901,
+                fill_price=0.9225,
+                above_band=True,
+                play_type="resolution",
+            ),
+        ]
+    }
+    out = validation.daily_trade_message(book, "2026-08-05")
+    assert "$2.06 @ 0.99" in out
+    assert "fill 0.92" in out
+    assert "ABOVE BAND" in out
+
+
+def test_a_live_row_inside_the_band_carries_no_warning():
+    book = {
+        "positions": [
+            _pred_row(
+                execution="live",
+                sleeve="A",
+                ticker="991",
+                instrument="991",
+                cost_basis=2.06,
+                entry_price=0.80,
+                fill_price=0.79,
+                above_band=False,
+            ),
+        ]
+    }
+    out = validation.daily_trade_message(book, "2026-08-05")
+    assert "fill 0.79" in out
+    assert "ABOVE BAND" not in out

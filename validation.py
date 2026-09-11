@@ -384,6 +384,13 @@ def _pred_lines(p: dict, *, live: bool) -> list[str]:
     tail = ["live" if live else "paper"]
     if live and p.get("cost_basis") is not None:
         tail.append(f"${p['cost_basis']:g} @ {p.get('entry_price', 0):.2f}")
+        # entry_price is what a share cost; fill_price is the venue's number.
+        # Their gap is the venue's take, and this line is the only place the
+        # operator sees it beside the trade it was taken on.
+        if p.get("fill_price") is not None:
+            tail.append(f"fill {p['fill_price']:.2f}")
+        if p.get("above_band"):
+            tail.append("⚠️ ABOVE BAND")
     elif p.get("play_type"):
         tail.append(str(p["play_type"]))
     tail.append(_pred_handle(p))

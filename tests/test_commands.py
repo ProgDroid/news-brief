@@ -1226,7 +1226,8 @@ def test_predict_commit_passes_real_live_exposure(monkeypatch):
 
     def fake_open(book, **kw):
         opened.update(kw)
-        row = {"id": "L", "status": "open", **kw}
+        # entry_price is on every row the real function returns; the receipt reads it.
+        row = {"id": "L", "status": "open", "entry_price": 0.62, **kw}
         book["positions"].append(row)
         return row
 
@@ -1609,3 +1610,61 @@ def test_capture_reaches_telegram_autocomplete():
 
 def test_capture_is_documented_in_the_help():
     assert "/capture" in brief.HELP_TEXT
+
+
+def test_predict_commit_reports_the_price_PAID_not_the_displayed_one(monkeypatch):
+    """The wizard used to confirm '@ 0.92' -- the market's displayed price. The
+    row the venue actually filled says what a share cost (measured 2026-09-11:
+    ~0.989 against a 0.92 display). The confirmation is the only receipt."""
+    import polygram_live
+
+    monkeypatch.setattr(common, "PG_LIVE_ENABLED", True)
+    monkeypatch.setattr(common, "PG_B_ENABLED", True)
+    book = {"positions": []}
+    monkeypatch.setattr(brief, "load_book", lambda: book)
+    monkeypatch.setattr(brief, "save_book", lambda b: None)
+    monkeypatch.setattr(brief.trading, "BOOK_FILE", "x")
+    monkeypatch.setattr(
+        brief, "file_lock", lambda *a, **k: __import__("contextlib").nullcontext()
+    )
+    monkeypatch.setattr(trading, "_sleeve_b_open_ok", lambda b, m, o, a: (True, ""))
+
+    def fake_open(book, **kw):
+        row = {
+            "id": "2026-09-01:prediction:m:NO:live",
+            "execution": "live",
+            "sleeve": "B",
+            "instrument": kw["market_id"],
+            "outcome": kw["outcome"],
+            "entry_price": 0.98925,
+            "fill_price": 0.943,
+            "cost_basis": 2.06,
+            "status": "open",
+        }
+        book["positions"].append(row)
+        return row
+
+    monkeypatch.setattr(polygram_live, "open_live_position", fake_open)
+    monkeypatch.setattr(common, "append_thesis", lambda r: None)
+    edits = []
+    monkeypatch.setattr(brief, "telegram_edit_text", lambda *a: edits.append(a))
+    brief._WIZARD["42"] = {
+        "step": "pr_confirm",
+        "msg_id": 1,
+        "thesis": "t",
+        "market_id": "m",
+        "event_id": "evt",
+        "question": "Q?",
+        "prices": [0.08, 0.92],
+        "token_ids": ["tYes", "tNo"],
+        "outcome": "No",
+        "side_index": 1,
+        "stake": 2.0,
+        "hold_mode": "settle",
+        "p_hat": 0.5,
+        "end_date": "2026-09-01",
+    }
+    brief._predict_commit("42")
+    final = edits[-1][1]
+    assert "@ 0.99" in final and "fill 0.94" in final and "$2.06" in final
+    assert "@ 0.92" not in final

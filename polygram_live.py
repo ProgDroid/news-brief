@@ -295,6 +295,12 @@ def open_live_position(
     if fill is None:
         return None
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    # What a share COST is amount/shares, not the venue's fillPrice. Measured on
+    # all nine $2 buys to 2026-09-01: shares = 2 + 0.0205/fillPrice, so a dollar
+    # bought ~1.011 shares whatever the displayed price (0.78-0.94), and the
+    # wallet debited the full $2.00 plus the fee as a SEPARATE line. fillPrice
+    # is kept beside it because the gap between the two is the venue's take.
+    paid = amount / fill["shares"] if fill["shares"] else fill["fill_price"]
     row = {
         "id": f"{today}:prediction:{market_id}:{outcome.upper()}:live",
         "opened": today,
@@ -316,9 +322,11 @@ def open_live_position(
         "source_kind": source_kind,
         "source_perspective": source_perspective,
         "order_id": fill["order_id"],
-        "entry_price": fill["fill_price"],
+        "entry_price": paid,
+        "fill_price": fill["fill_price"],
         "shares": fill["shares"],
-        "cost_basis": amount,
+        # amount + fee: the wallet shows two debits per buy (measured 2026-09-11).
+        "cost_basis": amount + fill["total_fee"],
         "fees": {
             "spread_fee": fill["spread_fee"],
             "trade_fee": fill["trade_fee"],
@@ -332,6 +340,19 @@ def open_live_position(
         "last_mark": None,
         "realized_return": None,
     }
+    if sleeve == "A":
+        # The band gate ran on the DISPLAYED price before the order. This is the
+        # same test on the price we were actually given. It is a verdict on the
+        # fill, not a trigger: the money has moved, and unwinding would only add
+        # the sell fee to a loss already taken. Recorded on the row so the daily
+        # message can say it next to the trade it concerns.
+        row["above_band"] = paid > common.PG_A_BAND_HI
+        if row["above_band"]:
+            log.error(
+                f"Live open {market_id}/{outcome}: paid {paid:.3f}/share, ABOVE the "
+                f"{common.PG_A_BAND_HI:g} band ceiling the gate passed on "
+                f"(fill {fill['fill_price']:.4f}, ${amount:g} -> {fill['shares']} sh)"
+            )
     book["positions"].append(row)
     log.info(
         f"LIVE OPEN {sleeve} {market_id}/{outcome} ${amount} @ {fill['fill_price']}"
@@ -586,6 +607,13 @@ def backfill_settled(book):
             continue
         cost = p.get("cost_basis") or 0.0
         p["realized_return"] = (proceeds / cost - 1.0) if cost else 0.0
+        # Same stamp close_live_position leaves, so a backfilled row and a natively
+        # closed one agree on where the proceeds are recorded.
+        p["last_mark"] = {
+            "date": str(h.get("createdAt") or "")[:10] or None,
+            "price": h.get("fillPrice"),
+            "proceeds": proceeds,
+        }
         n += 1
     if missing:
         log.info(
