@@ -25,12 +25,6 @@
 #   docker compose run --rm newsbrief collect    # force a collect now
 #   docker compose run --rm --entrypoint bash newsbrief   # a shell in the image
 #
-# `pgdiag` is NOT a Postgres tool despite how it now reads next to the postgres
-# service — "pg" is PolyGram. It is a read-only probe of the live prediction-market
-# seam. To inspect the run ledger, query Postgres directly:
-#   docker compose exec -T postgres psql -U newsbrief -d newsbrief -c "TABLE job_runs;"
-#   docker compose run --rm newsbrief pgdiag    # PolyGram (prediction markets), not Postgres
-#
 # Only ONE getUpdates consumer may run per bot. The supervisor keeps the Telegram
 # daemon resident as a child, so it is that one consumer — do not also start a
 # `commands` service or run the mode by hand, or the bot 409s and goes deaf.
@@ -66,8 +60,8 @@ x-newsbrief: &newsbrief
     # is declared here. brief.py logs a warning naming the cause when unset.
     - MODAL_PROXY_KEY=${MODAL_PROXY_KEY:-}
     - MODAL_PROXY_SECRET=${MODAL_PROXY_SECRET:-}
-    # Live prediction trading (REAL MONEY). All default to off/empty, and an empty
-    # value keeps common.py's built-in default — so omitting them from your .env is
+    # Runtime knobs. All default to off/empty, and an empty value keeps
+    # common.py's built-in default — so omitting them from your .env is
     # exactly as safe as not having these lines at all.
     #
     # SEED VALUES ONLY, as of phase 2. Every knob below lives in the `settings`
@@ -80,22 +74,6 @@ x-newsbrief: &newsbrief
     # the line here, watch a fail-closed flag silently no-op — is not possible
     # against a table, because a row cannot be invisible the way a variable that
     # was never passed through can.
-    - PG_LIVE_ENABLED=${PG_LIVE_ENABLED:-}
-    - PG_LIVE_TOTAL_CAP=${PG_LIVE_TOTAL_CAP:-}
-    - PG_LIVE_PER_TRADE_CAP=${PG_LIVE_PER_TRADE_CAP:-}
-    - PG_A_ENABLED=${PG_A_ENABLED:-}
-    - PG_A_STAKE=${PG_A_STAKE:-}
-    - PG_A_BAND_LO=${PG_A_BAND_LO:-}
-    - PG_A_BAND_HI=${PG_A_BAND_HI:-}
-    - PG_A_SPREAD_GATE=${PG_A_SPREAD_GATE:-}
-    - PG_A_TAKE=${PG_A_TAKE:-}
-    - PG_A_STOP=${PG_A_STOP:-}
-    - PG_A_TIME_STOP_DAYS=${PG_A_TIME_STOP_DAYS:-}
-    - PG_A_NEAR_DAYS=${PG_A_NEAR_DAYS:-}
-    - PG_B_ENABLED=${PG_B_ENABLED:-}
-    - PG_B_POS_CAP=${PG_B_POS_CAP:-}
-    - PG_B_TOTAL_CAP=${PG_B_TOTAL_CAP:-}
-    - PG_THESIS_GRACE_DAYS=${PG_THESIS_GRACE_DAYS:-}
     # Self-hosted Nitter on the shared network (Twitter/X feeds). Defaults to the
     # service named `nitter` on Nitter's internal port 8080; override if it differs.
     #

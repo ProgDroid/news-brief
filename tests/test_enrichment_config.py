@@ -46,10 +46,10 @@ def test_the_secret_and_the_fixture_dir_stay_in_the_environment():
 
 
 def test_an_unknown_name_raises_rather_than_forwarding():
-    """The forwarding list is explicit, so `config.PG_A_ENABLED` is a typo and
-    not a lookup that happens to succeed through `common`."""
-    with pytest.raises(AttributeError, match="PG_A_ENABLED"):
-        config.PG_A_ENABLED
+    """The forwarding list is explicit, so `config.BRIEF_MEMORY_ENABLED` is a typo
+    and not a lookup that happens to succeed through `common`."""
+    with pytest.raises(AttributeError, match="BRIEF_MEMORY_ENABLED"):
+        config.BRIEF_MEMORY_ENABLED
 
 
 def test_is_enabled_is_not_frozen_at_import(monkeypatch):

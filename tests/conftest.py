@@ -84,7 +84,7 @@ def _stubbed_config(request, monkeypatch):
     import config
 
     # Knobs resolve through common.__getattr__, which Python consults ONLY for
-    # names absent from the module. `monkeypatch.setattr(common, "PG_A_ENABLED",
+    # names absent from the module. `monkeypatch.setattr(common, "BRIEF_MEMORY_ENABLED",
     # True)` works, but its undo restores the resolved value as a REAL
     # attribute — which then shadows __getattr__ for the rest of the process and
     # quietly freezes that knob for every later test. Clearing the leak here, at

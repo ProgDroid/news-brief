@@ -348,9 +348,8 @@ def test_a_first_boot_inside_a_grace_window_runs_nothing(clean_db):
     On first boot job_runs is empty, latest_scheduled_for is None, and decide
     never reaches its already-recorded branch — so every schedule still inside
     its grace window fires at once. Deploy at 06:30 and that is a SECOND collect
-    for a morning host cron already ran, and a monitor that calls
-    trading.sweep_live_exits and polygram_live.reconcile_live_book: the live
-    sell path, with real money.
+    for a morning host cron already ran, and a comprehend pass that calls
+    comprehend.run twice: double the Claude spend, on the same items.
     """
     import scheduler
     import supervisor

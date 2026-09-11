@@ -381,26 +381,6 @@ def test_mode_monitor_silent_when_quiet(monkeypatch):
     assert sent == []
 
 
-def test_mode_monitor_runs_live_exit_and_reconcile(monkeypatch):
-    import brief
-    import polygram_live
-    import trading
-
-    monkeypatch.setattr(brief, "run_volume_monitor", lambda: [])
-    swept, reconciled = [], []
-    monkeypatch.setattr(
-        trading, "sweep_live_exits", lambda book, today: swept.append(True) or 0
-    )
-    monkeypatch.setattr(
-        polygram_live, "reconcile_live_book", lambda book: reconciled.append(True) or 0
-    )
-    monkeypatch.setattr(brief, "load_book", lambda: {"positions": []})
-    saved = {}
-    monkeypatch.setattr(brief, "save_book", lambda b: saved.setdefault("b", b))
-    brief.mode_monitor()
-    assert swept == [True] and reconciled == [True]
-
-
 def test_mode_monitor_runs_the_capture_liveness_check(monkeypatch):
     """The wiring, which is its own failure: capture.liveness can be perfect and
     still report to nobody if the monitor never calls it (news-brief-a9q)."""

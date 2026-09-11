@@ -7,8 +7,8 @@ what keeps them LIVE: a re-export binds once at import, and a knob that cannot
 move without a container restart is not a knob — it is a build artifact.
 
 The forwarding list is explicit rather than "anything in common.KNOBS" so that
-`config.PG_A_ENABLED` stays a typo instead of becoming a lookup that happens to
-succeed. Two values remain real constants read from the environment: the API key
+`config.BRIEF_MEMORY_ENABLED` stays a typo instead of becoming a lookup that
+happens to succeed. Two values remain real constants read from the environment: the API key
 (a credential, and a settings row would land in every pg_dump) and the fixture
 directory (test-only, set by tests that have no database).
 """

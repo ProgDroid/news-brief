@@ -9,10 +9,7 @@ Modes:
   commands — long-running bot daemon: real-time Telegram commands + buttons (long polling)
   run      — submit + collect synchronously (for testing)
   paper    — open paper positions from today's signals (also run inside collect)
-  monitor  — hourly volume alerts + live-position exit sweep/reconcile
-  pgdiag   — READ-ONLY probe of the live PolyGram seam (flags, wallet, eventId,
-             orderbook); places no orders, run it on demand when the live sleeve
-             is silent
+  monitor  — hourly volume alerts + capture/comprehend/knob health checks
 
 The image entrypoint is `python brief.py`, so the MODE is the command argument. The
 committed docker-compose.yml defines one service per mode from a single shared anchor.
@@ -67,7 +64,6 @@ from common import (
 import common
 import scheduler
 import trading
-import polygram_live
 from trading import (
     load_book,
     save_book,
@@ -949,36 +945,6 @@ def _wizard_handle_text(chat_id: str, text: str) -> None:
     if not w:
         return
     step = w.get("step")
-    if step == "pr_thesis":
-        _predict_search_and_show(chat_id, text)
-        return
-    if step == "pr_stake_text":
-        try:
-            v = float(text)
-        except ValueError:
-            telegram_edit_text(
-                w["msg_id"], "Not a number — reply a USD amount (e.g. 7).", []
-            )
-            return
-        cap = _sleeve_b_stake_cap()
-        if v <= 0 or v > cap:
-            telegram_edit_text(
-                w["msg_id"],
-                f"Stake must be between $0 and ${cap:g}. Reply a smaller amount.",
-                [],
-            )
-            return
-        w["stake"] = v
-        _predict_show_hold(chat_id)
-        return
-    if step == "pr_phat":
-        try:
-            v = float(text)
-            w["p_hat"] = v if 0.0 <= v <= 1.0 else None
-        except ValueError:
-            w["p_hat"] = None
-        _predict_confirm_prompt(chat_id)
-        return
     if step == "category_text":
         w["category"] = text.strip().lower()
         _wizard_kind_prompt(chat_id)
@@ -1002,253 +968,6 @@ def _wizard_handle_text(chat_id: str, text: str) -> None:
                 "<code>timesofisrael.com</code> or "
                 "<code>https://site.com/feed.xml</code>."
             )
-
-
-# ── /predict conviction-bet wizard (Sleeve B) ──────────────────────────────────
-_PREDICT_STAKES = [2, 5, 10]  # preset USD buttons; "Other" → free-text
-
-
-def _predict_start(chat_id: str) -> None:
-    """Begin the /predict conviction-bet wizard, or refuse if live trading is disabled."""
-    if not (common.PG_LIVE_ENABLED and common.PG_B_ENABLED):
-        telegram_send(
-            "Live conviction trading is <b>disabled</b> "
-            "(set PG_LIVE_ENABLED + PG_B_ENABLED)."
-        )
-        return
-    msg_id = telegram_send_buttons(
-        "🎯 <b>Conviction bet</b>\n\nReply with your thesis (free text) — "
-        "I'll find matching markets.",
-        [[{"text": "❌ Cancel", "callback_data": "pr:cancel"}]],
-    )
-    _WIZARD[chat_id] = {"step": "pr_thesis", "msg_id": msg_id}
-
-
-def _predict_search_and_show(chat_id: str, thesis: str) -> None:
-    """After the thesis text: search PolyGram, stash candidates, render market buttons."""
-    w = _WIZARD[chat_id]
-    w["thesis"] = thesis
-    cands = trading._gather_pg_candidates([{"topic": thesis}])[:6]
-    if not cands:
-        telegram_edit_text(
-            w["msg_id"], "No matching markets found. Try /predict again.", []
-        )
-        _WIZARD.pop(chat_id, None)
-        return
-    w["candidates"] = cands
-    w["step"] = "pr_market"
-    rows = [
-        [
-            {
-                "text": f"{c['question'][:55]} · {c['yes_price']:.2f}",
-                "callback_data": f"pr:mkt:{i}",
-            }
-        ]
-        for i, c in enumerate(cands)
-    ]
-    rows.append([{"text": "❌ Cancel", "callback_data": "pr:cancel"}])
-    telegram_edit_text(w["msg_id"], "Pick the market:", rows)
-
-
-def _predict_show_sides(chat_id: str, idx: int) -> None:
-    """After market pick: fetch token ids/prices, stash, render YES/NO buttons."""
-    w = _WIZARD[chat_id]
-    c = w["candidates"][idx]
-    m = trading.polygram_market(c["market_id"])
-    parsed = trading._parse_pg_market(m) if m is not None else None
-    if parsed is None or not c.get("event_id"):
-        telegram_edit_text(
-            w["msg_id"], "That market can't be traded right now. /predict to retry.", []
-        )
-        _WIZARD.pop(chat_id, None)
-        return
-    w.update(
-        {
-            "market_id": c["market_id"],
-            "event_id": c["event_id"],
-            "end_date": c["end_date"],
-            "question": parsed["question"],
-            "prices": parsed["prices"],
-            "token_ids": parsed["token_ids"],
-            "outcomes": parsed["outcomes"],
-            "step": "pr_side",
-        }
-    )
-    yes_p, no_p = parsed["prices"][0], parsed["prices"][1]
-    # Label the buttons with the market's real outcomes: on an Up/Down or
-    # candidate-name binary, "YES/NO" asks the operator to bet on a side the venue
-    # has never heard of (and would reject at /trade/place).
-    yes_l = trading._pg_outcome_label(parsed, 0)
-    no_l = trading._pg_outcome_label(parsed, 1)
-    rows = [
-        [
-            {"text": f"{yes_l} · {yes_p:.2f}", "callback_data": "pr:side:YES"},
-            {"text": f"{no_l} · {no_p:.2f}", "callback_data": "pr:side:NO"},
-        ],
-        [{"text": "❌ Cancel", "callback_data": "pr:cancel"}],
-    ]
-    telegram_edit_text(w["msg_id"], f"<b>{parsed['question']}</b>\n\nWhich side?", rows)
-
-
-def _sleeve_b_stake_cap() -> float:
-    """Effective ceiling on a single Sleeve-B stake: the tighter of the Sleeve-B
-    per-position cap and the global per-trade cap (both bind when the order opens),
-    so the wizard never offers/accepts a stake open_live_position would reject."""
-    return min(common.PG_B_POS_CAP, common.PG_LIVE_PER_TRADE_CAP)
-
-
-def _predict_show_stake(chat_id: str, side: str) -> None:
-    w = _WIZARD[chat_id]
-    w["side_index"] = 0 if side == "YES" else 1
-    # The venue validates `outcome` against the market's outcomes array.
-    w["outcome"] = trading._pg_outcome_label(
-        {"outcomes": w.get("outcomes") or []}, w["side_index"]
-    )
-    w["step"] = "pr_stake"
-    cap = _sleeve_b_stake_cap()
-    presets = [
-        {"text": f"${s}", "callback_data": f"pr:stake:{s}"}
-        for s in _PREDICT_STAKES
-        if s <= cap
-    ]
-    rows = [presets] if presets else []
-    rows.append(
-        [
-            {"text": "✏️ Other", "callback_data": "pr:stake:other"},
-            {"text": "❌ Cancel", "callback_data": "pr:cancel"},
-        ]
-    )
-    telegram_edit_text(
-        w["msg_id"],
-        f"Stake (USD, max ${cap:g})? Money you can watch go to zero.",
-        rows,
-    )
-
-
-def _predict_show_hold(chat_id: str) -> None:
-    w = _WIZARD[chat_id]
-    w["step"] = "pr_hold"
-    rows = [
-        [{"text": "⏳ Hold to settlement", "callback_data": "pr:hold:settle"}],
-        [{"text": "✋ Until I /close", "callback_data": "pr:hold:manual"}],
-        [{"text": "❌ Cancel", "callback_data": "pr:cancel"}],
-    ]
-    telegram_edit_text(w["msg_id"], "Exit mode?", rows)
-
-
-def _predict_show_phat(chat_id: str) -> None:
-    w = _WIZARD[chat_id]
-    w["step"] = "pr_phat"
-    rows = [
-        [{"text": "⏭ Skip", "callback_data": "pr:phat:skip"}],
-        [{"text": "❌ Cancel", "callback_data": "pr:cancel"}],
-    ]
-    telegram_edit_text(
-        w["msg_id"],
-        "Your probability the bet resolves in your favour (0–1)? Reply a number, or Skip.",
-        rows,
-    )
-
-
-def _predict_confirm_prompt(chat_id: str) -> None:
-    w = _WIZARD[chat_id]
-    w["step"] = "pr_confirm"
-    ph = "—" if w.get("p_hat") is None else f"{w['p_hat']:.2f}"
-    entry = w["prices"][w["side_index"]]
-    summary = (
-        f"<b>{w['question']}</b>\n"
-        f"Side <b>{w['outcome']}</b> @ {entry:.2f} · ${w['stake']:g} · "
-        f"{w['hold_mode']} · p̂={ph}\n<i>{html.escape(w['thesis'])}</i>"
-    )
-    rows = [
-        [
-            {"text": "✅ Open bet", "callback_data": "pr:confirm"},
-            {"text": "❌ Cancel", "callback_data": "pr:cancel"},
-        ]
-    ]
-    telegram_edit_text(w["msg_id"], summary, rows)
-
-
-def _predict_commit(chat_id: str) -> None:
-    """Open the Sleeve-B live row under the cap/no-DCA guard and log the thesis. Fail-closed."""
-    w = _WIZARD.get(chat_id)
-    if not w:
-        return
-    with file_lock(trading.BOOK_FILE):
-        book = load_book()
-        ok, why = trading._sleeve_b_open_ok(
-            book, w["market_id"], w["outcome"], w["stake"]
-        )
-        if not ok:
-            telegram_edit_text(w["msg_id"], f"⚠️ Not opened — {why}.", [])
-            _WIZARD.pop(chat_id, None)
-            return
-        entry = w["prices"][w["side_index"]]
-        # Real cross-sleeve exposure so the global PG_LIVE_TOTAL_CAP (enforced in
-        # open_live_position) bounds total real money across BOTH sleeves — the
-        # Sleeve-B caps in _sleeve_b_open_ok only bound Sleeve-B rows.
-        live_exposure = sum(
-            (p.get("cost_basis") or 0.0)
-            for p in book.get("positions", [])
-            if p.get("execution") == "live" and p.get("status") == "open"
-        )
-        row = polygram_live.open_live_position(
-            book,
-            sleeve="B",
-            event_id=w["event_id"],
-            market_id=w["market_id"],
-            token_id=w["token_ids"][w["side_index"]],
-            outcome=w["outcome"],
-            side_index=w["side_index"],
-            amount=w["stake"],
-            topic=w["question"],
-            source_id="user",
-            source_kind="discretionary",
-            source_perspective=None,
-            live_exposure=live_exposure,
-        )
-        if row is None:
-            telegram_edit_text(
-                w["msg_id"], "⚠️ Venue rejected the order — nothing opened.", []
-            )
-            _WIZARD.pop(chat_id, None)
-            return
-        if w.get("hold_mode") == "manual":
-            row["hold_mode"] = "manual"
-        save_book(book)
-    common.append_thesis(
-        {
-            "id": row["id"],
-            "created": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-            "market_id": w["market_id"],
-            "event_id": w["event_id"],
-            "outcome": w["outcome"],
-            "side_index": w["side_index"],
-            "entry_price": entry,
-            "p_hat": w.get("p_hat"),
-            "resolve_by": w.get("end_date"),
-            "question": w["question"],
-            "thesis": w["thesis"],
-            "source_ids": ["user"],
-            "stake": w["stake"],
-            "hold_mode": w.get("hold_mode", "settle"),
-            "sleeve": "B",
-            "traded": True,
-            "scored": False,
-            "outcome_result": None,
-            "brier": None,
-        }
-    )
-    # The receipt says what a share COST (row["entry_price"] = amount/shares), not
-    # the displayed price `entry` -- those differed by ~7c on every real fill
-    # (measured 2026-09-11), and this message is the only place the operator
-    # sees the trade they just paid for.
-    receipt = f"✅ Opened <b>{w['outcome']}</b> @ {row['entry_price']:.2f}"
-    if row.get("fill_price") is not None:
-        receipt += f" (fill {row['fill_price']:.2f})"
-    receipt += f", ${row.get('cost_basis', w['stake']):g} all-in. Logged."
-    telegram_edit_text(w["msg_id"], receipt, [])
-    _WIZARD.pop(chat_id, None)
 
 
 def _sources_render(message_id: int | None = None) -> None:
@@ -1330,15 +1049,10 @@ def _close_ticker(tkr: str) -> None:
             telegram_send(f"No open paper position for <b>{html.escape(tkr)}</b>.")
             return
         day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        # Live rows hold real capital at the venue: sell there, never paper-mark.
         closed_n = 0
         failed = []
         for p in matches:
-            if p.get("execution") == "live":
-                ok = polygram_live.close_live_position(p, "manual")
-            else:
-                ok = _close_position_at_market(p, day, "manual")
-            if ok:
+            if _close_position_at_market(p, day, "manual"):
                 closed_n += 1
             else:
                 failed.append(p)
@@ -1350,18 +1064,12 @@ def _close_ticker(tkr: str) -> None:
                 f"<b>{html.escape(tkr)}</b> (manual)."
             )
         elif closed_n:
-            # A ticker can match a live row and a paper row at once. Reporting
-            # only the successes made "Closed 1 position(s)" a truthful sentence
-            # and a misleading message: real capital stayed at the venue and the
-            # failure existed solely in a log line. Same class as the bug that
-            # produced it -- a money path whose failure never reaches the
-            # operator (news-brief-8fy).
             telegram_send(
                 f"⚠️ Closed {closed_n} position(s) for "
                 f"<b>{html.escape(tkr)}</b>, but {len(failed)} FAILED and "
                 f"are still open: "
                 + ", ".join(html.escape(str(p.get("id"))) for p in failed)
-                + ". Live rows hold real capital — check the logs."
+                + ". Check the logs."
             )
         else:
             telegram_send(f"⚠️ Couldn't close {html.escape(tkr)} — left open.")
@@ -1382,8 +1090,6 @@ def _close_picker_render(message_id: int | None = None) -> None:
         # the tap resolves exactly as before regardless of the label.
         if p.get("asset_class") == "prediction":
             label = pred_title(p, _BUTTON_NAME_CAP)
-            if p.get("execution") == "live":
-                label = f"💵 {label}"
         else:
             label = tkr
         rows.append(
@@ -1500,14 +1206,8 @@ def _handle_callback_query(cb: dict, fb: dict | None = None) -> dict | None:
         telegram_edit_text(msg_id, "Reset cancelled — nothing changed.", [])
         return fb
 
-    # ── /addsource + /predict wizards (cancel works without a live wizard) ──
+    # ── /addsource wizard (cancel works without a live wizard) ──
     if data == "as:cancel":
-        w = _WIZARD.pop(chat_id, None)
-        if w:
-            telegram_edit_text(w["msg_id"], "❌ Cancelled.", [])
-        return fb
-
-    if data == "pr:cancel":
         w = _WIZARD.pop(chat_id, None)
         if w:
             telegram_edit_text(w["msg_id"], "❌ Cancelled.", [])
@@ -1565,27 +1265,6 @@ def _handle_callback_query(cb: dict, fb: dict | None = None) -> dict | None:
             f"[{entry['kind']}] ({html.escape(entry['category'])}).",
             [],
         )
-    # ── /predict wizard actions (w guaranteed live past the guard above) ──
-    elif data.startswith("pr:mkt:"):
-        _predict_show_sides(chat_id, int(data.split(":")[2]))
-    elif data.startswith("pr:side:"):
-        _predict_show_stake(chat_id, data.split(":")[2])
-    elif data.startswith("pr:stake:"):
-        val = data.split(":")[2]
-        if val == "other":
-            w["step"] = "pr_stake_text"
-            telegram_edit_text(w["msg_id"], "Reply with the stake in USD (e.g. 7).", [])
-        else:
-            w["stake"] = float(val)
-            _predict_show_hold(chat_id)
-    elif data.startswith("pr:hold:"):
-        w["hold_mode"] = data.split(":")[2]
-        _predict_show_phat(chat_id)
-    elif data == "pr:phat:skip":
-        w["p_hat"] = None
-        _predict_confirm_prompt(chat_id)
-    elif data == "pr:confirm":
-        _predict_commit(chat_id)
     return fb
 
 
@@ -1658,9 +1337,6 @@ def _handle_telegram_update(update: dict, fb: dict) -> dict:
 
     elif text == "/addsource":
         _wizard_start(chat_id)
-
-    elif text == "/predict":
-        _predict_start(chat_id)
 
     elif text == "/sources":
         _sources_render()
@@ -3804,7 +3480,6 @@ BOT_COMMANDS = [
     ("capture", "Feed capture health: last pass, failing feeds"),
     ("run", "Run a job now (collect, submit, weekly, monitor)"),
     ("addsource", "Add a temporary news source (guided)"),
-    ("predict", "Open a conviction prediction bet (guided)"),
     ("sources", "List / remove temporary sources"),
     ("removesource", "Remove a temp source by name"),
     ("pin", "Always show a topic"),
@@ -3927,299 +3602,6 @@ def mode_commands():
             time.sleep(5)
             continue
         fb, offset = _drain_update_batch(updates, fb, offset)
-
-
-def mode_pgdiag():
-    """READ-ONLY probe of the live PolyGram seam. Places no orders, writes no book.
-
-    Exists because Sleeve A's eight gates are fail-closed and indistinguishable from
-    outside: "no live positions" is the same observable whether the flags are unset in
-    the container, the wallet is unreadable, the orderbook read fails, or no market was
-    in band. Waiting a day for the collect run's tally answers that too, but only after
-    a day; this answers it now, and safely, because every call below is a GET.
-
-    Checks, in the order the live path depends on them:
-      1. flags as the RUNNING PROCESS sees them (docker-compose passthrough is easy to
-         lose — a host export alone delivers nothing to the container)
-      2. credentials + login
-      3. wallet balance — cap_ok reads an unreadable balance as unfunded
-      4. /search shape: whether an eventId actually resolves. Sleeve A cannot place an
-         order without one, and the paper path never needs it, so a missing key here
-         yields exactly "paper fills daily, live never opens"
-      5. venue positions vs the book — an order that filled under an unexpected
-         status string would leave real capital at the venue with no row here, and
-         nothing in the codebase ever adopts an unknown venue position
-      6. half-spread vs the gate across EVERY in-band candidate, not one token: one
-         passing measurement proves the shape parses, not that the gate is reachable
-    """
-    log.info("=== PGDIAG (read-only) ===")
-    out = [
-        "<b>🔎 PolyGram live diagnostic</b>",
-        f"PG_LIVE_ENABLED={int(bool(common.PG_LIVE_ENABLED))} "
-        f"PG_A_ENABLED={int(bool(common.PG_A_ENABLED))} "
-        f"PG_B_ENABLED={int(bool(common.PG_B_ENABLED))}",
-        f"stake=${common.PG_A_STAKE:g} band={common.PG_A_BAND_LO}–{common.PG_A_BAND_HI} "
-        f"spread_gate={common.PG_A_SPREAD_GATE} per_trade=${common.PG_LIVE_PER_TRADE_CAP:g}",
-    ]
-    if not (trading.POLYGRAM_EMAIL and trading.POLYGRAM_PASSWORD):
-        out.append("❌ credentials MISSING — nothing below can run")
-        telegram_send_long("\n".join(out))
-        return
-    token = trading.polygram_login()
-    out.append("✅ login ok" if token else "❌ login FAILED")
-    if not token:
-        telegram_send_long("\n".join(out))
-        return
-
-    bal = polygram_live.wallet_balance()
-    out.append(
-        f"✅ wallet ${bal:.2f}"
-        if bal is not None
-        else "❌ wallet UNREADABLE — cap_ok then rejects every order"
-    )
-
-    # Use a real, current search term so the shapes are the ones the matcher sees.
-    term = "trump"
-    events = trading.polygram_search(term) or []
-    if not isinstance(events, list) or not events:
-        out.append(
-            f"❌ /search '{term}' returned nothing usable: {type(events).__name__}"
-        )
-        telegram_send_long("\n".join(out))
-        return
-    ev = events[0]
-    ev_keys = sorted(ev.keys())[:12] if isinstance(ev, dict) else []
-    out.append(
-        f"✅ /search returned {len(events)} event(s); keys: {', '.join(ev_keys)}"
-    )
-    # Every identifier the market actually carries. /trade/place takes eventId +
-    # marketId + tokenId, and we send the numeric gamma-style `id`; a 400 from that
-    # endpoint is most cheaply explained by it wanting a different one of these
-    # (a conditionId/slug, or an int where we send a str), so show the real keys and
-    # their types rather than guessing at the payload.
-    markets = ev.get("markets") if isinstance(ev, dict) else None
-    if isinstance(markets, list) and markets and isinstance(markets[0], dict):
-        m0 = markets[0]
-        ids = {
-            k: v
-            for k, v in m0.items()
-            if "id" in k.lower() or k.lower() in {"slug", "question"}
-        }
-        out.append(
-            "market id fields: "
-            + ", ".join(
-                f"{k}={str(v)[:24]}({type(v).__name__})" for k, v in sorted(ids.items())
-            )
-        )
-        out.append(f"event id fields: id={ev.get('id')}({type(ev.get('id')).__name__})")
-
-    cands = trading._gather_pg_candidates([{"topic": term, "ticker": None}])
-    with_ev = [c for c in cands if c.get("event_id")]
-    out.append(
-        f"{'✅' if with_ev else '❌'} candidates={len(cands)}, "
-        f"with a resolvable eventId={len(with_ev)}"
-        + ("" if with_ev else " — Sleeve A CANNOT open without one")
-    )
-    if not cands:
-        telegram_send_long("\n".join(out))
-        return
-
-    # ── Venue vs book: is real capital already out there, unrecorded? ─────────
-    # place_market_order discards any fill whose status string isn't exactly
-    # "filled", and reconcile_live_book only CLOSES rows the venue dropped — it never
-    # adopts a venue position the book doesn't know about. So an order that really
-    # filled under an unexpected status would leave money at the venue and no row
-    # here, permanently invisible. This is the one write-path contract that a
-    # read-only probe cannot verify directly, so check its footprint instead.
-    venue = polygram_live.list_positions()
-    if venue is None:
-        out.append("❌ /trade/positions UNREADABLE — reconcile and close both no-op")
-    else:
-        # The raw shape, because this endpoint's field TYPES have never been seen:
-        # no live position has ever existed, so the book↔venue join below (and the
-        # one close_live_position/reconcile_live_book depend on) is unverified
-        # against real data. An int marketId where we store a str would make every
-        # row look like an orphan here and, worse, look SETTLED to reconcile.
-        # EVERY position, and EVERY key name. The filtered single-sample view
-        # this replaces could not answer the one question it was built for --
-        # "what identifies a position here" -- because it printed venue[0] only
-        # and kept just the keys whose NAME contains "id". The 2026-09-10 run
-        # reported marketId/tokenId/userId, which is equally consistent with
-        # "there is no position id" and "it is called something else", and said
-        # nothing whatever about positions 1 and 2 (news-brief-8fy).
-        #
-        # Key names, not values: the names settle the shape question exactly,
-        # while the values are unbounded, carry account detail, and this report
-        # goes to Telegram.
-        for i, p in enumerate(venue):
-            if isinstance(p, dict):
-                out.append(f"venue position keys[{i}]: {sorted(p)}")
-        if venue and isinstance(venue[0], dict):
-            v0 = venue[0]
-            shown = {
-                k: v
-                for k, v in v0.items()
-                # NO FILTER AT ALL, deliberately. The previous version kept
-                # `position_key` plus anything matching a name pattern, which
-                # still presupposes which fields matter. It cost the answer once
-                # already, and again on 2026-09-10: `totalInvested` and
-                # `avgPrice` -- the venue's OWN record of dollars committed, and
-                # the only things that can settle whether `amount` is dollars or
-                # a share count -- were in the key list and had no value shown.
-            }
-            out.append(
-                "venue position fields: "
-                + ", ".join(
-                    f"{k}={str(v)[:24]}({type(v).__name__})"
-                    for k, v in sorted(shown.items())
-                )
-            )
-        book_keys = {
-            polygram_live.venue_key(p.get("instrument"), p.get("outcome"))
-            for p in load_book().get("positions", [])
-            if p.get("execution") == "live" and p.get("status") == "open"
-        }
-        venue_keys = {
-            polygram_live.venue_key(p.get("marketId"), p.get("outcome")) for p in venue
-        }
-        orphans = venue_keys - book_keys
-        ghosts = book_keys - venue_keys
-        out.append(
-            f"venue positions={len(venue)}, open live rows in book={len(book_keys)}"
-        )
-        if orphans:
-            out.append(
-                f"🚨 {len(orphans)} venue position(s) with NO book row — orders ARE "
-                f"filling and the fill parse is discarding them: {sorted(orphans)[:3]}"
-            )
-        if ghosts:
-            out.append(
-                f"⚠️ {len(ghosts)} book row(s) not on the venue: {sorted(ghosts)[:3]}"
-            )
-        if venue and not orphans:
-            out.append("✅ every venue position is recorded in the book")
-
-    # ── Spread survey: is the gate, not the band, the binding constraint? ─────
-    # Sample the in-band side of every candidate rather than one token. A single
-    # passing measurement (as taken on 2026-07-27) says the shape parses; it says
-    # nothing about whether 3% of mid is achievable on this venue's favorites.
-    tight = wide = unreadable = 0
-    for c in cands[:12]:
-        m = trading.polygram_market(c["market_id"])
-        parsed = trading._parse_pg_market(m) if m is not None else None
-        if not parsed or parsed["closed"] or not parsed["token_ids"]:
-            continue
-        side = next(
-            (
-                i
-                for i, pr in enumerate(parsed["prices"][:2])
-                if common.PG_A_BAND_LO <= pr <= common.PG_A_BAND_HI
-            ),
-            None,
-        )
-        if side is None or len(parsed["token_ids"]) <= side:
-            continue
-        half = trading._fetch_pg_half_spread(parsed["token_ids"][side])
-        if half is None:
-            unreadable += 1
-            verdict = "orderbook UNREADABLE ❌"
-        elif half <= common.PG_A_SPREAD_GATE:
-            tight += 1
-            verdict = f"half_spread={half:.3f} PASSES ✅"
-        else:
-            wide += 1
-            verdict = f"half_spread={half:.3f} > {common.PG_A_SPREAD_GATE} ✗"
-        out.append(
-            f"  ◦ {html.escape(parsed['question'][:44])} "
-            f"@ {parsed['prices'][side]:.2f} — {verdict}"
-        )
-    if tight or wide or unreadable:
-        out.append(
-            f"in-band sample: {tight} would pass, {wide} too wide, "
-            f"{unreadable} unreadable"
-        )
-    else:
-        out.append("no candidate had a side inside the band right now")
-    # ── /trade/history: the shape backfill_settled depends on ────────────────
-    # backfill_settled is the fallback that fills realized_return on a row the
-    # venue settled without us, and it reached for `proceeds` on records keyed
-    # by (marketId, outcome) -- all three guessed from documentation, none ever
-    # observed. That fallback failed silently on 2026-09-10 (news-brief-sb0),
-    # and it is the last unmeasured shape in this seam.
-    #
-    # ENUMERATE, never name-match. A probe that picks fields by name pattern
-    # presupposes what the answer is CALLED, which is precisely how
-    # `position_key` stayed invisible for a year: it contains no "id".
-    # Call _pg_request DIRECTLY. trade_history() returns None precisely when
-    # `history` and `trades` are both absent -- i.e. exactly when the key names
-    # are wrong, which is the fact this probe exists to establish. Asking it
-    # would presuppose the answer, which is the same mistake that hid
-    # `position_key` for a year, made one level up (news-brief-8lb).
-    raw = polygram_live._pg_request("GET", "/trade/history")
-    if raw is None:
-        out.append(
-            "❌ /trade/history: the REQUEST failed (non-2xx, network, or "
-            "unparseable body). _pg_request logged the status and the body to "
-            "this run's stdout — read the container log, it is not in here."
-        )
-    else:
-        records = None
-        if isinstance(raw, dict):
-            out.append(f"/trade/history 2xx, top-level keys: {', '.join(sorted(raw))}")
-            for k in sorted(raw):
-                v = raw[k]
-                size = f"[{len(v)}]" if isinstance(v, (list, dict, str)) else ""
-                out.append(f"  {k}={type(v).__name__}{size} {str(v)[:48]}")
-            # By SHAPE, not by name: the first list of dicts, whatever it is
-            # called. That is the whole question.
-            records = next(
-                (
-                    v
-                    for _, v in sorted(raw.items())
-                    if isinstance(v, list) and v and isinstance(v[0], dict)
-                ),
-                None,
-            )
-        elif isinstance(raw, list):
-            out.append(f"/trade/history 2xx, bare list of {len(raw)}")
-            records = raw if raw and isinstance(raw[0], dict) else None
-        else:
-            out.append(f"/trade/history 2xx, but it is a {type(raw).__name__}")
-
-        if records:
-            out.append(f"✅ records found by shape: {len(records)}")
-            out.append("  record[0] ALL keys: " + ", ".join(sorted(records[0])))
-            # EVERY record, not just the first. This repo already has a test
-            # forcing that for /trade/positions, written because dumping
-            # venue[0] hid `position_key` for a month -- and this probe was
-            # then written to dump record[0], leaving the BUY orders that
-            # settle news-brief-rhg sitting unshown in the same response.
-            for idx, rec in enumerate(records[:10]):
-                if not isinstance(rec, dict):
-                    out.append(f"  record[{idx}] is {type(rec).__name__}")
-                    continue
-                out.append(
-                    f"  record[{idx}]: "
-                    + ", ".join(
-                        f"{k}={str(v)[:20]}({type(v).__name__})"
-                        for k, v in sorted(rec.items())
-                    )
-                )
-            if len(records) > 10:
-                out.append(f"  (+{len(records) - 10} more not shown)")
-        else:
-            out.append("⚠️ no list-of-dicts anywhere in the response")
-
-        # What PRODUCTION makes of this exact payload, via the real function.
-        if polygram_live._parse_trade_history(raw) is None:
-            out.append(
-                "🚨 trade_history() reads this payload as None, so "
-                "backfill_settled CANNOT fire: the records are not under "
-                "`history` or `trades`. Fix the key from the list above."
-            )
-
-    out.append("(read-only: no orders placed, book untouched)")
-    telegram_send_long("\n".join(out))
 
 
 def mode_backup():
@@ -4388,12 +3770,7 @@ def ignored_knobs_alert() -> None:
 
 
 def mode_monitor():
-    """Hourly cross-asset volume-anomaly alerts + live-position exit sweep/reconcile.
-
-    The volume monitor is decoupled from the brief (its own cron mode). The live
-    block (under the book lock) runs the Sleeve-A exit sweep, then makes the venue
-    authoritative (reconcile) — both fail-safe so a live error never breaks the cron.
-    """
+    """Hourly cross-asset volume-anomaly alerts plus the capture/comprehend/knob health checks."""
     log.info("=== MONITOR ===")
     # First, because it is the block that reports the monitor's own blind spot:
     # everything below alerts on what the world did, and this alerts on whether
@@ -4419,23 +3796,6 @@ def mode_monitor():
     alerts = run_volume_monitor()
     if alerts:
         telegram_send_long("🔔 <b>Volume alerts</b>\n\n" + "\n".join(alerts))
-    try:
-        with file_lock(trading.BOOK_FILE, timeout=trading.BOOK_LOCK_TIMEOUT):
-            book = load_book()
-            n_exit = trading.sweep_live_exits(
-                book, datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            )
-            n_rec = polygram_live.reconcile_live_book(book)
-            n_fill = polygram_live.backfill_settled(book)
-            n_score = trading.score_settled_theses()
-            if n_exit or n_rec or n_fill or n_score:
-                save_book(book)
-                log.info(
-                    f"Live sweep: {n_exit} exited, {n_rec} reconciled, "
-                    f"{n_fill} backfilled, {n_score} theses scored"
-                )
-    except Exception as e:  # never let the live sweep break the monitor cron
-        log.warning(f"Live exit sweep failed: {e}")
 
 
 def mode_capture():
@@ -4474,7 +3834,6 @@ MODES = {
     "paper": mode_paper,
     "monitor": mode_monitor,
     "backup": mode_backup,
-    "pgdiag": mode_pgdiag,
     "capture": mode_capture,
     "comprehend": mode_comprehend,
 }
@@ -4627,7 +3986,7 @@ if __name__ == "__main__":
             sys.exit(supervisor.serve())
         print(
             "Usage: brief.py "
-            "[serve|submit|collect|weekly|paper|commands|monitor|backup|pgdiag|capture]"
+            "[serve|submit|collect|weekly|paper|commands|monitor|backup|capture]"
         )
         sys.exit(1)
 

@@ -554,8 +554,8 @@ def seed_first_boot(conn, now: datetime | None = None) -> list[str]:
     Deploy between 06:00 and 08:00 UTC and the supervisor runs a second collect
     on top of the one host cron already ran that morning; monitor's 15-minute
     grace means any deploy in the first quarter of ANY hour re-runs `monitor`,
-    which calls `trading.sweep_live_exits` and
-    `polygram_live.reconcile_live_book` — the live sell path, with real money.
+    which sends Telegram alerts — a duplicate run is a duplicate message to
+    the operator.
 
     An empty ledger cannot distinguish "host cron already ran this" from
     "genuinely missed", so we assume the former exactly once, per job, and let

@@ -108,7 +108,6 @@ ANTHROPIC_HEADERS = {
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 SIGNALS_DIR = DATA_DIR / "signals"
-THESIS_LOG_FILE = DATA_DIR / "thesis_log.json"
 
 # ── Trading212 config + auth ──────────────────────────────────────────────────
 # Read-only API key. Base URL: live for real account, demo for practice.
@@ -131,7 +130,7 @@ POLYGRAM_PASSWORD = os.environ.get("POLYGRAM_PASSWORD")
 
 # ── Runtime knobs ─────────────────────────────────────────────────────────────
 # Every non-secret setting, resolved from the `settings` table rather than the
-# environment. `common.PG_A_ENABLED` still reads exactly as it always did — the
+# environment. `common.BRIEF_MEMORY_ENABLED` still reads exactly as it always did — the
 # module `__getattr__` at the foot of this section resolves the name through
 # `config`, with a short TTL cache — so the documented rule stands unchanged and
 # is now more true than before: read a knob as `common.X`, because a
@@ -185,28 +184,9 @@ KNOBS: dict[str, Knob] = {
     # Service endpoints. Non-secret, unlike the credentials they are used with.
     "T212_BASE_URL": Knob(str, "https://live.trading212.com"),
     "ALPACA_DATA_URL": Knob(str, "https://data.alpaca.markets", env="APCA_DATA_URL"),
-    # Live prediction trading (real money). Default OFF; funded/enabled per host.
-    "PG_LIVE_ENABLED": Knob(bool, False),
-    "PG_LIVE_TOTAL_CAP": Knob(float, 50.0),  # max USD across all live rows
-    "PG_LIVE_PER_TRADE_CAP": Knob(float, 5.0),  # max USD per order
-    # Sleeve A — systematic favorite-fade (real money). Default OFF.
-    "PG_A_ENABLED": Knob(bool, False),
-    "PG_A_STAKE": Knob(float, 2.0),  # USD per fade
-    "PG_A_BAND_LO": Knob(float, 0.75),  # favorite-side entry band
-    "PG_A_BAND_HI": Knob(float, 0.92),
-    "PG_A_SPREAD_GATE": Knob(float, 0.03),  # max half-spread (fraction of mid)
-    "PG_A_TAKE": Knob(float, 0.97),  # take-profit: held price repriced to ceiling
-    "PG_A_STOP": Knob(float, 0.15),  # stop: absolute adverse drop from entry price
-    "PG_A_TIME_STOP_DAYS": Knob(int, 21),
-    "PG_A_NEAR_DAYS": Knob(int, 10),  # ≤ this to settlement ⇒ hold, no time-stop
-    # Sleeve B — discretionary conviction holds.
-    "PG_B_ENABLED": Knob(bool, False),
-    "PG_B_POS_CAP": Knob(float, 10.0),  # per conviction bet (money-you-can-zero)
-    "PG_B_TOTAL_CAP": Knob(float, 40.0),  # across all open Sleeve-B rows
-    "PG_THESIS_GRACE_DAYS": Knob(int, 14),
     # Round-trip cost haircut (basis points) applied to gross return at close, by
-    # asset class. Prediction uses the real orderbook half-spread when available
-    # (see trading._fetch_pg_half_spread); this is the fallback/momentum-exit cost.
+    # asset class. Prediction falls back to this when no real entry spread was
+    # captured at open; this is the fallback/momentum-exit cost.
     "HAIRCUT_BPS_EQUITY": Knob(int, 10),
     "HAIRCUT_BPS_CRYPTO": Knob(int, 26),
     "HAIRCUT_BPS_PREDICTION": Knob(int, 200),
@@ -310,7 +290,7 @@ def knob_parses(knob: Knob, raw: str) -> bool:
     `coerce_knob` answers with the DEFAULT for a value it cannot read, which is
     right for a live read — a fat-fingered row must not take a job down — but it
     makes a typo indistinguishable from agreement to anything comparing the two:
-    `PG_A_STAKE=banana` coerces to 2.0 and so equals the very default it was
+    `VOL_SPIKE_MULT=banana` coerces to 2.5 and so equals the very default it was
     written to override. A bool is the sharper case, because it coerces
     ANYTHING: `banana` is simply not in `_TRUTHY`, reads False, and matches a
     default of False. Somebody who typed it meant something.
@@ -362,7 +342,7 @@ def __getattr__(name: str):
     `common.X` read go through the settings cache and become live, with no call
     site changed.
 
-    One interaction worth knowing: `monkeypatch.setattr(common, "PG_A_ENABLED",
+    One interaction worth knowing: `monkeypatch.setattr(common, "BRIEF_MEMORY_ENABLED",
     True)` still works, because the lookup it checks against succeeds here. Undo
     then restores the resolved value as a REAL attribute, which shadows this
     function for the rest of the process. Harmless in tests, where the suite
@@ -478,25 +458,6 @@ def _load_json_or(path: Path, default):
         except OSError as qe:
             log.error(f"Corrupt JSON {path.name} (quarantine failed: {qe}): {e}")
         return default
-
-
-# ── Sleeve-B conviction-thesis log ──────────────────────────────────────────────
-def load_thesis_log() -> list:
-    """The Sleeve-B conviction-thesis calibration corpus (list of records)."""
-    data = _load_json_or(THESIS_LOG_FILE, [])
-    return data if isinstance(data, list) else []
-
-
-def save_thesis_log(records: list) -> None:
-    _write_json_atomic(THESIS_LOG_FILE, records)
-
-
-def append_thesis(record: dict) -> None:
-    """Append one thesis record under the file lock (daemon + retention both touch it)."""
-    with file_lock(THESIS_LOG_FILE):
-        log_ = load_thesis_log()
-        log_.append(record)
-        save_thesis_log(log_)
 
 
 # ── Telegram ──────────────────────────────────────────────────────────────────

@@ -57,7 +57,11 @@ def aggregate_performance(book: dict) -> dict:
     closed = [
         p
         for p in book.get("positions", [])
-        if p.get("status") == "closed" and p.get("execution", "paper") != "live"
+        if p.get("status") == "closed"
+        # execution == "live" rows are the retired polygram book: their returns
+        # measure the venue's pricing, not the strategy
+        # (docs/2026-09-11-live-buy-pricing.md).
+        and p.get("execution", "paper") != "live"
     ]
     dims = {}
     for dim in _DIMENSIONS:
@@ -69,28 +73,6 @@ def aggregate_performance(book: dict) -> dict:
             groups.setdefault(key, []).append(p)
         dims[dim] = {k: s for k, v in groups.items() if (s := _stats(v))}
     return {"overall": _stats(closed), "dimensions": dims}
-
-
-def live_performance(book: dict) -> dict:
-    """Realized stats over closed live rows (real money), separate from the paper gate."""
-    live = [
-        p
-        for p in book.get("positions", [])
-        if p.get("status") == "closed"
-        and p.get("execution") == "live"
-        and p.get("realized_return") is not None
-    ]
-    if not live:
-        return {"n": 0, "mean_return": 0.0, "by_sleeve": {}}
-    rets = [p["realized_return"] for p in live]
-    by_sleeve: dict = {}
-    for p in live:
-        by_sleeve.setdefault(p.get("sleeve", "?"), []).append(p["realized_return"])
-    return {
-        "n": len(live),
-        "mean_return": sum(rets) / len(rets),
-        "by_sleeve": {k: sum(v) / len(v) for k, v in by_sleeve.items()},
-    }
 
 
 def record_gate_history(book: dict) -> None:
@@ -273,12 +255,6 @@ def performance_report(book: dict) -> str:
         mark = "✅ READY" if g["ready"] else "⛔ not ready"
         lines.append(f"  – {ac}: {mark} — {g['reason']}")
 
-    lp = live_performance(book)
-    if lp["n"]:
-        lines.append(
-            f"<b>💵 LIVE (real money)</b>: {lp['n']} closed, "
-            f"mean net {lp['mean_return'] * 100:+.1f}%"
-        )
     return "\n".join(lines)
 
 
@@ -318,29 +294,6 @@ def performance_prompt_block(book: dict) -> str:
 
 _PRED_NAME_CAP = 72  # a market question can run 200+ chars; Telegram lines wrap badly
 
-# Human labels for trading.open_sleeve_a_live's skip tally. Reasons in
-# _SLEEVE_A_FAULTS mean something is BROKEN (unreadable venue data, a rejected
-# order) as opposed to the sleeve correctly declining a market; they are flagged so
-# a failing orderbook read cannot hide behind "nothing was in band".
-_SKIP_LABELS = {
-    "below_similarity": "weak match",
-    "no_event_id": "no eventId on the market",
-    "already_open": "already held",
-    "unreadable": "market data unreadable",
-    "market_closed": "market closed",
-    "side_missing": "side data missing",
-    "no_price": "no price",
-    "out_of_band": "price outside band",
-    "spread_too_wide": "spread too wide",
-    "book_unreadable": "orderbook unreadable",
-    "open_rejected": "order rejected (cap, kill-switch or non-fill)",
-}
-# "spread_too_wide" is NOT here: an illiquid market is the gate doing its job, and
-# marking it alongside a failing venue read is what made a healthy run look broken.
-_SLEEVE_A_FAULTS = frozenset(
-    {"no_event_id", "unreadable", "book_unreadable", "open_rejected", "side_missing"}
-)
-
 
 def pred_title(p: dict, cap: int = _PRED_NAME_CAP) -> str:
     """A prediction row's PLAIN display title: the market question, collapsed+truncated.
@@ -379,82 +332,16 @@ def _pred_handle(p: dict) -> str:
     )
 
 
-def _pred_lines(p: dict, *, live: bool) -> list[str]:
+def _pred_lines(p: dict) -> list[str]:
     """Two lines for one prediction row: name — outcome, then the metadata tail."""
-    tail = ["live" if live else "paper"]
-    if live and p.get("cost_basis") is not None:
-        tail.append(f"${p['cost_basis']:g} @ {p.get('entry_price', 0):.2f}")
-        # entry_price is what a share cost; fill_price is the venue's number.
-        # Their gap is the venue's take, and this line is the only place the
-        # operator sees it beside the trade it was taken on.
-        if p.get("fill_price") is not None:
-            tail.append(f"fill {p['fill_price']:.2f}")
-        if p.get("above_band"):
-            tail.append("⚠️ ABOVE BAND")
-    elif p.get("play_type"):
+    tail = ["paper"]
+    if p.get("play_type"):
         tail.append(str(p["play_type"]))
     tail.append(_pred_handle(p))
     return [
         f"  • {pred_name(p)} — {html.escape(str(p.get('outcome') or ''))}",
         f"    {' · '.join(tail)}",
     ]
-
-
-def _sleeve_a_block(status: dict) -> list[str]:
-    """Render why the real-money sleeve did or did not trade today. [] if no status.
-
-    This exists because Sleeve A is fail-closed across eight independent gates, so
-    "no live positions" is its ordinary output and was previously visible only in a
-    container log. Rendered even when the sleeve is OFF: "are the flags actually set
-    in the running container" is the first question a zero-trade day raises, and the
-    deploy passes those flags through docker-compose, where they are easy to lose.
-    """
-    if not status:
-        return []
-    state = status.get("state")
-    if state == "off":
-        return [
-            "<b>💵 Sleeve A (live)</b>",
-            f"  OFF — PG_LIVE_ENABLED={int(bool(status.get('live_enabled')))}, "
-            f"PG_A_ENABLED={int(bool(status.get('a_enabled')))}",
-        ]
-    if state == "no_creds":
-        return [
-            "<b>💵 Sleeve A (live)</b>",
-            "  armed, but PolyGram credentials are missing",
-        ]
-    if state == "crashed":
-        # mode_paper swallows live-path exceptions so the paper run still completes;
-        # unreported, that is indistinguishable from the sleeve declining every market.
-        return [
-            "<b>💵 Sleeve A (live)</b>",
-            f"  ❌ CRASHED — {html.escape(str(status.get('error') or 'unknown'))}",
-        ]
-
-    if state == "no_candidates":
-        # The wallet is only read once a run has candidates, so don't imply it failed.
-        return ["<b>💵 Sleeve A (live)</b>", "  armed · no candidate markets today"]
-
-    wallet = status.get("wallet")
-    wstr = f"wallet ${wallet:.2f}" if wallet is not None else "wallet UNREADABLE ⚠️"
-    lines = [
-        "<b>💵 Sleeve A (live)</b>",
-        f"  {status.get('matches', 0)} match(es) → "
-        f"{status.get('opened', 0)} opened · {wstr}",
-    ]
-    skips = status.get("skips") or {}
-    if skips:
-        parts = [
-            f"{_SKIP_LABELS.get(r, r)} ×{n}" + (" ⚠️" if r in _SLEEVE_A_FAULTS else "")
-            for r, n in sorted(skips.items(), key=lambda kv: -kv[1])
-        ]
-        lines.append(f"  skipped: {', '.join(parts)}")
-    for b in status.get("blocked") or []:
-        lines.append(
-            f"  ◦ {html.escape(str(b.get('question') or '?'))[:_PRED_NAME_CAP]} "
-            f"@ {b.get('price'):.2f} — {_SKIP_LABELS.get(b.get('why'), b.get('why'))}"
-        )
-    return lines
 
 
 def daily_trade_message(book: dict, today: str, sleeve_a: dict | None = None) -> str:
@@ -464,13 +351,8 @@ def daily_trade_message(book: dict, today: str, sleeve_a: dict | None = None) ->
     Marks are last-known (refreshed by the weekly mark-to-market), not re-priced
     here, to keep the collect path light.
 
-    Paper and live prediction rows are rendered SEPARATELY. They are otherwise
-    near-identical on the wire (same asset_class, same market id, both `bullish`),
-    so a merged list makes it impossible to tell whether real money moved — which
-    is exactly the question the live sleeve raises.
-
-    `sleeve_a` is trading.open_sleeve_a_live's status dict; when supplied, the
-    sleeve's reason for trading or not is rendered even if it opened nothing.
+    `sleeve_a` is unused — kept as a parameter for callers not yet updated;
+    there is no live sleeve left to report on.
     """
     positions = book.get("positions", [])
     opened = [p for p in positions if p.get("opened") == today]
@@ -478,9 +360,7 @@ def daily_trade_message(book: dict, today: str, sleeve_a: dict | None = None) ->
     opened_dir = [p for p in opened if p.get("asset_class") != "prediction"]
     opened_pred = [p for p in opened if p.get("asset_class") == "prediction"]
     opened_paper = [p for p in opened_pred if p.get("execution") != "live"]
-    opened_live = [p for p in opened_pred if p.get("execution") == "live"]
-    sleeve_block = _sleeve_a_block(sleeve_a or {})
-    if not (opened or open_now or sleeve_block):
+    if not (opened or open_now):
         return ""
 
     lines = ["<b>📈 TRADE UPDATE</b>"]
@@ -494,22 +374,14 @@ def daily_trade_message(book: dict, today: str, sleeve_a: dict | None = None) ->
     if opened_paper:
         lines.append("<b>Prediction suggestions (paper)</b>")
         for p in opened_paper:
-            lines.extend(_pred_lines(p, live=False))
-    if opened_live:
-        lines.append("<b>💵 Opened LIVE today (real money)</b>")
-        for p in opened_live:
-            lines.extend(_pred_lines(p, live=True))
-    # Always rendered when a status is supplied — the counts and skip tally say
-    # something the row list cannot (how many markets were considered, and why the
-    # rest were declined), so it is not redundant with an "Opened LIVE" section.
-    lines.extend(sleeve_block)
+            lines.extend(_pred_lines(p))
     if open_now:
         lines.append(f"<b>Open positions ({len(open_now)})</b>")
         for p in open_now:
             mark = p.get("last_mark")
             mstr = f"{100 * mark['return']:+.1f}%" if mark else "—"
             if p.get("asset_class") == "prediction":
-                tag = "💵 live" if p.get("execution") == "live" else "paper"
+                tag = "paper"
                 lines.append(
                     f"  • {pred_name(p)} — "
                     f"{html.escape(str(p.get('outcome') or ''))} [{tag}]: {mstr}"

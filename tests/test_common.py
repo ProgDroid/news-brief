@@ -125,19 +125,6 @@ def test_log_handlers_include_rotating_file_handler():
             h.close()
 
 
-def test_append_thesis_persists(tmp_path, monkeypatch):
-    monkeypatch.setattr(common, "THESIS_LOG_FILE", tmp_path / "thesis_log.json")
-    common.append_thesis({"id": "t1", "market_id": "m", "p_hat": 0.8})
-    common.append_thesis({"id": "t2", "market_id": "n", "p_hat": None})
-    log = common.load_thesis_log()
-    assert [r["id"] for r in log] == ["t1", "t2"]
-
-
-def test_load_thesis_log_missing_is_empty(tmp_path, monkeypatch):
-    monkeypatch.setattr(common, "THESIS_LOG_FILE", tmp_path / "nope.json")
-    assert common.load_thesis_log() == []
-
-
 # ── Knobs: coercion and the __getattr__ seam ─────────────────────────────────
 # These need no database. `conftest` pins the settings map to empty, so every
 # knob resolves through the real coercion path to its declared default — which
@@ -150,11 +137,11 @@ def test_every_knob_resolves_to_its_declared_default():
 
 
 def test_an_unknown_knob_raises_rather_than_resolving():
-    """The registry is what makes a typo loud. Without it `common.PG_A_ENABLD`
-    would be a lookup that misses and returns a default, and the sleeve would
+    """The registry is what makes a typo loud. Without it `common.BRIEF_MEMORY_ENABLD`
+    would be a lookup that misses and returns a default, and the feature would
     read as disabled for a reason nobody could see."""
-    with pytest.raises(AttributeError, match="PG_A_ENABLD"):
-        common.PG_A_ENABLD
+    with pytest.raises(AttributeError, match="BRIEF_MEMORY_ENABLD"):
+        common.BRIEF_MEMORY_ENABLD
 
 
 @pytest.mark.parametrize(
@@ -185,7 +172,7 @@ def test_a_malformed_value_falls_back_to_the_default(kind, raw):
 
 def test_a_bool_knob_never_falls_back():
     """Anything unrecognised is False, not the default. A live-money flag whose
-    stored value is gibberish must read OFF, and `PG_LIVE_ENABLED` defaulting to
+    stored value is gibberish must read OFF, and `CAPTURE_ENABLED` defaulting to
     False is not something to rely on if the default ever changes."""
     assert common.coerce_knob(common.Knob(bool, True), "banana") is False
 

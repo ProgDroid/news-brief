@@ -71,16 +71,6 @@ def test_stamp_open_benchmark_equity(monkeypatch):
     assert p["entry_spread"] is None
 
 
-def test_stamp_open_benchmark_prediction(monkeypatch):
-    import trading
-
-    monkeypatch.setattr(trading, "_fetch_pg_half_spread", lambda t: 0.02)
-    p = {"asset_class": "prediction", "token_id": "tok123"}
-    trading._stamp_open_benchmark(p)
-    assert p["benchmark_entry"] is None
-    assert p["entry_spread"] == 0.02
-
-
 def test_stamp_open_benchmark_best_effort(monkeypatch):
     import trading
 
@@ -91,25 +81,6 @@ def test_stamp_open_benchmark_best_effort(monkeypatch):
     p = {"asset_class": "equity"}
     trading._stamp_open_benchmark(p)  # must not raise
     assert p["benchmark_entry"] is None
-
-
-def test_fetch_pg_half_spread_parses_levels(monkeypatch):
-    import trading
-
-    monkeypatch.setattr(
-        trading,
-        "_polygram_get",
-        lambda path: {"bids": [{"price": "0.40"}], "asks": [{"price": "0.50"}]},
-    )
-    # mid 0.45, half-spread 0.05 → 0.05/0.45
-    assert abs(trading._fetch_pg_half_spread("tok") - (0.05 / 0.45)) < 1e-9
-
-
-def test_fetch_pg_half_spread_none_on_garbage(monkeypatch):
-    import trading
-
-    monkeypatch.setattr(trading, "_polygram_get", lambda path: None)
-    assert trading._fetch_pg_half_spread("tok") is None
 
 
 def _closed_equity(**kw):
