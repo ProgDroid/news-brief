@@ -175,8 +175,12 @@ suite passes and says nothing about `db.py`, the migrations, or the run ledger â
 skip is not a pass. Export a connection first, and check the run count moved:
 
 ```bash
-docker run --rm -d -p 5432:5432 -e POSTGRES_PASSWORD=newsbrief \
-  -e POSTGRES_USER=newsbrief -e POSTGRES_DB=newsbrief_test postgres:18-alpine
+# --tmpfs: `--rm` does NOT remove anonymous volumes; 57 abandoned ones (21GB)
+# filled the disk on 2026-09-10. postgres:18 moved its data dir, so the mount
+# is /var/lib/postgresql (NOT .../data â€” the image exits 1 on that path).
+# MSYS_NO_PATHCONV=1: Git Bash otherwise rewrites the mount path to C:/Program Files/Git/...
+MSYS_NO_PATHCONV=1 docker run --rm -d -p 5432:5432 --tmpfs /var/lib/postgresql \
+  -e POSTGRES_PASSWORD=newsbrief -e POSTGRES_USER=newsbrief -e POSTGRES_DB=newsbrief_test postgres:18-alpine
 export DATABASE_URL="postgresql://newsbrief:newsbrief@localhost:5432/newsbrief_test"
 pytest tests/test_db.py -q   # must report runs, not "skipped"
 ```
