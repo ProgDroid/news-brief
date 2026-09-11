@@ -298,7 +298,7 @@ def test_aggregate_performance_excludes_live():
             },
             {
                 "status": "closed",
-                "asset_class": "prediction",
+                "asset_class": "equity",
                 "execution": "live",
                 "sleeve": "A",
                 "net_return": -0.9,
