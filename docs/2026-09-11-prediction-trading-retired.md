@@ -22,6 +22,10 @@ matching happens off-chain. There is no adjacent path to a working execution
 venue. The operator's own words: "I doubt this is a bug, just them getting their
 money's worth ... let's drop it completely."
 
+The measurement above is the before/after pair with `docs/2026-09-10-lost-live-close.md`,
+the incident that started it: a live sell that the book never recorded, which is
+what prompted checking the buy side too.
+
 ## What was removed
 
 Tasks 1–4 of the retirement plan, committed as `2507cad`, `fa66e48`, `b2a7856`,
@@ -100,9 +104,15 @@ HAIRCUT_BPS_PREDICTION: no row (default 200)
 ## Host runbook
 
 ```sh
-# 0. Preconditions were MEASURED before the push (Task 6 Step 4): the three
-#    PG_*_ENABLED rows read 0, HAIRCUT_BPS_PREDICTION is 200 or absent, and the
-#    book had 0 open live rows. If any of that has changed since, stop.
+# 0. Preconditions were MEASURED before the push (Task 6 Step 4):
+#      PG_LIVE_ENABLED = 1, PG_A_ENABLED = 0, PG_B_ENABLED = 0
+#      HAIRCUT_BPS_PREDICTION: no row (default 200)
+#      0 open live rows
+#    PG_LIVE_ENABLED=1 was acceptable because both sleeves gate on their own
+#    flag (PG_A_ENABLED / PG_B_ENABLED, both 0) so nothing could open, and
+#    after this deploy the knob no longer exists in code, so the row is inert.
+#    If PG_A_ENABLED or PG_B_ENABLED reads anything other than 0, or open live
+#    rows > 0, since this was measured: stop and look.
 # 1. Deploy the commits (whatever the usual pull/build/up is here).
 # 2. Retire the open paper rows — dry run first; expect "N row(s) to retire, M never marked"
 #    where N is what the host book holds (the 08-29 local copy said 25 / 2; the host has moved on):

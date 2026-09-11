@@ -3621,7 +3621,7 @@ def capture_liveness_alert(conn, now) -> None:
     indistinguishable, to the operator, from a measured one.
 
     Fail-safe like every other block in the monitor: a capture check that cannot
-    read must not cost the volume alerts or the live exit sweep.
+    read must not cost the volume alerts.
     """
     import capture
 
@@ -3657,7 +3657,7 @@ def comprehend_retirement_alert(conn) -> None:
     this again for whatever fails next rather than swallowing it as a repeat.
 
     Fail-safe like every other block in the monitor: a stop-loss that cannot
-    read must not cost the volume alerts or the live exit sweep.
+    read must not cost the volume alerts.
     """
     import comprehend
 

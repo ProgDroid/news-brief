@@ -46,6 +46,7 @@ def test_legacy_book_migrates_in_place(tmp_path, monkeypatch):
     assert p["execution"] == "paper"
     assert p["instrument"] == "aapl.us"  # renamed from stooq_symbol
     assert "stooq_symbol" not in p
+    assert "play_type" not in p  # retired 2026-09-11; new rows carry no such field
     assert book_file.exists()  # migrated copy written
     assert legacy_file.exists()  # original kept as backup
 
@@ -67,6 +68,7 @@ def test_stamp_open_benchmark_equity(monkeypatch):
     p = {"asset_class": "equity"}
     trading._stamp_open_benchmark(p)
     assert p["benchmark_entry"] == 5000.0
+    assert "entry_spread" not in p  # retired 2026-09-11; new rows carry no such field
 
 
 def test_stamp_open_benchmark_best_effort(monkeypatch):

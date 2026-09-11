@@ -226,6 +226,28 @@ def test_watched_instruments_skips_incomplete_entries(tmp_path, monkeypatch):
     assert len(watched) == 2  # the two incomplete entries skipped
 
 
+def test_watched_instruments_skips_retired_prediction_rows(tmp_path, monkeypatch):
+    monkeypatch.setattr(trading, "WATCHLIST_FILE", tmp_path / "wl.json")
+    monkeypatch.setattr(
+        trading,
+        "load_book",
+        lambda: {
+            "positions": [
+                {"status": "open", "asset_class": "equity", "instrument": "shel.uk"},
+                {
+                    "status": "open",
+                    "asset_class": "prediction",
+                    "instrument": "3324624",
+                },  # retired venue; no volume source
+            ]
+        },
+    )
+    watched = trading._watched_instruments()
+    assert ("equity", "shel.uk") in watched
+    assert ("prediction", "3324624") not in watched
+    assert len(watched) == 1
+
+
 def _setup_monitor(monkeypatch, tmp_path, watched, volumes, history=None):
     monkeypatch.setattr(trading, "VOLUME_HISTORY_FILE", tmp_path / "vh.json")
     monkeypatch.setattr(trading, "_watched_instruments", lambda: watched)

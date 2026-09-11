@@ -903,6 +903,8 @@ def _watched_instruments() -> list[tuple[str, str]]:
     for p in load_book().get("positions", []):
         if p.get("status") != "open":
             continue
+        if p.get("asset_class") == "prediction":
+            continue  # retired venue (2026-09-11): no volume source; scripts/retire_prediction_rows.py closes these
         inst = p.get("instrument")
         if not inst:
             continue

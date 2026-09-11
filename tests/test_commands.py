@@ -149,6 +149,48 @@ def test_positions_unpriceable_shows_dash(monkeypatch):
     assert "—" in sent[0]
 
 
+def test_positions_skips_retired_prediction_rows_and_says_so(monkeypatch):
+    sent = _capture(monkeypatch)
+    monkeypatch.setattr(
+        brief,
+        "load_book",
+        lambda: {
+            "positions": [
+                {
+                    "status": "open",
+                    "asset_class": "equity",
+                    "instrument": "shel.uk",
+                    "ticker": "SHEL",
+                    "direction": "bullish",
+                    "entry_price": 30.0,
+                },
+                {
+                    "status": "open",
+                    "asset_class": "index",
+                    "instrument": "^gspc",
+                    "ticker": "SPX",
+                    "direction": "bullish",
+                    "entry_price": 5000.0,
+                },
+                {
+                    "status": "open",
+                    "asset_class": "prediction",
+                    "instrument": "3324624",
+                    "ticker": "3324624",
+                    "direction": "bullish",
+                    "entry_price": 0.5,
+                },
+            ]
+        },
+    )
+    monkeypatch.setattr(brief, "price_position", lambda p: 40.0)
+    brief._handle_telegram_update(_update("/positions"), _fb())
+    assert "SHEL" in sent[0]
+    assert "<b>index</b>" in sent[0]
+    assert "1 prediction row(s) awaiting retirement" in sent[0]
+    assert "3324624" not in sent[0]
+
+
 def test_performance_wraps_report(monkeypatch):
     sent = _capture(monkeypatch)
     monkeypatch.setattr(brief, "load_book", lambda: {"positions": []})

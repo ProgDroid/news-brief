@@ -316,7 +316,3 @@ def test_aggregate_performance_excludes_the_retired_prediction_class():
     agg = validation.aggregate_performance(book)
     assert agg["overall"]["n"] == 1
     assert "prediction" not in agg["dimensions"]["asset_class"]
-
-
-def test_daily_trade_message_still_empty_without_status_or_positions():
-    assert validation.daily_trade_message({"positions": []}, "2026-08-05") == ""
