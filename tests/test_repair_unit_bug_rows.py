@@ -21,7 +21,6 @@ def _rr_row():
         "entry_price": 1264.0,
         "status": "closed",
         "close_reason": "horizon",
-        "play_type": None,
         "checkpoints": {
             "1w": {
                 "date": "2026-06-15",

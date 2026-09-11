@@ -7,7 +7,6 @@ No network, no mutation. Builds the weekly performance report, the go-live readi
 gate, the daily prompt-feedback block, and the unified daily trade message.
 """
 
-import html
 import statistics
 
 import common
@@ -24,12 +23,11 @@ LEAKAGE_LOG_FILE = (
 _DIMENSIONS = (
     "asset_class",
     "confidence",
-    "play_type",
     "thesis_ref",
     "source_kind",
     "source_perspective",
 )
-_ASSET_CLASSES = ("equity", "crypto", "prediction")
+_ASSET_CLASSES = ("equity", "crypto")
 
 
 def _stats(positions: list) -> dict | None:
@@ -58,10 +56,11 @@ def aggregate_performance(book: dict) -> dict:
         p
         for p in book.get("positions", [])
         if p.get("status") == "closed"
-        # execution == "live" rows are the retired polygram book: their returns
-        # measure the venue's pricing, not the strategy
-        # (docs/2026-09-11-live-buy-pricing.md).
+        # Retired 2026-09-11: live rows measured the venue's pricing, not the
+        # strategy, and prediction is a class the model can no longer emit.
+        # Both stay in the book as record and count nowhere.
         and p.get("execution", "paper") != "live"
+        and p.get("asset_class") != "prediction"
     ]
     dims = {}
     for dim in _DIMENSIONS:
@@ -292,102 +291,33 @@ def performance_prompt_block(book: dict) -> str:
     )
 
 
-_PRED_NAME_CAP = 72  # a market question can run 200+ chars; Telegram lines wrap badly
-
-
-def pred_title(p: dict, cap: int = _PRED_NAME_CAP) -> str:
-    """A prediction row's PLAIN display title: the market question, collapsed+truncated.
-
-    Prediction rows carry no ticker — trading.py stores the market id in `ticker`
-    and the question in `topic`. Falling back to the id keeps rows opened before a
-    question was available (or whose market fetch failed) renderable.
-
-    Unescaped on purpose: inline-keyboard button labels are NOT HTML-parsed, so an
-    escaped "&amp;" would show up literally on the button. HTML callers use
-    pred_name; button callers use this with a tighter cap.
-    """
-    q = " ".join((p.get("topic") or "").split())
-    if not q:
-        return str(p.get("ticker") or p.get("instrument") or "?")
-    return q if len(q) <= cap else q[: cap - 1].rstrip() + "…"
-
-
-def pred_name(p: dict) -> str:
-    """pred_title escaped for Telegram-HTML message bodies.
-
-    Escaping is mandatory, not cosmetic: questions are venue-supplied free text and
-    a bare "&" or "<" makes Telegram reject the whole message as a parse error.
-    """
-    return html.escape(pred_title(p))
-
-
-def _pred_handle(p: dict) -> str:
-    """The market id, as copy-pasteable <code> — the handle /close and /watch take.
-
-    Kept alongside the question because the name is not a key: two markets in one
-    event can share almost identical wording, and the command layer resolves by id.
-    """
-    return (
-        f"<code>{html.escape(str(p.get('ticker') or p.get('instrument') or ''))}</code>"
-    )
-
-
-def _pred_lines(p: dict) -> list[str]:
-    """Two lines for one prediction row: name — outcome, then the metadata tail."""
-    tail = ["paper"]
-    if p.get("play_type"):
-        tail.append(str(p["play_type"]))
-    tail.append(_pred_handle(p))
-    return [
-        f"  • {pred_name(p)} — {html.escape(str(p.get('outcome') or ''))}",
-        f"    {' · '.join(tail)}",
-    ]
-
-
-def daily_trade_message(book: dict, today: str, sleeve_a: dict | None = None) -> str:
+def daily_trade_message(book: dict, today: str) -> str:
     """Unified daily trade message (Telegram-HTML). Pure — uses last-known marks.
 
     Sections, each omitted when empty; returns "" when there is nothing to say.
     Marks are last-known (refreshed by the weekly mark-to-market), not re-priced
     here, to keep the collect path light.
-
-    `sleeve_a` is unused — kept as a parameter for callers not yet updated;
-    there is no live sleeve left to report on.
     """
     positions = book.get("positions", [])
     opened = [p for p in positions if p.get("opened") == today]
     open_now = [p for p in positions if p.get("status") == "open"]
-    opened_dir = [p for p in opened if p.get("asset_class") != "prediction"]
-    opened_pred = [p for p in opened if p.get("asset_class") == "prediction"]
-    opened_paper = [p for p in opened_pred if p.get("execution") != "live"]
     if not (opened or open_now):
         return ""
 
     lines = ["<b>📈 TRADE UPDATE</b>"]
-    if opened_dir:
+    if opened:
         lines.append("<b>Opened today</b>")
-        for p in opened_dir:
+        for p in opened:
             lines.append(
                 f"  • {p['ticker']} ({p['asset_class']}) {p['direction']} "
                 f"@ {p['entry_price']:g}"
             )
-    if opened_paper:
-        lines.append("<b>Prediction suggestions (paper)</b>")
-        for p in opened_paper:
-            lines.extend(_pred_lines(p))
     if open_now:
         lines.append(f"<b>Open positions ({len(open_now)})</b>")
         for p in open_now:
             mark = p.get("last_mark")
             mstr = f"{100 * mark['return']:+.1f}%" if mark else "—"
-            if p.get("asset_class") == "prediction":
-                tag = "paper"
-                lines.append(
-                    f"  • {pred_name(p)} — "
-                    f"{html.escape(str(p.get('outcome') or ''))} [{tag}]: {mstr}"
-                )
-            else:
-                lines.append(
-                    f"  • {p['ticker']} ({p['asset_class']}) {p['direction']}: {mstr}"
-                )
+            lines.append(
+                f"  • {p['ticker']} ({p['asset_class']}) {p['direction']}: {mstr}"
+            )
     return "\n".join(lines)

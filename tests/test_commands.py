@@ -51,15 +51,6 @@ def test_watch_adds_inferred_crypto(monkeypatch, tmp_path):
     assert "crypto" in sent[0] and "XBTUSD" in sent[0]
 
 
-def test_watch_explicit_prediction(monkeypatch, tmp_path):
-    _capture(monkeypatch)
-    monkeypatch.setattr(trading, "WATCHLIST_FILE", tmp_path / "wl.json")
-    monkeypatch.setattr(trading, "polygram_market", lambda mid: {"question": "x"})
-    brief._handle_telegram_update(_update("/watch prediction 0xabc"), _fb())
-    items = trading.load_watchlist()["items"]
-    assert items[0]["asset_class"] == "prediction" and items[0]["instrument"] == "0xabc"
-
-
 def test_watch_unresolvable_reports_and_skips(monkeypatch, tmp_path):
     sent = _capture(monkeypatch)
     monkeypatch.setattr(trading, "WATCHLIST_FILE", tmp_path / "wl.json")
@@ -963,6 +954,33 @@ def test_close_says_plainly_when_everything_closed(monkeypatch, tmp_path):
 
     assert "P" not in sent[0], "nothing failed, so nothing may be named as failed"
     assert "1" in sent[0]
+
+
+def test_close_on_a_not_yet_retired_prediction_row_names_the_script(monkeypatch):
+    book = {
+        "positions": [
+            {
+                "id": "x",
+                "status": "open",
+                "asset_class": "prediction",
+                "ticker": "3324624",
+                "instrument": "3324624",
+                "direction": "bullish",
+                "entry_price": 0.4,
+            }
+        ]
+    }
+    monkeypatch.setattr(brief, "load_book", lambda: book)
+    monkeypatch.setattr(
+        brief, "file_lock", lambda *a, **k: __import__("contextlib").nullcontext()
+    )
+    sent = []
+    monkeypatch.setattr(brief, "telegram_send", lambda t: sent.append(t))
+    brief._close_ticker("3324624")
+    assert (
+        "retire_prediction_rows" in sent[-1]
+        and book["positions"][0]["status"] == "open"
+    )
 
 
 # ── /jobs and /run: the scheduler's operator surface ─────────────────────────

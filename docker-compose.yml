@@ -51,8 +51,6 @@ x-newsbrief: &newsbrief
     - APCA_API_KEY_ID=${APCA_API_KEY_ID:-}
     - APCA_API_SECRET_KEY=${APCA_API_SECRET_KEY:-}
     - APCA_DATA_URL=${APCA_DATA_URL:-https://data.alpaca.markets}
-    - POLYGRAM_EMAIL=${POLYGRAM_EMAIL:-}
-    - POLYGRAM_PASSWORD=${POLYGRAM_PASSWORD:-}
     # Modal proxy auth for the podcast MCP endpoint, which is deployed with
     # requires_proxy_auth=True. Without these the call 401s at Modal's edge and
     # the brief ships with no podcast context — and setting them on the host or

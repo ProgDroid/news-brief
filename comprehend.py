@@ -687,7 +687,7 @@ def clean(text: str | None) -> str:
 def form_matches(form: str, text: str) -> bool:
     """Word-boundary match, never substring.
 
-    Substring matching is the recorded PolyGram failure: `MU` matched "Musk".
+    Substring matching is a recorded failure elsewhere in this repo: MU matched "Musk"
     """
     form = (form or "").strip()
     if not form or not text:

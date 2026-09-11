@@ -142,7 +142,7 @@ def test_mode_paper_writes_book_under_lock(monkeypatch, tmp_path):
     monkeypatch.setattr(trading, "SIGNALS_DIR", sig_dir)
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     # A non-actionable signal: mode_paper still runs the load->save span (opens 0),
-    # so no network is touched (PolyGram is unconfigured in the test env).
+    # so no network is touched.
     (sig_dir / f"signals-{today}.json").write_text(
         json.dumps({"signals": [{"direction": "neutral", "ticker": "X"}]})
     )

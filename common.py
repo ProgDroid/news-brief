@@ -122,12 +122,6 @@ ALPACA_API_KEY_ID = os.environ.get("APCA_API_KEY_ID", "").strip()
 ALPACA_API_SECRET = os.environ.get("APCA_API_SECRET_KEY", "").strip()
 
 
-# PolyGram (prediction markets) credentials — optional, like T212. Login is
-# JWT-based; registration is manual/one-time and never in the cron path.
-POLYGRAM_EMAIL = os.environ.get("POLYGRAM_EMAIL")
-POLYGRAM_PASSWORD = os.environ.get("POLYGRAM_PASSWORD")
-
-
 # ── Runtime knobs ─────────────────────────────────────────────────────────────
 # Every non-secret setting, resolved from the `settings` table rather than the
 # environment. `common.BRIEF_MEMORY_ENABLED` still reads exactly as it always did — the
@@ -184,12 +178,9 @@ KNOBS: dict[str, Knob] = {
     # Service endpoints. Non-secret, unlike the credentials they are used with.
     "T212_BASE_URL": Knob(str, "https://live.trading212.com"),
     "ALPACA_DATA_URL": Knob(str, "https://data.alpaca.markets", env="APCA_DATA_URL"),
-    # Round-trip cost haircut (basis points) applied to gross return at close, by
-    # asset class. Prediction falls back to this when no real entry spread was
-    # captured at open; this is the fallback/momentum-exit cost.
+    # The per-class round-trip cost, in basis points, applied to gross return at close.
     "HAIRCUT_BPS_EQUITY": Knob(int, 10),
     "HAIRCUT_BPS_CRYPTO": Knob(int, 26),
-    "HAIRCUT_BPS_PREDICTION": Knob(int, 200),
     # Go-live readiness gate (per asset class). Informational — nothing
     # auto-enables live.
     "GATE_MIN_TRADES": Knob(int, 30),
@@ -206,7 +197,6 @@ KNOBS: dict[str, Knob] = {
     "VOL_ALERT_COOLDOWN_HRS": Knob(float, 12.0),
     "VOL_FLOOR_EQUITY": Knob(float, 0.0),
     "VOL_FLOOR_CRYPTO": Knob(float, 0.0),
-    "VOL_FLOOR_PREDICTION": Knob(float, 0.0),
     # ── Knobs that lived in other modules until 0q0.7.6 ───────────────────────
     # Feature flags for the two post-delivery passes. Both default OFF and both
     # fail safe, so a row that is missing costs a feature, never a brief.

@@ -1,16 +1,13 @@
 import validation
 
 
-def _closed(
-    asset_class, net, edge=None, confidence=None, play_type=None, thesis_ref=None
-):
+def _closed(asset_class, net, edge=None, confidence=None, thesis_ref=None):
     return {
         "status": "closed",
         "asset_class": asset_class,
         "net_return": net,
         "edge": edge,
         "confidence": confidence,
-        "play_type": play_type,
         "thesis_ref": thesis_ref,
     }
 
@@ -233,21 +230,8 @@ def test_daily_trade_message_opened_and_open():
                 "asset_class": "equity",
                 "ticker": "SHEL",
                 "direction": "bullish",
-                "play_type": None,
                 "entry_price": 30.0,
                 "last_mark": None,
-            },
-            {
-                "status": "open",
-                "opened": "2026-06-14",
-                "asset_class": "prediction",
-                "ticker": "mkt1",
-                "direction": "bullish",
-                "play_type": "momentum",
-                "outcome": "Yes",
-                "entry_price": 0.4,
-                "last_mark": None,
-                "rationale": "matched (similarity=0.7)",
             },
             {
                 "status": "open",
@@ -255,7 +239,6 @@ def test_daily_trade_message_opened_and_open():
                 "asset_class": "crypto",
                 "ticker": "BTC",
                 "direction": "bullish",
-                "play_type": None,
                 "entry_price": 60000.0,
                 "last_mark": {"date": "2026-06-08", "price": 66000.0, "return": 0.10},
             },
@@ -263,7 +246,6 @@ def test_daily_trade_message_opened_and_open():
     }
     out = validation.daily_trade_message(book, "2026-06-14")
     assert "SHEL" in out  # opened today
-    assert "mkt1" in out  # prediction suggestion
     assert "BTC" in out  # open-positions summary
     assert "+10" in out  # last-known mark for the older open position
 
@@ -310,7 +292,7 @@ def test_aggregate_performance_excludes_live():
         "positions": [
             {
                 "status": "closed",
-                "asset_class": "prediction",
+                "asset_class": "equity",
                 "execution": "paper",
                 "net_return": 0.05,
             },
@@ -327,51 +309,13 @@ def test_aggregate_performance_excludes_live():
     assert agg["overall"]["n"] == 1  # live row excluded from the paper gate
 
 
-# ── Prediction rows read as questions, not market ids ─────────────────────────
-# A prediction row has no ticker: trading.py stores the market id in `ticker` and
-# the question in `topic`, so the old message showed only "2774056".
-
-
-def _pred_row(**kw):
-    row = {
-        "status": "open",
-        "opened": "2026-08-05",
-        "asset_class": "prediction",
-        "execution": "paper",
-        "ticker": "2774056",
-        "instrument": "2774056",
-        "direction": "bullish",
-        "play_type": "momentum",
-        "outcome": "Yes",
-        "topic": "Will Iran & Israel agree a ceasefire before October?",
-        "entry_price": 0.41,
-        "last_mark": None,
-    }
-    row.update(kw)
-    return row
-
-
-def test_daily_trade_message_names_prediction_markets():
-    out = validation.daily_trade_message({"positions": [_pred_row()]}, "2026-08-05")
-    assert "Will Iran &amp; Israel agree a ceasefire" in out  # the question, escaped
-    assert "<code>2774056</code>" in out  # id kept as the /close handle
-    assert "&amp;" in out and " & " not in out  # bare & would 400 the whole message
-
-
-def test_daily_trade_message_truncates_long_questions():
-    long_q = "Will " + "x" * 300 + "?"
-    out = validation.daily_trade_message(
-        {"positions": [_pred_row(topic=long_q)]}, "2026-08-05"
-    )
-    assert "…" in out
-    assert max(len(ln) for ln in out.splitlines()) < 120
-
-
-def test_daily_trade_message_falls_back_to_id_without_question():
-    out = validation.daily_trade_message(
-        {"positions": [_pred_row(topic=None)]}, "2026-08-05"
-    )
-    assert "2774056" in out  # renderable even when the market fetch lost the question
+def test_aggregate_performance_excludes_the_retired_prediction_class():
+    """Decided 2026-09-11: prediction rows stay in the book as record and count
+    nowhere -- not the weekly report, not the gate, not the daily prompt."""
+    book = {"positions": [_closed("prediction", 0.5), _closed("equity", 0.1)]}
+    agg = validation.aggregate_performance(book)
+    assert agg["overall"]["n"] == 1
+    assert "prediction" not in agg["dimensions"]["asset_class"]
 
 
 def test_daily_trade_message_still_empty_without_status_or_positions():

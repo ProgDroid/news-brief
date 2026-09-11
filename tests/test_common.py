@@ -171,7 +171,7 @@ def test_a_malformed_value_falls_back_to_the_default(kind, raw):
 
 
 def test_a_bool_knob_never_falls_back():
-    """Anything unrecognised is False, not the default. A live-money flag whose
+    """Anything unrecognised is False, not the default. A fail-closed flag whose
     stored value is gibberish must read OFF, and `CAPTURE_ENABLED` defaulting to
     False is not something to rely on if the default ever changes."""
     assert common.coerce_knob(common.Knob(bool, True), "banana") is False

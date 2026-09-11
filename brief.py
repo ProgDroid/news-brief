@@ -84,8 +84,6 @@ from validation import (
     record_gate_history,
     performance_prompt_block,
     daily_trade_message,
-    pred_name,
-    pred_title,
 )
 from enrichment import (
     annotate_signals,
@@ -735,7 +733,7 @@ HELP_TEXT = """<b>newsbrief commands</b>
 
 /watch [SYMBOL]
   Track an instrument for volume alerts (crypto/equity inferred).
-  e.g. <code>/watch BTC</code> · <code>/watch prediction 0xMARKETID</code>
+  e.g. <code>/watch BTC</code>
 
 /unwatch [SYMBOL]
   Stop watching an instrument. Send <code>/unwatch</code> alone to pick from a button list.
@@ -1010,7 +1008,6 @@ def _sources_render(message_id: int | None = None) -> None:
 # current list as tappable buttons; the text form (e.g. `/close AAPL_US_EQ`) still
 # works. Buttons are keyed by _short_id over a stable field and re-resolved against
 # the live list on tap, so a list that shifted between render and tap stays correct.
-_BUTTON_NAME_CAP = 40  # button labels are one short line; message bodies fit more
 
 
 def _picker_send(text: str, rows: list, message_id: int | None) -> None:
@@ -1029,12 +1026,12 @@ def _picker_empty(text: str, message_id: int | None) -> None:
 
 def _pos_ticker(p: dict) -> str:
     """A position's display/close key — ticker if present, else the raw instrument
-    (some positions, e.g. prediction markets, carry no separate ticker)."""
+    (some positions carry no separate ticker)."""
     return p.get("ticker") or p.get("instrument", "")
 
 
 def _close_ticker(tkr: str) -> None:
-    """Close all open positions for one ticker (paper at mark, live via venue sell).
+    """Close all open positions for one ticker, at the current mark.
     Shared by the `/close TICKER` text command and the close-picker button."""
     # Hold the book lock across load->close->save so a concurrent mode_paper
     # (collect) write can't clobber this manual close.
@@ -1047,6 +1044,14 @@ def _close_ticker(tkr: str) -> None:
         ]
         if not matches:
             telegram_send(f"No open paper position for <b>{html.escape(tkr)}</b>.")
+            return
+        retired = [p for p in matches if p.get("asset_class") == "prediction"]
+        if retired:
+            telegram_send(
+                f"⚠️ {html.escape(tkr)} is a prediction-market row and the venue is "
+                "retired; it cannot be priced. Run scripts/retire_prediction_rows.py "
+                "on the host to close it at its last mark."
+            )
             return
         day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         closed_n = 0
@@ -1085,13 +1090,7 @@ def _close_picker_render(message_id: int | None = None) -> None:
         if tkr in seen:
             continue  # one button per ticker; _close_ticker closes all its lots
         seen.add(tkr)
-        # Label a prediction by its question — a bare market id on a button gives the
-        # operator nothing to choose between. callback_data still hashes the ticker, so
-        # the tap resolves exactly as before regardless of the label.
-        if p.get("asset_class") == "prediction":
-            label = pred_title(p, _BUTTON_NAME_CAP)
-        else:
-            label = tkr
+        label = tkr
         rows.append(
             [{"text": f"❌ {label}", "callback_data": f"close:{_short_id(tkr)}"}]
         )
@@ -1392,20 +1391,13 @@ def _handle_telegram_update(update: dict, fb: dict) -> dict:
     elif text.startswith("/watch "):
         body = text[7:].strip()
         parts = body.split(maxsplit=1)
-        if parts and parts[0] in ("equity", "crypto", "prediction") and len(parts) == 2:
+        if parts and parts[0] in ("equity", "crypto") and len(parts) == 2:
             ac, token = parts[0], parts[1].strip()
         else:
             ac, token = None, body
         entry = resolve_watch_entry(token, asset_class=ac)
         if entry is None:
-            telegram_send(
-                f"⚠️ Couldn't resolve <b>{html.escape(token)}</b>"
-                + (
-                    " (prediction needs an explicit market id: <code>/watch prediction &lt;id&gt;</code>)"
-                    if ac is None
-                    else ""
-                )
-            )
+            telegram_send(f"⚠️ Couldn't resolve <b>{html.escape(token)}</b>")
         else:
             wl = load_watchlist()
             dup = any(
@@ -1470,34 +1462,28 @@ def _handle_telegram_update(update: dict, fb: dict) -> dict:
             telegram_send("No open positions.")
         else:
             by_class: dict[str, list[str]] = {}
+            retired = 0
             for p in opens:
-                # Prediction rows carry the market id in `ticker` and the question in
-                # `topic`; show the question (escaped by pred_name) and flag the rows
-                # holding real money, with the id kept as the /close-able handle.
-                is_pred = p.get("asset_class") == "prediction"
-                if is_pred:
-                    label = pred_name(p) + (
-                        " 💵" if p.get("execution") == "live" else ""
-                    )
-                else:
-                    label = html.escape(p.get("ticker") or p.get("instrument", ""))
+                if p.get("asset_class") == "prediction":
+                    retired += 1  # venue retired; see scripts/retire_prediction_rows.py
+                    continue
+                label = html.escape(p.get("ticker") or p.get("instrument", ""))
                 mark = price_position(p)
                 if mark is None:
                     line = f"  – {label}: mark —"
                 else:
                     ret = _signal_return(p["direction"], p["entry_price"], mark)
                     line = f"  – {label}: {100 * ret:+.1f}%"
-                if is_pred:
-                    handle = html.escape(
-                        str(p.get("ticker") or p.get("instrument", ""))
-                    )
-                    line += f"\n    <code>{handle}</code>"
                 by_class.setdefault(p.get("asset_class", "equity"), []).append(line)
             lines = ["<b>📂 Open positions</b>"]
-            for ac in ("equity", "crypto", "prediction"):
-                if by_class.get(ac):
-                    lines.append(f"<b>{ac}</b>")
-                    lines.extend(by_class[ac])
+            for ac in sorted(by_class):  # every class that has rows, index included
+                lines.append(f"<b>{ac}</b>")
+                lines.extend(by_class[ac])
+            if retired:
+                lines.append(
+                    f"<i>{retired} prediction row(s) awaiting retirement — "
+                    "run scripts/retire_prediction_rows.py</i>"
+                )
             telegram_send_long("\n".join(lines))
 
     elif text == "/performance":
@@ -3159,12 +3145,12 @@ def mode_collect():
             except Exception as e:
                 log.error(f"Claim verification skipped (brief unaffected): {e}")
         clear_batch_state()
-        # Trading stage runs AFTER clear_batch_state and is isolated: a matcher /
-        # PolyGram / Claude failure must never re-collect and duplicate the brief.
+        # Trading stage runs AFTER clear_batch_state and is isolated: a quote-provider
+        # / Claude failure must never re-collect and duplicate the brief.
         try:
             summary = mode_paper() or {}
             book = load_book()
-            msg = daily_trade_message(book, today, summary.get("sleeve_a"))
+            msg = daily_trade_message(book, today)
             if msg:
                 telegram_send_long(msg)
         except Exception as e:

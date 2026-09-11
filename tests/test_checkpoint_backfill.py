@@ -182,15 +182,6 @@ def test_historical_closes_crypto_routes_kraken(monkeypatch):
     assert seen["pair"] == "XBTUSD"
 
 
-def test_historical_closes_prediction_returns_empty():
-    assert (
-        trading.historical_closes(
-            "prediction", "some-market", "2026-06-01", "2026-06-02"
-        )
-        == {}
-    )
-
-
 def test_historical_closes_unparseable_equity_returns_empty(monkeypatch):
     monkeypatch.setattr(
         trading, "_yahoo_closes", lambda *a, **k: (_ for _ in ()).throw(AssertionError)

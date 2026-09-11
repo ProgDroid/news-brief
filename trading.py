@@ -5,7 +5,6 @@ Imports infra from common.py. (Later phases generalise this to a
 multi-asset subsystem.)"""
 
 import json
-import re
 import requests
 from datetime import datetime, timezone, timedelta
 from typing import NamedTuple
@@ -21,17 +20,11 @@ from common import (
     T212_API_KEY_ID,
     T212_API_KEY,
     t212_auth_header,
-    ANTHROPIC_HEADERS,
-    POLYGRAM_EMAIL,
-    POLYGRAM_PASSWORD,
 )
 
 PAPER_DIR = DATA_DIR / "paper"
 BOOK_FILE = PAPER_DIR / "book.json"
-# Generous timeout for the paper-book lock: mode_paper holds it across the whole
-# load->open->save span, which (when PolyGram is configured) can include the
-# creds-gated Claude prediction matcher. A coincident /close that can't acquire
-# within this window degrades to "command failed, retry", never to corruption.
+# 120s: mode_paper holds the lock across quote fetches for every actionable signal.
 BOOK_LOCK_TIMEOUT = 120.0
 # Legacy equity-only book; read once and migrated into BOOK_FILE on first load.
 LEGACY_PAPER_BOOK_FILE = PAPER_DIR / "paper-book.json"
@@ -45,7 +38,7 @@ VOLUME_HISTORY_FILE = (
 LEAKAGE_LOG_FILE = PAPER_DIR / "leakage-log.json"  # Stage A: declined-signal counts
 
 # Asset-class → informational venue tag stamped on opened positions.
-_VENUE_BY_ASSET = {"equity": "t212", "crypto": "kraken", "prediction": "polygram"}
+_VENUE_BY_ASSET = {"equity": "t212", "crypto": "kraken"}
 
 # Crypto majors → Kraken base asset (encodes Kraken's BTC→XBT, DOGE→XDG quirks).
 # Signals carry plain symbols (BTC, ETH); the realistic tradable universe is small
@@ -123,18 +116,6 @@ INDEX_TICKER_SYMBOLS = {
 def resolve_index_symbol(ticker: str) -> str | None:
     """Yahoo symbol for a commodity/macro signal ticker, or None if it isn't one."""
     return INDEX_TICKER_SYMBOLS.get(str(ticker or "").strip().upper())
-
-
-# ── PolyGram (prediction markets) ─────────────────────────────────────────────
-POLYGRAM_BASE = "https://polygram.ink/api"
-POLYGRAM_TOKEN_FILE = PAPER_DIR / "polygram_token.json"
-PG_CANDIDATE_CAP = 25  # max candidate markets fed to the matcher (prompt-size bound)
-PG_SIMILARITY_FLOOR = 0.60  # open only matches at/above this matcher similarity
-PG_PER_QUERY_CAP = (
-    5  # max NEW markets any one search token contributes (junk-recall bound)
-)
-PG_MIN_TOKEN_LEN = 4  # PolyGram /search is substring-based; short tokens over-match
-PG_MAX_HOLD_DAYS = 182  # ~26w backstop close for never-resolving resolution markets
 
 
 class Quote(NamedTuple):
@@ -532,30 +513,10 @@ def fetch_benchmark() -> float | None:
     return q.close if q else None
 
 
-def fetch_pg_volume(market_id: str) -> float | None:
-    """24h volume for a PolyGram market, read from market detail (volume lives on
-    the market object in the Polymarket mirror, not in the price series). None if
-    the market is unfetchable or exposes no volume field — caller skips. This is
-    the spec's graceful-degradation path for prediction volume."""
-    m = polygram_market(market_id)
-    if m is None:
-        return None
-    for field in ("volume24hr", "volume24Hr", "volume"):
-        v = m.get(field)
-        if v is not None:
-            try:
-                return float(v)
-            except (TypeError, ValueError):
-                return None
-    return None
-
-
 def fetch_volume(asset_class: str, instrument: str) -> float | None:
     """Mark one instrument's volume via the fetcher for its asset class."""
     if asset_class == "crypto":
         return fetch_kraken_volume(instrument)
-    if asset_class == "prediction":
-        return fetch_pg_volume(instrument)
     # index instruments are raw Yahoo symbols ("BZ=F"), which fetch_quote's
     # base.market parsing cannot read — go straight to Yahoo, as fetch_price does.
     q = _yahoo_fetch(instrument) if asset_class == "index" else fetch_quote(instrument)
@@ -565,9 +526,7 @@ def fetch_volume(asset_class: str, instrument: str) -> float | None:
 def fetch_benchmark_level(asset_class: str) -> float | None:
     """Current benchmark index level for an asset class (best-effort, None on failure).
 
-    Equity → S&P 500 (multi-provider benchmark); crypto → BTC/XBT (Kraken);
-    prediction → None (naive coin-flip baseline, handled at close as
-    benchmark_return=0).
+    Equity → S&P 500 (multi-provider benchmark); crypto → BTC/XBT (Kraken).
     """
     if asset_class == "equity":
         return fetch_benchmark()
@@ -578,39 +537,20 @@ def fetch_benchmark_level(asset_class: str) -> float | None:
 
 
 def _stamp_open_benchmark(p: dict) -> None:
-    """Stamp benchmark_entry (+ prediction entry_spread) on a freshly opened position.
+    """Stamp benchmark_entry on a freshly opened position.
 
     Best-effort: any fetch failure leaves the field None and never raises.
     """
-    ac = p.get("asset_class", "equity")
-    if ac == "prediction":
-        p["benchmark_entry"] = None
-        p["entry_spread"] = None
-        return
-    p["entry_spread"] = None
     try:
-        p["benchmark_entry"] = fetch_benchmark_level(ac)
+        p["benchmark_entry"] = fetch_benchmark_level(p.get("asset_class", "equity"))
     except Exception as e:
         log.warning(f"Benchmark fetch failed for {p.get('ticker')}: {e}")
         p["benchmark_entry"] = None
 
 
 def _haircut_fraction(p: dict) -> float:
-    """Round-trip cost fraction for a closed position, by asset class.
-
-    Prediction: entry = real orderbook half-spread if captured at open, else the
-    config fallback; resolution settles at 1/0 (entry leg only), momentum adds a
-    config-bps exit leg. Equity/crypto: a single config round-trip constant.
-    """
-    ac = p.get("asset_class", "equity")
-    if ac == "prediction":
-        entry = p.get("entry_spread")
-        if entry is None:
-            entry = common.HAIRCUT_BPS_PREDICTION / 10_000
-        if p.get("play_type") == "momentum":
-            return entry + common.HAIRCUT_BPS_PREDICTION / 10_000
-        return entry
-    if ac == "crypto":
+    """Round-trip cost fraction for a closed position: one config constant per class."""
+    if p.get("asset_class", "equity") == "crypto":
         return common.HAIRCUT_BPS_CRYPTO / 10_000
     return common.HAIRCUT_BPS_EQUITY / 10_000
 
@@ -632,332 +572,30 @@ def _stamp_close_metrics(p: dict, day: str) -> None:
     haircut = _haircut_fraction(p)
     p["haircut"] = haircut
     net = gross - haircut
-    if ac == "prediction":
-        # A long-only stake cannot lose more than itself, and the venue's
-        # half-spread is already inside the price paid — subtracting it from a
-        # total loss double-counts. Equity/crypto keep no floor: a bearish row is
-        # a short, whose loss really is unbounded.
-        net = max(net, -1.0)
     p["net_return"] = net
     bench = None
-    if ac == "prediction":
-        bench = 0.0  # naive coin-flip baseline
-    else:
-        entry = p.get("benchmark_entry")
-        if entry:
-            try:
-                level = fetch_benchmark_level(ac)
-            except Exception as e:
-                log.warning(f"Benchmark fetch failed for {p.get('ticker')}: {e}")
-                level = None
-            if level is not None:
-                candidate = _signal_return("bullish", entry, level)
-                if abs(candidate) > BENCHMARK_SANITY_RETURN:
-                    # Corrupt level on one side. Leaving edge unset costs one row
-                    # of attribution; stamping it poisons every mean downstream,
-                    # including the model's own performance_prompt_block.
-                    log.warning(
-                        f"Implausible benchmark return {candidate:.2%} for "
-                        f"{p.get('ticker')} (entry={entry}, level={level}) — "
-                        "edge left unset"
-                    )
-                else:
-                    bench = candidate
+    entry = p.get("benchmark_entry")
+    if entry:
+        try:
+            level = fetch_benchmark_level(ac)
+        except Exception as e:
+            log.warning(f"Benchmark fetch failed for {p.get('ticker')}: {e}")
+            level = None
+        if level is not None:
+            candidate = _signal_return("bullish", entry, level)
+            if abs(candidate) > BENCHMARK_SANITY_RETURN:
+                # Corrupt level on one side. Leaving edge unset costs one row
+                # of attribution; stamping it poisons every mean downstream,
+                # including the model's own performance_prompt_block.
+                log.warning(
+                    f"Implausible benchmark return {candidate:.2%} for "
+                    f"{p.get('ticker')} (entry={entry}, level={level}) — "
+                    "edge left unset"
+                )
+            else:
+                bench = candidate
     p["benchmark_return"] = bench
     p["edge"] = (net - bench) if bench is not None else None
-
-
-def _parse_pg_market(m: dict) -> dict | None:
-    """Flatten a raw PolyGram market into the fields the seam needs.
-
-    PolyGram mirrors Polymarket: `outcomes`, `outcomePrices`, and `clobTokenIds`
-    are JSON-ENCODED STRINGS of index-aligned arrays (YES=index 0, NO=index 1).
-    Returns None if the required arrays are missing or unparseable — callers skip.
-
-    `outcomes` is parsed separately and never fatal: it is needed only to LABEL a
-    side (see _pg_outcome_label), so a market with readable prices and tokens must
-    stay tradeable-shaped even if its labels are junk.
-    """
-    try:
-        prices = [float(x) for x in json.loads(m["outcomePrices"])]
-        token_ids = json.loads(m.get("clobTokenIds") or "[]")
-    except (KeyError, TypeError, ValueError):
-        return None
-    if len(prices) < 2:
-        return None
-    try:
-        outcomes = json.loads(m.get("outcomes") or "[]")
-    except (TypeError, ValueError):
-        outcomes = []
-    return {
-        "market_id": str(m.get("id", "")),
-        "question": str(m.get("question", "")),
-        "prices": prices,
-        "yes_price": prices[0],
-        "outcomes": outcomes if isinstance(outcomes, list) else [],
-        "end_date": m.get("endDate"),
-        "closed": bool(m.get("closed")),
-        "uma_status": m.get("umaResolutionStatus"),
-        "token_ids": token_ids,
-    }
-
-
-def _pg_outcome_label(parsed: dict, side_index: int) -> str:
-    """The venue's OWN label for a side, falling back to Yes/No.
-
-    `POST /trade/place` validates `outcome` against the market's `outcomes` array,
-    so a hardcoded "Yes"/"No" is a 400 on any binary that isn't labelled that way —
-    Up/Down, Above/Below, two candidate names. Polymarket-mirrored markets are
-    usually Yes/No, which is why nothing caught this until the first real order:
-    every read path keys off side_index and never needed the label.
-    """
-    outs = parsed.get("outcomes") or []
-    if side_index < len(outs):
-        label = outs[side_index]
-        if isinstance(label, str) and label.strip():
-            return label.strip()
-    return "Yes" if side_index == 0 else "No"
-
-
-def polygram_login() -> str | None:
-    """Log in with POLYGRAM_EMAIL/PASSWORD, persist and return the JWT (or None)."""
-    if not (POLYGRAM_EMAIL and POLYGRAM_PASSWORD):
-        return None
-    try:
-        resp = requests.post(
-            f"{POLYGRAM_BASE}/auth/login",
-            json={"email": POLYGRAM_EMAIL, "password": POLYGRAM_PASSWORD},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        token = resp.json().get("token")
-    except Exception as e:
-        log.warning(f"PolyGram login failed: {e}")
-        return None
-    if not token:
-        log.warning("PolyGram login returned no token")
-        return None
-    _write_json_atomic(POLYGRAM_TOKEN_FILE, {"token": token})
-    return token
-
-
-def _polygram_get(path: str, params: dict | None = None):
-    """GET a PolyGram path with the persisted JWT; refresh once on 401.
-
-    Returns parsed JSON or None on any failure (uncredentialed, network error,
-    non-2xx after a refresh attempt) — same None-on-failure posture as the pricers.
-    """
-    if not (POLYGRAM_EMAIL and POLYGRAM_PASSWORD):
-        return None
-    token = (_load_json_or(POLYGRAM_TOKEN_FILE, {}) or {}).get(
-        "token"
-    ) or polygram_login()
-    if not token:
-        return None
-    url = f"{POLYGRAM_BASE}{path}"
-    for attempt in (1, 2):
-        try:
-            resp = requests.get(
-                url,
-                headers={"Authorization": f"Bearer {token}"},
-                params=params,
-                timeout=30,
-            )
-        except Exception as e:
-            log.warning(f"PolyGram GET {path} failed: {e}")
-            return None
-        if resp.status_code == 401 and attempt == 1:
-            token = polygram_login()
-            if not token:
-                return None
-            continue
-        try:
-            resp.raise_for_status()
-            return resp.json()
-        except Exception as e:
-            log.warning(f"PolyGram GET {path} failed: {e}")
-            return None
-    return None
-
-
-def polygram_search(query: str) -> list | None:
-    """Search PolyGram events/markets by free text. Returns the raw events list or None."""
-    return _polygram_get("/search", params={"q": query})
-
-
-def polygram_market(market_id: str) -> dict | None:
-    """Fetch one market's full detail (mark + settlement status). Returns raw dict or None."""
-    return _polygram_get(f"/markets/{market_id}")
-
-
-def _pg_market_volume(m: dict) -> float:
-    """Best-effort 24h volume for ranking a raw PolyGram market (0.0 if absent)."""
-    for key in ("volume24hr", "volumeNum", "volume"):
-        v = m.get(key)
-        if v is not None:
-            try:
-                return float(v)
-            except (TypeError, ValueError):
-                continue
-    return 0.0
-
-
-def _signal_search_terms(signals: list) -> list[str]:
-    """Distinct lowercased entity tokens from signal topics, in first-seen order.
-
-    PolyGram's /search is a substring match, so we feed it short specific tokens
-    (e.g. 'hormuz', 'china', 'iran') rather than the kebab-case topic slug, which
-    never appears verbatim in a market title. Tokens shorter than PG_MIN_TOKEN_LEN
-    are dropped (a 2-char token substring-matches half the catalogue), and the
-    signal `ticker` is deliberately NOT searched ('MU' substring-matches 'Musk').
-    """
-    terms: list[str] = []
-    for s in signals:
-        for tok in re.split(r"[^a-z0-9]+", (s.get("topic") or "").lower()):
-            if len(tok) >= PG_MIN_TOKEN_LEN and tok not in terms:
-                terms.append(tok)
-    return terms
-
-
-def _gather_pg_candidates(signals: list) -> list:
-    """Search PolyGram for markets related to the day's signals; dedup + cap.
-
-    Searches each distinct entity token derived from the signal topics (see
-    _signal_search_terms), keeps OPEN binary markets ranked by 24h volume, and
-    takes at most PG_PER_QUERY_CAP per token so no single token monopolises the
-    pool. Dedups by market_id and caps the total at PG_CANDIDATE_CAP to bound the
-    matcher prompt. Returns the parsed-candidate dicts (market_id/question/
-    yes_price/end_date/event_id) the matcher is shown; event_id is the /search
-    event wrapper's id, carried through for the live (Sleeve A) open path.
-    """
-    seen: dict[str, dict] = {}
-    for q in _signal_search_terms(signals):
-        raw: list[dict] = []
-        for ev in polygram_search(q) or []:
-            if isinstance(ev, dict):
-                ev_id = ev.get("id") or ev.get("eventId")  # live-verify key name
-                for m in ev.get("markets", []):
-                    if isinstance(m, dict):
-                        m["_event_id"] = ev_id  # stash for parse/open
-                        raw.append(m)
-        raw.sort(key=_pg_market_volume, reverse=True)
-        taken = 0
-        for m in raw:
-            if taken >= PG_PER_QUERY_CAP:
-                break
-            parsed = _parse_pg_market(m)
-            if parsed is None or parsed["closed"]:
-                continue
-            if parsed["market_id"] not in seen:
-                seen[parsed["market_id"]] = {
-                    "market_id": parsed["market_id"],
-                    "question": parsed["question"],
-                    "yes_price": parsed["yes_price"],
-                    "end_date": parsed["end_date"],
-                    "event_id": m.get("_event_id"),
-                }
-                taken += 1
-        if len(seen) >= PG_CANDIDATE_CAP:
-            break
-    return list(seen.values())
-
-
-def _parse_matches(text: str, candidate_ids: set) -> list:
-    """Parse the matcher's JSON-array reply, validating each match.
-
-    Resilient like the signals parser: locate the array within any surrounding
-    prose/fences, json.loads it, and keep only well-formed matches whose
-    market_id is a real candidate. Returns [] on any failure.
-    """
-    try:
-        arr = json.loads(text[text.index("[") : text.rindex("]") + 1])
-    except (ValueError, json.JSONDecodeError):
-        return []
-    out = []
-    for item in arr if isinstance(arr, list) else []:
-        if not isinstance(item, dict):
-            continue
-        mid = str(item.get("market_id", ""))
-        side = str(item.get("side", "")).upper()
-        play = str(item.get("play_type", "")).lower()
-        if (
-            mid not in candidate_ids
-            or side not in ("YES", "NO")
-            or play not in ("resolution", "momentum")
-        ):
-            continue
-        try:
-            sim = float(item.get("similarity"))
-        except (TypeError, ValueError):
-            continue
-        target = item.get("target")
-        try:
-            target = float(target) if target is not None else None
-        except (TypeError, ValueError):
-            target = None
-        out.append(
-            {
-                "market_id": mid,
-                "side": side,
-                "play_type": play,
-                "similarity": sim,
-                "target": target,
-            }
-        )
-    return out
-
-
-def run_prediction_matcher(signals: list, candidates: list) -> list:
-    """One synchronous Claude call mapping signals → prediction-market matches.
-
-    Same Messages-API shape as run_dig but with NO tools/web search. Returns the
-    validated match list (possibly empty); never raises into the cron path.
-    """
-    if not candidates:
-        return []
-    payload = {
-        "model": common.MODEL,
-        "max_tokens": 2048,
-        # Raw-JSON extraction on a tight 2048 budget; disable thinking (adaptive is
-        # the Sonnet 5 default) so it can't crowd out the JSON array and truncate it.
-        "thinking": {"type": "disabled"},
-        "system": (
-            "You map daily investing signals to live prediction markets. Given today's "
-            "signals and candidate markets, return ONLY a JSON array (no prose, no code "
-            'fences). Each element: {"market_id": str, "side": "YES"|"NO", "play_type": '
-            '"resolution"|"momentum", "similarity": number 0..1, "target": number|null}. '
-            "side is the outcome the signal implies. play_type is 'resolution' when the "
-            "signal speaks to the eventual settled outcome, 'momentum' when it is a "
-            "near-term catalyst likely to move the odds regardless of settlement. target "
-            "(momentum only, else null) is an optional held-side price in 0..1 to take "
-            "profit at. similarity is your confidence the signal is genuinely about this "
-            "market. Omit weak matches; return [] if none."
-        ),
-        "messages": [
-            {
-                "role": "user",
-                "content": (
-                    f"Today's signals:\n{json.dumps(signals)}\n\n"
-                    f"Candidate markets:\n{json.dumps(candidates)}\n\n"
-                    "Return the JSON array of matches."
-                ),
-            }
-        ],
-    }
-    try:
-        resp = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers=ANTHROPIC_HEADERS,
-            json=payload,
-            timeout=120,
-        )
-        resp.raise_for_status()
-        blocks = resp.json().get("content", [])
-        text = "\n".join(b["text"] for b in blocks if b.get("type") == "text")
-    except Exception as e:
-        log.warning(f"Prediction matcher call failed: {e}")
-        return []
-    return _parse_matches(text, {c["market_id"] for c in candidates})
 
 
 def fetch_price(asset_class: str, instrument: str) -> float | None:
@@ -978,9 +616,9 @@ def historical_closes(
     """Daily close series for one position over [start, end], routed by asset class.
 
     equity → Yahoo (base.market resolved); index → Yahoo (raw symbol);
-    crypto → Kraken OHLC. Prediction and anything unrecognised → {}. The map feeds
-    _snap_close to price a checkpoint at its true crossing date; {} → the caller
-    falls back to the current mark price.
+    crypto → Kraken OHLC. Anything unrecognised → {}. The map feeds _snap_close to
+    price a checkpoint at its true crossing date; {} → the caller falls back to
+    the current mark price.
     """
     if asset_class == "crypto":
         return _kraken_closes(instrument, start)
@@ -995,19 +633,7 @@ def historical_closes(
 
 
 def price_position(p: dict) -> float | None:
-    """Mark a position to market by dispatching on its asset_class.
-
-    Equity/crypto go through fetch_price (instrument-level). Prediction marks the
-    held side from market detail (outcomePrices[side_index]) — None if unfetchable.
-    """
-    if p.get("asset_class") == "prediction":
-        m = polygram_market(p["instrument"])
-        if m is None:
-            return None
-        parsed = _parse_pg_market(m)
-        if parsed is None:
-            return None
-        return parsed["prices"][p["side_index"]]
+    """Mark a position to market via fetch_price for its asset class."""
     return fetch_price(p.get("asset_class", "equity"), p["instrument"])
 
 
@@ -1188,7 +814,6 @@ def _migrate_position(p: dict) -> dict:
     p.setdefault("asset_class", "equity")
     p.setdefault("venue", "t212")
     p.setdefault("execution", "paper")
-    p.setdefault("play_type", None)
     if "instrument" not in p:
         p["instrument"] = p.pop("stooq_symbol", None)
     return p
@@ -1199,9 +824,9 @@ def load_book() -> dict:
 
     If book.json exists it is authoritative. Otherwise, if the legacy
     paper-book.json exists, its positions are stamped into the polymorphic
-    shape (asset_class/venue/execution/instrument/play_type) and written to
-    book.json; the legacy file is left in place as a backup. A missing pair
-    yields the empty-book shape.
+    shape (asset_class/venue/execution/instrument) and written to book.json;
+    the legacy file is left in place as a backup. A missing pair yields the
+    empty-book shape.
     """
     if BOOK_FILE.exists():
         return _load_json_or(BOOK_FILE, {"positions": []})
@@ -1246,15 +871,9 @@ def save_watchlist(wl: dict) -> None:
 def resolve_watch_entry(token: str, asset_class: str | None = None) -> dict | None:
     """Resolve a /watch token into a watchlist entry, or None if unresolvable.
 
-    Inference order is crypto → equity. Prediction is never inferred (a market
-    can't be guessed from a ticker-shaped token): it needs an explicit class and a
-    market id, validated via polygram_market.
+    Inference order is crypto → equity.
     """
     token = token.strip()
-    if asset_class == "prediction":
-        if polygram_market(token) is None:
-            return None
-        return {"raw": token, "asset_class": "prediction", "instrument": token}
     if asset_class in (None, "crypto"):
         pair = resolve_kraken_pair(token, load_crypto_ticker_overrides())
         if pair:
@@ -1444,7 +1063,6 @@ def _floor_for(asset_class: str) -> float:
     return {
         "equity": common.VOL_FLOOR_EQUITY,
         "crypto": common.VOL_FLOOR_CRYPTO,
-        "prediction": common.VOL_FLOOR_PREDICTION,
     }.get(asset_class, 0.0)
 
 
@@ -1484,132 +1102,30 @@ def _close_position_at_market(p: dict, day: str, reason: str) -> bool:
     return True
 
 
-def _pg_match_pass(signals: list) -> tuple[list, list]:
-    """Search PolyGram and matcher-rank the day's signals once: (candidates, matches).
-
-    This is the expensive step of the prediction seam — one PolyGram search per
-    entity token plus a single Claude matcher call — and it is deliberately run
-    ONCE per collect and shared by the paper and live open paths.
-
-    Sharing is a correctness requirement, not just a cost saving: the matcher is
-    nondeterministic, so two passes over the same signals can return different
-    match sets. When they diverge, a paper row for a market is no evidence that
-    Sleeve A ever considered it, and the paper book stops being a usable read on
-    what the live sleeve is doing.
-    """
-    candidates = _gather_pg_candidates(signals)
-    if not candidates:
-        return [], []
-    return candidates, run_prediction_matcher(signals, candidates)
-
-
-def _open_prediction_positions(
-    book: dict, signals: list, today: str, open_keys: set, match_pass=None
-) -> int:
-    """Match the day's signals to live PolyGram markets and open paper positions.
-
-    Creds-gated (no-op when PolyGram is unconfigured, so unit tests never hit the
-    network). Opens one long-the-held-side position per match above the similarity
-    floor, deduped by market, priced at the live held-side mark. Returns the count.
-
-    `match_pass` is the shared (candidates, matches) tuple from _pg_match_pass;
-    when omitted the function runs its own pass, which keeps it usable standalone.
-    """
-    if not (POLYGRAM_EMAIL and POLYGRAM_PASSWORD):
-        log.info("PolyGram not configured — skipping prediction matching")
-        return 0
-    candidates, matches = (
-        match_pass if match_pass is not None else _pg_match_pass(signals)
-    )
-    if not candidates:
-        log.info("No PolyGram candidates today")
-        return 0
-    opened = 0
-    for mt in matches:
-        if mt["similarity"] < PG_SIMILARITY_FLOOR:
-            continue
-        mid, side = mt["market_id"], mt["side"]
-        key = ("prediction", mid, "bullish")
-        if key in open_keys:
-            continue  # dedup: a position for this market is already open
-        m = polygram_market(mid)
-        parsed = _parse_pg_market(m) if m is not None else None
-        if parsed is None or parsed["closed"]:
-            log.warning(f"Prediction skip: market {mid} unfetchable/closed")
-            continue
-        side_index = 0 if side == "YES" else 1
-        price = parsed["prices"][side_index]
-        if price is None or price <= 0:
-            log.warning(f"Prediction skip: non-positive price for {mid} ({side})")
-            continue
-        play_type = mt["play_type"]
-        book["positions"].append(
-            {
-                "id": f"{today}:prediction:{mid}:{side}",
-                "opened": today,
-                "asset_class": "prediction",
-                "venue": "polygram",
-                "execution": "paper",
-                "ticker": mid,
-                "instrument": mid,
-                "play_type": play_type,
-                "outcome": _pg_outcome_label(parsed, side_index),
-                "side_index": side_index,
-                "token_id": parsed["token_ids"][side_index]
-                if len(parsed["token_ids"]) > side_index
-                else None,
-                "target": mt["target"] if play_type == "momentum" else None,
-                "direction": "bullish",  # always long the held side (long-sense return)
-                "confidence": None,
-                "topic": parsed["question"],
-                "thesis_ref": None,
-                "rationale": f"matched (similarity={mt['similarity']})",
-                "source_id": None,
-                "source_kind": "unknown",
-                "source_perspective": None,
-                "entry_price": price,
-                "entry_date": today,
-                "status": "open",
-                "close_reason": None,
-                "closed_date": None,
-                "checkpoints": {},
-                "last_mark": None,
-                "realized_return": None,
-            }
-        )
-        _stamp_open_benchmark(book["positions"][-1])
-        open_keys.add(key)
-        opened += 1
-    return opened
-
-
 def mode_paper():
     """Open paper positions from today's signals. Pure simulation — no money, no orders.
 
     Equity/crypto: each medium/high-confidence directional signal with a resolvable
     instrument opens one notional position (deduped per asset_class+ticker+direction),
-    priced via Stooq/Kraken. Prediction: the Claude matcher maps ALL of today's signals
-    to live PolyGram markets (creds-gated) and opens long-the-held-side positions.
-    Unmappable/unpriced/macro signals are skipped and logged. MtM + close run weekly.
+    priced via Stooq/Kraken. Unmappable/unpriced/macro signals are skipped and
+    logged. MtM + close run weekly.
 
     The whole load->open->save span runs under the book lock so a concurrent /close
     (commands mode) can't clobber this collect run's writes (see BOOK_LOCK_TIMEOUT).
 
-    Returns {"opened": int, "sleeve_a": status|None} — the caller renders the Sleeve-A
-    status into the daily Telegram message, since the live sleeve's reasons for not
-    trading are invisible in the book by construction.
+    Returns {"opened": int}.
     """
     log.info("=== PAPER ===")
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     snap_path = SIGNALS_DIR / f"signals-{today}.json"
     if not snap_path.exists():
         log.info("No signals snapshot for today — nothing to paper-trade")
-        return {"opened": 0, "sleeve_a": None}
+        return {"opened": 0}
 
     signals = json.loads(snap_path.read_text()).get("signals", [])
     if not signals:
         log.info("No signals today — nothing to paper-trade")
-        return {"opened": 0, "sleeve_a": None}
+        return {"opened": 0}
 
     leakage = {
         "traded": 0,
@@ -1699,7 +1215,6 @@ def mode_paper():
                         "execution": "paper",
                         "ticker": ticker,
                         "instrument": symbol,
-                        "play_type": None,
                         "direction": direction,
                         "confidence": s.get("confidence"),
                         "topic": s.get("topic"),
@@ -1725,23 +1240,10 @@ def mode_paper():
         else:
             log.info("No actionable equity/crypto signals today")
 
-        # One search + one matcher call, shared by both open paths (see _pg_match_pass).
-        # Creds-guarded here so an unconfigured host never touches the network.
-        match_pass = (
-            _pg_match_pass(signals)
-            if (POLYGRAM_EMAIL and POLYGRAM_PASSWORD)
-            else ([], [])
-        )
-        opened += _open_prediction_positions(
-            book, signals, today, open_keys, match_pass
-        )
-
-        sleeve_a = None
-
         save_book(book)
         _record_leakage(today, leakage)
         log.info(f"Opened {opened} paper position(s)")
-        return {"opened": opened, "sleeve_a": sleeve_a}
+        return {"opened": opened}
 
 
 def _snap_close(closes: dict[str, float], target_date: str) -> float | None:
@@ -1791,7 +1293,7 @@ def _record_checkpoints(
     Each checkpoint is priced at the close on its true crossing date
     (entry_date + threshold) when available in `closes` (price_basis="historical");
     otherwise it falls back to the current mark price/return (price_basis="current").
-    `closes` is {} for prediction and for runs where nothing newly crossed.
+    `closes` is {} for runs where nothing newly crossed.
     """
     entry = datetime.strptime(p["entry_date"], "%Y-%m-%d").date()
     for label, threshold in PAPER_HORIZONS.items():
@@ -1819,17 +1321,19 @@ def mark_to_market(book: dict, today_str: str) -> dict:
     """Mark every open position to market, record crossed horizon checkpoints, close on trigger.
 
     Mutates and returns the book. Equity/crypto: record 1w/2w/4w checkpoints, close at 4w.
-    Prediction: dispatched to _mtm_prediction (held-side mark + play_type close trigger).
     A position whose price can't be fetched is left open and retried next run.
     """
     today = datetime.strptime(today_str, "%Y-%m-%d").date()
+    retired_open = 0
     for p in book["positions"]:
         if p["status"] != "open":
             continue
-        if p.get("execution") == "live":
-            continue  # live rows exit via the hourly sweep, never the weekly measurement path
         if p.get("asset_class") == "prediction":
-            _mtm_prediction(p, today, today_str)
+            # Retired venue (2026-09-11): no price source exists for this class.
+            # scripts/retire_prediction_rows.py closes these; until it has run
+            # they are left exactly as they are, and counted so the skip is
+            # attributable rather than silent.
+            retired_open += 1
             continue
         price = price_position(p)
         if price is None:
@@ -1865,52 +1369,9 @@ def mark_to_market(book: dict, today_str: str) -> dict:
             p["closed_date"] = today_str
             p["realized_return"] = p["checkpoints"][PAPER_CLOSE_HORIZON]["return"]
             _stamp_close_metrics(p, today_str)
+    if retired_open:
+        log.warning(
+            f"{retired_open} prediction row(s) still open — the venue is retired; "
+            "run scripts/retire_prediction_rows.py"
+        )
     return book
-
-
-def _settle_prediction(p: dict, day: str, ret: float, reason: str):
-    """Close a prediction position with the given return and reason.
-
-    The mark price is intentionally not a parameter: the caller has already
-    written p["last_mark"] before settling, so this only flips status/return.
-    """
-    p["status"] = "closed"
-    p["close_reason"] = reason
-    p["closed_date"] = day
-    p["realized_return"] = ret
-    _stamp_close_metrics(p, day)
-
-
-def _mtm_prediction(p: dict, today, today_str: str):
-    """Mark + (maybe) close one open prediction position from a single market-detail fetch.
-
-    Held-side mark = outcomePrices[side_index]; return is long-sense (you hold the token).
-    Close trigger forks by play_type:
-      momentum  → close at target-cross (held price >= target) else 4w horizon backstop.
-      resolution→ hold to settlement (closed & uma 'resolved'); PG_MAX_HOLD_DAYS backstop.
-    Left open (retried next run) if the market can't be fetched/parsed.
-    """
-    m = polygram_market(p["instrument"])
-    parsed = _parse_pg_market(m) if m is not None else None
-    if parsed is None:
-        log.warning(f"MtM kept open (no price): prediction {p['instrument']}")
-        return
-    price = parsed["prices"][p["side_index"]]
-    ret = _signal_return(
-        "bullish", p["entry_price"], price
-    )  # always long the held side
-    p["last_mark"] = {"date": today_str, "price": price, "return": ret}
-    days_open = (today - datetime.strptime(p["entry_date"], "%Y-%m-%d").date()).days
-    _record_checkpoints(p, today_str, price, ret, days_open, {})
-
-    if p["play_type"] == "resolution":
-        if parsed["closed"] and parsed["uma_status"] == "resolved":
-            _settle_prediction(p, today_str, ret, "settlement")
-        elif days_open >= PG_MAX_HOLD_DAYS:
-            _settle_prediction(p, today_str, ret, "max_hold")
-    else:  # momentum
-        target = p.get("target")
-        if target is not None and price >= target:
-            _settle_prediction(p, today_str, ret, "target")
-        elif PAPER_CLOSE_HORIZON in p["checkpoints"]:
-            _settle_prediction(p, today_str, ret, "horizon")

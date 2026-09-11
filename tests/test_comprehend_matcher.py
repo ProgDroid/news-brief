@@ -1,9 +1,9 @@
 """Surface-form matching rules.
 
-Every rule here exists because of a recorded failure. PolyGram's substring
-search made `MU` match "Musk" (news-brief polygram-candidate-search-fix), and a
-geopolitics corpus answers "who is DISCUSSED" when you ask "who is PRESENT".
-These are not stylistic choices.
+Every rule here exists because of a recorded failure. A substring search
+elsewhere in this repo (a now-retired trading venue's candidate search) made
+`MU` match "Musk", and a geopolitics corpus answers "who is DISCUSSED" when
+you ask "who is PRESENT". These are not stylistic choices.
 """
 
 import pytest
@@ -44,9 +44,10 @@ def test_a_long_form_matches_on_a_word_boundary():
 
 
 def test_a_long_form_does_NOT_match_inside_a_word():
-    """Substring matching is the recorded PolyGram bug. 'Iran' must not match
-    'Iranian-adjacent' via a bare `in` check -- it matches here only because a
-    hyphen is a word boundary, so use a word that truly embeds it."""
+    """Substring matching is the recorded bug (see module docstring). 'Iran'
+    must not match 'Iranian-adjacent' via a bare `in` check -- it matches here
+    only because a hyphen is a word boundary, so use a word that truly embeds
+    it."""
     assert not comprehend.form_matches("Iran", "the tiranian delegation")
 
 

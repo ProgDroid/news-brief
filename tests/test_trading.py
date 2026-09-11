@@ -45,7 +45,6 @@ def test_legacy_book_migrates_in_place(tmp_path, monkeypatch):
     assert p["venue"] == "t212"
     assert p["execution"] == "paper"
     assert p["instrument"] == "aapl.us"  # renamed from stooq_symbol
-    assert p["play_type"] is None
     assert "stooq_symbol" not in p
     assert book_file.exists()  # migrated copy written
     assert legacy_file.exists()  # original kept as backup
@@ -68,7 +67,6 @@ def test_stamp_open_benchmark_equity(monkeypatch):
     p = {"asset_class": "equity"}
     trading._stamp_open_benchmark(p)
     assert p["benchmark_entry"] == 5000.0
-    assert p["entry_spread"] is None
 
 
 def test_stamp_open_benchmark_best_effort(monkeypatch):
@@ -90,7 +88,6 @@ def _closed_equity(**kw):
         "direction": "bullish",
         "realized_return": 0.10,
         "benchmark_entry": 100.0,
-        "play_type": None,
     }
     p.update(kw)
     return p
@@ -131,42 +128,6 @@ def test_stamp_close_metrics_benchmark_fetch_failure(monkeypatch):
     assert p["net_return"] is not None
     assert p["benchmark_return"] is None
     assert p["edge"] is None
-
-
-def test_stamp_close_metrics_prediction_resolution():
-    import trading
-
-    p = {
-        "ticker": "mkt1",
-        "asset_class": "prediction",
-        "play_type": "resolution",
-        "realized_return": 0.30,
-        "entry_spread": 0.02,
-        "benchmark_entry": None,
-    }
-    trading._stamp_close_metrics(p, "2026-06-14")
-    # resolution settles at 1/0 — entry spread only, no exit leg
-    assert p["haircut"] == 0.02
-    assert abs(p["net_return"] - 0.28) < 1e-9
-    assert p["benchmark_return"] == 0.0  # naive coin-flip baseline
-    assert abs(p["edge"] - 0.28) < 1e-9
-
-
-def test_stamp_close_metrics_prediction_momentum_fallback():
-    import trading
-
-    p = {
-        "ticker": "mkt2",
-        "asset_class": "prediction",
-        "play_type": "momentum",
-        "realized_return": 0.10,
-        "entry_spread": None,
-        "benchmark_entry": None,
-    }
-    trading._stamp_close_metrics(p, "2026-06-14")
-    bps = common.HAIRCUT_BPS_PREDICTION / 10_000
-    assert abs(p["haircut"] - 2 * bps) < 1e-9  # entry fallback + exit bps
-    assert abs(p["net_return"] - (0.10 - 2 * bps)) < 1e-9
 
 
 def test_equity_daily_move_open_to_last(monkeypatch):
@@ -404,26 +365,6 @@ def _equity_open(**over):
     return p
 
 
-def test_prediction_total_loss_cannot_exceed_minus_100pct():
-    """B3: a long-only stake can lose the stake and no more.
-
-    The venue's half-spread is already inside the price paid, so subtracting it
-    again pushed 11 of 56 closed predictions below -100% (worst: -116.29%).
-    """
-    import trading
-
-    p = {
-        "ticker": "mkt1",
-        "asset_class": "prediction",
-        "play_type": "momentum",
-        "realized_return": -1.0,  # settled worthless
-        "entry_spread": 0.14285714285714288,  # a real 10c-wide book
-        "benchmark_entry": None,
-    }
-    trading._stamp_close_metrics(p, "2026-08-16")
-    assert p["net_return"] == -1.0
-
-
 def test_equity_short_may_still_lose_more_than_100pct(monkeypatch):
     """The B3 floor is for long-only instruments; a short has unbounded loss."""
     import trading
@@ -609,3 +550,73 @@ def test_contrary_signal_opens_once_the_position_has_closed(monkeypatch, tmp_pat
     assert len(positions) == 2
     assert positions[-1]["direction"] == "bearish"
     assert positions[-1]["status"] == "open"
+
+
+# --- prediction-venue retirement (2026-09-11) ---------------------------------
+
+
+def test_mode_paper_returns_a_summary_when_there_is_nothing_to_do(
+    monkeypatch, tmp_path
+):
+    """mode_collect does `summary = mode_paper() or {}`; a bare int or None there
+    is a TypeError on a quiet day."""
+    monkeypatch.setattr(trading, "SIGNALS_DIR", tmp_path)
+    assert trading.mode_paper() == {"opened": 0}
+
+
+def test_mark_to_market_leaves_a_retired_prediction_row_alone_and_says_so(
+    monkeypatch, caplog
+):
+    """No price source exists for the class any more. The row is not priced, not
+    closed, and the weekly run says how many are waiting for the retire script --
+    a silent skip would be unattributable (fail-closed-needs-status-not-count)."""
+    caplog.set_level("WARNING", logger="newsbrief")
+    monkeypatch.setattr(trading, "fetch_price", lambda *a, **k: pytest.fail("priced"))
+    row = {
+        "status": "open",
+        "asset_class": "prediction",
+        "instrument": "3324624",
+        "ticker": "3324624",
+        "direction": "bullish",
+        "entry_price": 0.4,
+        "entry_date": "2026-08-20",
+        "checkpoints": {},
+        "last_mark": None,
+    }
+    book = trading.mark_to_market({"positions": [row]}, "2026-09-12")
+    assert book["positions"][0]["status"] == "open"
+    assert any("1 prediction row(s) still open" in r.message for r in caplog.records)
+
+
+def test_collect_trading_failure_does_not_duplicate_brief(monkeypatch):
+    import brief
+
+    calls = {"deliver": 0, "cleared": 0}
+    monkeypatch.setattr(brief, "load_state", lambda: {"batch_id": "b1"})
+    monkeypatch.setattr(brief, "poll_batch", lambda bid: "RAW")
+    monkeypatch.setattr(brief, "extract_signals", lambda raw, **kw: ([], "ok"))
+    monkeypatch.setattr(brief, "normalize_signals", lambda raw: ([], []))
+    monkeypatch.setattr(
+        brief,
+        "deliver",
+        lambda *a, **k: calls.__setitem__("deliver", calls["deliver"] + 1),
+    )
+    monkeypatch.setattr(brief, "save_signals", lambda *a, **k: None)
+    monkeypatch.setattr(
+        brief,
+        "clear_batch_state",
+        lambda: calls.__setitem__("cleared", calls["cleared"] + 1),
+    )
+    monkeypatch.setattr(brief, "telegram_alert", lambda *a, **k: None)
+
+    def _boom():
+        raise RuntimeError("quote provider down")
+
+    monkeypatch.setattr(brief, "mode_paper", _boom)
+
+    brief.mode_collect()  # must NOT raise
+
+    assert calls["deliver"] == 1  # brief delivered exactly once
+    assert (
+        calls["cleared"] == 1
+    )  # batch cleared despite the trading failure -> no re-collect
