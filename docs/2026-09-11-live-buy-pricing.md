@@ -1,7 +1,7 @@
 # What a live buy actually costs: the venue rule the book never saw
 
 2026-09-11. Beads: `news-brief-rhg` (fix built; closes when the repair below has run),
-`news-brief-p3v` (measured — the question it asked is answered), `news-brief-9tq` (redirected).
+`news-brief-p3v` (measured — the question it asked is answered), `news-brief-9tq` (measured — six payouts; repair below).
 
 ## The measurement
 
@@ -98,12 +98,28 @@ will, against the corrected cost). Anything else — a tenth live row, a stake t
 $2, a recorded proceeds figure that disagrees with the venue's history — is a **refusal**
 (exit 2), and a second run refuses because the rows now carry `fill_price`.
 
-## The seven legacy rows (`9tq`, redirected)
+## The six resolved rows (`9tq`, measured)
 
-They resolved at the venue. `/trade/history` holds **5 orders in total** and a resolution
-is not an order, so no field-name fix will ever backfill them. Their value is in the
-wallet's payout lines: for each of the seven markets, either a credit of `shares × $1`
-(≈ $2.02) or nothing. That is a recognition task for the operator, not a probe.
+The remaining legacy rows — 3324624, 2910437, 3348047, 3399428, 2910438, 3491476 —
+resolved at the venue. `/trade/history` holds **5 orders in total** and a resolution is not
+an order, so no field-name fix could ever have backfilled them. The operator read the
+wallet history on 2026-09-11: **six payout credits of ~$2.02, one per market.** Every one
+of them won.
+
+Every one of them lost money. `shares × $1.00` (2.022–2.026) against the $2.06 debited is
+**−1.6% to −1.9% on a winning trade** — the buy rule above, measured at resolution.
+
+```sh
+# after repair_live_cost_basis.py has been applied; refuses otherwise
+docker compose run --rm newsbrief-monitor \
+  python scripts/repair_settled_payouts.py /app/logs/paper/book.json
+docker compose run --rm newsbrief-monitor \
+  python scripts/repair_settled_payouts.py /app/logs/paper/book.json --apply
+```
+
+Pre-registered: **6 row(s) valued**, each `realized_return ≈ −0.018`, `last_mark.price 1.0`,
+`proceeds = shares`. The complete live track record is then nine trades, nine losses:
+six wins at −1.8%, three sales at −8.6 / −12.5 / −16.3%.
 
 ## Timestamps
 
