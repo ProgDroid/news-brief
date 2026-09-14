@@ -1,6 +1,6 @@
 # The §8.2 corroboration gate: what it should measure before it fires
 
-**Bead:** `news-brief-yxd` · **Date:** 2026-09-14 · **Status: PROPOSED — not yet the decision of record**
+**Bead:** `news-brief-yxd` · **Date:** 2026-09-14 · **Status: ACCEPTED 2026-09-14** by the operator; amended into spec §8.2 as Amendment 1 and implemented in `scripts/score_comprehension.py`.
 
 `news-brief-bqa.11` holds a one-shot pre-registered gate
 (`scripts/score_comprehension.py`) that has never run against production data.
@@ -132,15 +132,40 @@ If that is unacceptable, the alternative is to stop treating corroboration as a
 gate at all and keep it as a reported observable — option (1)'s honesty without
 spending the one-shot. That option is live and is not obviously worse.
 
-## 5. What happens next
+## 5. What shipped
 
-`bqa.11` stays blocked until this is accepted. On acceptance:
+Accepted 2026-09-14. Done in this change:
 
-- Amend §8.2 in `docs/superpowers/specs/2026-09-04-comprehension-pipeline-design.md`
-  with §4 above, dated, including the "changed after seeing data" paragraph verbatim.
-- Teach `run_gate` to take the cutover and horizon, and to report **not measurable**
-  rather than FAIL when the cohort is too young — the discipline
-  `score_match_rate_corroboration` already keeps.
-- Fire the gate with the cutover set to the **pg_trgm deploy** (`9c40935`), which
-  needs the deploy timestamp read on the host, not inferred — `bqa.19` §3 is the
-  record of what inferring it costs. Allow ~13h of elapsed post-cutover events.
+- **§8.2 Amendment 1** in `docs/superpowers/specs/2026-09-04-comprehension-pipeline-design.md`,
+  dated, leading with the "changed after seeing data" paragraph so no future cohort
+  pass reads as the pre-registered test passing.
+- **`gate_corroboration`** in `scripts/score_comprehension.py`: the outlet direction
+  measures one cohort `[cutover, now − horizon)`; the 10% floor and 60% ceiling are
+  unchanged; too-soon or empty reports NOT MEASURABLE, never 0.0.
+- **The gate refuses without a cutover** rather than falling back to the whole-KB
+  rate, and takes exactly one `--horizon-hours` (the horizon is not pre-registered).
+- **`summarize`** gives three outcomes: PASSED, FAILED, and **NOT RESOLVED** — the
+  last for a run where every non-pass was unmeasured. Still a non-zero exit.
+- Nine tests, each checked by mutation: reverting the gate to the whole-KB rate
+  fails exactly 3, reporting not-measurable as a 0.0 floor failure fails exactly 2,
+  and a silent whole-KB fallback with no cutover fails exactly 2 — counts
+  pre-registered before the mutations were run.
+
+## 6. What is still outstanding
+
+`bqa.11` is now unblocked in code but needs two things this repo cannot supply:
+
+- **The cutover, read on the host**, not inferred: the instant the pg_trgm image
+  (`9c40935`) began serving. `bqa.19` §3 is the record of what inferring it costs —
+  a confident wrong table off a migration timestamp that predated the change by 3h27m.
+- **~13h of elapsed post-cutover events** before a 6h horizon has anything to measure.
+
+Then:
+
+```sh
+docker compose run --rm --entrypoint python newsbrief \
+    scripts/score_comprehension.py --cutover <ISO8601> --horizon-hours 6
+```
+
+A NOT RESOLVED verdict is the expected outcome if the cohort is thin, and it is the
+correct one — it does not spend anything.

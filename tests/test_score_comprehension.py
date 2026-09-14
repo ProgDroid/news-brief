@@ -116,7 +116,12 @@ def test_empty_kb_fails_naming_each_unmeasured_check(kb):
     assert "events.type" in failures
     assert "events.commitment_state" in failures
     assert "assertions.standing" in failures
-    assert "corroboration: no events" in failures
+    # The outlet direction used to report "corroboration: no events" from the
+    # whole-KB rate. It is cohort-scoped as of 2026-09-14 (news-brief-yxd), so
+    # with no cutover it refuses instead of measuring the retired quantity.
+    assert any("no cutover given" in f for f in failures)
+    # The match-rate direction is a write-path ratio rather than a corpus
+    # rate, so the amendment does not touch it.
     assert "match-rate corroboration: no assertions" in failures
 
 
@@ -408,3 +413,148 @@ def test_sweep_names_the_nesting_between_horizons(kb, capsys):
     out = capsys.readouterr().out
     assert "NESTED, not independent" in out
     assert "12h" in out and "6h" in out
+
+
+# --- The gate becomes cohort-scoped (news-brief-yxd, 2026-09-14) -----------
+#
+# §8.2's floor was pre-registered against the CUMULATIVE whole-KB rate. That
+# quantity is confounded by ranking generation: the corpus was built under
+# three candidate rankings whose batched recall@30 differs threefold, and the
+# rate drifts DOWN as the corpus grows, so a fixed floor on it gets harder to
+# clear however good the pipeline becomes. The gate now measures one cohort
+# created after a named cutover. See
+# docs/2026-09-14-corroboration-gate-decision.md.
+
+
+def _event_with_outlets(kb, created_at, n_outlets):
+    """An event at `created_at` asserted by `n_outlets` DISTINCT outlets, each
+    assertion sharing the event's timestamp so any exposure horizon keeps it.
+    """
+    ev = _event_at(kb, created_at)
+    for i in range(n_outlets):
+        item = _item(kb, outlet_name=f"Outlet{next(_item_seq)}_{i}")
+        _assertion_at(kb, item, ev, created_at)
+    return ev
+
+
+# 21. The gate refuses to measure without a cutover, exactly as --cohorts
+# does. A gate that silently fell back to the whole KB would be measuring the
+# confounded quantity this change exists to retire -- and it would look like a
+# real verdict.
+def test_gate_refuses_to_measure_corroboration_without_a_cutover(kb):
+    _event_with_outlets(kb, BASE - timedelta(hours=48), 2)
+    kb.commit()
+    failures = sc.run_gate(kb)
+    assert any("cutover" in f for f in failures)
+    assert not any("below the" in f for f in failures)
+
+
+# 22. Too soon after the cutover for any event to have lived out the horizon
+# reports a REASON, never a rate. "Not measurable" is not 0.0, and 0.0 would
+# read as the event layer having bought nothing.
+def test_gate_cohort_too_young_is_not_measurable_rather_than_a_floor_failure(kb):
+    _event_with_outlets(kb, BASE - timedelta(hours=1), 1)
+    kb.commit()
+    verdict = sc.gate_corroboration(
+        kb, cutover=BASE - timedelta(hours=2), horizon_hours=6, now=BASE
+    )
+    assert verdict["status"] == "not_measurable"
+    assert "0.0%" not in verdict["reason"]
+    assert "floor" not in verdict["reason"]
+
+
+# 23. Same discipline for a cohort that is old enough but EMPTY: no events in
+# the window is an absence of measurement, not a rate of zero.
+def test_gate_empty_cohort_is_not_measurable_rather_than_zero(kb):
+    _event_with_outlets(kb, BASE - timedelta(hours=96), 2)
+    kb.commit()
+    verdict = sc.gate_corroboration(
+        kb, cutover=BASE - timedelta(hours=48), horizon_hours=6, now=BASE
+    )
+    assert verdict["status"] == "not_measurable"
+    assert verdict["total"] == 0
+    assert "0.0%" not in verdict["reason"]
+
+
+# 24. THE DISCRIMINATING PAIR. A KB whose WHOLE-KB rate sits comfortably
+# inside the band, and whose post-cutover cohort is uncorroborated, must FAIL.
+# Reading the whole KB instead of the cohort passes this KB, so this test is
+# what separates the two implementations.
+def test_gate_reads_the_cohort_and_fails_where_the_whole_kb_would_pass(kb):
+    for _ in range(6):
+        _event_with_outlets(kb, BASE - timedelta(hours=48), 2)
+    for _ in range(14):
+        _event_with_outlets(kb, BASE - timedelta(hours=48), 1)
+    for _ in range(10):
+        _event_with_outlets(kb, BASE - timedelta(hours=12), 1)
+    kb.commit()
+
+    whole_rate, _, _ = sc.corroboration_by_outlet(kb)
+    assert sc.CORROBORATION_FLOOR <= whole_rate <= sc.CORROBORATION_CEILING
+
+    verdict = sc.gate_corroboration(
+        kb, cutover=BASE - timedelta(hours=24), horizon_hours=6, now=BASE
+    )
+    assert verdict["status"] == "fail"
+    assert verdict["total"] == 10
+    assert "floor" in verdict["reason"]
+
+
+# 25. The other direction of the same discrimination: a whole-KB rate BELOW
+# the floor whose cohort clears it must PASS. Without this, a gate that simply
+# always failed would satisfy test 24.
+def test_gate_reads_the_cohort_and_passes_where_the_whole_kb_would_fail(kb):
+    for _ in range(30):
+        _event_with_outlets(kb, BASE - timedelta(hours=48), 1)
+    for _ in range(3):
+        _event_with_outlets(kb, BASE - timedelta(hours=12), 2)
+    for _ in range(7):
+        _event_with_outlets(kb, BASE - timedelta(hours=12), 1)
+    kb.commit()
+
+    whole_rate, _, _ = sc.corroboration_by_outlet(kb)
+    assert whole_rate < sc.CORROBORATION_FLOOR
+
+    verdict = sc.gate_corroboration(
+        kb, cutover=BASE - timedelta(hours=24), horizon_hours=6, now=BASE
+    )
+    assert verdict["status"] == "pass"
+    assert verdict["total"] == 10
+
+
+# 26. The over-merge ceiling is untouched by cohort scoping. It is the mirror
+# failure and it presents as success, so it has to survive the change that
+# only the floor direction motivated.
+def test_gate_cohort_above_the_ceiling_still_fails_as_over_merging(kb):
+    for _ in range(9):
+        _event_with_outlets(kb, BASE - timedelta(hours=12), 2)
+    _event_with_outlets(kb, BASE - timedelta(hours=12), 1)
+    kb.commit()
+    verdict = sc.gate_corroboration(
+        kb, cutover=BASE - timedelta(hours=24), horizon_hours=6, now=BASE
+    )
+    assert verdict["status"] == "fail"
+    assert "ceiling" in verdict["reason"]
+
+
+# 27. A gate that did not resolve is not a gate that passed, and it is not a
+# gate that failed either. Reporting an unmeasured run as "FAILED" would read
+# as a verdict on the event layer that nothing measured.
+def test_unresolved_is_reported_as_neither_passed_nor_failed():
+    line = sc.summarize([sc.NOT_MEASURABLE + ": cohort too young"])
+    assert "NOT RESOLVED" in line
+    assert "PASSED" not in line
+    assert "FAILED" not in line
+
+
+# 28. One real failure alongside an unmeasured check is still a FAILED gate:
+# the unresolved one must not launder it.
+def test_a_real_failure_outranks_an_unmeasured_check():
+    line = sc.summarize([sc.NOT_MEASURABLE + ": cohort too young", "events.type"])
+    assert "FAILED" in line
+    assert "NOT RESOLVED" not in line
+
+
+# 29. And an empty failure list is still a pass.
+def test_no_failures_is_a_pass():
+    assert "PASSED" in sc.summarize([])

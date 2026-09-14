@@ -649,6 +649,60 @@ while recall went 100%→42.9% — and the gate said nothing.
 Report `events_matched / (events_matched + events_created)` beside the headline. If the two
 disagree, trust the disagreement (`the-probe-measured-the-wrong-layer`).
 
+#### Amendment 1 — the floor applies to a COHORT (2026-09-14, `news-brief-yxd`)
+
+**The quantity changed after seeing the data. The threshold did not.** Stating that plainly
+is the point of this amendment: a future cohort run that clears 10% **must not be read as
+the pre-registered test passing**. The test as originally written — the cumulative whole-KB
+rate against a 10% floor — **fails**, at ~6.4%, and that result stands.
+
+What is claimed is narrower: the original quantity is confounded in a way that was not
+visible on 2026-09-04. The corpus was built under three candidate rankings whose batched
+`recall@30` — the probability a duplicate is ever *offered*, and so the hard ceiling on any
+corroboration the matcher can record — differs threefold:
+
+| ranking | shipped | batched `recall@30` |
+|---|---|---:|
+| recency | original | 15% |
+| entity overlap | `51c850c`, 2026-09-08 | 27.5% |
+| pg_trgm similarity | `9c40935`, 2026-09-09 | 44.0% |
+
+Essentially every event in the measured rate was created under the first two, and the rate
+**drifts down as the corpus grows** — 6.64% → 6.49% → 6.43% — so waiting makes the floor
+harder to clear however good the pipeline gets. A FAIL on it is attributable to two retired
+rankings, which is a verdict on nothing. `news-brief-bqa.18` named this defect — *a fixed
+floor on a cumulative non-stationary quantity* — before any of the ceiling work existed.
+
+Note what does **not** justify this: the 6.7% "ceiling" from `bqa.25`. That bead calls its
+own figure **a floor twice over** (union-find understates; the separator sees ~13% of
+positives), so it bounds what merging *one weak detector's* duplicates would buy, not
+corroboration in principle. It cannot license a new threshold, which is why none is taken.
+
+**What the gate now does** (`gate_corroboration`):
+
+- The outlet direction measures **one cohort**, `[cutover, now − horizon)`, every event
+  scored over the same slice of its own life so event age is held constant.
+- **The 10% floor and the 60% ceiling are unchanged.** Only the population moved.
+- **A cutover is required**; the gate refuses rather than falling back to the whole-KB rate,
+  for the reason `--cohorts` already refuses (§3 of the cohort write-up: a ledger dates
+  migrations, not commits).
+- **Exactly one `--horizon-hours`.** The horizon is *not* pre-registered — it is a free
+  parameter, which is why the observation mode sweeps it. A gate renders one verdict, so it
+  takes one deliberate value.
+- Too soon, or an empty window, reports **NOT MEASURABLE** — never a rate of 0.0, and never
+  a floor failure. `summarize` reports such a run as **GATE NOT RESOLVED**, which is neither
+  a pass nor a fail, and still a non-zero exit.
+
+**The caveat this does not remove.** `corroboration_by_outlet` **moves with news volume**,
+and any two windows differ in volume (the clean-anchor cohorts differed by 37%). An absolute
+floor on a volume-sensitive quantity stays shaky, so a cohort landing near 10% should be
+read as *not resolved*, not as a pass or a fail. The gate prints this beside every measured
+result.
+
+**The match-rate direction is untouched** — it is a write-path ratio, not a corpus rate.
+
+Full argument: `docs/2026-09-14-corroboration-gate-decision.md`.
+
 ### 8.3 Volume and cost envelope
 
 Predicted items/day, material rate and $/day are written down **before** the first real run and
