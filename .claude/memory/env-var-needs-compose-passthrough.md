@@ -202,3 +202,47 @@ what they ask for, so fixing one while breaking another is a new episode rather 
 longer need them — the 18:16-startup case now prints itself. If a knob is misbehaving and the boot
 log says nothing, that is evidence the knob is NOT of this class, and worth spending on a
 different hypothesis rather than re-running the three queries.
+
+## 2026-09-22 — CORRECTION: a missing line does NOT freeze a default into a row
+
+The section above says a missing compose line "freezes a code default INTO A ROW" and that
+"the fix at that point is a `UPDATE settings`, not a redeploy". **That is wrong, and it was
+wrong when written** — not stale, wrong on the day.
+
+`import_settings_from_env` writes only knobs actually PRESENT and non-empty in the
+environment (`config.py:244`: `if raw is None or not raw.strip(): continue`), and that guard
+landed in `3797ecf` — the *same* 2026-09-02 commit that created the importer, so there was
+never a window in which the claim held. The guard's own comment states the reason outright:
+*"Writing every knob would freeze today's defaults into rows, and a later change to a default
+in code would then be silently overridden by a row nobody chose."* The code was explicitly
+designed against the thing the memory asserted it did.
+
+**What actually follows from an absent row.** `config.knob` resolves to the CODE DEFAULT
+(`config.py:210`), never to the environment. So:
+
+- **A NEW knob needs no host action at all.** No row exists, so its code default is live on
+  deploy. Measured 2026-09-22: `HOST_GAP_SECONDS` (5 → 15, `news-brief-goq`) and
+  `RECONCILE_TIMEOUT` (30 → 90, `news-brief-0p3`) both take effect on deploy alone. Reaching
+  for `UPDATE settings` here would have been work that changes nothing.
+- **A knob that already HAS a row needs a row write**, because the environment is never read
+  at resolution time. `COMPREHEND_ENABLED` is this case and its default is `False`, so it is
+  off until a row says otherwise whatever compose contains. `config.py:278` records that
+  confusion costing a rollout window: `COMPREHEND_ENABLED=1` in compose, no row, every pass
+  logging "disabled by COMPREHEND_ENABLED".
+- **A row write needs no restart** — `config.TTL_SECONDS` is 60.
+- The compose anchor still matters, but **only for a FRESH deployment's seed**. On this host,
+  seeded since Epic 7, editing compose changes nothing.
+
+So the two cases invert the advice: the *new* knob wants a deploy, the *existing* knob wants a
+row. The old text gave the row answer for both.
+
+**Why it was believable, which is the transferable part.** The claim was a plausible inference
+from a real mechanism ("the importer copies the environment once") that nobody checked against
+the importer's actual loop. It is `metadata-is-not-state` applied to my own memory corpus: a
+note states what a mechanism is *for*, and that is not the same as what its code does. Ask
+which line would have to exist for the claim to be true, then go and look for it.
+
+The working procedure built on the corrected version is
+`docs/2026-09-22-host-runbook-comprehension-restart.md`. See also
+[[newsbrief-flag-access-module-attr]] for the read side, and
+[[newsbrief-runtime-foundation-phase-1]].
