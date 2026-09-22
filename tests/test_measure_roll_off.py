@@ -153,6 +153,33 @@ def test_the_proposed_interval_is_a_fraction_of_turnover_and_clamped():
     assert proposed_interval_minutes(4800.0, safety=4, lo=10, hi=240) == 240
 
 
+def test_the_default_ceiling_is_captures_and_not_a_second_copy_of_it():
+    """news-brief-wa1. The three assertions above pass `hi` explicitly, so they
+    pin the CLAMP and say nothing about the default -- which is the number that
+    actually ships, because `feed_stats` calls this with turnover alone.
+
+    240 was retired: `poll_pairs` discards pairs wider than 1.5x nominal, so no
+    turnover figure behind these proposals is measured over more than 45
+    minutes, and capture caps a declared interval at 4x nominal for that reason.
+    A generator left holding the superseded number re-emits it at every future
+    run, and b42.5's rollout reads its OUTPUT -- so the stale value would be
+    pasted into a `poll_every_minutes` key, silently clamped by capture, and the
+    declared interval would then misstate the intent with nothing to say so.
+    """
+    import capture
+
+    assert proposed_interval_minutes(999_999.0) == capture.max_poll_interval_minutes()
+    assert proposed_interval_minutes(999_999.0) != 240
+
+
+def test_an_explicit_ceiling_still_wins_over_the_derived_one():
+    """The control. Deriving the default must not take away a caller's ability
+    to ask what a different ceiling would propose -- which is how the ceiling
+    decision was made in the first place.
+    """
+    assert proposed_interval_minutes(999_999.0, hi=77) == 77
+
+
 def test_the_budget_slows_every_feed_rather_than_dropping_any():
     """Cadence is not free -- 26 feeds at five minutes is ~7500 requests a day on
     one UA, and Nitter already 429s adjacent feeds. Over budget, every feed slows

@@ -139,6 +139,85 @@ def test_an_empty_feed_is_reported_as_empty_not_malformed(monkeypatch):
     assert brief.fetch_feed_entries(FEED).failure == "empty"
 
 
+def _raising(exc):
+    def _get(*a, **k):
+        raise exc
+
+    return _get
+
+
+def test_a_dns_failure_is_network_not_malformed(monkeypatch):
+    """news-brief-arm. "malformed" tells the operator the FEED is broken, which
+    sends them to the publisher. A name-resolution failure means the request
+    never left the box, and the remediation is the opposite: look at the host,
+    the container's DNS, or the Nitter service being down. The two were one
+    string because `_failure_for_exception` used "malformed" as its catch-all.
+    """
+    exc = brief.requests.ConnectionError(
+        "HTTPSConnectionPool(host='nitter', port=8080): Max retries exceeded "
+        "(Caused by NameResolutionError(...Failed to resolve 'nitter'...))"
+    )
+    monkeypatch.setattr(brief.requests, "get", _raising(exc))
+    got = brief.fetch_feed_entries(FEED)
+    assert got.entries == []
+    assert got.failure == "network"
+
+
+def test_a_refused_connection_is_network_not_malformed(monkeypatch):
+    monkeypatch.setattr(
+        brief.requests, "get", _raising(brief.requests.ConnectionError("refused"))
+    )
+    assert brief.fetch_feed_entries(FEED).failure == "network"
+
+
+def test_a_certificate_failure_is_tls_not_network(monkeypatch):
+    """SSLError SUBCLASSES ConnectionError, so the network branch would swallow
+    it unless TLS is tested first. It earns its own kind because its remediation
+    is unique: `source-fetch-failure-modes` records presstv.ir shipping a REVOKED
+    certificate, whose fix was replacing the source -- never retrying, and never
+    disabling verification.
+    """
+    monkeypatch.setattr(
+        brief.requests,
+        "get",
+        _raising(brief.requests.exceptions.SSLError("certificate verify failed")),
+    )
+    assert brief.fetch_feed_entries(FEED).failure == "tls"
+
+
+def test_an_unrecognised_exception_is_error_not_malformed(monkeypatch):
+    """UNKNOWN is not a diagnosis. The catch-all must not name a cause it did
+    not establish -- that is the whole defect in arm, and a fallback that claims
+    "malformed" makes every unclassified fault look like a publisher problem.
+    """
+    monkeypatch.setattr(brief.requests, "get", _raising(ValueError("who knows")))
+    assert brief.fetch_feed_entries(FEED).failure == "error"
+
+
+def test_malformed_is_still_reserved_for_bytes_that_would_not_parse(monkeypatch):
+    """The control for the four above: "malformed" must keep meaning something,
+    and it means the fetch SUCCEEDED and the payload did not parse.
+    """
+    monkeypatch.setattr(brief.requests, "get", lambda *a, **k: _Resp(b"<<not xml"))
+    assert brief.fetch_feed_entries(FEED).failure == "malformed"
+
+
+def test_an_http_error_carrying_a_response_still_reports_its_status(monkeypatch):
+    """`_failure_for_exception`'s status branch must survive the new kinds: a
+    raised HTTPError with a response attached is classified by STATUS, not by
+    the exception fallback.
+    """
+
+    class Gone(_Resp):
+        status_code = 403
+
+        def raise_for_status(self):
+            raise brief.requests.HTTPError("403", response=self)
+
+    monkeypatch.setattr(brief.requests, "get", lambda *a, **k: Gone(b""))
+    assert brief.fetch_feed_entries(FEED).failure == "http_403"
+
+
 def test_outlet_defaults_to_the_feed_name():
     assert brief.outlet_for({"name": "TASS", "url": "u", "category": "geo"}) == "TASS"
 

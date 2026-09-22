@@ -63,3 +63,32 @@ countermeasure has to be a mechanism, not a habit.
 passed while the message reached api.telegram.org. When writing a "nothing was sent" assertion,
 enumerate every channel the handler can speak through first; see
 [[telegram-send-long-convention]].
+
+## 2026-09-22 — two spellings that look correct and freeze anyway
+
+Both found converting `HOST_GAP_SECONDS` from a constant to a row (`news-brief-goq`). Neither is
+a `from`-import, so neither is caught by the rule as stated above.
+
+**1. A knob in a DEFAULT ARGUMENT is frozen at import.** `HostSpacer.__init__(self, gap_seconds:
+float = HOST_GAP_SECONDS, ...)` evaluates that name once, when the `def` executes. Both
+production call sites are a bare `common.HostSpacer()`, so the default IS the shipped value —
+making the row accepted, readable, settable by the operator, and completely inert. This is the
+`a-config-can-be-accepted-and-inert` shape wearing the `from`-import's clothes. Take
+`gap_seconds: float | None = None` and resolve in the body.
+
+**2. Inside `common.py` itself, a bare global lookup of a knob name raises `NameError`.** PEP 562's
+module `__getattr__` is consulted only for attribute access ON THE MODULE OBJECT; a bare
+`HOST_GAP_SECONDS` in a function defined in `common.py` compiles to `LOAD_GLOBAL`, which checks
+the module dict then builtins and never calls `__getattr__`. So the one spelling that reads most
+naturally is the one that cannot work — and it is not obvious, because the identical spelling in
+any OTHER module (`common.HOST_GAP_SECONDS`) is correct. **Measured**, not reasoned: a function
+compiled into `common.__dict__` doing the bare lookup raised `NameError: name 'HOST_GAP_SECONDS'
+is not defined`. Use `getattr(sys.modules[__name__], "NAME")`, which takes the normal attribute
+path — so a `monkeypatch.setattr(common, "NAME", ...)` still wins, which calling `__getattr__`
+directly would not.
+
+**The tell for both:** a test that monkeypatches the knob and asserts the EFFECT (not the row)
+fails while everything else passes. Write that test when adding a knob — `[5.0] == [31]` is what
+the freeze looks like. See [[env-var-needs-compose-passthrough]] for the other half (the knob is
+invisible in the container until the compose anchor declares it).
+

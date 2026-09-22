@@ -558,3 +558,116 @@ def test_a_real_failure_outranks_an_unmeasured_check():
 # 29. And an empty failure list is still a pass.
 def test_no_failures_is_a_pass():
     assert "PASSED" in sc.summarize([])
+
+
+# ── news-brief-zp8: a frozen corpus is not a live sample ──────────────────────
+#
+# MEASURED 2026-09-22. The gate ran with --cutover 2026-09-10T00:00:00Z
+# --horizon-hours 6 and returned "GATE FAILED, corroboration 2.4% (19 of 776)".
+# COMPREHEND_ENABLED had been false on the host since 2026-09-10, so the twelve
+# day cohort held exactly one day of events, all written before the switch-off.
+#
+# Both existing not_measurable branches are ABSENCE conditions -- an unelapsed
+# horizon, or a window with no events at all. A corpus that STOPPED GROWING
+# trips neither: it presents as a normal population with a real rate, so the
+# gate returned a confident verdict about a KB frozen for twelve days and
+# nothing in the output hinted at it. The operator had to notice by eye.
+
+
+def test_a_frozen_corpus_is_not_measurable_rather_than_a_floor_failure(kb):
+    """The regression. Every event lands in the first hours of a twelve-day
+    window and nothing follows, which is the production shape exactly.
+
+    Single-outlet events, so the OLD code computes a real 0.0% rate and returns
+    a confident "fail" -- the number is arithmetically correct and answers a
+    question nobody asked. That is what makes this the discriminating fixture
+    rather than a restatement of the empty-cohort case.
+    """
+    for _ in range(10):
+        _event_with_outlets(kb, BASE - timedelta(hours=282), 1)
+    kb.commit()
+    verdict = sc.gate_corroboration(
+        kb, cutover=BASE - timedelta(hours=288), horizon_hours=6, now=BASE
+    )
+    assert verdict["status"] == "not_measurable"
+    assert "floor" not in verdict["reason"]
+    assert "0.0%" not in verdict["reason"]
+    # Name the fact, not just the verdict: an operator who cannot see WHEN the
+    # corpus stopped has to go and find out, which is the cost this removes.
+    assert "2026-08-28" in verdict["reason"]
+
+
+def test_a_live_corpus_below_the_floor_still_fails(kb):
+    """THE CONTROL, and the one that makes the test above mean anything.
+
+    A check that refused unconditionally would satisfy the regression while
+    destroying the gate. Here the corpus is live -- events are still being
+    written right up to `now`, they are merely younger than the exposure
+    horizon and so excluded from the cohort by design -- and the cohort is
+    uncorroborated. That must still be a FAIL.
+    """
+    for _ in range(10):
+        _event_with_outlets(kb, BASE - timedelta(hours=12), 1)
+    for _ in range(3):
+        _event_with_outlets(kb, BASE - timedelta(hours=2), 2)
+    kb.commit()
+    verdict = sc.gate_corroboration(
+        kb, cutover=BASE - timedelta(hours=24), horizon_hours=6, now=BASE
+    )
+    assert verdict["status"] == "fail"
+    assert verdict["total"] == 10
+    assert "floor" in verdict["reason"]
+
+
+def test_the_freeze_margin_is_the_exposure_horizon_and_not_a_new_number(kb):
+    """A corpus that stopped LESS than one horizon before the window closed is
+    ordinary lag, not a freeze, and must not be refused.
+
+    The margin is the horizon the caller already passed in, so this check
+    introduces no threshold of its own -- which matters, because an invented
+    constant here would be the same unbacked number the gate exists to avoid.
+    Newest event 4h before `now`, window ends 6h before `now`: the event sits
+    AFTER the window end, so there is no freeze at all.
+    """
+    for _ in range(10):
+        _event_with_outlets(kb, BASE - timedelta(hours=12), 1)
+    _event_with_outlets(kb, BASE - timedelta(hours=4), 1)
+    kb.commit()
+    verdict = sc.gate_corroboration(
+        kb, cutover=BASE - timedelta(hours=24), horizon_hours=6, now=BASE
+    )
+    assert verdict["status"] == "fail"
+
+
+def test_every_verdict_carries_the_last_event_time(kb):
+    """Provenance next to the number, on the PASSING path too.
+
+    `a-ledger-dates-what-it-records`: a precondition that is only checked when
+    it fails is a precondition nobody can audit. The freshness fact travels
+    with every verdict so the operator reads it beside the rate rather than
+    having to ask for it.
+    """
+    for _ in range(3):
+        _event_with_outlets(kb, BASE - timedelta(hours=12), 2)
+    for _ in range(7):
+        _event_with_outlets(kb, BASE - timedelta(hours=12), 1)
+    _event_with_outlets(kb, BASE - timedelta(hours=1), 1)
+    kb.commit()
+    verdict = sc.gate_corroboration(
+        kb, cutover=BASE - timedelta(hours=24), horizon_hours=6, now=BASE
+    )
+    assert verdict["status"] == "pass"
+    assert verdict["last_event_at"] == BASE - timedelta(hours=1)
+
+
+def test_the_gate_prints_the_last_event_beside_the_cohort_span(kb, capsys):
+    """The header is where the operator actually looks. A fact held only in the
+    returned dict would not have prevented the 2026-09-22 misreading.
+    """
+    for _ in range(10):
+        _event_with_outlets(kb, BASE - timedelta(hours=12), 1)
+    _event_with_outlets(kb, BASE - timedelta(hours=2), 1)
+    kb.commit()
+    sc.run_gate(kb, cutover=BASE - timedelta(hours=24), horizon_hours=6)
+    out = capsys.readouterr().out
+    assert "last event" in out

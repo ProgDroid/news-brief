@@ -111,7 +111,14 @@ MAX_GAP_FACTOR = 1.5
 SAFETY = 4
 
 INTERVAL_LO = 10
-INTERVAL_HI = 240
+
+# There is deliberately no INTERVAL_HI here. The ceiling lives in
+# `capture.max_poll_interval_minutes()` and is READ, never restated: this file
+# held 240 after capture had already capped a declared interval at 4x nominal
+# (120), so the generator went on proposing a number the project had ruled on,
+# and b42.5's rollout takes its values from this script's output
+# (news-brief-wa1). A stale document is inert; a stale generator re-emits itself
+# at every future run.
 
 # One user agent's daily request budget across every feed. Below what the
 # 30-minute global cadence spends today (26 feeds x 48 = 1248), because the
@@ -266,11 +273,22 @@ def full_turnover_minutes(overlap_value, gap_minutes: float):
 
 
 def proposed_interval_minutes(
-    turnover_minutes, safety: int = SAFETY, lo: int = INTERVAL_LO, hi: int = INTERVAL_HI
+    turnover_minutes, safety: int = SAFETY, lo: int = INTERVAL_LO, hi: int | None = None
 ):
-    """The interval a turnover time justifies, clamped at both ends."""
+    """The interval a turnover time justifies, clamped at both ends.
+
+    `hi` defaults to the ceiling capture will actually enforce, resolved at CALL
+    time rather than bound into the signature: a default argument is evaluated
+    once at import, which would reintroduce the copy this removes the moment the
+    schedule is retimed. An explicit `hi` still wins, which is how the ceiling
+    decision was made.
+    """
     if turnover_minutes is None:
         return None
+    if hi is None:
+        import capture
+
+        hi = capture.max_poll_interval_minutes()
     return int(min(hi, max(lo, turnover_minutes / safety)))
 
 

@@ -776,7 +776,9 @@ def _messages_call(system: str, user: str) -> str:
             "system": system,
             "messages": [{"role": "user", "content": user}],
         },
-        timeout=30,
+        # Module attribute, never a `from common import` copy: a from-copy
+        # freezes at import and defeats the host's settings row.
+        timeout=common.RECONCILE_TIMEOUT,
     )
     resp.raise_for_status()
     body = resp.json()

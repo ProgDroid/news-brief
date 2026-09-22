@@ -263,6 +263,53 @@ def _spacer(gap=5):
     return spacer, slept, clock
 
 
+def test_the_default_host_gap_is_a_live_row_not_a_value_frozen_at_import():
+    """news-brief-goq. Both production call sites are a bare
+    `common.HostSpacer()`, so the DEFAULT is the only value that ships.
+
+    It was a default ARGUMENT reading a module constant, and a default argument
+    is evaluated once, at import. Making HOST_GAP_SECONDS a settings row while
+    leaving that signature alone is the `a-config-can-be-accepted-and-inert`
+    shape: the row would exist, the operator would set it, every read would look
+    correct, and the spacer would go on using the number frozen at boot. This
+    fails if the resolution moves back into the signature.
+    """
+    import pytest
+
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(common, "HOST_GAP_SECONDS", 31)
+        slept = []
+        spacer = common.HostSpacer(clock=FakeClock(), sleeper=slept.append)
+        spacer.wait({"url": "https://h.example/a"})
+        spacer.wait({"url": "https://h.example/b"})
+        assert slept == [31]
+    finally:
+        monkeypatch.undo()
+
+
+def test_the_host_gap_is_a_knob_so_the_host_can_retune_it_without_a_redeploy():
+    """5 was measured INSUFFICIENT on 2026-09-10 (429s on the self-hosted Nitter
+    at 04:30, 05:30 and 07:30). What the right number is cannot be derived from
+    this repo -- it is a property of that Nitter instance under that fleet -- so
+    the value has to be tunable where it can be measured.
+    """
+    assert "HOST_GAP_SECONDS" in common.KNOBS
+    assert common.KNOBS["HOST_GAP_SECONDS"].kind is float
+
+
+def test_an_explicit_gap_still_overrides_the_row():
+    """The control for the two above. `HostSpacer`'s docstring says a second
+    caller must be able to re-derive the gap rather than inherit a justification
+    written for capture's poller; resolving the row must not take that away.
+    """
+    slept = []
+    spacer = common.HostSpacer(2, clock=FakeClock(), sleeper=slept.append)
+    spacer.wait({"url": "https://h.example/a"})
+    spacer.wait({"url": "https://h.example/b"})
+    assert slept == [2]
+
+
 def test_host_spacer_sleeps_the_full_gap_between_two_fetches_of_one_host():
     spacer, slept, _ = _spacer(gap=5)
     spacer.wait({"url": "https://h.example/a"})

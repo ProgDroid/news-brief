@@ -1676,8 +1676,30 @@ def _failure_for_status(status: int) -> str:
 
 
 def _failure_for_exception(exc) -> str:
+    """Name the fault without claiming one that was never established.
+
+    "malformed" is reserved for the single path that actually received bytes and
+    failed to parse them. Reaching here means the request RAISED, and a request
+    that never completed says nothing about what the publisher serves -- calling
+    it malformed sent the operator to the feed's owner for a fault that lived on
+    this host (news-brief-arm). An exception we cannot place is `error`: UNKNOWN
+    is not a diagnosis, and a catch-all that names a cause is worse than one
+    that admits it has none.
+
+    TLS is tested BEFORE the connection branch because `requests.exceptions
+    .SSLError` subclasses `ConnectionError` -- here the order is the
+    classification. It is worth separating because its remediation is unlike the
+    others': `source-fetch-failure-modes` records presstv.ir serving a revoked
+    certificate, fixed by replacing the source, never by retrying it.
+    """
     status = getattr(getattr(exc, "response", None), "status_code", None)
-    return _failure_for_status(status) if status else "malformed"
+    if status:
+        return _failure_for_status(status)
+    if isinstance(exc, requests.exceptions.SSLError):
+        return "tls"
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        return "network"
+    return "error"
 
 
 # A derived title is an excerpt, so it needs a length. 160 leaves room for the

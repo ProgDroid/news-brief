@@ -5,6 +5,7 @@ by both brief.py and trading.py (one-way dependency, no cycles)."""
 
 import base64
 import os
+import sys
 import re
 import json
 import time
@@ -219,6 +220,34 @@ KNOBS: dict[str, Knob] = {
     # bump, with nothing to say so. Set one only to pin it deliberately.
     "SIGNALS_MODEL": Knob(str, "", env="NEWSBRIEF_SIGNALS_MODEL"),
     "CLAIM_VERIFY_MODEL": Knob(str, "", env="NEWSBRIEF_CLAIM_VERIFY_MODEL"),
+    # Read timeout for the brief-memory reconcile call (news-brief-0p3). It was
+    # a bare 30 inline in brief_memory.py -- the only timeout in that module --
+    # and it fired in production on 2026-09-10, wiping a day of ledger memory.
+    # 30 was never derived: RECONCILE_MAX_TOKENS is 8192 and a full working set
+    # measures ~3.7k output tokens, so the call was permitted to spend a budget
+    # its own deadline could not cover. 90 mirrors SIGNALS_TIMEOUT, which is the
+    # same shape -- a post-generation call whose latency is free because the
+    # brief has already shipped -- and the asymmetry runs the same way: too
+    # short silently loses the day's memory and misreports it as a model
+    # failure, too long costs only wall-clock nobody is waiting on. A row, so
+    # the host can retune it from a measured duration without a redeploy.
+    "RECONCILE_TIMEOUT": Knob(int, 90),
+    # Seconds between two consecutive fetches of the SAME host. The self-hosted
+    # Nitter rate-limits requests that arrive close together; `order_by_host`
+    # only reduces how often this has to fire, it is not a substitute for it.
+    #
+    # A ROW rather than a constant because the right number is a property of
+    # that Nitter instance under this fleet, and cannot be derived from this
+    # repo. What IS established is negative: 5 was MEASURED INSUFFICIENT on
+    # 2026-09-10, with `RSS retry 1/2 ... 429` on the @geo_papic feed at 04:30,
+    # 05:30 and 07:30 (news-brief-goq). 15 is not a derived value either -- it
+    # is three times a number shown to be too small, chosen because the cost of
+    # being generous is bounded and one-sided: the whole fleet holds a handful
+    # of Nitter feeds, so even a wide gap adds seconds to a pass nobody is
+    # waiting on, while too narrow silently drops a feed and a dropped feed is
+    # indistinguishable from a quiet one downstream. Retune it on the host from
+    # the 429 rate, not from here.
+    "HOST_GAP_SECONDS": Knob(float, 15.0),
     # Enrichment subsystem. Read through `enrichment.config`, which forwards
     # here, so its ~10 call sites are unchanged. BIGDATA_API_KEY is absent for
     # the same reason as every other credential.
@@ -690,11 +719,9 @@ def split_html_message(text: str, max_len: int = TELEGRAM_MAX_LEN) -> list[str]:
 # level -- so `brief` cannot import `capture` without inverting a dependency
 # that has a direction. Both already import `common`.
 
-# The self-hosted Nitter rate-limits requests that arrive close together. This
-# is the guard that actually protects a host; `order_by_host` only reduces how
-# often it has to fire. Sized for capture's 48-passes-a-day poller, which is why
-# `HostSpacer` takes it as a keyword rather than reading it directly.
-HOST_GAP_SECONDS = 5
+# HOST_GAP_SECONDS is a settings row (see KNOBS). It is deliberately NOT a
+# constant here: `__getattr__` below fires only for names absent from the
+# module, so a constant of the same name would shadow the row forever.
 
 
 def feed_host(feed: dict) -> str:
@@ -735,17 +762,27 @@ class HostSpacer:
     generator would burn the gap on feeds it is about to skip. The caller decides
     when it is actually going to make a request.
 
-    `gap_seconds` is a parameter rather than a read of HOST_GAP_SECONDS because
-    that value was chosen for capture's 48-passes-a-day poller; a second caller
-    must be able to re-derive it rather than inherit a justification written for
-    someone else. The clock and sleeper are injected so spacing can be asserted
-    in seconds instead of by making the suite sleep.
+    `gap_seconds` stays a parameter so a second caller can re-derive it rather
+    than inherit a justification written for capture's 48-passes-a-day poller.
+    Omitting it takes the settings row, resolved HERE and not in the signature:
+    a default argument is evaluated once at import, which would have pinned the
+    boot-time value into both production call sites -- each a bare
+    `HostSpacer()` -- and left the row accepted, readable and inert. The clock
+    and sleeper are injected so spacing can be asserted in seconds instead of by
+    making the suite sleep.
     """
 
-    def __init__(
-        self, gap_seconds: float = HOST_GAP_SECONDS, *, clock=None, sleeper=None
-    ):
-        self._gap = gap_seconds
+    def __init__(self, gap_seconds: float | None = None, *, clock=None, sleeper=None):
+        # Through the MODULE object, not a bare global: `__getattr__` below is
+        # PEP 562, which Python consults only for attribute access on the
+        # module. A bare `HOST_GAP_SECONDS` here compiles to LOAD_GLOBAL, finds
+        # no constant (there deliberately is none) and raises NameError -- so
+        # the one spelling that looks most natural is the one that cannot work.
+        self._gap = (
+            getattr(sys.modules[__name__], "HOST_GAP_SECONDS")
+            if gap_seconds is None
+            else gap_seconds
+        )
         self._clock = clock or time.monotonic
         self._sleeper = sleeper or time.sleep
         self._last: dict[str, float] = {}

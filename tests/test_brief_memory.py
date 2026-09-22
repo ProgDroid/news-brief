@@ -276,6 +276,53 @@ def test_messages_call_budget_fits_full_ledger(monkeypatch):
     assert captured["json"]["max_tokens"] >= 4096
 
 
+def test_messages_call_timeout_is_sized_against_its_own_token_budget(monkeypatch):
+    """news-brief-0p3. The read timeout was a bare 30 -- the only timeout in
+    this module, and never revisited when RECONCILE_MAX_TOKENS went to 8192.
+
+    A budget the call is ALLOWED to spend and a deadline it is allowed to take
+    are the same quantity seen twice, and they had drifted apart: a measured
+    worst-case working set is ~3.7k output tokens, which 30s cannot cover. This
+    asserts the relationship rather than a magic number, so the next max_tokens
+    bump cannot silently re-open the gap.
+    """
+    captured = {}
+
+    def fake_post(*a, **k):
+        captured.update(k)
+        return _FakeResp(
+            {"stop_reason": "end_turn", "content": [{"type": "text", "text": "[]"}]}
+        )
+
+    monkeypatch.setattr(bm.requests, "post", fake_post)
+    bm._messages_call("sys", "user")
+    # Haiku 4.5 sustains well over 100 output tok/s, but a slow or contended
+    # generation is exactly the case a timeout exists for. One second per 100
+    # budgeted tokens is the floor this call must clear.
+    assert captured["timeout"] >= bm.RECONCILE_MAX_TOKENS / 100
+
+
+def test_the_reconcile_timeout_is_a_settings_row_not_a_frozen_constant(monkeypatch):
+    """Reading it through `common.` is load-bearing: a `from common import`
+    copy freezes at import and defeats both the host row and this monkeypatch
+    (`newsbrief-flag-access-module-attr`). Reconcile latency is free -- it runs
+    AFTER the brief ships -- so the operator must be able to widen this from a
+    real duration without a redeploy.
+    """
+    captured = {}
+
+    def fake_post(*a, **k):
+        captured.update(k)
+        return _FakeResp(
+            {"stop_reason": "end_turn", "content": [{"type": "text", "text": "[]"}]}
+        )
+
+    monkeypatch.setattr(bm.requests, "post", fake_post)
+    monkeypatch.setattr(bm.common, "RECONCILE_TIMEOUT", 137)
+    bm._messages_call("sys", "user")
+    assert captured["timeout"] == 137
+
+
 def test_reconcile_prompt_bounds_output_size():
     p = bm.build_reconcile_prompt({"version": 1, "claims": []}, "brief")
     assert f"at most {bm.WORKING_SET_SIZE}" in p

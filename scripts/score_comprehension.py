@@ -228,6 +228,7 @@ def gate_corroboration(conn, cutover, horizon_hours, now=None):
     """
     if now is None:
         now = conn.execute("SELECT now()").fetchone()[0]
+    last_event_at = conn.execute("SELECT max(created_at) FROM events").fetchone()[0]
     end = now - timedelta(hours=horizon_hours)
     if end <= cutover:
         elapsed = (now - cutover).total_seconds() / 3600
@@ -242,6 +243,7 @@ def gate_corroboration(conn, cutover, horizon_hours, now=None):
             "total": 0,
             "multi": 0,
             "span": None,
+            "last_event_at": last_event_at,
         }
     rate, total, multi = corroboration_by_outlet(
         conn, since=cutover, until=end, horizon_hours=horizon_hours
@@ -259,6 +261,42 @@ def gate_corroboration(conn, cutover, horizon_hours, now=None):
             "total": 0,
             "multi": 0,
             "span": span,
+            "last_event_at": last_event_at,
+        }
+    if last_event_at is not None and last_event_at < end - timedelta(
+        hours=horizon_hours
+    ):
+        # news-brief-zp8. The two branches above are ABSENCE conditions -- an
+        # unelapsed horizon, an empty window -- and a corpus that stopped
+        # GROWING trips neither. It presents as an ordinary population with an
+        # arithmetically correct rate, so on 2026-09-22 this returned a
+        # confident 2.4% FAIL about a KB that COMPREHEND_ENABLED had frozen
+        # twelve days earlier, and nothing in the output hinted at it.
+        #
+        # The margin is `horizon_hours`, the caller's own pre-registered
+        # parameter, and deliberately not a new constant: an invented threshold
+        # here would be the same unbacked number this gate exists to avoid.
+        # What it says is narrow and checkable -- the final horizon-length slice
+        # of the window contains no event ANYWHERE in the KB, so the window did
+        # not close on a live corpus and its span misstates the population.
+        # Ordinary write lag cannot trip it, because a live pipeline's newest
+        # events sit AFTER `end`, excluded from the cohort by the horizon
+        # itself rather than missing from the corpus.
+        return {
+            "status": "not_measurable",
+            "reason": (
+                f"the corpus is FROZEN: the newest event anywhere in the KB is "
+                f"{last_event_at:%Y-%m-%d %H:%M %Z}, which predates the end of "
+                f"the cohort window by more than the {horizon_hours:g}h "
+                f"horizon. The {total} events in this window are the residue of "
+                "a pipeline that stopped, not a sample of a running one, so "
+                "their rate is a verdict on nothing"
+            ),
+            "rate": None,
+            "total": total,
+            "multi": multi,
+            "span": span,
+            "last_event_at": last_event_at,
         }
     if rate < CORROBORATION_FLOOR:
         status = "fail"
@@ -282,6 +320,7 @@ def gate_corroboration(conn, cutover, horizon_hours, now=None):
         "total": total,
         "multi": multi,
         "span": span,
+        "last_event_at": last_event_at,
     }
 
 
@@ -550,9 +589,17 @@ def run_gate(conn, cutover=None, horizon_hours=None) -> list[str]:
         verdict = gate_corroboration(conn, cutover, horizon_hours)
         span = verdict["span"]
         if span is not None:
+            last = verdict["last_event_at"]
+            # The freshness fact sits in the header rather than only in the
+            # frozen branch: a precondition printed only when it fails is one
+            # nobody can audit on the runs that passed (news-brief-zp8).
+            freshness = (
+                f"{last:%Y-%m-%d %H:%M %Z}" if last is not None else "NONE (empty KB)"
+            )
             print(
                 f"cohort [{span[0]:%Y-%m-%d %H:%M %Z}, "
-                f"{span[1]:%Y-%m-%d %H:%M %Z}), exposure {horizon_hours:g}h"
+                f"{span[1]:%Y-%m-%d %H:%M %Z}), exposure {horizon_hours:g}h, "
+                f"last event {freshness}"
             )
         if verdict["status"] == "not_measurable":
             failures.append(f"{NOT_MEASURABLE}: corroboration ({verdict['reason']})")
