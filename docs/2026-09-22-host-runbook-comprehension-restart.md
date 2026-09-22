@@ -9,6 +9,17 @@ accumulation window; `b42.5`'s per-feed intervals stay held until the cohort clo
 This exists because every remaining step is a **host** action. The code side is pushed
 and green; nothing further happens in this repo until the flag is on.
 
+## Status
+
+| step | state |
+|---|---|
+| 0 — deploy | **done** 2026-09-22 |
+| 1 — new defaults live (`goq`, `0p3`) | **done** 2026-09-22. `goq` stays open: the code cannot close it, only a run of clean `:30` passes can. |
+| 2 — flip `COMPREHEND_ENABLED` | **done** 2026-09-22, cutover `2026-09-22 18:13:37.571434+00` |
+| 3 — verify by effect | **outstanding** — see below, and it is the one step that can still reveal the flip was inert |
+| 4 — hold `b42.5` | in force until the cohort closes |
+| 5 — run the gate | not before **2026-09-30 00:13:37Z** |
+
 ---
 
 ## The trap this runbook is written around
@@ -136,9 +147,24 @@ costs only request budget, 1,248/day against a possible ~492, and nothing is ble
 
 ## Step 5 — after 7 full days, run the gate. Once.
 
-```bash
-py scripts/score_comprehension.py --cutover '<the cutover from step 2>' --horizon-hours 6
+**Steps 0–2 were completed on 2026-09-22.** The flip returned:
+
 ```
+COMPREHEND_ENABLED | true | 2026-09-22 18:13:37.571434+00
+```
+
+```bash
+py scripts/score_comprehension.py \
+    --cutover '2026-09-22T18:13:37.571434Z' --horizon-hours 6
+```
+
+**Earliest honest run: 2026-09-30 00:13:37Z — cutover + 7d + 6h, not cutover + 7d.**
+The cohort is `[cutover, now − horizon)`, so a run at exactly +7 days measures a **6d18h**
+cohort and quietly under-delivers the pre-registered window by a quarter of a day. Adding
+the horizon back is what gives the window its stated length. This reading was settled on
+2026-09-22, *before any post-cutover data existed* — which is the only point at which the
+call can honestly be made, and the reason it is written down here rather than decided on
+the day of the run.
 
 **Record the output verbatim in the repo, PASS or FAIL.** The parameters are
 pre-registered in Amendment 2 and are not open for adjustment after seeing the result.
