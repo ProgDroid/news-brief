@@ -148,3 +148,25 @@ it marks the work done while a review that can still find blocking defects has n
 
 See [[newsbrief-commit-to-main]] (solo repo → commit straight to main during these runs) and
 [[user-runs-concurrent-sessions]] (stage explicit paths, never `git add -A`).
+
+
+## 2026-09-11 — the prediction-retirement run (6 tasks, 5 implementers, 7 reviewers, 2 red-teams)
+
+- **Zero true stalls, but TWO self-parks:** the sonnet implementer twice ran the ~4-min DB gate in
+  the background and told me it would "resume once the Monitor notifies" — the Monitor never woke it.
+  Recovery both times: read the gate file in the workspace myself (`*fullgate*.txt`, look for
+  `PYTEST_EXIT=`), then `SendMessage` it the result and "do not wait on the Monitor; commit and
+  report". Tell an implementer up front: *the pytest command blocks; use a long timeout; never
+  background the gate.*
+- **Long returns TRUNCATE — three reviewers lost their Minor list mid-sentence.** The contract that
+  works: write the full report to a file in the workspace, return verdicts + path only. Put it in
+  every reviewer dispatch, not just the red-team ones.
+- **Model tiers that were right:** haiku for the two transcription tasks (script + rename), sonnet
+  for the two multi-file removals (−156 and −40 `def test_`, both exactly pre-registered), opus for
+  the two shared-path reviews — opus found the only two real gaps (an inert kept test; a skip that
+  depended on `_parse_symbol` rejecting a numeric id rather than a guard).
+- **Pre-registered counts held on every task** and the off-by-one between my baseline (1688) and the
+  implementer's (1689) was reported by the implementer rather than fudged — say explicitly that a
+  disagreement with the pre-registration is to be REPORTED, not reconciled.
+- Two fix rounds in the whole run, both one-line. The plan's two red-team passes before execution
+  are why (see `learnings/plan-redteam-defect-classes.md`).

@@ -23,7 +23,8 @@ layer unexecuted.** `tests/test_db.py` (and any DB-backed module) skips on
 told you nothing about `db.py`, the migrations, or the run ledger. A skip is not a pass,
 and the count moving is the only proof the probe can return anything. Start one and
 confirm the runs:
-`docker run --rm -d -p 5432:5432 -e POSTGRES_PASSWORD=newsbrief -e POSTGRES_USER=newsbrief -e POSTGRES_DB=newsbrief_test postgres:18-alpine`
+`docker run --rm -d -p 5432:5432 --tmpfs /var/lib/postgresql (postgres:18 REFUSES .../data — exit 1; and prefix MSYS_NO_PATHCONV=1 or Git Bash rewrites the mount path) -e POSTGRES_PASSWORD=newsbrief -e POSTGRES_USER=newsbrief -e POSTGRES_DB=newsbrief_test postgres:18-alpine`
+(the `--tmpfs` is load-bearing -- see "every test-DB start leaked a volume" at the end of this file)
 then `export DATABASE_URL="postgresql://newsbrief:newsbrief@localhost:5432/newsbrief_test"`
 and check `pytest tests/test_db.py -q` reports runs rather than `skipped`. The container
 is often already up from an earlier session — `docker ps` before starting a second one.
@@ -128,3 +129,28 @@ nobody is reading memories.
 ending, and if you keep working afterwards, restart it before the next `pytest`.** Tell: a suite
 that hangs rather than fails, or a sudden block of `E`s in a run that passed minutes ago.
 Confirm with `docker ps` -- an empty list at exit 0 is ABSENT, not unknown.
+
+
+## Every test-DB start leaked a ~370MB volume, and it filled the disk (2026-09-10)
+
+`--rm` removes the CONTAINER. It does **not** remove the container's anonymous volume -- only
+`docker rm -v` does, and `--rm` does not imply it. The postgres image declares
+`/var/lib/postgresql/data` as a VOLUME, so **every** `docker run --rm` of the test database
+created a fresh anonymous volume and abandoned it on exit.
+
+Measured: **57 orphaned anonymous volumes, 21.11GB, 96% reclaimable**, against 967MB of images and
+202MB of build cache. Zero named volumes existed, so nothing curated was ever at risk. The disk
+went from gigabytes free to **0.5GB** and Docker was blamed for being on the wrong drive; the drive
+was never the problem.
+
+**Fix, applied to the command above: `--tmpfs /var/lib/postgresql (postgres:18 REFUSES .../data — exit 1; and prefix MSYS_NO_PATHCONV=1 or Git Bash rewrites the mount path)`.** RAM-backed, faster than
+the disk path, and there is nothing left to collect. The data is gone when the container stops,
+which is exactly what a test database wants.
+
+**Recovery if it has accumulated again:** `docker volume prune -f` (skips in-use volumes; safe here
+because every volume in this project is anonymous test data). That frees space *inside* the WSL
+disk only -- the `.vhdx` does not shrink on its own, so follow with `wsl --shutdown` then
+`wsl --manage docker-desktop --set-sparse true`.
+
+**Tell:** `docker system df` showing Local Volumes far larger than Images, with a high RECLAIMABLE
+percentage. Check it before concluding Docker needs moving to another drive.

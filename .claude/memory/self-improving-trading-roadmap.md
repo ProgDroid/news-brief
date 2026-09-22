@@ -39,3 +39,6 @@ cited from the day's tagged list, code derives tags — single source of truth);
 signals = **lightweight leakage counts** now (full counterfactual scoring PARKED in roadmap);
 **human-facing only** — `performance_prompt_block` firewall kept (prompt-feeding = Stage B).
 Aligns with descriptive-only philosophy of [[sentiment-sizing-null-decided]].
+
+
+**2026-09-11:** the prediction asset class is GONE (oh4). `validation._DIMENSIONS` no longer carries `play_type`; `_ASSET_CLASSES` is (equity, crypto); Stage B's hardcoded dim tuple in `performance_prompt_block` was already (asset_class, confidence, thesis_ref).

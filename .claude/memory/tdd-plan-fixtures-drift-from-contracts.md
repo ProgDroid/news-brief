@@ -35,3 +35,17 @@ external shape is a guess with a green tick next to it.
 
 Cross-reference [[tests-asserting-less-than-their-name]]: the same path also had a stub that
 accepted the identifier and never asserted it, so neither half of the pair could catch the other.
+
+
+**Third instance, 2026-09-11 (`rhg`):** `_fill()` in `tests/test_polygram_live.py` returned 8.06 shares at 0.62 for $5 — i.e. `shares = amount/fill`, the docs' arithmetic — and `test_open_live_position_writes_truthful_row` asserted `entry_price == fill_price` and `cost_basis == amount` against it. Nine real fills said `shares = 2 + 0.0205/fill` and the wallet said cost = amount + fee. A fixture whose numbers are *derived from the formula under test* can never catch the formula being wrong; `MEASURED_BUY_2026_09_01` now sits beside it with the real order. **When a fixture's numbers are round or self-consistent, ask where they came from.**
+
+**Fourth and fifth instances, 2026-09-11 (the retirement plan):** (4) the plan's own test code called
+`_closed(asset_class="prediction", net_return=0.5)` against a helper whose signature is
+`_closed(asset_class, net, ...)` — a TypeError before AND after the change, which a red-team caught by
+running the snippet. **A plan that pastes test code must have run it, or say it hasn't.** (5) the
+subtler one: `test_aggregate_performance_excludes_live` had a live row that was ALSO
+`asset_class == "prediction"`; once the new prediction clause landed, that row was excluded either
+way and the live clause had no test that could fail. **A fixture that satisfies two exclusion
+clauses at once discriminates neither** — when you add a clause, re-read every fixture the OLD
+clause's test uses and make each row trip exactly one clause. The mutation check ("revert only the
+live clause → exactly 1 failure") is what proved the fix.

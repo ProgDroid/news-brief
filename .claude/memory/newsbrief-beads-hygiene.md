@@ -43,6 +43,12 @@ and **an id that fires every turn is how a hook earns being switched off**.
   file, so the hook fires every turn, and (b) **bash dies on a CRLF script** with
   `$'\r': command not found` — a hook failing that way is indistinguishable from one that
   was never wired up. Now pinned: `.beads/issues.jsonl -text` and `*.sh text eol=lf`.
+  **CORRECTION 2026-09-10: (b) does not reproduce under this machine's Git Bash.** A
+  deliberately-CRLF script with `set -euo pipefail` ran clean, exit 0, stdout byte-identical
+  under `od -c` to its LF twin. Note this bullet only ever said Git *would* hand over CRLF and
+  bash *dies* — (b) reads as inferred, not observed, and (a) is the half that was actually
+  measured here. Keep the pin (portability, plus (a) is real); stop predicting an execution
+  failure on this machine.
 
 **A Stop hook's bare stdout only reaches the transcript view.** To surface in the UI it
 must print `{"systemMessage": "..."}`. Stop fires after *every* turn, not once at session
@@ -52,3 +58,6 @@ Verified in both directions with live controls, never by silence: hiding `hook-i
 brought bqa.11 back, claiming a bead named it and only it, and a clean repo prints nothing
 and exits 0. See [[fix-the-tooling-dont-route-around-it]] and
 [[user-runs-concurrent-sessions]] (why the hook rewrites only a generated file).
+
+
+**`bd create --title` is path-converted by Git Bash (2026-09-11):** a title starting `/trade/history …` was stored as `C:/Program Files/Git/trade/history …`; the create echoed the rewritten title back as if I had typed it, and only `bd list` showed it. Prefix `MSYS_NO_PATHCONV=1` on any `bd` call whose title/description starts with `/`. Also: a bead can be FIXED and never closed — `qiz` was fixed in 7f0a904 and blocked `9tq` a day later; when a close is refused for a blocker, read the blocker's code before assuming it is real work.
