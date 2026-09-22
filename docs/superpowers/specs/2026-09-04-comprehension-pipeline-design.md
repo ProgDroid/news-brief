@@ -703,6 +703,72 @@ result.
 
 Full argument: `docs/2026-09-14-corroboration-gate-decision.md`.
 
+
+#### Amendment 2 — the run of 2026-09-22 is VOID, not spent (2026-09-22, `news-brief-bqa.27`)
+
+**The gate fired, and it failed.** That goes first, because an amendment that buries its own
+inconvenient result is the move this document exists to prevent. On 2026-09-22 the gate ran with
+`--cutover 2026-09-10T00:00:00Z --horizon-hours 6` and returned **GATE FAILED, corroboration
+2.4% (19 of 776)**.
+
+That run is declared void **on admissibility, not on its result.** `COMPREHEND_ENABLED` had been
+false on the host since 2026-09-10 (`docs/2026-09-10-comprehend-cost-handover.md` line 4), so the
+twelve-day cohort held exactly one day of events — 446/3277/1300/776 on 7–10 Sep and nothing
+after — the residue of a pipeline that had stopped, not a sample of a running one.
+
+**Why this is not a threshold moved after seeing data.** The whole distinction is *admissibility*
+versus *threshold*, and it is worth being explicit that the first can be repaired while the second
+cannot:
+
+- **The thresholds are untouched.** `CORROBORATION_FLOOR` is still `0.10`, the ceiling still
+  `0.60`, `MIN_DISTINCT_AT_10PCT` still 2. Nothing in `news-brief-zp8` moved a number anything
+  passes or fails against.
+- **The SPENT reading would itself breach the pre-registration.** `scripts/score_comprehension.py`
+  line 33, written 2026-09-04 before any run: *"An unmeasured check is neither a pass nor a floor
+  failure... reporting an unmeasured run as FAILED states something about the event layer that
+  nothing measured."* Recording 2.4% as a spent verdict does exactly that.
+- **`zp8` establishes the run was an unmeasured check.** The gate's two `not_measurable` branches
+  were both ABSENCE conditions — an unelapsed horizon, an empty window — and a corpus that stopped
+  *growing* trips neither; it presents as an ordinary population with an arithmetically correct
+  rate. The gate now compares the newest event anywhere in the KB against the cohort's end and
+  refuses. On these inputs it refuses: `end` = 09-22 − 6h, the margin `end − 6h` = 09-21 12:00,
+  `last_event_at` ≈ 09-10.
+- **The repair is symmetric.** `last_event_at` prints in the run header beside the cohort span on
+  every run, including ones that PASS. A precondition visible only when it fails is one nobody can
+  audit, and a check that only ever rescues an unwelcome result is not a check.
+- **The refusal has a discriminating control.**
+  `test_a_live_corpus_below_the_floor_still_fails` holds a corpus still being written right up to
+  `now`, whose cohort is uncorroborated, and asserts it STILL FAILS. A check that refused
+  unconditionally would have satisfied the regression while destroying the gate.
+
+**Amendment 1 is not disturbed.** The original test — the cumulative whole-KB rate against a 10%
+floor — still **fails**, at ~6.4%, and that result stands. Nothing here recovers a pass; it
+recovers only the ability to ask the cohort question of a pipeline that is actually running.
+
+**This is one void.** The next admissible run renders the verdict, whatever it says. A second
+appeal to instrument error is not available, and this paragraph is here so that a later reader can
+hold the decision to it.
+
+**Pre-registered now, before `COMPREHEND_ENABLED` goes back on:**
+
+| parameter | value | why it is fixed in advance |
+|---|---|---|
+| `--horizon-hours` | **6** | The same value the void run used. See below. |
+| accumulation window | **7 days** from the host flip | At the observed 800–1,300 events/day this is ~5–9k events, enough for the §8.1 enum preconditions and an outlet with 10+ assertions, without letting one slow news week dominate. |
+| `--cutover` | the **actual host flip timestamp** | Captured from the host at the moment of the flip, never inferred from `schema_migrations.applied_at` — a ledger dates its own events, and that one has already been measured predating a code cutover by 3h27m. |
+
+**`--horizon-hours` stays 6, and the reason is not that 6 is good.** §8.2 says plainly that the
+horizon is *not* pre-registered — a free parameter, where "ANY value does that, which is exactly
+why no single one can be defended." That freedom is what makes changing it now indefensible rather
+than harmless. 24h is *more generous* to corroboration, since a next-morning follow-up from a
+second outlet lands inside it; picking it immediately after watching 6h fail would be using the
+void run's information to choose a friendlier parameter, which is the substance of the thing a
+pre-registration forbids even where the letter permits it. 6 was chosen before, so 6 it stays.
+
+**What would have made this unnecessary.** Nothing in the 2026-09-22 output hinted that the corpus
+was frozen; the operator caught it by eye. The generalisable form is in
+`news-brief-zp8`: a probe that reports a rate must state, next to the number, the precondition
+that entitles it to report one.
 ### 8.3 Volume and cost envelope
 
 Predicted items/day, material rate and $/day are written down **before** the first real run and
