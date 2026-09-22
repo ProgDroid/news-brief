@@ -29,6 +29,12 @@ MAX_SINGLE_VALUE_SHARE = 0.90
 CORROBORATION_FLOOR = 0.10
 CORROBORATION_CEILING = 0.60
 
+# Marks a check that rendered NO verdict. An unmeasured check is neither a
+# pass nor a floor failure, and `summarize` keeps those apart: reporting an
+# unmeasured run as FAILED states something about the event layer that
+# nothing measured.
+NOT_MEASURABLE = "not measurable"
+
 # NOT pre-registered, and deliberately declared below the block that is: the
 # exposure horizon is a free parameter of the cohort OBSERVATION, not a
 # threshold anything passes or fails. It exists to hold event age constant
@@ -194,6 +200,105 @@ def corroboration_by_outlet(conn, since=None, until=None, horizon_hours=None):
         params or None,
     ).fetchone()
     return (multi / total if total else 0.0), total, multi
+
+
+def gate_corroboration(conn, cutover, horizon_hours, now=None):
+    """Spec 8.2's outlet direction, scoped to ONE post-cutover cohort.
+
+    AMENDED 2026-09-14 (news-brief-yxd). As pre-registered on 2026-09-04 this
+    gated the CUMULATIVE whole-KB rate. That quantity is confounded by ranking
+    generation: the corpus was built under three candidate rankings whose
+    batched recall@30 differs threefold (recency 15%, entity overlap 27.5%,
+    pg_trgm 44%), and the rate DRIFTS DOWN as the corpus grows -- 6.64 to 6.49
+    to 6.43% -- so a fixed floor on it gets harder to clear however good the
+    pipeline becomes. A FAIL on it is attributable to retired rankings, which
+    is a verdict on nothing. The floor itself is unchanged at 10%; what moved
+    is the population it is applied to, and that moved AFTER seeing the data.
+    docs/2026-09-14-corroboration-gate-decision.md argues it in full.
+
+    The cohort is [cutover, now - horizon_hours), and each event is scored
+    over the same slice of its own life, so event age is held constant rather
+    than hoped away. Returns a dict whose `status` is "pass", "fail" or
+    "not_measurable" -- the third because too soon, or an empty window, is an
+    ABSENCE of measurement and not a rate of 0.0. That distinction is the
+    discipline `score_match_rate_corroboration` already keeps.
+
+    `now` defaults to the DATABASE clock: every timestamp it is compared
+    against was written by `now()` on that server.
+    """
+    if now is None:
+        now = conn.execute("SELECT now()").fetchone()[0]
+    end = now - timedelta(hours=horizon_hours)
+    if end <= cutover:
+        elapsed = (now - cutover).total_seconds() / 3600
+        return {
+            "status": "not_measurable",
+            "reason": (
+                f"{elapsed:.1f}h since the cutover: the {horizon_hours:g}h "
+                "exposure horizon has not elapsed for a single post-cutover "
+                "event, so there is nothing to measure"
+            ),
+            "rate": None,
+            "total": 0,
+            "multi": 0,
+            "span": None,
+        }
+    rate, total, multi = corroboration_by_outlet(
+        conn, since=cutover, until=end, horizon_hours=horizon_hours
+    )
+    span = (cutover, end)
+    if total == 0:
+        return {
+            "status": "not_measurable",
+            "reason": (
+                "no events were created between "
+                f"{cutover:%Y-%m-%d %H:%M %Z} and {end:%Y-%m-%d %H:%M %Z}, "
+                "so there is nothing to measure"
+            ),
+            "rate": None,
+            "total": 0,
+            "multi": 0,
+            "span": span,
+        }
+    if rate < CORROBORATION_FLOOR:
+        status = "fail"
+        reason = (
+            f"below the {CORROBORATION_FLOOR:.0%} floor: the event layer "
+            "bought nothing over the claim ledger"
+        )
+    elif rate > CORROBORATION_CEILING:
+        status = "fail"
+        reason = (
+            f"above the {CORROBORATION_CEILING:.0%} ceiling: suspect the "
+            "matcher is OVER-MERGING distinct events"
+        )
+    else:
+        status = "pass"
+        reason = ""
+    return {
+        "status": status,
+        "reason": reason,
+        "rate": rate,
+        "total": total,
+        "multi": multi,
+        "span": span,
+    }
+
+
+def summarize(failures) -> str:
+    """The gate's one-line verdict.
+
+    Three outcomes, not two. A run where every non-pass is an unmeasured
+    check did not fail -- it did not resolve, and saying FAILED would assert
+    something about the event layer that nothing measured. One real failure
+    alongside an unmeasured check is still FAILED: the unresolved one must
+    not launder it, so every entry stays listed either way.
+    """
+    if not failures:
+        return "GATE PASSED"
+    if all(f.startswith(NOT_MEASURABLE) for f in failures):
+        return "GATE NOT RESOLVED: " + ", ".join(failures)
+    return "GATE FAILED: " + ", ".join(failures)
 
 
 def deploy_anchor(conn, version=None):
@@ -401,10 +506,18 @@ def standing_variance_by_outlet(conn):
     return rows, bool(rows)
 
 
-def run_gate(conn) -> list[str]:
+def run_gate(conn, cutover=None, horizon_hours=None) -> list[str]:
     """Run every check against `conn`, print its output, return the
     failures. Split from main() so tests can drive it against a fixture
-    connection instead of opening their own via db.connect()."""
+    connection instead of opening their own via db.connect().
+
+    `cutover` and `horizon_hours` scope spec 8.2's outlet direction to one
+    post-cutover cohort (`gate_corroboration`). Without a cutover that check
+    REFUSES rather than falling back to the whole-KB rate: the fallback would
+    silently measure the confounded cumulative quantity this gate stopped
+    using, and it would look like a real verdict. Same refusal as --cohorts,
+    for the same reason.
+    """
     failures = []
 
     print("=== Enum variance (spec 8.1) ===")
@@ -426,25 +539,38 @@ def run_gate(conn) -> list[str]:
             print(f"    [{reason}]: {detail}")
 
     print("\n=== Corroboration, BOTH directions (spec 8.2) ===")
-    rate, total, multi = corroboration_by_outlet(conn)
-    print(f"events={total} multi-outlet={multi} rate={rate:.1%}")
-    if total == 0:
-        failures.append("corroboration: no events")
-        print("FAIL  no events to measure")
-    elif rate < CORROBORATION_FLOOR:
-        failures.append("corroboration below floor")
-        print(
-            f"FAIL  below the {CORROBORATION_FLOOR:.0%} floor: the event "
-            f"layer bought nothing over the claim ledger"
-        )
-    elif rate > CORROBORATION_CEILING:
-        failures.append("corroboration above ceiling")
-        print(
-            f"FAIL  above the {CORROBORATION_CEILING:.0%} ceiling: suspect "
-            f"the matcher is OVER-MERGING distinct events"
-        )
+    if cutover is None:
+        failures.append("corroboration: no cutover given, so nothing measured")
+        print("REFUSED  the outlet direction is COHORT-scoped as of 2026-09-14")
+        print("         (news-brief-yxd). It needs --cutover: the instant the")
+        print("         code being measured began serving. Falling back to the")
+        print("         whole-KB rate would measure the cumulative quantity")
+        print("         this gate stopped using, and would look like a verdict.")
     else:
-        print("PASS")
+        verdict = gate_corroboration(conn, cutover, horizon_hours)
+        span = verdict["span"]
+        if span is not None:
+            print(
+                f"cohort [{span[0]:%Y-%m-%d %H:%M %Z}, "
+                f"{span[1]:%Y-%m-%d %H:%M %Z}), exposure {horizon_hours:g}h"
+            )
+        if verdict["status"] == "not_measurable":
+            failures.append(f"{NOT_MEASURABLE}: corroboration ({verdict['reason']})")
+            print(f"NOT MEASURABLE  {verdict['reason']}")
+            print("                which is not a rate of 0.0")
+        else:
+            print(
+                f"events={verdict['total']} multi-outlet={verdict['multi']} "
+                f"rate={verdict['rate']:.1%}"
+            )
+            if verdict["status"] == "fail":
+                failures.append(f"corroboration: {verdict['reason']}")
+                print(f"FAIL  {verdict['reason']}")
+            else:
+                print("PASS")
+            print("Corroboration MOVES WITH NEWS VOLUME and any two windows")
+            print("differ in volume, so a result close to the floor should be")
+            print("read as not resolved rather than as a pass or a fail.")
 
     ok, measured, detail = score_match_rate_corroboration(conn)
     print(f"\n{'PASS' if ok else 'FAIL'}  match-rate corroboration: {detail}")
@@ -504,8 +630,9 @@ def _parse_cutover(text):
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
-def _explain_missing_cutover(conn) -> int:
-    """--cohorts without --cutover. Measure nothing, and say what to answer.
+def _explain_missing_cutover(conn, mode="--cohorts") -> int:
+    """A mode that needs a cutover ran without one. Measure nothing, and say
+    what to answer.
 
     The first live run defaulted to the newest migration's applied_at and
     produced a table whose "post-cutover" column was not the change being
@@ -515,7 +642,7 @@ def _explain_missing_cutover(conn) -> int:
     commit, so it is offered as a hint with its validity condition attached
     rather than silently used as an answer.
     """
-    print("--cohorts needs --cutover: the instant the code you are measuring")
+    print(f"{mode} needs --cutover: the instant the code you are measuring")
     print("began serving. schema_migrations dates MIGRATIONS, not commits, so")
     print("it answers this only for a change that shipped alongside one.")
     anchor = deploy_anchor(conn)
@@ -547,8 +674,9 @@ def main(argv=None) -> int:
     )
     parser.add_argument(
         "--cutover",
-        help="ISO-8601 cutover for --cohorts. Defaults to the newest "
-        "migration's applied_at, which is when that image began serving.",
+        help="ISO-8601 instant the code being measured began serving. "
+        "REQUIRED by both the gate and --cohorts, and guessed by neither: "
+        "schema_migrations dates MIGRATIONS, not commits.",
     )
     parser.add_argument(
         "--horizon-hours",
@@ -573,9 +701,26 @@ def main(argv=None) -> int:
             print_sweep(conn, _parse_cutover(args.cutover), args.horizon_hours)
             return 0
 
-        failures = run_gate(conn)
+        if not args.cutover:
+            return _explain_missing_cutover(conn, mode="the gate")
+        if len(args.horizon_hours) != 1:
+            print("The gate takes exactly ONE --horizon-hours.")
+            print("The horizon is NOT pre-registered -- it is a free parameter,")
+            print("and any value holds event age constant, which is why the")
+            print("OBSERVATION mode sweeps several. A gate cannot sweep: it")
+            print("renders one verdict, so it needs one deliberate horizon.")
+            print(
+                f"Given {len(args.horizon_hours)}: "
+                f"{' '.join(f'{h:g}' for h in args.horizon_hours)}"
+            )
+            return 2
+        failures = run_gate(
+            conn,
+            cutover=_parse_cutover(args.cutover),
+            horizon_hours=args.horizon_hours[0],
+        )
 
-    print("\n" + ("GATE FAILED: " + ", ".join(failures) if failures else "GATE PASSED"))
+    print("\n" + summarize(failures))
     return 1 if failures else 0
 
 
