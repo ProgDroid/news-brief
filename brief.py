@@ -238,14 +238,6 @@ RSS_FEEDS = [
         "kind": "analyst",
         "outlet": "Chase Taylor",
     },
-    {
-        "name": "@LordPos3idon",
-        # No explicit outlet on purpose: for a pseudonymous account the handle IS
-        # the publisher identity, and `outlet_for` already falls back to the name.
-        "url": f"{NITTER_BASE_URL}/LordPos3idon/rss",
-        "category": "geo",
-        "kind": "analyst",
-    },
     # ── Region-native / primary sources (added 2026-06-14) ────────────────────
     {
         "name": "Al Jazeera",
