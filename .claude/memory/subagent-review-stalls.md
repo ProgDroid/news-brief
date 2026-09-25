@@ -170,3 +170,27 @@ See [[newsbrief-commit-to-main]] (solo repo → commit straight to main during t
   disagreement with the pre-registration is to be REPORTED, not reconciled.
 - Two fix rounds in the whole run, both one-line. The plan's two red-team passes before execution
   are why (see `learnings/plan-redteam-defect-classes.md`).
+
+## 2026-09-25 (comprehension cost phase 1: 11 tasks, 7 fix rounds, 0 second rounds)
+
+- **Put "run long commands in the FOREGROUND" in the shared implementer context, not in each
+  dispatch.** After one self-park in Task 4, adding that line stopped it for the remaining 7
+  tasks.
+- **Check each brief against the code BEFORE dispatching it.** Reading each brief's load-bearing
+  assumptions (prices against the claude-api skill, column names, fixture names, whether
+  `except` branches commit, whether a guard has any test) found 6 plan defects before any
+  implementer saw them (rulings R7, R8, R11, R13, R14, and the Task 11 runbook notes). Settle
+  documentation questions (e.g. "is `thinking: disabled` accepted on Haiku 4.5?") in the
+  CONTROLLER. A subagent may not have the skill, and the answer is a ruling either way.
+- **Give every reviewer NAMED RISKS, each with one focused check.** Nearly every Important
+  finding this run came from a named risk: the timezone of a `::date` cast, the aliased state
+  fake, mid-pass config resolution, and the runbook's `cutover`.
+- **Use the most capable model for the money guard's task review and for the final review.** Both
+  found what sonnet reviews did not: the aliased `state_store`, and the mid-pass model switch
+  that bypassed the ledger.
+- **The final review finds the cross-task class.** Per-task reviews cannot see a value
+  re-resolved across a function that six tasks edited in turn. See
+  [[snapshot-config-per-unit-of-work]].
+- **The controller re-reviewing small fix rounds itself (by reading the diff and checking the
+  pre-registered mutations) was ruled OK (R20).** It was offset by pointing the final review at
+  exactly those commits, which then cleared them.

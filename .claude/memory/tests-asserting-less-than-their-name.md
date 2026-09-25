@@ -76,3 +76,32 @@ test name said "sells"; the only thing it could not see was what was sold. Captu
 
 Same family as the others here, with a sharper tell: **scan test doubles for parameters that appear
 in the signature and nowhere in the body.** That is mechanically greppable, unlike most vacuity.
+
+## 2026-09-25 (comprehension cost phase 1): the FIXTURE could not tell right from wrong
+
+Four more in one plan, all passing, all with the same root: **a fixture on which the correct code and
+the bug produce IDENTICAL observations.** A stronger assertion cannot fix that. Only a fixture
+where the two DIVERGE can.
+
+- **The in-memory fake was more forgiving than the store.** `tests/conftest.py`'s `state_store`
+  stores the caller's dict OBJECT (`store.update`). The real `runtime_state` table JSON-encodes, so
+  production only ever sees what was explicitly written. `Budget.debit` mutates a dict it has
+  already stored, so deleting its `set_runtime_state` call **passed the entire suite**, while in
+  production the bucket would refill every pass. It was found by an opus reviewer, not by reading.
+  Fix: test the write against the REAL table (a JSON round trip). Bead `news-brief-2ln` covers
+  the fixture itself. **Tell: a test double whose "store" hands back the same object it was given.**
+- **Equal knob defaults made two call sites indistinguishable.** With no settings row,
+  `_triage_model()` and `_integrate_model()` both resolve to `common.MODEL`, so a test "proving"
+  the integration ledger row carries the integration model would pass with the models swapped.
+  Fix: monkeypatch them to DIFFERENT values, and only then assert.
+- **A fixture tripped two conditions, so it discriminated neither** (again: see
+  [[tdd-plan-fixtures-drift-from-contracts]]). The surge test's 5→15 outlet failed the ratio test
+  as well as the absolute floor. A fixture must straddle exactly ONE predicate's boundary.
+- **A second writer masked a missing first write.** `mark_exhausted` also persists the whole
+  state, including the debited balance. So the debit-persistence test must be a pass that does NOT
+  exhaust, otherwise deleting `debit`'s own write is covered by the other one.
+
+**How to apply:** before trusting a test, ask *what would this fixture look like if the bug were
+present?* If the answer is "the same", the test is decorative. The pre-registered mutation count
+([[mutation-diagnostic-demands-a-count]]) is what surfaces this. All four were predicted-N,
+measured-0, or were found by a reviewer who mentally deleted the line.

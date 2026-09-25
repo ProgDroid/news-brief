@@ -42,3 +42,11 @@ Separate and unexamined: the daily brief batch runs `in=289313` in a SINGLE call
 with `cache_read=0` -- about a third of a day's Sonnet spend, and unlike
 comprehend its prefix is almost certainly over 1024 tokens, so it is a real
 caching candidate.
+
+## 2026-09-25: the £15/day incident and the redesign
+
+After re-enabling, spend reached ~£15/day. The cause was NOT comprehension's design but its INPUT:
+Reuters instrument quote pages (~2,000/day, 78% of the corpus), drained oldest-first after a
+12-day pause. **Per-item cost ($0.0027) was never the problem; unbounded volume was.** The fix is a
+budget plus selectivity: [[comprehension-cost-redesign-phase-1]]. When cost jumps, check the
+per-outlet item counts before the per-call token counts.

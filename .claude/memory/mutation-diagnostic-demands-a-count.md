@@ -181,3 +181,21 @@ supposed to have been doing.
 **How to apply:** before believing a zero, ask whether the mutation removed BEHAVIOUR. And when
 a test asserts on log text, assert on records and counts, never on a phrase the source can
 freely rewrite.
+
+## 2026-09-25 (comprehension cost phase 1): three new ways the COUNT lies
+
+- **A `-k` filter is a probe that can silently exclude the subject.** A brief's
+  `-k "account or empty_account"` did not match `test_a_400_saying_the_credit_balance_is_too_low_is_billing`.
+  The mutation read 0 when the truth was 1. **Run mutations against WHOLE modules; a filtered 0 is
+  UNKNOWN.**
+- **Mutating one half of an up/down migration pair breaks every rollback test through it.**
+  A predicted 2 read 4. The extra two were rollback tests hitting `UndefinedObject` because the
+  unmutated DOWN script dropped a constraint the mutated UP never created. Count the other half.
+- **Adding a test invalidates earlier pre-registrations that pass through the same line.** A
+  fix round added `test_exhaustion_is_persisted`, and two older mutations then read 3 vs 2 and 2 vs 1.
+  The tests were right; the numbers had not been re-registered. **When a fix adds a test, recount
+  every pre-registered mutation on the lines it touches.**
+
+**And one that worked: predicting ZERO found a gap.** "Delete the integration spend line" was
+predicted to fail 0 and did. That is a coverage hole named in advance, and the test it prompted is
+what later caught the model swap above.
