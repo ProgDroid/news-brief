@@ -19,10 +19,12 @@ import json
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 import requests
 
 import common
+import config
 from common import log
 
 # Bump on any material change to the triage prompt. A prompt change that is not
@@ -124,6 +126,8 @@ class Tally:
     # pass without charging any item: nothing about the items was judged.
     aborted: str = ""
     spent_usd: float = 0.0
+    budget_exhausted: bool = False
+    budget_balance_usd: float | None = None
     failures: dict = field(default_factory=dict)
 
 
@@ -424,15 +428,94 @@ def record_spend(conn, stage, model, usage, *, batch_id=None, batch=False) -> fl
     return usd
 
 
-def run(conn) -> Tally:
+BUDGET_STATE_KEY = "comprehend_budget"
+
+
+def accrue(state, now, allowance: float, max_days: float) -> dict:
+    """The bucket after accruing up to `now`. Pure.
+
+    Continuous accrual at allowance/day, capped at allowance * max_days. An
+    unreadable state (a hand-edited row, a type drift) starts over at one
+    day's allowance rather than crashing every pass. A timestamp in the future
+    (clock moved back) accrues nothing rather than a negative amount.
+    """
+    fresh = {"balance_usd": float(allowance), "at": now.isoformat()}
+    try:
+        balance = float(state["balance_usd"])
+        then = datetime.fromisoformat(state["at"])
+        # INSIDE the try: a hand-edited naive timestamp parses fine and then
+        # raises TypeError (aware minus naive) on the subtraction, on every pass.
+        days = max(0.0, (now - then).total_seconds() / 86400)
+    except (TypeError, KeyError, ValueError):
+        return fresh
+    out = dict(state)
+    out["balance_usd"] = min(allowance * max_days, balance + allowance * days)
+    out["at"] = now.isoformat()
+    return out
+
+
+class Budget:
+    """One pass's view of the bucket. Every debit is persisted immediately,
+    so a crash mid-pass cannot un-spend what was spent."""
+
+    def __init__(self, state: dict) -> None:
+        self.state = state
+
+    @property
+    def balance(self) -> float:
+        return float(self.state["balance_usd"])
+
+    def can_spend(self) -> bool:
+        return self.balance > 0
+
+    def debit(self, usd: float) -> None:
+        self.state["balance_usd"] = self.balance - usd
+        config.set_runtime_state({BUDGET_STATE_KEY: self.state})
+
+    def mark_exhausted(self, now) -> None:
+        # The UTC DATE, overwritten each time: the alert is at most once per
+        # day the budget ran out (spec 4.3, revised). A once-per-episode key
+        # cleared by "a full day banked" could fire once and then never again,
+        # because spend runs at about the allowance.
+        self.state["exhausted_on"] = now.date().isoformat()
+        config.set_runtime_state({BUDGET_STATE_KEY: self.state})
+
+
+def _allowance() -> tuple[float, float]:
+    return (
+        float(common.COMPREHEND_DAILY_BUDGET_USD),
+        float(common.COMPREHEND_BUDGET_MAX_DAYS),
+    )
+
+
+def open_budget(now) -> Budget:
+    allowance, max_days = _allowance()
+    state = accrue(
+        config.runtime_state().get(BUDGET_STATE_KEY), now, allowance, max_days
+    )
+    config.set_runtime_state({BUDGET_STATE_KEY: state})
+    return Budget(state)
+
+
+def pause_budget(now) -> None:
+    """A disabled pass moves the clock without accruing: time spent off
+    must not bank budget that the flip back on would then release at once."""
+    state = config.runtime_state().get(BUDGET_STATE_KEY)
+    if isinstance(state, dict):
+        config.set_runtime_state({BUDGET_STATE_KEY: {**state, "at": now.isoformat()}})
+
+
+def run(conn, now=None) -> Tally:
     """One full pass. Bounded by DEADLINE_SECONDS.
 
     Commit boundaries are load-bearing: one transaction per micro-batch, one
     savepoint per item inside it (spec section 6.4).
     """
+    now = now or datetime.now(timezone.utc)
     tally = Tally(enabled=bool(common.COMPREHEND_ENABLED))
     if not tally.enabled:
         log.info("Comprehend: disabled by COMPREHEND_ENABLED; nothing read")
+        pause_budget(now)
         return tally
 
     # Refuse to spend on a model we cannot price, BEFORE any call (spec 4.3).
@@ -442,6 +525,7 @@ def run(conn) -> Tally:
         except UnpricedModel:
             return _abort(conn, tally, f"unpriced_model:{model}")
 
+    budget = open_budget(now)
     deadline = time.monotonic() + DEADLINE_SECONDS
     index = SurfaceIndex.build(conn)
     outlets = dict(conn.execute("SELECT id, name FROM outlets").fetchall())
@@ -489,12 +573,16 @@ def run(conn) -> Tally:
     for batch in _chunk(undecided, int(common.COMPREHEND_TRIAGE_BATCH)):
         if time.monotonic() >= deadline:
             break
+        if not budget.can_spend():
+            tally.budget_exhausted = True
+            budget.mark_exhausted(now)
+            break
         payload = [dict(it, outlet=outlets.get(it["outlet_id"], "?")) for it in batch]
         try:
             resp = call_triage(build_triage_request(payload))
-            tally.spent_usd += record_spend(
-                conn, "triage", _triage_model(), resp.get("usage") or {}
-            )
+            usd = record_spend(conn, "triage", _triage_model(), resp.get("usage") or {})
+            tally.spent_usd += usd
+            budget.debit(usd)
             verdicts = parse_triage_response(resp, {it["id"] for it in batch})
         except Exception as exc:
             kind = _account_failure(exc)
@@ -551,6 +639,10 @@ def run(conn) -> Tally:
     for batch in _chunk(material_items, int(common.COMPREHEND_INTEGRATE_BATCH)):
         if time.monotonic() >= deadline:
             break
+        if not budget.can_spend():
+            tally.budget_exhausted = True
+            budget.mark_exhausted(now)
+            break
         payload = [dict(it, outlet=outlets.get(it["outlet_id"], "?")) for it in batch]
         hits = [
             sf
@@ -590,9 +682,11 @@ def run(conn) -> Tally:
             resp = call_integration(
                 build_integration_request(payload, cand_entities, cand_events)
             )
-            tally.spent_usd += record_spend(
+            usd = record_spend(
                 conn, "integration", _integrate_model(), resp.get("usage") or {}
             )
+            tally.spent_usd += usd
+            budget.debit(usd)
             extractions = parse_integration_response(
                 resp,
                 {it["id"] for it in batch},
@@ -711,6 +805,7 @@ def run(conn) -> Tally:
     tally.gave_up_triage = conn.execute(
         "SELECT count(*) FROM item_triage WHERE verdict = 'failed' AND attempts >= 3"
     ).fetchone()[0]
+    tally.budget_balance_usd = round(budget.balance, 4)
     log.info(f"Comprehend: {tally}")
     return tally
 

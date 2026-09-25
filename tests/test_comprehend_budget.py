@@ -1,6 +1,7 @@
 """Spend accounting and the budget (spec 2026-09-25 section 4.3)."""
 
 import logging
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -170,3 +171,179 @@ def test_a_successful_integration_call_ledgers_its_spend(kb, monkeypatch):
     assert rows[0][0] == integrate_model
     assert float(rows[0][1]) == pytest.approx(expected_usd) == pytest.approx(0.003)
     assert tally.spent_usd == pytest.approx(0.003)
+
+
+T0 = datetime(2026, 9, 26, 12, 0, tzinfo=timezone.utc)
+
+
+def test_a_first_pass_starts_with_one_days_allowance():
+    s = comprehend.accrue(None, T0, 1.5, 3)
+    assert s["balance_usd"] == pytest.approx(1.5)
+
+
+def test_the_balance_accrues_continuously():
+    s = comprehend.accrue(
+        {"balance_usd": 0.0, "at": T0.isoformat()}, T0 + timedelta(hours=12), 1.5, 3
+    )
+    assert s["balance_usd"] == pytest.approx(0.75)
+
+
+def test_the_balance_is_capped_at_max_days():
+    s = comprehend.accrue(
+        {"balance_usd": 4.0, "at": T0.isoformat()}, T0 + timedelta(days=10), 1.5, 3
+    )
+    assert s["balance_usd"] == pytest.approx(4.5)
+
+
+def test_a_future_timestamp_never_accrues_negative():
+    """Review Focus 2: a clock moved back must not drain the bucket."""
+    s = comprehend.accrue(
+        {"balance_usd": 1.0, "at": (T0 + timedelta(hours=5)).isoformat()}, T0, 1.5, 3
+    )
+    assert s["balance_usd"] == pytest.approx(1.0)
+
+
+def test_a_corrupt_budget_row_is_reinitialised_not_fatal():
+    """Review Focus 1: a hand-edited row must not crash every pass."""
+    for junk in (
+        {"balance_usd": "abc", "at": T0.isoformat()},
+        {"balance_usd": 1.0, "at": "not a date"},
+        {"balance_usd": 1.0, "at": "2026-09-30T00:00:00"},  # naive
+        {"at": T0.isoformat()},
+        "not a dict",
+    ):
+        s = comprehend.accrue(junk, T0, 1.5, 3)
+        assert s["balance_usd"] == pytest.approx(1.5)
+
+
+def _fake_triage_costing(calls):
+    def fake(req):
+        calls.append(req)
+        ids = [
+            int(line.split("id=")[1].split()[0])
+            for line in req["messages"][0]["content"].splitlines()
+            if line.startswith("- id=")
+        ]
+        return {
+            "stop_reason": "tool_use",
+            # Sonnet: 1000 in + 100 out = $0.003
+            "usage": {"input_tokens": 1000, "output_tokens": 100},
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "emit_triage",
+                    "input": {"items": [{"id": i, "material": False} for i in ids]},
+                }
+            ],
+        }
+
+    return fake
+
+
+def _seed(kb, n):
+    outlet = kb.execute(
+        "INSERT INTO outlets (name, kind) VALUES ('Wire', 'wire') RETURNING id"
+    ).fetchone()[0]
+    for k in range(n):
+        kb.execute(
+            "INSERT INTO items (outlet_id, url, title, content_hash, published_at) "
+            "VALUES (%s, 'u', %s, %s, now())",
+            (outlet, f"Trade talk {k}", f"H{k}"),
+        )
+    kb.commit()
+
+
+@needs_db
+def test_an_empty_bucket_makes_no_call(kb, monkeypatch, state_store):
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_SAMPLE_PER_DAY", 0)
+    NOW_T = datetime.now(timezone.utc)
+    state_store[comprehend.BUDGET_STATE_KEY] = {
+        "balance_usd": 0.0,
+        "at": NOW_T.isoformat(),
+    }
+    _seed(kb, 3)
+    calls = []
+    monkeypatch.setattr(comprehend, "call_triage", _fake_triage_costing(calls))
+
+    tally = comprehend.run(kb, now=NOW_T)
+
+    assert calls == []
+    assert tally.budget_exhausted is True
+    assert state_store[comprehend.BUDGET_STATE_KEY]["exhausted_on"] == (
+        NOW_T.date().isoformat()
+    )
+
+
+@needs_db
+def test_a_pass_stops_when_the_balance_runs_out(kb, monkeypatch, state_store):
+    """Worst-case overdraft is ONE call: $0.002 left, each call costs $0.003."""
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_SAMPLE_PER_DAY", 0)
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_TRIAGE_BATCH", 1)
+    NOW_T = datetime.now(timezone.utc)
+    state_store[comprehend.BUDGET_STATE_KEY] = {
+        "balance_usd": 0.002,
+        "at": NOW_T.isoformat(),
+    }
+    _seed(kb, 3)
+    calls = []
+    monkeypatch.setattr(comprehend, "call_triage", _fake_triage_costing(calls))
+
+    tally = comprehend.run(kb, now=NOW_T)
+
+    assert len(calls) == 1
+    assert tally.budget_exhausted is True
+    assert state_store[comprehend.BUDGET_STATE_KEY]["balance_usd"] == pytest.approx(
+        -0.001
+    )
+
+
+@needs_db
+def test_a_disabled_pass_does_not_bank_budget(kb, monkeypatch, state_store):
+    """Re-enabling after a pause accrues from the flip, not from the pause."""
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", False)
+    long_ago = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()
+    state_store[comprehend.BUDGET_STATE_KEY] = {"balance_usd": 0.0, "at": long_ago}
+
+    comprehend.run(kb)
+
+    assert state_store[comprehend.BUDGET_STATE_KEY]["at"] != long_ago
+    assert state_store[comprehend.BUDGET_STATE_KEY]["balance_usd"] == 0.0
+
+
+@needs_db
+def test_an_empty_bucket_skips_integration(kb, monkeypatch, state_store):
+    """Controller Ruling R11: the brief pins the TRIAGE can_spend guard but not
+    the INTEGRATION guard, which is the one that stops integration spending
+    after triage has already emptied the bucket. A triaged-material item with
+    nothing left in the bucket must never reach call_integration."""
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
+    outlet_id = kb.execute(
+        "INSERT INTO outlets (name, kind) VALUES ('Reuters', 'wire') RETURNING id"
+    ).fetchone()[0]
+    item_id = kb.execute(
+        "INSERT INTO items (outlet_id, url, title, body, content_hash, published_at) "
+        "VALUES (%s, 'u', 'Trade talks resume', 'body', 'H1', now()) RETURNING id",
+        (outlet_id,),
+    ).fetchone()[0]
+    comprehend.record_triage(
+        kb, item_id, "material", "tracked_story", None, comprehend.TRIAGE_PROMPT_VERSION
+    )
+    kb.commit()
+
+    NOW_T = datetime.now(timezone.utc)
+    state_store[comprehend.BUDGET_STATE_KEY] = {
+        "balance_usd": 0.0,
+        "at": NOW_T.isoformat(),
+    }
+
+    monkeypatch.setattr(
+        comprehend,
+        "call_integration",
+        lambda req: pytest.fail("integrated on an empty bucket"),
+    )
+
+    tally = comprehend.run(kb, now=NOW_T)
+
+    assert tally.budget_exhausted is True
