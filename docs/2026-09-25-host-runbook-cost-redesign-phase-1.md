@@ -118,18 +118,10 @@ SELECT model, count(*) FROM comprehend_spend WHERE stage = 'triage' GROUP BY 1;
 must show `claude-haiku-4-5`. The model name is not in the call's log line, and Sonnet
 also returns `tool_use`, so nothing else can tell you.
 
-**Watch the first pass after this flip.** The `thinking: {"type": "disabled"}` shape
-the triage call sends is what Sonnet 5 requires; whether Haiku 4.5 accepts the same
-shape is **documented-not-observed** — the claude-api skill's error tables list a 400 on
-this shape only for Fable 5/5.1, Opus 5.5, and Opus 5 at `xhigh`/`max` thinking, not for
-Haiku 4.5. A 400 is a 4xx, and `comprehend.py`'s `_is_transient` check spares only 429
-and 5xx — so a 400 here would be **charged to the batch's items**, not merely logged.
-
-Expect, in the log, a `Comprehend: triage call took ...s stop_reason=tool_use ...` line
-and **no** `Comprehend: triage batch failed` warning. If a 400 appears instead — either
-as the failure warning or as a non-`tool_use` `stop_reason` — **revert this row
-immediately** (`NEWSBRIEF_TRIAGE_MODEL` back to `''` or the prior value) before running a
-second pass, so the items just charged are the only ones.
+**M2: this row has no effect yet.** Comprehension stays off (`COMPREHEND_ENABLED` is
+still `false`) until step 5, so setting this row now only stages it — the first pass
+that actually calls Haiku happens under step 5, which is where watching it belongs; see
+that step for what to expect and what to revert if it goes wrong.
 
 ## Step 4 — run the §4.6 recovery SQL
 
@@ -150,6 +142,26 @@ outage-hit items will be past the 14-day horizon by then and become `stale` anyw
 
 ## Step 5 — flip `COMPREHEND_ENABLED`
 
+**Pre-flip check (M3).** Confirm every model settings row this deploy might read is
+actually priced, BEFORE the flip can spend against one that is not:
+
+```sql
+SELECT key, value FROM settings
+ WHERE key IN ('NEWSBRIEF_MODEL', 'NEWSBRIEF_INTEGRATE_MODEL', 'NEWSBRIEF_TRIAGE_MODEL')
+   AND user_id IS NULL;
+```
+
+(These are the real key names — verified against `common.py`'s `KNOBS` table, which
+declares `MODEL` with `env="NEWSBRIEF_MODEL"`, `INTEGRATE_MODEL` with
+`env="NEWSBRIEF_INTEGRATE_MODEL"`, and `TRIAGE_MODEL` with `env="NEWSBRIEF_TRIAGE_MODEL"`
+— `Knob.key` reads and writes exactly that env name, the same trap step 3 already warns
+about for the triage row.) Every `value` returned must be one of the keys in
+`comprehend.PRICES_PER_MTOK` — currently `claude-sonnet-5`, `claude-haiku-4-5`, and
+`claude-haiku-4-5-20251001`. A row naming anything else means the pass aborts on
+`unpriced_model` the moment it flips on (spec 4.3) — better caught here than on the
+first `comprehend_abort_alert`. A row absent from the result is fine: an unset knob
+falls back to `MODEL` (Sonnet), which is always priced.
+
 Same statement shape as the old runbook's step 2:
 
 ```sql
@@ -162,6 +174,32 @@ RETURNING key, value, now() AS cutover;
 
 **Record the returned `cutover` verbatim, in `docs/`** — the same place step 2's gate
 output is recorded. It is the `<flip>` value step 7 needs, seven days from now.
+
+**M1: the first 24h can spend up to roughly 2x the daily allowance, and that is by
+design, not a bug.** The token bucket accrues continuously and caps at
+`COMPREHEND_BUDGET_MAX_DAYS` (default 3) days of `COMPREHEND_DAILY_BUDGET_USD` (default
+$1.50); a bucket that has never been debited opens at one full day's allowance
+(`accrue`'s `fresh` case), so the FIRST hour is bounded by that one day's allowance
+($1.50) plus at most one more call before `can_spend()` next gets checked, and the
+first 24h as a whole can spend up to the two days' worth (~$3.00) sitting in the bucket
+at flip time. It settles to the steady-state ~$1.50/day rate from the second day on.
+
+**Watch the first pass after this flip (moved from step 3, M2: setting
+`NEWSBRIEF_TRIAGE_MODEL` in step 3 had no effect while `COMPREHEND_ENABLED` was still
+false, so THIS is the first pass that actually calls Haiku).** The
+`thinking: {"type": "disabled"}` shape the triage call sends is what Sonnet 5 requires;
+whether Haiku 4.5 accepts the same shape is **documented-not-observed** — the
+claude-api skill's error tables list a 400 on this shape only for Fable 5/5.1, Opus 5.5,
+and Opus 5 at `xhigh`/`max` thinking, not for Haiku 4.5. A 400 is a 4xx, and
+`comprehend.py`'s `_is_transient` check spares only 429 and 5xx — so a 400 here would be
+**charged to the batch's items**, not merely logged.
+
+Expect, in the log, a `Comprehend: triage call took ...s stop_reason=tool_use ...` line
+and **no** `Comprehend: triage batch failed` warning. If a 400 appears instead — either
+as the failure warning or as a non-`tool_use` `stop_reason` — **revert
+`NEWSBRIEF_TRIAGE_MODEL` immediately** (back to `''` or the prior value) before the next
+hourly pass (or flip `COMPREHEND_ENABLED` back off), so the items just charged are the
+only ones.
 
 **Verify by effect within the hour:**
 
@@ -181,6 +219,27 @@ comprehend side; capture's own tally field for the same idea is spelled differen
 `quote_pages_dropped` — don't cross-reference the two names as if they were one field.)
 
 ## Step 6 — the deliberate-exhaustion check
+
+**Check first whether this has already been proven (I3).** `_alert_once` (`brief.py`)
+keys the budget alert on `comprehend_budget_alert` (that is the real key —
+`brief.COMPREHEND_BUDGET_ALERT_KEY` — not a guess), and stores the episode key
+`budget:<UTC date>` as a JSON-encoded string, e.g. `"budget:2026-10-02"` (note the
+literal double quotes — `config.runtime_state()` decodes it with `json.loads`, so the
+row's raw value carries them). Run:
+
+```sql
+SELECT value FROM runtime_state WHERE key = 'comprehend_budget_alert';
+```
+
+If it already holds **today's** key (`"budget:<today's UTC date>"`), the bucket has
+already run dry naturally today — likely on flip day, working through the backlog — and
+the alert path has already fired and been verified by that natural exhaustion. **Record
+that value here as the verification and skip the deliberate $0.01 step below**, forcing
+it now would spend real money to re-prove something today's log already proved, and
+because `_alert_once` keys on the date, this deliberate check would send NO message at
+all (correct behaviour, but indistinguishable from broken without this note). If the row
+is absent, or holds an older date, proceed with the deliberate check below on a UTC day
+that has not yet naturally exhausted the budget.
 
 Set the `COMPREHEND_DAILY_BUDGET_USD` row to `0.01` for one pass.
 
@@ -229,12 +288,49 @@ Record both next to the spec's §4 estimate (~$1.40–2.40/day at 50–86% mater
 at 20% material — the material rate is the biggest unknown in the spec, and this is what
 measures it).
 
-**Also compare the ledger's daily sum against the Anthropic console's daily usage for the
-same days.** A consistent shortfall in the ledger — the console showing more spend than
-`comprehend_spend` records — is evidence for `news-brief-eqs` (timed-out requests billed
-by Anthropic but never debited from the bucket, because a timeout never returns a `usage`
-block to record against). Name the bead in whatever you write up, so the shortfall isn't
-re-discovered from scratch later.
+**Also compare the ledger's daily sum against the Anthropic console's daily usage — but
+scoped to HAIKU only, not the account total (I4, reviewer finding).** The account total
+is confounded and always reads higher than `comprehend_spend`, for reasons that have
+nothing to do with `news-brief-eqs`: the daily brief and the weekly summary
+(`brief.submit_batch`, `"model": common.MODEL`), signals (`brief._signals_model()`,
+`common.SIGNALS_MODEL or common.MODEL`), the claim-verify judge
+(`claim_verify._model()`, `common.CLAIM_VERIFY_MODEL or common.MODEL`), and
+`scripts/inspect_integration.py` (M6 — a real paid call, outside the ledger and outside
+the budget) all draw on the SAME Anthropic account and all default to `common.MODEL`
+(Sonnet) — none of that spend is comprehension's, and none of it is in
+`comprehend_spend` either, so comparing account totals just measures how much brief/
+signals/claim-verify volume there was that week.
+
+Verified by grep (`"model":` across `*.py`, checking every model knob's default in
+`common.py`'s `KNOBS`), not assumed: `TRIAGE_MODEL`, `INTEGRATE_MODEL`, `SIGNALS_MODEL`,
+and `CLAIM_VERIFY_MODEL` all default to `""` (falling back to `MODEL` = Sonnet), so
+**until step 3's row is set, nothing in this codebase calls Haiku, and after it, only
+triage does** — narrowing to Haiku isolates comprehension's triage stage cleanly from
+everything else on the account.
+
+**With one exception, also found by that grep, worth naming so it isn't
+re-discovered:** `brief_memory.py`'s daily standing-claim reconcile call
+(`reconcile_ledger`) hardcodes `RECONCILE_MODEL = "claude-haiku-4-5-20251001"` — a real,
+paid Haiku call, independent of any settings row, that also never reaches
+`comprehend_spend`. It runs once a day (alongside the daily brief), against triage's many
+batches an hour, so it is a small, near-constant offset rather than a growing one — but a
+Haiku-only comparison should still subtract roughly one reconcile call's tokens per day,
+or the residual will look like uncorroborated comprehension spend when it cannot be.
+
+Also account for triage's own retries when reading the Haiku total: `pending_triage`
+retries a `failed` item while `attempts < 3` (an item starts at `attempts = 1` on its
+first insert), so one stubborn item can cost up to three Haiku calls before
+`gave_up_triage` (`attempts >= 3`) retires it — a multiplier on top of one-call-per-item,
+not evidence of a leak.
+
+After subtracting the reconcile offset (and accounting for retries), a consistent
+shortfall in the ledger — the console's Haiku usage still higher than
+`comprehend_spend`'s Haiku rows — is evidence for `news-brief-eqs` (timed-out requests
+billed by Anthropic but never debited from the bucket, because a timeout never returns a
+`usage` block to record against). Name the bead in whatever you write up, so the
+shortfall isn't re-discovered from scratch later. The cleanest fix, if this matters
+enough to chase precisely rather than bound: a separate API key or workspace for
+comprehension, so the console can scope by key instead of by model.
 
 ---
 
