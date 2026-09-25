@@ -37,6 +37,12 @@ Capture's changes (the Reuters quote-page filter, the per-outlet surge alert) ta
 effect immediately on deploy and need no flag. Comprehension's changes stay inert until
 step 5.
 
+**Getting `<deploy time>`.** As with the old runbook's step 0, this host's image-pull step
+is not verified to be automatic — confirm the running container is on the new image first,
+the same way step 0 there asks, and use the moment of that confirmation as `<deploy time>`.
+A container restart time (`docker inspect --format '{{.State.StartedAt}}'`) shows only the
+*last* start, so treat it as a lower bound on the deploy, not proof of this specific one.
+
 Confirm by effect that capture changed — never by reading a row back:
 
 ```sql
@@ -154,6 +160,9 @@ DO UPDATE SET value = EXCLUDED.value, updated_at = now()
 RETURNING key, value, now() AS cutover;
 ```
 
+**Record the returned `cutover` verbatim, in `docs/`** — the same place step 2's gate
+output is recorded. It is the `<flip>` value step 7 needs, seven days from now.
+
 **Verify by effect within the hour:**
 
 ```sql
@@ -191,6 +200,18 @@ instant comprehension stopped.
 Then **restore `COMPREHEND_DAILY_BUDGET_USD` to `1.50`.**
 
 ## Step 7 — after 7 days, record and compare
+
+`<flip>` is the `cutover` step 5 recorded in `docs/`. If it was not recorded, recover it
+with:
+
+```sql
+SELECT updated_at FROM settings WHERE key = 'COMPREHEND_ENABLED' AND user_id IS NULL;
+```
+
+That fallback is safe here: `settings.updated_at` is `TIMESTAMPTZ NOT NULL DEFAULT now()`
+(`migrations/0001_runtime_foundation_up.sql`), set by the same `ON CONFLICT ... DO UPDATE
+SET ... updated_at = now()` step 5 ran, and nothing later in this runbook writes to the
+`COMPREHEND_ENABLED` row again — steps 6 and 7 touch `COMPREHEND_DAILY_BUDGET_USD` only.
 
 The material rate:
 
