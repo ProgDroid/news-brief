@@ -277,18 +277,38 @@ def _account_failure(exc: BaseException) -> str | None:
     return None
 
 
-def _abort(conn, tally: Tally, reason: str, exc: BaseException | None = None) -> Tally:
+ABORT_STATE_KEY = "comprehend_abort"
+
+
+def _abort(
+    conn, tally: Tally, reason: str, exc: BaseException | None = None, now=None
+) -> Tally:
     """Stop the pass WITHOUT charging anything, and say why.
 
     Logs the response BODY, not just the status: an HTTPError stringifies to a
     status and a URL, and that is why nobody can now say whether 2026-09-25's
     empty balance came back as 400 or 402 (http-error-body-is-the-diagnosis).
+
+    Persists the reason so the monitor -- a fresh process every hour, with no
+    memory of this pass -- can say ONCE that every pass is failing (spec
+    4.2-4.3): an abort never charges an item, so nothing else about this run
+    is otherwise visible outside the log. `now` is the caller's clock when
+    reachable (all three call sites are inside run(), where it is already in
+    scope); a direct call with none falls back to reading the clock itself.
     """
     conn.commit()
     tally.aborted = reason
     body = getattr(getattr(exc, "response", None), "text", "") or ""
     log.error(
         f"Comprehend: pass aborted ({reason}); no item was charged. body={body[:500]!r}"
+    )
+    config.set_runtime_state(
+        {
+            ABORT_STATE_KEY: {
+                "reason": reason,
+                "at": (now or datetime.now(timezone.utc)).isoformat(),
+            }
+        }
     )
     log.info(f"Comprehend: {tally}")
     return tally
@@ -556,7 +576,7 @@ def run(conn, now=None) -> Tally:
         try:
             price_of(model)
         except UnpricedModel:
-            return _abort(conn, tally, f"unpriced_model:{model}")
+            return _abort(conn, tally, f"unpriced_model:{model}", now=now)
 
     budget = open_budget(now)
     deadline = time.monotonic() + DEADLINE_SECONDS
@@ -620,7 +640,7 @@ def run(conn, now=None) -> Tally:
         except Exception as exc:
             kind = _account_failure(exc)
             if kind:
-                return _abort(conn, tally, kind, exc)
+                return _abort(conn, tally, kind, exc, now=now)
             tally.failed_triage += len(batch)
             log.warning("Comprehend: triage batch failed", exc_info=True)
             for it in batch:
@@ -730,7 +750,7 @@ def run(conn, now=None) -> Tally:
         except Exception as exc:
             kind = _account_failure(exc)
             if kind:
-                return _abort(conn, tally, kind, exc)
+                return _abort(conn, tally, kind, exc, now=now)
             # A network fault is a statement about the host, not about the news.
             # Charging it would let three unrelated outages retire an item that
             # was never once judged -- see _is_transient (news-brief-bqa.13).
@@ -822,23 +842,20 @@ def run(conn, now=None) -> Tally:
     tally.gave_up_integration = conn.execute(
         "SELECT count(*) FROM item_triage WHERE integrate_attempts >= 3"
     ).fetchone()[0]
-    # integrated_at IS NULL, not "integrate_prompt_version < current": a row
-    # integrated under an OLDER prompt version is already in the KB, so
-    # counting it here would make every INTEGRATE_PROMPT_VERSION bump read as
-    # mass loss (R9). aged_out counts only material items pending_integration
-    # will never pick up at all, which is the un-integrated half.
-    tally.aged_out = conn.execute(
-        "SELECT count(*) FROM item_triage t JOIN items i ON i.id = t.item_id "
-        "WHERE t.triage_prompt_version = %s AND t.verdict = 'material' "
-        "  AND t.integrate_attempts < 3 AND t.integrated_at IS NULL "
-        "  AND coalesce(i.published_at, i.created_at) "
-        "      < now() - make_interval(days => %s)",
-        (TRIAGE_PROMPT_VERSION, CANDIDATE_WINDOW_DAYS),
-    ).fetchone()[0]
+    # aged_out counts only material items pending_integration will never pick
+    # up at all (R13: extracted into aged_out_count, called from both here and
+    # budget_verdict -- see that function's docstring for the IS NULL note).
+    tally.aged_out = aged_out_count(conn)
     tally.gave_up_triage = conn.execute(
         "SELECT count(*) FROM item_triage WHERE verdict = 'failed' AND attempts >= 3"
     ).fetchone()[0]
     tally.budget_balance_usd = round(budget.balance, 4)
+    # A clean pass (nothing aborted) retracts a previous abort: the state key
+    # is the monitor's only memory across the hourly process restart, and
+    # leaving it set after recovery would keep telling the operator about a
+    # failure that stopped happening (capture.liveness contract).
+    if ABORT_STATE_KEY in config.runtime_state():
+        config.clear_runtime_state([ABORT_STATE_KEY])
     log.info(f"Comprehend: {tally}")
     return tally
 
@@ -888,6 +905,77 @@ def retirement(conn) -> tuple[str, str] | None:
         f"failed integration attempts, and {at_risk} more are one failure "
         f"away. Recover the survivors with: UPDATE item_triage SET "
         f"integrate_attempts = 0 WHERE integrate_attempts > 0;",
+    )
+
+
+_ABORT_ADVICE = {
+    "billing": "The Anthropic balance is empty. Top it up; nothing was charged "
+    "to any item, and the next pass after that resumes on its own.",
+    "auth": "The API key was refused (401/403). Check ANTHROPIC_API_KEY on the host.",
+}
+
+
+def abort_verdict(state: dict) -> tuple[str, str] | None:
+    """(episode key, message) while comprehension is refusing to run at all --
+    an empty balance, a refused key, or an unpriced model -- each of which
+    stops EVERY pass before charging an item, which is otherwise silent
+    (spec 4.2-4.3). `state` is a `config.runtime_state()` snapshot; the caller
+    owns dedup against the last key sent."""
+    a = state.get(ABORT_STATE_KEY)
+    if not isinstance(a, dict) or not a.get("reason"):
+        return None
+    reason = a["reason"]
+    if reason.startswith("unpriced_model:"):
+        model = reason.split(":", 1)[1]
+        advice = (
+            f"Model {model!r} has no price in comprehend.PRICES_PER_MTOK, "
+            "so comprehension refuses to spend on it. Add its price, or "
+            "point the model settings row back at a priced model."
+        )
+    else:
+        advice = _ABORT_ADVICE.get(reason, "See the comprehend log.")
+    return (f"abort:{reason}", f"Comprehension is stopping every pass: {advice}")
+
+
+def budget_verdict(conn, state: dict, now) -> tuple[str, str] | None:
+    """(episode key, message) on the UTC day the budget ran dry (spec 4.3).
+
+    Keyed on the day, not on `exhausted_on` alone: `!= today` (not `is None`)
+    is what makes yesterday's exhaustion silent again at midnight UTC, so a
+    fresh key is available for a fresh episode without a manual reset.
+    """
+    b = state.get(BUDGET_STATE_KEY)
+    today = now.date().isoformat()
+    if not isinstance(b, dict) or b.get("exhausted_on") != today:
+        return None
+    allowance, max_days = _allowance()
+    # Budget-starved items must never be silent (spec 4.3, revised): the day's
+    # structural outcomes ride along with the one alert.
+    stale_today = conn.execute(
+        "SELECT count(*) FROM item_triage WHERE verdict = 'stale' "
+        "AND created_at >= %s::date",
+        (today,),
+    ).fetchone()[0]
+    # R13: the same query run() tallies, through the one function -- never a
+    # second copy of it (reconstruction-drifts-from-production).
+    aged_out = aged_out_count(conn)
+    balance = accrue(b, now, allowance, max_days)["balance_usd"]
+    untriaged = conn.execute(
+        "SELECT count(*) FROM items i LEFT JOIN item_triage t "
+        "  ON t.item_id = i.id AND t.triage_prompt_version = %s WHERE t.id IS NULL",
+        (TRIAGE_PROMPT_VERSION,),
+    ).fetchone()[0]
+    # Spec 4.3 asks for BOTH counts. Through the production predicate, never
+    # a copy of it (reconstruction-drifts-from-production).
+    awaiting = len(pending_integration(conn, 1_000_000))
+    return (
+        f"budget:{today}",
+        f"Comprehension's budget ran out today ({today}). "
+        f"Balance ${balance:.2f} of ${allowance:.2f}/day (cap {max_days:g} days); "
+        f"{untriaged} items untriaged, {awaiting} awaiting integration; "
+        f"{stale_today} went stale today and {aged_out} have aged out unintegrated. "
+        "It resumes as the allowance accrues. To spend more, raise the "
+        "COMPREHEND_DAILY_BUDGET_USD settings row.",
     )
 
 
@@ -955,6 +1043,27 @@ def pending_integration(conn, limit: int) -> list[dict]:
         }
         for r in rows
     ]
+
+
+def aged_out_count(conn) -> int:
+    """Material items pending_integration will never pick up at all -- the
+    un-integrated half of D4's horizon policy (R13). One query, called from
+    both run()'s tally and budget_verdict(); never a copy of it
+    (reconstruction-drifts-from-production).
+
+    integrated_at IS NULL, not "integrate_prompt_version < current": a row
+    integrated under an OLDER prompt version is already in the KB, so counting
+    it here would make every INTEGRATE_PROMPT_VERSION bump read as mass loss
+    (R9).
+    """
+    return conn.execute(
+        "SELECT count(*) FROM item_triage t JOIN items i ON i.id = t.item_id "
+        "WHERE t.triage_prompt_version = %s AND t.verdict = 'material' "
+        "  AND t.integrate_attempts < 3 AND t.integrated_at IS NULL "
+        "  AND coalesce(i.published_at, i.created_at) "
+        "      < now() - make_interval(days => %s)",
+        (TRIAGE_PROMPT_VERSION, CANDIDATE_WINDOW_DAYS),
+    ).fetchone()[0]
 
 
 # Surface forms that are also ordinary English words. A form on this list never

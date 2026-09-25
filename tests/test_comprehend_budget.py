@@ -433,3 +433,128 @@ def test_non_finite_budget_values_cannot_disable_the_guard(monkeypatch):
         {"balance_usd": float("nan"), "at": T0.isoformat()}, T0, 1.5, 3
     )
     assert s["balance_usd"] == pytest.approx(1.5)
+
+
+def test_an_abort_names_its_reason_and_model():
+    v = comprehend.abort_verdict(
+        {
+            comprehend.ABORT_STATE_KEY: {
+                "reason": "unpriced_model:claude-sonnet-9",
+                "at": T0.isoformat(),
+            }
+        }
+    )
+    key, message = v
+    assert key == "abort:unpriced_model:claude-sonnet-9"
+    assert "claude-sonnet-9" in message and "PRICES_PER_MTOK" in message
+
+
+def test_a_billing_abort_says_to_top_up():
+    _, message = comprehend.abort_verdict(
+        {comprehend.ABORT_STATE_KEY: {"reason": "billing", "at": T0.isoformat()}}
+    )
+    assert "balance" in message.lower()
+
+
+def test_no_abort_state_is_no_verdict():
+    assert comprehend.abort_verdict({}) is None
+
+
+def _exhausted_on(day):
+    return {
+        comprehend.BUDGET_STATE_KEY: {
+            "balance_usd": 0.0,
+            "at": T0.isoformat(),
+            "exhausted_on": day,
+        }
+    }
+
+
+@needs_db
+def test_one_budget_key_per_utc_day(kb, monkeypatch):
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_DAILY_BUDGET_USD", 1.5)
+    today = T0.date().isoformat()
+    first = comprehend.budget_verdict(kb, _exhausted_on(today), T0)
+    later = comprehend.budget_verdict(kb, _exhausted_on(today), T0 + timedelta(hours=9))
+    assert first[0] == later[0] == f"budget:{today}"
+    assert "COMPREHEND_DAILY_BUDGET_USD" in first[1]
+    assert "aged out" in first[1] and "stale" in first[1]
+
+
+@needs_db
+def test_yesterdays_exhaustion_is_no_verdict_today(kb):
+    """The per-day key can never go permanently silent AND never fires more
+    than daily: yesterday's episode is over at midnight UTC."""
+    yesterday = (T0 - timedelta(days=1)).date().isoformat()
+    assert comprehend.budget_verdict(kb, _exhausted_on(yesterday), T0) is None
+
+
+@needs_db
+def test_no_exhaustion_is_no_budget_verdict(kb):
+    state = {comprehend.BUDGET_STATE_KEY: {"balance_usd": 1.0, "at": T0.isoformat()}}
+    assert comprehend.budget_verdict(kb, state, T0) is None
+
+
+@needs_db
+def test_a_clean_pass_clears_a_previous_abort(kb, monkeypatch, state_store):
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
+    state_store[comprehend.ABORT_STATE_KEY] = {"reason": "billing", "at": "x"}
+
+    tally = comprehend.run(kb)  # nothing to do, nothing fails
+
+    assert tally.aborted == ""
+    assert comprehend.ABORT_STATE_KEY not in state_store
+
+
+@needs_db
+def test_the_budget_alert_fires_once_per_episode(kb, monkeypatch, state_store):
+    import brief
+
+    sent = []
+    monkeypatch.setattr(brief, "telegram_alert", sent.append)
+    today = datetime.now(timezone.utc).date().isoformat()
+    state_store[comprehend.BUDGET_STATE_KEY] = {
+        "balance_usd": 0.0,
+        "at": T0.isoformat(),
+        "exhausted_on": today,
+    }
+
+    for _ in range(3):
+        brief.comprehend_budget_alert(kb)
+
+    assert len(sent) == 1
+
+
+@needs_db
+def test_an_abort_persists_its_reason(kb, monkeypatch, state_store):
+    """R14 (1): the reason must reach state_store through the real run() path,
+    not just through _abort called directly -- an unpriced TRIAGE_MODEL is the
+    cheapest way to force run() to abort before any network call."""
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
+    monkeypatch.setattr(comprehend.common, "TRIAGE_MODEL", "claude-sonnet-9")
+
+    comprehend.run(kb)
+
+    assert (
+        state_store[comprehend.ABORT_STATE_KEY]["reason"]
+        == "unpriced_model:claude-sonnet-9"
+    )
+
+
+def test_the_abort_alert_fires_once_per_episode(monkeypatch, state_store):
+    """R14 (2): the brief.comprehend_abort_alert() counterpart to
+    test_the_budget_alert_fires_once_per_episode above."""
+    import brief
+
+    sent = []
+    monkeypatch.setattr(brief, "telegram_alert", sent.append)
+    state_store[comprehend.ABORT_STATE_KEY] = {
+        "reason": "unpriced_model:claude-sonnet-9",
+        "at": T0.isoformat(),
+    }
+
+    for _ in range(3):
+        brief.comprehend_abort_alert()
+
+    assert len(sent) == 1
+    assert "claude-sonnet-9" in sent[0]

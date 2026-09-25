@@ -3700,6 +3700,62 @@ def comprehend_retirement_alert(conn) -> None:
         log.exception("comprehend retirement check failed")
 
 
+COMPREHEND_ABORT_ALERT_KEY = "comprehend_abort_alert"
+COMPREHEND_BUDGET_ALERT_KEY = "comprehend_budget_alert"
+
+
+def _alert_once(state_key, verdict, state, icon) -> None:
+    """The capture.liveness contract, once: send on a NEW key, before storing
+    it; clear the key when the verdict goes away. Shared by the two checks
+    below -- both follow exactly the seen/key/message shape every other block
+    in this file repeats inline."""
+    seen = state.get(state_key)
+    if verdict is None:
+        if seen:
+            config.clear_runtime_state([state_key])
+        return
+    key, message = verdict
+    if key == seen:
+        return
+    # Sent BEFORE the key is stored, for the reason capture_liveness_alert
+    # gives: the other order loses the alert entirely when Telegram is the
+    # thing that is down, while this order costs at most a repeat an hour
+    # later.
+    telegram_alert(f"{icon} {message}")
+    save_state({state_key: key})
+
+
+def comprehend_abort_alert() -> None:
+    """Say once that comprehension is refusing to run, and why (spec 4.2-4.3).
+    Covers an empty balance, a refused key and an unpriced model -- each one
+    stops every pass without charging an item, which is exactly the kind of
+    failure that is otherwise silent."""
+    import comprehend
+
+    try:
+        state = load_state()
+        _alert_once(
+            COMPREHEND_ABORT_ALERT_KEY,
+            comprehend.abort_verdict(state),
+            state,
+            "\U0001f6d1",
+        )
+    except Exception:
+        log.exception("comprehend abort check failed")
+
+
+def comprehend_budget_alert(conn) -> None:
+    """Say once per episode that the budget ran dry (spec 4.3)."""
+    import comprehend
+
+    try:
+        state = load_state()
+        verdict = comprehend.budget_verdict(conn, state, datetime.now(timezone.utc))
+        _alert_once(COMPREHEND_BUDGET_ALERT_KEY, verdict, state, "\U0001f4b8")
+    except Exception:
+        log.exception("comprehend budget check failed")
+
+
 CAPTURE_FAILING_KEY = "capture_failing_alert"
 CAPTURE_DROUGHT_KEY = "capture_drought_alert"
 CAPTURE_SURGE_KEY = "capture_surge_alert"
@@ -3794,6 +3850,12 @@ def mode_monitor():
             # silent losses, and everything below it reports what the world
             # did (news-brief-bqa.15).
             comprehend_retirement_alert(conn)
+            # Two silent failure modes of comprehension itself, not of what it
+            # reports on: every pass refusing to run at all (empty balance,
+            # refused key, unpriced model), and the budget running dry for the
+            # day (news-brief-2r5.10).
+            comprehend_abort_alert()
+            comprehend_budget_alert(conn)
             # Third of the same kind: not what the world did, but what this
             # deployment is failing to do because a knob never took effect
             # (news-brief-5fc). No connection of its own to take.
