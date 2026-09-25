@@ -304,12 +304,12 @@ signals/claim-verify volume there was that week.
 Verified by grep (`"model":` across `*.py`, checking every model knob's default in
 `common.py`'s `KNOBS`), not assumed: `TRIAGE_MODEL`, `INTEGRATE_MODEL`, `SIGNALS_MODEL`,
 and `CLAIM_VERIFY_MODEL` all default to `""` (falling back to `MODEL` = Sonnet), so
-**until step 3's row is set, nothing in this codebase calls Haiku, and after it, only
-triage does** — narrowing to Haiku isolates comprehension's triage stage cleanly from
-everything else on the account.
+**through settings, only triage calls Haiku, and only once step 3's row is set.** There is
+one hardcoded exception, named below, so narrowing the comparison to Haiku isolates
+comprehension's triage stage from everything else on the account once that daily call is
+subtracted.
 
-**With one exception, also found by that grep, worth naming so it isn't
-re-discovered:** `brief_memory.py`'s daily standing-claim reconcile call
+**The exception, also found by that grep, named here so it isn't re-discovered:** `brief_memory.py`'s daily standing-claim reconcile call
 (`reconcile_ledger`) hardcodes `RECONCILE_MODEL = "claude-haiku-4-5-20251001"` — a real,
 paid Haiku call, independent of any settings row, that also never reaches
 `comprehend_spend`. It runs once a day (alongside the daily brief), against triage's many
