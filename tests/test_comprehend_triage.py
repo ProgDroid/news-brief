@@ -544,12 +544,13 @@ def test_a_full_pass_triages_and_integrates_with_both_calls_stubbed(kb, monkeypa
 
 
 def test_an_item_the_validator_rejects_is_charged_an_attempt(kb, monkeypatch):
-    """Otherwise it is re-selected first on every pass, forever.
+    """Otherwise it is re-selected every pass until it ages past the horizon.
 
     A rejected row never reaches write_batch, so nothing sets integrated_at and
-    nothing bumps integrate_attempts -- and the integration SELECT's
-    `ORDER BY i.id` puts it at the FRONT of the next batch. It would re-pay an
-    expensive call every pass while no counter moved.
+    nothing bumps integrate_attempts -- and `pending_integration`'s
+    `ORDER BY i.id DESC` keeps it among the newest items until it ages past
+    the 14-day horizon. It would re-pay an expensive call every pass in that
+    window while no counter moved.
     """
     monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
     kb.execute("INSERT INTO stories (name, scope) VALUES ('Ukraine', 'episodic')")
@@ -1616,9 +1617,9 @@ def test_the_defer_ceiling_is_a_settings_knob_not_a_constant():
 def test_an_entityless_item_is_never_re_offered(kb, monkeypatch):
     """news-brief-bqa.17 as the PROPERTY, driven through run()'s real
     integration SELECT rather than restating it. Before the fix this item
-    raised NoEntitySurvived, kept integrated_at NULL, and came straight back to
-    the FRONT of the next batch (ORDER BY i.id) to re-pay its call -- three
-    times, then died forever."""
+    raised NoEntitySurvived, kept integrated_at NULL, and came straight back
+    into the next batch (ORDER BY i.id DESC, within the 14-day horizon) to
+    re-pay its call -- three times, then died forever."""
     monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
     item_id = _tracked_material(kb)
 

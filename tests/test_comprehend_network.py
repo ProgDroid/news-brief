@@ -133,8 +133,8 @@ def test_both_timeouts_are_settings_knobs_not_constants():
 # charge it. On 2026-09-08 a ~90s host DNS fault failed three whole batches and
 # charged an attempt to every item in them -- roughly 15 items penalised for a
 # fault that obtained no verdict about any of them. Three such faults retire an
-# item permanently, and because the integration SELECT is `ORDER BY i.id` the
-# loss falls on the OLDEST corpus rather than at random.
+# item permanently, and because `pending_integration` is `ORDER BY i.id DESC`
+# the loss falls on the NEWEST corpus rather than at random.
 
 
 def _http_error(status: int) -> Exception:

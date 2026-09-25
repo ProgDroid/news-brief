@@ -647,7 +647,7 @@ def test_an_empty_extraction_is_marked_integrated_and_writes_nothing(kb):
     ).fetchone()
     assert integrated_at is not None, (
         "an empty item must be advanced past the integration SELECT, or it is "
-        "re-offered at the FRONT of every future batch forever"
+        "re-offered every future pass until it ages past the 14-day horizon"
     )
     assert attempts == 0, "nothing failed, so nothing may be charged an attempt"
 
@@ -853,7 +853,10 @@ def test_an_extraction_with_events_but_no_entities_is_terminal_not_retried(kb):
         "SELECT integrated_at, integrate_attempts FROM item_triage WHERE item_id = %s",
         (iid,),
     ).fetchone()
-    assert row[0] is not None, "must be terminal, or it is re-offered forever"
+    assert row[0] is not None, (
+        "must be terminal, or it is re-offered every future pass until it "
+        "ages past the 14-day horizon"
+    )
     assert row[1] == 0, "the model answered; it just answered 'no entities'"
 
 

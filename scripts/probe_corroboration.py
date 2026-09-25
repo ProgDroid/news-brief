@@ -571,9 +571,11 @@ def integrate_batch_size() -> int:
 def batch_neighbours(rows, miss, size):
     """The other items that would share this miss's candidate list.
 
-    Production chunks `ORDER BY i.id LIMIT 300` into groups of `size`, so a
-    batch is items processed in the same pass. Nearest-in-time is the closest
-    reconstruction available: exact historical batches were never recorded.
+    Production chunks `pending_integration`'s `ORDER BY i.id DESC` (limited to
+    COMPREHEND_MAX_ITEMS, and to items within the 14-day horizon) into groups
+    of `size`, so a batch is items processed in the same pass. Nearest-in-time
+    is the closest reconstruction available: exact historical batches were
+    never recorded.
     """
     target = miss["later"]["created_at"]
     seen = {miss["later"]["event_id"], miss["earlier"]["event_id"]}

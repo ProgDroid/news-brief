@@ -216,10 +216,10 @@ def _is_transient(exc: BaseException) -> bool:
     Only these may be retried without charging `integrate_attempts`, which is a
     ONE-WAY DOOR at 3. A ~90s DNS fault on 2026-09-08 failed three whole batches
     and spent an attempt on every item in them, for a fault that said nothing
-    about any of those items; because the integration SELECT is `ORDER BY i.id`
-    that loss lands on the OLDEST corpus rather than at random. 429 and 5xx sit
-    here with the connection faults: they are the server declining to answer,
-    which is likewise not a statement about what was asked.
+    about any of those items; because `pending_integration` is `ORDER BY i.id
+    DESC` that loss lands on the NEWEST corpus rather than at random. 429 and
+    5xx sit here with the connection faults: they are the server declining to
+    answer, which is likewise not a statement about what was asked.
 
     The set is deliberately narrow, because the failure mode of being too
     liberal is quieter than the bug it fixes. A 4xx other than 429 means the
@@ -590,10 +590,11 @@ def run(conn) -> Tally:
             continue
 
         # A row _validate_item rejected never reaches write_batch, so nothing
-        # else advances it: it satisfies the integration SELECT forever and
-        # `ORDER BY i.id` puts it at the FRONT of every future batch, re-paying
-        # its share of the call each pass with no operator-visible signal.
-        # Charging it an attempt lets the ceiling of 3 retire it, which is the
+        # else advances it: it satisfies pending_integration's predicate every
+        # pass and `ORDER BY i.id DESC` keeps it among the newest items until
+        # it ages past the 14-day horizon, re-paying its share of the call
+        # each pass in that window with no operator-visible signal. Charging
+        # it an attempt lets the ceiling of 3 retire it first, which is the
         # same treatment a whole-batch failure already gets.
         dropped = [
             it["id"]
@@ -621,6 +622,11 @@ def run(conn) -> Tally:
     tally.gave_up_integration = conn.execute(
         "SELECT count(*) FROM item_triage WHERE integrate_attempts >= 3"
     ).fetchone()[0]
+    # integrated_at IS NULL, not "integrate_prompt_version < current": a row
+    # integrated under an OLDER prompt version is already in the KB, so
+    # counting it here would make every INTEGRATE_PROMPT_VERSION bump read as
+    # mass loss (R9). aged_out counts only material items pending_integration
+    # will never pick up at all, which is the un-integrated half.
     tally.aged_out = conn.execute(
         "SELECT count(*) FROM item_triage t JOIN items i ON i.id = t.item_id "
         "WHERE t.triage_prompt_version = %s AND t.verdict = 'material' "
@@ -1716,8 +1722,11 @@ def write_extraction(conn, extraction: dict, index: SurfaceIndex, tally: Tally) 
     # Nothing to extract. Mark it done and charge it nothing: it is neither a
     # model failure nor a parser failure, and leaving integrated_at NULL is the
     # shape this repo has hit three times -- a row a predicate keeps
-    # re-selecting that nothing advances. `ORDER BY i.id` would put it at the
-    # FRONT of every future batch, re-paying its share of the call each pass.
+    # re-selecting that nothing advances. Under `pending_integration`'s `ORDER
+    # BY i.id DESC` plus the 14-day horizon, an unmarked empty extraction stays
+    # among the NEWEST un-integrated items, so it would be re-paid every pass
+    # until it ages past the horizon -- bounded, but by up to 14 days of hourly
+    # calls, not by attempts.
     # Note this is NOT the same as "every entity was refused": that path went
     # through resolution and had work rejected, so it keeps its attempt.
     if not extraction["entities"] and not extraction["events"]:
