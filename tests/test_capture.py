@@ -234,7 +234,7 @@ def test_an_explicit_outlet_key_wins():
 
 def test_both_reuters_feeds_resolve_to_one_outlet():
     named = {f["name"]: f for f in brief.RSS_FEEDS}
-    assert brief.outlet_for(named["Reuters Markets"]) == "Reuters"
+    assert brief.outlet_for(named["Reuters Business"]) == "Reuters"
     assert brief.outlet_for(named["Reuters World"]) == "Reuters"
 
 
@@ -254,7 +254,7 @@ def test_no_feed_ships_a_product_name_as_an_outlet():
         "ISW Daily Assessment",
         "BOJ Statements",
         "EIA Today in Energy",
-        "Reuters Markets",
+        "Reuters Business",
         "Reuters World",
         "Marko Papic (@geo_papic)",
         "Jacob Shapiro (@jacobshap)",
@@ -479,12 +479,12 @@ def test_a_capture_url_points_at_the_same_source_through_a_shorter_window():
     """The pair must not drift. Two hand-maintained URLs invite an edit to one
     and not the other, and the failure would be silent: capture would quietly be
     reading a different source from the brief, with both feeds still working."""
-    # The four measured as capping on 2026-09-08 (100 entries every poll, at
-    # when:1d and wider). Pinned rather than counted, so dropping an override
-    # fails here instead of silently reinstating the truncation; changing this
-    # set is a claim about the feeds and wants a fresh measurement behind it.
+    # The feeds measured as capping (100 entries every poll) on 2026-09-08,
+    # except Reuters Business, which replaced the /markets proxy on 2026-09-25
+    # and measured 34 per 6h window: it keeps the narrow capture window because
+    # its when:2d window exceeds the cap at ~136/day.
     assert {f["name"] for f in brief.RSS_FEEDS if f.get("capture_url")} == {
-        "Reuters Markets",
+        "Reuters Business",
         "Reuters World",
         "Kyiv Independent",
         "Yonhap (English)",

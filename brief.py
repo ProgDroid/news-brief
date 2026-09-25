@@ -146,22 +146,26 @@ THESIS_FILE = DATA_DIR / "theses.json"
 # ── Feed sources ──────────────────────────────────────────────────────────────
 RSS_FEEDS = [
     {
-        "name": "Reuters Markets",
-        # Reuters discontinued public RSS (June 2020); proxy via Google News.
-        # `site:` is stable (unlike allinurl:); `when:2d` is a freshness guardrail
-        # so a quiet section never feeds the LLM stale headlines as news. For the
-        # BRIEF the window is not a volume control, since only the 25 newest items
-        # are used (fetch_rss max_items). For CAPTURE it is exactly that, which is
-        # what `capture_url` below exists to say.
-        # Capped: when:2d returns exactly 100 (the Google News cap) with ~370
-        # candidates for 100 RELEVANCE-ranked slots, so an item never in the top
-        # 100 at any poll instant is lost unobservably. Capture polls a 6h window
-        # (measured 17-24 items, 2026-09-08) where nothing can be ranked out. The
-        # brief keeps 2d: it takes the newest 25 at brief time, and 6h at 06:00
-        # would be the overnight hours only. The narrow window REQUIRES frequent
-        # polling -- do not slow these feeds without widening it (b42.4/b42.5).
-        "url": "https://news.google.com/rss/search?q=when:2d+site%3Areuters.com%2Fmarkets&hl=en-US&gl=US&ceid=US%3Aen",
-        "capture_url": "https://news.google.com/rss/search?q=when:6h+site%3Areuters.com%2Fmarkets&hl=en-US&gl=US&ceid=US%3Aen",
+        "name": "Reuters Business",
+        # Was "Reuters Markets" (site:reuters.com/markets) until 2026-09-25.
+        # Around 2026-09-15 Google News began indexing Reuters' INSTRUMENT pages
+        # under /markets ("MSTS.DE - Reuters", "... | Stock Price & Latest News
+        # - Reuters"): the 6h window returned the 100-item cap with a different
+        # sample on every poll (union 191 across three fetches), and 48 polls a
+        # day captured ~2,000 quote pages a day -- 78% of the corpus, each one
+        # paid for again by comprehension. -inurl:companies changed nothing and
+        # the /markets/<region> sub-paths return nothing; /business measured 34
+        # per 6h window with no quote pages (spec 2026-09-25 section 2.2).
+        # common.is_quote_page guards every feed in case this recurs elsewhere.
+        #
+        # Reuters has no public RSS (June 2020), hence the Google News proxy.
+        # `site:` is stable (unlike allinurl:); `when:2d` is a freshness
+        # guardrail for the BRIEF, which takes only the 25 newest items. For
+        # CAPTURE the window is a volume control, which is what `capture_url`
+        # says. The narrow window REQUIRES frequent polling -- do not slow this
+        # feed without widening it (b42.4/b42.5).
+        "url": "https://news.google.com/rss/search?q=when:2d+site%3Areuters.com%2Fbusiness&hl=en-US&gl=US&ceid=US%3Aen",
+        "capture_url": "https://news.google.com/rss/search?q=when:6h+site%3Areuters.com%2Fbusiness&hl=en-US&gl=US&ceid=US%3Aen",
         "category": "macro",
         "kind": "wire",
         "outlet": "Reuters",
