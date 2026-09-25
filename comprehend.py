@@ -73,6 +73,10 @@ class Tally:
     defer_cap_hit: int = 0
     gave_up_triage: int = 0
     gave_up_integration: int = 0
+    # Material items past the horizon, never to be integrated (spec D4). A
+    # standing count, like gave_up_integration. Not a failure: the policy
+    # under a budget is that old items give way.
+    aged_out: int = 0
     entities_created: int = 0
     entities_resolved: int = 0
     events_created: int = 0
@@ -469,31 +473,10 @@ def run(conn) -> Tally:
     conn.commit()
 
     # --- Integration.
-    rows = conn.execute(
-        "SELECT i.id, i.title, i.body, i.outlet_id, i.published_at FROM items i "
-        "JOIN item_triage t ON t.item_id = i.id AND t.triage_prompt_version = %s "
-        "WHERE t.verdict = 'material' AND t.integrate_attempts < 3 "
-        "  AND (t.integrated_at IS NULL OR t.integrate_prompt_version < %s) "
-        "ORDER BY i.id LIMIT %s",
-        (
-            TRIAGE_PROMPT_VERSION,
-            INTEGRATE_PROMPT_VERSION,
-            int(common.COMPREHEND_MAX_ITEMS),
-        ),
-    ).fetchall()
     # published_at is carried because write_extraction needs it for
     # events.occurred_at. Without it every created event is invisible to
     # candidate_events and corroboration is impossible.
-    material_items = [
-        {
-            "id": r[0],
-            "title": r[1],
-            "body": r[2] or "",
-            "outlet_id": r[3],
-            "published_at": r[4],
-        }
-        for r in rows
-    ]
+    material_items = pending_integration(conn, int(common.COMPREHEND_MAX_ITEMS))
     published = {it["id"]: it["published_at"] for it in material_items}
 
     for batch in _chunk(material_items, int(common.COMPREHEND_INTEGRATE_BATCH)):
@@ -638,6 +621,14 @@ def run(conn) -> Tally:
     tally.gave_up_integration = conn.execute(
         "SELECT count(*) FROM item_triage WHERE integrate_attempts >= 3"
     ).fetchone()[0]
+    tally.aged_out = conn.execute(
+        "SELECT count(*) FROM item_triage t JOIN items i ON i.id = t.item_id "
+        "WHERE t.triage_prompt_version = %s AND t.verdict = 'material' "
+        "  AND t.integrate_attempts < 3 AND t.integrated_at IS NULL "
+        "  AND coalesce(i.published_at, i.created_at) "
+        "      < now() - make_interval(days => %s)",
+        (TRIAGE_PROMPT_VERSION, CANDIDATE_WINDOW_DAYS),
+    ).fetchone()[0]
     tally.gave_up_triage = conn.execute(
         "SELECT count(*) FROM item_triage WHERE verdict = 'failed' AND attempts >= 3"
     ).fetchone()[0]
@@ -696,9 +687,12 @@ def retirement(conn) -> tuple[str, str] | None:
 def pending_triage(conn, version: int, limit: int) -> list[dict]:
     """Items with no verdict at this version, or a retryable failure.
 
-    Oldest first: nothing reads this layer yet, so completeness beats recency
-    and no item may starve. Newest-first would permanently skip the tail of any
-    backlog.
+    NEWEST first (spec 2026-09-25 D4). This was oldest-first on the argument
+    that "nothing reads this layer yet, so completeness beats recency", which
+    assumed a small backlog. A 12-day pause left 24,045 items, drained at
+    $0.0027 each, oldest first. Under a budget, something must give when
+    arrivals outrun it, and a KB that lags the news cannot corroborate current
+    events -- so the OLD items give, and the horizon marks them stale.
     """
     rows = conn.execute(
         "SELECT i.id, i.title, i.body, i.outlet_id, i.published_at, "
@@ -708,7 +702,7 @@ def pending_triage(conn, version: int, limit: int) -> list[dict]:
         "LEFT JOIN item_triage t "
         "  ON t.item_id = i.id AND t.triage_prompt_version = %s "
         "WHERE t.id IS NULL OR (t.verdict = 'failed' AND t.attempts < 3) "
-        "ORDER BY i.id "
+        "ORDER BY i.id DESC "
         "LIMIT %s",
         # CANDIDATE_WINDOW_DAYS is defined further down the module; module-level
         # names resolve at call time, so the forward reference is fine.
@@ -722,6 +716,35 @@ def pending_triage(conn, version: int, limit: int) -> list[dict]:
             "outlet_id": r[3],
             "published_at": r[4],
             "stale": r[5],
+        }
+        for r in rows
+    ]
+
+
+def pending_integration(conn, limit: int) -> list[dict]:
+    """The ONE definition of what integration picks up next.
+
+    scripts/inspect_integration.py used to carry its own copy of this SELECT,
+    which is how a diagnostic ends up probing a query production no longer
+    runs (news-brief-bqa.26). Call this; never re-derive it.
+    """
+    rows = conn.execute(
+        "SELECT i.id, i.title, i.body, i.outlet_id, i.published_at FROM items i "
+        "JOIN item_triage t ON t.item_id = i.id AND t.triage_prompt_version = %s "
+        "WHERE t.verdict = 'material' AND t.integrate_attempts < 3 "
+        "  AND (t.integrated_at IS NULL OR t.integrate_prompt_version < %s) "
+        "  AND coalesce(i.published_at, i.created_at) "
+        "      >= now() - make_interval(days => %s) "
+        "ORDER BY i.id DESC LIMIT %s",
+        (TRIAGE_PROMPT_VERSION, INTEGRATE_PROMPT_VERSION, CANDIDATE_WINDOW_DAYS, limit),
+    ).fetchall()
+    return [
+        {
+            "id": r[0],
+            "title": r[1],
+            "body": r[2] or "",
+            "outlet_id": r[3],
+            "published_at": r[4],
         }
         for r in rows
     ]

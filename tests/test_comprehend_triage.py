@@ -1885,3 +1885,69 @@ def test_the_sample_never_promotes_a_structural_reject(kb):
     kb.commit()
 
     assert comprehend.select_sampled(kb, comprehend.TRIAGE_PROMPT_VERSION, 20) == []
+
+
+def test_triage_takes_the_newest_items_first(kb, monkeypatch):
+    """Spec D4: under a budget, OLD items give way, so the KB stays current."""
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_MAX_ITEMS", 1)
+    old = _add_item(kb, "Older item", h="A")
+    new = _add_item(kb, "Newer item", h="B")
+    kb.commit()
+
+    rows = comprehend.pending_triage(kb, comprehend.TRIAGE_PROMPT_VERSION, 1)
+
+    assert [r["id"] for r in rows] == [new]
+    assert old < new
+
+
+def test_a_material_item_past_the_horizon_is_not_integrated(kb, monkeypatch):
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
+    kb.execute("INSERT INTO stories (name, scope) VALUES ('Ukraine talks', 'episodic')")
+    item_id = _add_item(kb, "Ukraine talks resume")
+    comprehend.record_triage(
+        kb, item_id, "material", "tracked_story", None, comprehend.TRIAGE_PROMPT_VERSION
+    )
+    kb.execute(
+        "UPDATE items SET published_at = now() - interval '15 days' WHERE id = %s",
+        (item_id,),
+    )
+    kb.commit()
+    monkeypatch.setattr(
+        comprehend,
+        "call_integration",
+        lambda r: pytest.fail("an aged-out item was integrated"),
+    )
+
+    tally = comprehend.run(kb)
+
+    assert tally.aged_out == 1
+    assert (
+        kb.execute(
+            "SELECT verdict FROM item_triage WHERE item_id = %s", (item_id,)
+        ).fetchone()[0]
+        == "material"
+    ), "the row is not rewritten; its triage reason is kept"
+
+
+def test_a_null_published_at_falls_back_to_created_at(kb):
+    """Review Focus 4: NULL published_at must neither exempt an item from the
+    horizon nor make it stale on arrival."""
+    fresh = kb.execute(
+        "INSERT INTO items (outlet_id, url, title, content_hash) "
+        "VALUES (%s, 'u', 'no date, fresh', 'N1') RETURNING id",
+        (_outlet(kb),),
+    ).fetchone()[0]
+    old = kb.execute(
+        "INSERT INTO items (outlet_id, url, title, content_hash, created_at) "
+        "VALUES (%s, 'u', 'no date, old', 'N2', now() - interval '20 days') "
+        "RETURNING id",
+        (_outlet(kb),),
+    ).fetchone()[0]
+    kb.commit()
+
+    rows = {
+        r["id"]: r["stale"]
+        for r in comprehend.pending_triage(kb, comprehend.TRIAGE_PROMPT_VERSION, 10)
+    }
+
+    assert rows == {fresh: False, old: True}

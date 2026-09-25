@@ -37,8 +37,6 @@ from comprehend import (  # noqa: E402
     _ENTITY_LABEL,
     _EVENT_LABEL,
     CANDIDATE_ENTITY_CAP,
-    INTEGRATE_PROMPT_VERSION,
-    TRIAGE_PROMPT_VERSION,
     SurfaceIndex,
     Tally,
     _validate_item,
@@ -47,36 +45,15 @@ from comprehend import (  # noqa: E402
     candidate_events,
     clean,
     label_map,
+    pending_integration,
 )
 
 DEFAULT_BATCH = 5
 
 
 def select_batch(conn, limit: int) -> list[dict]:
-    """The SAME select `run()` uses, so this probes the rows that actually failed.
-
-    `ORDER BY i.id` matters: it is what puts the same low-id items at the front of
-    every pass, so a front-of-queue sample is the population that burns its retry
-    budget first — not a convenient sample from somewhere in the middle.
-    """
-    rows = conn.execute(
-        "SELECT i.id, i.title, i.body, i.outlet_id, i.published_at FROM items i "
-        "JOIN item_triage t ON t.item_id = i.id AND t.triage_prompt_version = %s "
-        "WHERE t.verdict = 'material' AND t.integrate_attempts < 3 "
-        "  AND (t.integrated_at IS NULL OR t.integrate_prompt_version < %s) "
-        "ORDER BY i.id LIMIT %s",
-        (TRIAGE_PROMPT_VERSION, INTEGRATE_PROMPT_VERSION, limit),
-    ).fetchall()
-    return [
-        {
-            "id": r[0],
-            "title": r[1],
-            "body": r[2] or "",
-            "outlet_id": r[3],
-            "published_at": r[4],
-        }
-        for r in rows
-    ]
+    """The SAME select `run()` uses, so this probes the rows that actually failed."""
+    return pending_integration(conn, limit)
 
 
 def build_candidates(conn, batch: list[dict]) -> tuple[list[dict], list[dict]]:
