@@ -249,13 +249,17 @@ def _account_failure(exc: BaseException) -> str | None:
     # The DOCUMENTED empty-balance error is 402 billing_error, but the widely
     # reported one is 400 invalid_request_error "credit balance is too low".
     # Which one the host got on 2026-09-25 was never recorded (only the status
-    # was logged), so match the body as well: a real 400 for a bad request
-    # must still charge its item.
+    # was logged), so match the body as well; but only for a 400 -- a 429 or
+    # 5xx whose body happens to mention "credit balance" is still a transient
+    # server fault (_is_transient), not a statement about the account.
+    if getattr(resp, "status_code", None) != 400:
+        return None
     try:
         body = resp.json().get("error") or {}
+        message = body.get("message", "")
     except Exception:
         return None
-    if "credit balance" in str(body.get("message", "")).lower():
+    if "credit balance" in str(message).lower():
         return "billing"
     return None
 

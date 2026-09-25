@@ -1719,13 +1719,18 @@ def test_account_statuses_are_classified(status, kind):
     assert comprehend._account_failure(_http_error(status)) == kind
 
 
-def _http_error_with_body(status, err_type, message):
+def _http_error_with_body(status, err_type=None, message=None, raw=None):
+    """`raw`, when given, is the exact JSON payload -- used to build bodies
+    that don't fit the {"error": {"type", "message"}} shape at all."""
     import json as _json
 
     err = _http_error(status)
-    err.response._content = _json.dumps(
-        {"type": "error", "error": {"type": err_type, "message": message}}
-    ).encode()
+    payload = (
+        raw
+        if raw is not None
+        else {"type": "error", "error": {"type": err_type, "message": message}}
+    )
+    err.response._content = _json.dumps(payload).encode()
     return err
 
 
@@ -1750,3 +1755,26 @@ def test_an_ordinary_400_is_not_an_account_failure():
 @pytest.mark.parametrize("status", [400, 404, 429, 500, 529])
 def test_other_statuses_are_not_account_failures(status):
     assert comprehend._account_failure(_http_error(status)) is None
+
+
+def test_a_400_whose_error_field_is_not_an_object_is_not_an_account_failure():
+    """Fix round 1 (Ruling R6). A malformed body -- `error` as a bare string
+    rather than an object -- must not crash _account_failure: it is called
+    from inside run()'s `except Exception` handlers, so an unhandled
+    AttributeError here would escape and crash the whole pass."""
+    err = _http_error_with_body(400, raw={"type": "error", "error": "not-a-dict"})
+    assert comprehend._account_failure(err) is None
+
+
+@pytest.mark.parametrize("status", [429, 500])
+def test_a_credit_balance_message_on_a_non_400_is_not_an_account_failure(status):
+    """Fix round 1 (Ruling R6). The credit-balance body check is scoped to a
+    400 (the spec's own wording); a 429 or 5xx whose body happens to mention
+    "credit balance" is still a transient server fault and must defer through
+    _is_transient, not abort the whole pass."""
+    err = _http_error_with_body(
+        status,
+        "invalid_request_error",
+        "Your credit balance is too low to access the Anthropic API.",
+    )
+    assert comprehend._account_failure(err) is None
