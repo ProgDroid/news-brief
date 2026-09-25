@@ -1142,12 +1142,13 @@ def test_a_surge_far_above_the_outlets_own_median_is_flagged(store):
     assert "400" in message and "50" in message
 
 
-def test_a_small_outlet_tripling_is_not_a_surge(store):
-    """3x of 5 is 15 items: noise, not a bill. The absolute floor is why."""
+def test_a_big_ratio_with_a_small_absolute_rise_is_not_a_surge(store):
+    """3.33x clears the ratio (median 60, recent 200), but +140 is under the
+    absolute floor: only SURGE_MIN_EXCESS can exclude this one."""
     _history(store)
     for d in range(1, 8):
-        _items(store, "Meduza", 5, d)
-    _items(store, "Meduza", 15, 0)
+        _items(store, "Meduza", 60, d)
+    _items(store, "Meduza", 200, 0)
     store.commit()
 
     assert capture.item_surge(store, NOW) is None
