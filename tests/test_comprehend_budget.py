@@ -83,11 +83,22 @@ def test_a_successful_integration_call_ledgers_its_spend(kb, monkeypatch):
     test_an_unpriced_model_aborts_the_pass_before_any_call and the triage
     ledger row is exercised via record_spend directly, but nothing drove a
     real integration batch through run() to prove the second call site
-    actually charges. Uses a rules-matched item (tracked_story) so no
-    call_triage stub is needed -- only call_integration, whose usage the
-    ledger row must reflect exactly.
+    actually charges -- specifically, that it charges the INTEGRATION model
+    and prices at ITS rate. With both TRIAGE_MODEL and INTEGRATE_MODEL unset
+    the two calls resolve to the same common.MODEL, so a mixed-up call site
+    (`_triage_model()` where `_integrate_model()` belongs) would still pass
+    every assertion here -- review Important finding, fix round 1. Pinning
+    TRIAGE_MODEL to Haiku makes the two differ. The item is rules-matched
+    (tracked_story), so no triage call should happen at all; call_triage is
+    stubbed to fail the test if it is, so that claim is enforced, not assumed.
     """
     monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
+    monkeypatch.setattr(comprehend.common, "TRIAGE_MODEL", "claude-haiku-4-5")
+    monkeypatch.setattr(
+        comprehend,
+        "call_triage",
+        lambda r: pytest.fail("item was rules-matched; call_triage must not run"),
+    )
     kb.execute("INSERT INTO stories (name, scope) VALUES ('Ukraine talks', 'episodic')")
     outlet_id = kb.execute(
         "INSERT INTO outlets (name, kind) VALUES ('Reuters', 'wire') RETURNING id"
@@ -135,14 +146,27 @@ def test_a_successful_integration_call_ledgers_its_spend(kb, monkeypatch):
 
     monkeypatch.setattr(comprehend, "call_integration", fake_integrate)
 
+    integrate_model = comprehend._integrate_model()
+    triage_model = comprehend._triage_model()
+    assert integrate_model != triage_model, (
+        "the two models must differ or the row's model column can't discriminate "
+        "which call site actually charged"
+    )
+    usage = {"input_tokens": 1000, "output_tokens": 100}
+    expected_usd = comprehend.cost_usd(integrate_model, usage)
+    haiku_usd = comprehend.cost_usd(triage_model, usage)
+    assert expected_usd != pytest.approx(haiku_usd), (
+        "the two rates must differ or a Haiku-priced row would look correct too"
+    )
+
     tally = comprehend.run(kb)
     kb.commit()
 
     assert tally.material == 1
     rows = kb.execute(
-        "SELECT stage, model, usd FROM comprehend_spend WHERE stage = 'integration'"
+        "SELECT model, usd FROM comprehend_spend WHERE stage = 'integration'"
     ).fetchall()
     assert len(rows) == 1
-    assert rows[0][0] == "integration"
-    assert float(rows[0][2]) == pytest.approx(0.003)
+    assert rows[0][0] == integrate_model
+    assert float(rows[0][1]) == pytest.approx(expected_usd) == pytest.approx(0.003)
     assert tally.spent_usd == pytest.approx(0.003)
