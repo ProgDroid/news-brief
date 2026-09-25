@@ -3702,6 +3702,7 @@ def comprehend_retirement_alert(conn) -> None:
 
 CAPTURE_FAILING_KEY = "capture_failing_alert"
 CAPTURE_DROUGHT_KEY = "capture_drought_alert"
+CAPTURE_SURGE_KEY = "capture_surge_alert"
 
 
 def capture_quality_alert(conn, now) -> None:
@@ -3716,13 +3717,14 @@ def capture_quality_alert(conn, now) -> None:
 
     Two independent episode keys, not one. A widening feed outage and a drought
     are different stories, and sharing a key would let the first one seen
-    silence the second.
+    silence the second. Surge (2026-09-25) is the first check for too MUCH.
     """
     import capture
 
     for state_key, produce in (
         (CAPTURE_FAILING_KEY, capture.failing_feeds),
         (CAPTURE_DROUGHT_KEY, capture.item_drought),
+        (CAPTURE_SURGE_KEY, capture.item_surge),
     ):
         try:
             verdict = produce(conn, now)

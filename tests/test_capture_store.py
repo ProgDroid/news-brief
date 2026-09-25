@@ -1098,3 +1098,92 @@ def test_capture_drops_quote_pages_before_storing(store, monkeypatch):
     assert tally.quote_pages_dropped == 1
     assert tally.items_seen == 1, "a dropped quote page was never an item seen"
     assert store.execute("SELECT entries_seen FROM feed_polls").fetchone()[0] == 2
+
+
+def _outlet_id(store, name):
+    row = store.execute("SELECT id FROM outlets WHERE name = %s", (name,)).fetchone()
+    if row:
+        return row[0]
+    return store.execute(
+        "INSERT INTO outlets (name, kind) VALUES (%s, 'wire') RETURNING id", (name,)
+    ).fetchone()[0]
+
+
+def _items(store, name, n, days_ago):
+    """n items captured `days_ago` whole days before NOW, all inside one
+    24h bucket (spread over the bucket's first hour)."""
+    store.execute(
+        "INSERT INTO items (outlet_id, url, title, content_hash, created_at) "
+        "SELECT %s, 'u', 't', md5(%s || '-' || %s || '-' || g), "
+        "       %s - make_interval(days => %s, secs => g %% 3600) "
+        "FROM generate_series(1, %s) g",
+        (_outlet_id(store, name), name, days_ago, NOW, days_ago, n),
+    )
+
+
+def _history(store):
+    """item_surge, like item_drought, refuses to judge without a week of runs."""
+    _run(store, minutes_ago=8 * 24 * 60)
+
+
+def test_a_surge_far_above_the_outlets_own_median_is_flagged(store):
+    """The 2026-09-16 Reuters shape, scaled down: ~8x its median."""
+    _history(store)
+    for d in range(1, 8):
+        _items(store, "Reuters", 50, d)
+    _items(store, "Reuters", 400, 0)
+    store.commit()
+
+    verdict = capture.item_surge(store, NOW)
+
+    assert verdict is not None
+    key, message = verdict
+    assert key == "surge:Reuters"
+    assert "400" in message and "50" in message
+
+
+def test_a_small_outlet_tripling_is_not_a_surge(store):
+    """3x of 5 is 15 items: noise, not a bill. The absolute floor is why."""
+    _history(store)
+    for d in range(1, 8):
+        _items(store, "Meduza", 5, d)
+    _items(store, "Meduza", 15, 0)
+    store.commit()
+
+    assert capture.item_surge(store, NOW) is None
+
+
+def test_a_big_outlet_rising_under_3x_is_not_a_surge(store):
+    _history(store)
+    for d in range(1, 8):
+        _items(store, "Reuters", 300, d)
+    _items(store, "Reuters", 800, 0)  # +500, but only 2.7x
+    store.commit()
+
+    assert capture.item_surge(store, NOW) is None
+
+
+def test_a_surge_is_unknown_while_the_history_is_too_short(store):
+    """No week of capture runs: unmeasured, not healthy and not surging."""
+    for d in range(1, 8):
+        _items(store, "Reuters", 50, d)
+    _items(store, "Reuters", 400, 0)
+    store.commit()
+
+    assert capture.item_surge(store, NOW) is None
+
+
+def test_a_surge_alerts_once_not_once_per_check(store, monkeypatch, state_store):
+    _history(store)
+    for d in range(1, 8):
+        _items(store, "Reuters", 50, d)
+    _items(store, "Reuters", 400, 0)
+    store.commit()
+    sent = []
+    monkeypatch.setattr(brief, "telegram_alert", sent.append)
+
+    for _ in range(3):
+        brief.capture_quality_alert(store, NOW)
+
+    assert [m for m in sent if "capturing far more" in m] == [sent[0]]
+    assert state_store[brief.CAPTURE_SURGE_KEY] == "surge:Reuters"

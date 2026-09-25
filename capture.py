@@ -15,6 +15,7 @@ Spec: docs/superpowers/specs/2026-09-02-continuous-capture-design.md
 """
 
 import hashlib
+import statistics
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -729,6 +730,68 @@ def item_drought(conn, now) -> tuple[str, str] | None:
         f"({_duration(now - started_at)}).\n"
         f"   Longest gap in the previous {HISTORY_DAYS} days: {longest} passes.\n"
         "   Every poll in that stretch succeeded, so this is not a fetch failure.",
+    )
+
+
+# The first alert here that watches for TOO MUCH. Until 2026-09-25 capture
+# alerted only on absence, and the only detector that ever caught a surge was
+# the Anthropic balance running out: Reuters went from ~300 to ~2,600 items a
+# day on 2026-09-16 and nothing said so for nine days (spec 2026-09-25 2.2).
+# Two conditions, both required: a ratio against the outlet's OWN median, so a
+# naturally busy outlet is judged against itself, and an absolute excess, so a
+# quiet outlet going from 5 to 15 -- noise, and no bill -- cannot trip it.
+SURGE_FACTOR = 3
+SURGE_MIN_EXCESS = 200
+
+
+def item_surge(conn, now) -> tuple[str, str] | None:
+    """(episode key, message) for outlets capturing far more than usual.
+
+    Silent below HISTORY_DAYS of runs, for item_drought's reason: a baseline
+    that has not seen a full week is not a baseline.
+    """
+    since = now - timedelta(days=HISTORY_DAYS)
+    oldest = conn.execute(
+        "SELECT min(started_at) FROM capture_runs "
+        "WHERE enabled AND finished_at IS NOT NULL"
+    ).fetchone()[0]
+    if oldest is None or oldest > since:
+        return None
+
+    rows = conn.execute(
+        "SELECT o.name, "
+        "  floor(extract(epoch FROM (%s - i.created_at)) / 86400)::int AS ago, "
+        "  count(*) "
+        "FROM items i JOIN outlets o ON o.id = i.outlet_id "
+        "WHERE i.created_at > %s - make_interval(days => %s) "
+        "  AND i.created_at <= %s "
+        "GROUP BY 1, 2",
+        (now, now, HISTORY_DAYS + 1, now),
+    ).fetchall()
+    by_outlet: dict[str, dict[int, int]] = {}
+    for name, ago, n in rows:
+        by_outlet.setdefault(name, {})[ago] = n
+
+    surging = []
+    for name, days in sorted(by_outlet.items()):
+        recent = days.get(0, 0)
+        # Zero-filled: a day with no items is a real zero in the baseline,
+        # and omitting it would bias the median upward.
+        median = statistics.median(days.get(d, 0) for d in range(1, HISTORY_DAYS + 1))
+        if recent > SURGE_FACTOR * median and recent - median >= SURGE_MIN_EXCESS:
+            surging.append((name, recent, median))
+    if not surging:
+        return None
+
+    lines = [
+        f"   {name[:24]:<26}{recent} items in 24h, daily median {median:g} "
+        f"over the previous {HISTORY_DAYS} days"
+        for name, recent, median in surging
+    ]
+    return (
+        "surge:" + ",".join(name for name, _, _ in surging),
+        f"{len(surging)} outlet(s) are capturing far more than usual. Every "
+        "extra item is also paid for by comprehension:\n" + "\n".join(lines),
     )
 
 
