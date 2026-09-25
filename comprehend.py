@@ -112,6 +112,10 @@ class Tally:
     # with different fixes: one is an encoding mistake, this is a nesting one,
     # and a single counter could not say which was continuing.
     items_double_wrapped: int = 0
+    # Why the pass stopped early, or "" if it did not. An account-level failure
+    # (billing, auth) or a refusal to spend (unpriced model) stops the WHOLE
+    # pass without charging any item: nothing about the items was judged.
+    aborted: str = ""
     failures: dict = field(default_factory=dict)
 
 
@@ -222,6 +226,55 @@ def _is_transient(exc: BaseException) -> bool:
     if resp is None:
         return True
     return resp.status_code == 429 or resp.status_code >= 500
+
+
+_ACCOUNT_STATUSES = {401: "auth", 402: "billing", 403: "auth"}
+
+
+def _account_failure(exc: BaseException) -> str | None:
+    """ "billing" or "auth" when the failure is about the ACCOUNT, else None.
+
+    news-brief-0rg: on 2026-09-25 the balance ran out, every call returned
+    402, and _is_transient -- which spares only 429 and 5xx -- charged each
+    one to the ITEM. Triage gave items up after 3 passes and integration
+    retired them after 13, for a fault that said nothing about any of them.
+    Every later call in the pass would fail identically, so the pass stops.
+    """
+    if not isinstance(exc, requests.RequestException):
+        return None
+    resp = getattr(exc, "response", None)
+    kind = _ACCOUNT_STATUSES.get(getattr(resp, "status_code", None))
+    if kind:
+        return kind
+    # The DOCUMENTED empty-balance error is 402 billing_error, but the widely
+    # reported one is 400 invalid_request_error "credit balance is too low".
+    # Which one the host got on 2026-09-25 was never recorded (only the status
+    # was logged), so match the body as well: a real 400 for a bad request
+    # must still charge its item.
+    try:
+        body = resp.json().get("error") or {}
+    except Exception:
+        return None
+    if "credit balance" in str(body.get("message", "")).lower():
+        return "billing"
+    return None
+
+
+def _abort(conn, tally: Tally, reason: str, exc: BaseException | None = None) -> Tally:
+    """Stop the pass WITHOUT charging anything, and say why.
+
+    Logs the response BODY, not just the status: an HTTPError stringifies to a
+    status and a URL, and that is why nobody can now say whether 2026-09-25's
+    empty balance came back as 400 or 402 (http-error-body-is-the-diagnosis).
+    """
+    conn.commit()
+    tally.aborted = reason
+    body = getattr(getattr(exc, "response", None), "text", "") or ""
+    log.error(
+        f"Comprehend: pass aborted ({reason}); no item was charged. body={body[:500]!r}"
+    )
+    log.info(f"Comprehend: {tally}")
+    return tally
 
 
 def _timed_post(request: dict, label: str, timeout: int, max_attempts: int) -> dict:
@@ -343,7 +396,10 @@ def run(conn) -> Tally:
             verdicts = parse_triage_response(
                 call_triage(build_triage_request(payload)), {it["id"] for it in batch}
             )
-        except Exception:
+        except Exception as exc:
+            kind = _account_failure(exc)
+            if kind:
+                return _abort(conn, tally, kind, exc)
             tally.failed_triage += len(batch)
             log.warning("Comprehend: triage batch failed", exc_info=True)
             for it in batch:
@@ -462,6 +518,9 @@ def run(conn) -> Tally:
                 tally,
             )
         except Exception as exc:
+            kind = _account_failure(exc)
+            if kind:
+                return _abort(conn, tally, kind, exc)
             # A network fault is a statement about the host, not about the news.
             # Charging it would let three unrelated outages retire an item that
             # was never once judged -- see _is_transient (news-brief-bqa.13).

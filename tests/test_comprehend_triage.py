@@ -1652,3 +1652,101 @@ def test_an_entityless_item_is_never_re_offered(kb, monkeypatch):
         lambda _req: pytest.fail("an entityless item was re-offered"),
     )
     comprehend.run(kb)
+
+
+# --- An empty account must abort the pass and charge nothing (news-brief-0rg).
+
+
+def _http_error(status):
+    resp = comprehend.requests.Response()
+    resp.status_code = status
+    return comprehend.requests.HTTPError(f"{status} error", response=resp)
+
+
+def test_an_empty_account_charges_no_triage_attempt(kb, monkeypatch):
+    """news-brief-0rg. A 402 says the ACCOUNT is empty. It says nothing about
+    any item, and charging it retired items every hour of the 2026-09-25
+    outage. The pass must stop at the first such failure."""
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_TRIAGE_BATCH", 1)
+    for n in range(3):
+        _add_item(kb, f"Chip export controls tightened {n}", h=f"H{n}")
+    kb.commit()
+    calls = []
+
+    def broke(req):
+        calls.append(req)
+        raise _http_error(402)
+
+    monkeypatch.setattr(comprehend, "call_triage", broke)
+
+    tally = comprehend.run(kb)
+    kb.commit()
+
+    assert len(calls) == 1, "every later call fails identically; stop at the first"
+    assert tally.aborted == "billing"
+    assert kb.execute("SELECT count(*) FROM item_triage").fetchone()[0] == 0
+
+
+def test_an_empty_account_charges_no_integration_attempt(kb, monkeypatch):
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_INTEGRATE_BATCH", 1)
+    first = _tracked_material(kb)
+    second = _add_item(kb, "Ukraine talks stall", h="H2")
+    kb.commit()
+    calls = []
+
+    def broke(req):
+        calls.append(req)
+        raise _http_error(402)
+
+    monkeypatch.setattr(comprehend, "call_integration", broke)
+
+    tally = comprehend.run(kb)
+    kb.commit()
+
+    assert len(calls) == 1
+    assert tally.aborted == "billing"
+    for item_id in (first, second):
+        assert _attempts(kb, item_id) == 0
+        assert _defers(kb, item_id) == 0
+
+
+@pytest.mark.parametrize(
+    "status,kind", [(401, "auth"), (403, "auth"), (402, "billing")]
+)
+def test_account_statuses_are_classified(status, kind):
+    assert comprehend._account_failure(_http_error(status)) == kind
+
+
+def _http_error_with_body(status, err_type, message):
+    import json as _json
+
+    err = _http_error(status)
+    err.response._content = _json.dumps(
+        {"type": "error", "error": {"type": err_type, "message": message}}
+    ).encode()
+    return err
+
+
+def test_a_400_saying_the_credit_balance_is_too_low_is_billing():
+    """Phase-1 red-team (a): the widely reported response to an exhausted
+    balance is 400 invalid_request_error "credit balance is too low", not
+    the documented 402. WHICH the host received on 2026-09-25 is recorded
+    nowhere -- the log kept only the status -- so classify on the body too."""
+    err = _http_error_with_body(
+        400,
+        "invalid_request_error",
+        "Your credit balance is too low to access the Anthropic API.",
+    )
+    assert comprehend._account_failure(err) == "billing"
+
+
+def test_an_ordinary_400_is_not_an_account_failure():
+    err = _http_error_with_body(400, "invalid_request_error", "max_tokens: too large")
+    assert comprehend._account_failure(err) is None
+
+
+@pytest.mark.parametrize("status", [400, 404, 429, 500, 529])
+def test_other_statuses_are_not_account_failures(status):
+    assert comprehend._account_failure(_http_error(status)) is None
