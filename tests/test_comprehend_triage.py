@@ -119,29 +119,18 @@ def _add_item(kb, title, body=None, outlet_id=None, h="H1"):
     ).fetchone()[0]
 
 
-def test_a_tracked_entity_makes_an_item_material_with_no_model_call(kb):
+def test_an_entity_mention_alone_no_longer_decides_material(kb):
+    """Spec D5. The entity is still IN the index -- integration uses it for
+    candidates -- but the rules half no longer treats a mention as material."""
     kb.execute("INSERT INTO entities (name, type) VALUES ('Ukraine', 'country')")
-    item_id = _add_item(kb, "Ukraine signals a ceasefire")
+    _add_item(kb, "Ukraine signals a ceasefire")
     kb.commit()
 
     index = comprehend.SurfaceIndex.build(kb)
     item = comprehend.pending_triage(kb, comprehend.TRIAGE_PROMPT_VERSION, 10)[0]
-    hit = comprehend.triage_by_rules(item, index)
 
-    assert hit is not None
-    assert hit.reason == "tracked_entity"
-    comprehend.record_triage(
-        kb, item_id, "material", hit.reason, None, comprehend.TRIAGE_PROMPT_VERSION
-    )
-    kb.commit()
-    row = kb.execute(
-        "SELECT verdict, reason, triage_model FROM item_triage WHERE item_id = %s",
-        (item_id,),
-    ).fetchone()
-    assert row == ("material", "tracked_entity", None), (
-        "triage_model must be NULL when no model ran -- a NOT NULL value here "
-        "would make the rules half indistinguishable from the model half"
-    )
+    assert [h.reason for h in index.match(item["title"])] == ["tracked_entity"]
+    assert comprehend.triage_by_rules(item, index) is None
 
 
 def test_an_untracked_item_is_not_matched_by_the_rules(kb):
@@ -157,8 +146,8 @@ def test_an_untracked_item_is_not_matched_by_the_rules(kb):
 
 
 def test_the_rules_half_reads_the_body_as_well_as_the_title(kb):
-    kb.execute("INSERT INTO entities (name, type) VALUES ('Ukraine', 'country')")
-    _add_item(kb, "A ceasefire is signalled", body="Officials in Ukraine confirmed.")
+    kb.execute("INSERT INTO stories (name, scope) VALUES ('Ukraine talks', 'episodic')")
+    _add_item(kb, "A ceasefire is signalled", body="Officials confirm Ukraine talks.")
     kb.commit()
 
     index = comprehend.SurfaceIndex.build(kb)
@@ -294,6 +283,17 @@ def test_the_triage_request_forces_the_tool_and_disables_thinking():
         "Sonnet 5 runs ADAPTIVE thinking when it is omitted, which eats "
         "max_tokens and truncates"
     )
+
+
+def test_a_haiku_triage_request_keeps_thinking_disabled(monkeypatch):
+    """Triage moves to Haiku 4.5 through a settings row (spec 4.5).
+    `{"type": "disabled"}` is documented as a 400 only on Fable 5/5.1, Opus
+    5.5, and Opus 5 at xhigh/max -- Haiku 4.5 is a pre-4.6 model and is not on
+    that list, so the same request shape is expected to keep working."""
+    monkeypatch.setattr(comprehend.common, "TRIAGE_MODEL", "claude-haiku-4-5")
+    req = comprehend.build_triage_request([{"id": 1, "title": "t"}])
+    assert req["model"] == "claude-haiku-4-5"
+    assert req["thinking"] == {"type": "disabled"}
 
 
 def test_a_truncated_response_raises_rather_than_being_parsed():
@@ -474,8 +474,8 @@ def test_the_daily_cap_blocks_a_later_run_on_the_same_day(kb):
 
 def test_a_full_pass_triages_and_integrates_with_both_calls_stubbed(kb, monkeypatch):
     monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
-    kb.execute("INSERT INTO entities (name, type) VALUES ('Ukraine', 'country')")
-    tracked = _add_item(kb, "Ukraine signals a ceasefire", h="Ht")
+    kb.execute("INSERT INTO stories (name, scope) VALUES ('Ukraine talks', 'episodic')")
+    tracked = _add_item(kb, "Ukraine talks resume", h="Ht")
     topical = _add_item(kb, "Sahel coup attempt reported", h="Hp")
     kb.commit()
 
@@ -532,12 +532,14 @@ def test_a_full_pass_triages_and_integrates_with_both_calls_stubbed(kb, monkeypa
     tally = comprehend.run(kb)
     kb.commit()
 
-    assert tally.triaged_by_rules == 1, "Ukraine matched the tracked half, no model"
+    assert tally.triaged_by_rules == 1, (
+        "Ukraine talks matched the tracked half, no model"
+    )
     assert tally.triaged_by_model == 1, "Sahel needed the model half"
     assert tally.material == 2
     assert tally.assertions_written == 2
     reasons = dict(kb.execute("SELECT item_id, reason FROM item_triage").fetchall())
-    assert reasons[tracked] == "tracked_entity"
+    assert reasons[tracked] == "tracked_story"
     assert reasons[topical] == "topical"
 
 
@@ -550,7 +552,7 @@ def test_an_item_the_validator_rejects_is_charged_an_attempt(kb, monkeypatch):
     expensive call every pass while no counter moved.
     """
     monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
-    kb.execute("INSERT INTO entities (name, type) VALUES ('Ukraine', 'country')")
+    kb.execute("INSERT INTO stories (name, scope) VALUES ('Ukraine', 'episodic')")
     good = _add_item(kb, "Ukraine talks resume", h="Hg")
     bad = _add_item(kb, "Ukraine border incident", h="Hb")
     kb.commit()
@@ -976,6 +978,11 @@ def test_the_integration_matcher_sees_cleaned_text(kb, monkeypatch):
     """
     monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
     kb.execute("INSERT INTO entities (name, type) VALUES ('Black Sea', 'country')")
+    # An entity mention alone no longer decides material (spec D5); a tracked
+    # story sharing the same surface form gets this item past the free rules
+    # with no model call, which is what this test needs to stay scoped to the
+    # matcher's own behaviour.
+    kb.execute("INSERT INTO stories (name, scope) VALUES ('Black Sea', 'episodic')")
     item_id = _add_item(kb, "Update", body="Black&nbsp;Sea shipping resumes")
     kb.commit()
 
@@ -1051,6 +1058,10 @@ def test_a_candidate_label_resolves_to_the_offered_entity_end_to_end(kb, monkeyp
     """
     monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
     kb.execute("INSERT INTO entities (name, type) VALUES ('Black Sea', 'country')")
+    # An entity mention alone no longer decides material (spec D5); a tracked
+    # story sharing the surface form gets this item past the free rules with
+    # no model call, keeping this test scoped to label resolution.
+    kb.execute("INSERT INTO stories (name, scope) VALUES ('Black Sea', 'episodic')")
     offered_id = kb.execute(
         "SELECT id FROM entities WHERE name = 'Black Sea'"
     ).fetchone()[0]
@@ -1111,6 +1122,10 @@ def test_the_entity_cap_keeps_the_newest_candidates(kb, monkeypatch):
 
     for name in ("Alpha Nation", "Beta Nation", "Gamma Nation"):
         kb.execute("INSERT INTO entities (name, type) VALUES (%s, 'country')", (name,))
+    # An entity mention alone no longer decides material (spec D5); a tracked
+    # story sharing a surface form gets this item past the free rules with no
+    # model call, keeping this test scoped to the candidate cap.
+    kb.execute("INSERT INTO stories (name, scope) VALUES ('Alpha Nation', 'episodic')")
     kb.commit()
     item_id = _add_item(
         kb, "Update", body="Alpha Nation, Beta Nation and Gamma Nation met today"
@@ -1293,9 +1308,12 @@ def test_a_still_pending_item_IS_re_offered(kb, monkeypatch):
 
 
 def _tracked_material(kb):
-    """One item that triage's rules half makes material with no model call, so
-    these tests exercise the integration path and nothing else."""
-    kb.execute("INSERT INTO entities (name, type) VALUES ('Ukraine', 'country')")
+    """One item the rules half makes material with no model call.
+
+    A tracked STORY, not an entity: since 2026-09-25 an entity mention alone no
+    longer decides (spec D5), because the entity set grows with the KB and the
+    rule's precision fell with it -- 86% of items were 'material'."""
+    kb.execute("INSERT INTO stories (name, scope) VALUES ('Ukraine talks', 'episodic')")
     item_id = _add_item(kb, "Ukraine talks resume")
     kb.commit()
     return item_id
@@ -1778,3 +1796,92 @@ def test_a_credit_balance_message_on_a_non_400_is_not_an_account_failure(status)
         "Your credit balance is too low to access the Anthropic API.",
     )
     assert comprehend._account_failure(err) is None
+
+
+# --- Free-rule structural rejects: stale, quote page (spec 2026-09-25 4.4-4.5).
+
+
+def test_a_quote_page_is_immaterial_by_rule_with_no_model_call(kb, monkeypatch):
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_SAMPLE_PER_DAY", 0)
+    item_id = _add_item(kb, "MSTS.DE - Reuters")
+    kb.commit()
+    monkeypatch.setattr(
+        comprehend,
+        "call_triage",
+        lambda r: pytest.fail("a quote page reached the model"),
+    )
+
+    tally = comprehend.run(kb)
+    kb.commit()
+
+    assert kb.execute(
+        "SELECT verdict, reason, triage_model FROM item_triage WHERE item_id = %s",
+        (item_id,),
+    ).fetchone() == ("immaterial", "quote_page", None)
+    assert tally.quote_pages == 1
+
+
+def test_an_item_past_the_horizon_is_stale_with_no_model_call(kb, monkeypatch):
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
+    item_id = kb.execute(
+        "INSERT INTO items (outlet_id, url, title, content_hash, published_at) "
+        "VALUES (%s, 'u', 'Old news about Iran', 'OLD', now() - interval '15 days') "
+        "RETURNING id",
+        (_outlet(kb),),
+    ).fetchone()[0]
+    kb.commit()
+    monkeypatch.setattr(
+        comprehend,
+        "call_triage",
+        lambda r: pytest.fail("a stale item reached the model"),
+    )
+
+    tally = comprehend.run(kb)
+    kb.commit()
+
+    assert kb.execute(
+        "SELECT verdict, reason FROM item_triage WHERE item_id = %s", (item_id,)
+    ).fetchone() == ("stale", "stale")
+    assert tally.stale == 1
+
+
+def test_a_stale_quote_page_is_stale_not_immaterial(kb, monkeypatch):
+    """Rule ORDER: stale first. Both are free; stale is checked first so no
+    later rule runs on an item that will be skipped anyway."""
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
+    item_id = kb.execute(
+        "INSERT INTO items (outlet_id, url, title, content_hash, published_at) "
+        "VALUES (%s, 'u', 'MSTS.DE - Reuters', 'OLDQ', now() - interval '20 days') "
+        "RETURNING id",
+        (_outlet(kb),),
+    ).fetchone()[0]
+    kb.commit()
+
+    comprehend.run(kb)
+    kb.commit()
+
+    assert (
+        kb.execute(
+            "SELECT verdict FROM item_triage WHERE item_id = %s", (item_id,)
+        ).fetchone()[0]
+        == "stale"
+    )
+
+
+def test_the_sample_never_promotes_a_structural_reject(kb):
+    """The control arm is items the MODEL judged immaterial. A pool of only
+    quote pages must promote nothing."""
+    for n in range(3):
+        item_id = _add_item(kb, f"XEQ{n}.DE - Reuters", h=f"Q{n}")
+        comprehend.record_triage(
+            kb,
+            item_id,
+            "immaterial",
+            "quote_page",
+            None,
+            comprehend.TRIAGE_PROMPT_VERSION,
+        )
+    kb.commit()
+
+    assert comprehend.select_sampled(kb, comprehend.TRIAGE_PROMPT_VERSION, 20) == []

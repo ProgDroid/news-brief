@@ -48,6 +48,9 @@ class Tally:
     sampled: int = 0
     material: int = 0
     immaterial: int = 0
+    # Structural outcomes of the free rules (spec 2026-09-25 4.4-4.5).
+    stale: int = 0
+    quote_pages: int = 0
     failed_triage: int = 0
     failed_integration: int = 0
     # Items whose batch died on the network rather than on its contents. Held
@@ -380,6 +383,26 @@ def run(conn) -> Tally:
     # --- Triage: rules half first, so the model never sees what a lookup answered.
     undecided = []
     for item in pending:
+        # Rule order (spec 4.5): stale, quote page, tracked topic, then the model.
+        if item["stale"]:
+            record_triage(
+                conn, item["id"], "stale", "stale", None, TRIAGE_PROMPT_VERSION
+            )
+            tally.stale += 1
+            continue
+        if common.is_quote_page(item.get("title")):
+            record_triage(
+                conn,
+                item["id"],
+                "immaterial",
+                "quote_page",
+                None,
+                TRIAGE_PROMPT_VERSION,
+            )
+            tally.triaged_by_rules += 1
+            tally.immaterial += 1
+            tally.quote_pages += 1
+            continue
         hit = triage_by_rules(item, index)
         if hit:
             record_triage(
@@ -678,14 +701,18 @@ def pending_triage(conn, version: int, limit: int) -> list[dict]:
     backlog.
     """
     rows = conn.execute(
-        "SELECT i.id, i.title, i.body, i.outlet_id, i.published_at "
+        "SELECT i.id, i.title, i.body, i.outlet_id, i.published_at, "
+        "  coalesce(i.published_at, i.created_at) "
+        "    < now() - make_interval(days => %s) AS stale "
         "FROM items i "
         "LEFT JOIN item_triage t "
         "  ON t.item_id = i.id AND t.triage_prompt_version = %s "
         "WHERE t.id IS NULL OR (t.verdict = 'failed' AND t.attempts < 3) "
         "ORDER BY i.id "
         "LIMIT %s",
-        (version, limit),
+        # CANDIDATE_WINDOW_DAYS is defined further down the module; module-level
+        # names resolve at call time, so the forward reference is fine.
+        (CANDIDATE_WINDOW_DAYS, version, limit),
     ).fetchall()
     return [
         {
@@ -694,6 +721,7 @@ def pending_triage(conn, version: int, limit: int) -> list[dict]:
             "body": r[2] or "",
             "outlet_id": r[3],
             "published_at": r[4],
+            "stale": r[5],
         }
         for r in rows
     ]
@@ -830,6 +858,14 @@ class SurfaceIndex:
         return out
 
 
+# The rules half decides MATERIAL only for what the operator chose to track.
+# An entity mention used to be enough, and the entity set is the KB itself: it
+# grows with every pass, so the rule's precision FELL as the pipeline worked,
+# until 86% of items were material (spec 2026-09-25 D5). Entity-only items now
+# go to the model, which judges the subject.
+_RULE_REASONS = frozenset({"tracked_claim", "tracked_story"})
+
+
 def triage_by_rules(item: dict, index: SurfaceIndex) -> SurfaceForm | None:
     """The tracked half. A database lookup, no model call.
 
@@ -838,8 +874,10 @@ def triage_by_rules(item: dict, index: SurfaceIndex) -> SurfaceForm | None:
     window to choose.
     """
     text = f"{clean(item.get('title'))} {clean(item.get('body'))}"
-    hits = index.match(text)
-    return hits[0] if hits else None
+    for hit in index.match(text):
+        if hit.reason in _RULE_REASONS:
+            return hit
+    return None
 
 
 # Sized from the batch: 25 items x ~25 output tokens plus schema overhead. A
@@ -989,6 +1027,9 @@ def select_sampled(conn, version: int, per_day: int) -> list[int]:
     ON CONFLICT never rewrites it on promotion. A row triaged yesterday and
     promoted today would be invisible to today's budget under `created_at`,
     letting the cap silently unbind across every UTC day boundary.
+
+    `reason = 'none'` restricts the pool to items the MODEL judged immaterial;
+    a structural reject (quote_page) would replace the control with junk.
     """
     used = conn.execute(
         "SELECT count(*) FROM item_triage "
@@ -1000,6 +1041,7 @@ def select_sampled(conn, version: int, per_day: int) -> list[int]:
     rows = conn.execute(
         "SELECT item_id FROM item_triage "
         "WHERE triage_prompt_version = %s AND verdict = 'immaterial' "
+        "  AND reason = 'none' "
         "ORDER BY item_id DESC LIMIT %s",
         (version, remaining),
     ).fetchall()
