@@ -180,6 +180,10 @@ class Tally:
     # (migration 0008 is already applied), so these live in the log line only.
     items_already: int = 0
     items_failed: int = 0
+    # Log only, like items_already: entries common.is_quote_page refused before
+    # storage. Counted so a feed that turns into quote pages is visible as a
+    # number rather than as a mysteriously quiet feed.
+    quote_pages_dropped: int = 0
     # Same -- no column, log only. A skip is neither a failure nor a poll, so it
     # needs its own name: "28 feeds, 3 ok" with no third number is exactly the
     # ambiguity capture_runs exists to remove.
@@ -457,6 +461,9 @@ def run(conn, spacer=None, now=None) -> Tally:
             tally.failures[got.failure] = tally.failures.get(got.failure, 0) + 1
             continue
 
+        entries = [e for e in got.entries if not common.is_quote_page(e.get("title"))]
+        tally.quote_pages_dropped += len(got.entries) - len(entries)
+
         outlet_id = resolve_outlet(conn, feed, strict=True)
         if outlet_id is None:
             tally.sources_dropped += 1
@@ -468,8 +475,16 @@ def run(conn, spacer=None, now=None) -> Tally:
             )
             continue
 
-        written, already, failed = store_items(conn, outlet_id, got.entries)
-        item_ids = _lookup_item_ids(conn, outlet_id, got.entries)
+        written, already, failed = store_items(conn, outlet_id, entries)
+        item_ids = _lookup_item_ids(conn, outlet_id, entries)
+        # record_sightings and record_poll below deliberately use the RAW
+        # got.entries, not the filtered list: feed_polls.entries_seen is the
+        # capping instrument ("100 entries every poll", measured 2026-09-08),
+        # and if a feed's 100-slot window filled with quote pages, recording
+        # the filtered count would hide the crowding-out that loses real
+        # articles unobservably. Quote pages get no item_id from the lookup,
+        # which is already how record_sightings treats entries with no stored
+        # row.
         record_sightings(conn, feed["name"], got.entries, item_ids)
         record_poll(conn, run_id, feed["name"], None, len(got.entries))
         # INVARIANT: record_sightings and this feed's record_poll must commit
@@ -481,7 +496,7 @@ def run(conn, spacer=None, now=None) -> Tally:
         # makes every feed's entire window read as rolled off on every pass.
         conn.commit()
         tally.feeds_ok += 1
-        tally.items_seen += len(got.entries)
+        tally.items_seen += len(entries)
         tally.items_new += written
         tally.items_already += already
         tally.items_failed += failed
@@ -494,6 +509,7 @@ def run(conn, spacer=None, now=None) -> Tally:
         f"{tally.feeds_failed} failed ({kinds or 'none'}), "
         f"{tally.items_seen} items seen, {tally.items_new} new, "
         f"{tally.items_already} already held, {tally.items_failed} failed, "
+        f"{tally.quote_pages_dropped} quote pages dropped, "
         f"{tally.feeds_not_due} not due, "
         f"{tally.sources_dropped} sources dropped"
     )

@@ -4,6 +4,7 @@ Telegram + HTML, Anthropic headers, and T212 auth. No domain logic; imported
 by both brief.py and trading.py (one-way dependency, no cycles)."""
 
 import base64
+import html
 import os
 import sys
 import re
@@ -711,6 +712,27 @@ def split_html_message(text: str, max_len: int = TELEGRAM_MAX_LEN) -> list[str]:
     if current.strip():
         chunks.append(current.strip())
     return chunks
+
+
+# Reuters instrument (quote) pages. Around 2026-09-15 Google News began indexing
+# them under site:reuters.com/markets, and the capped 6h window returned a
+# DIFFERENT 100 of them on every poll -- ~2,000 a day, 78% of the corpus, each
+# one paid for again by comprehension (spec 2026-09-25 section 2.2). Two
+# shapes: a bare instrument code ("MSTS.DE - Reuters") and the page-title
+# phrase. The bare-code rule is uppercase/digits/.^=- only, so any headline with
+# a space or a lowercase word -- every real one measured -- cannot match.
+_QUOTE_PAGE_PHRASE = "stock price & latest news"
+_BARE_INSTRUMENT_TITLE = re.compile(r"^[A-Z0-9^=][A-Z0-9.^=\-]*\s+-\s+Reuters$")
+
+
+def is_quote_page(title: str | None) -> bool:
+    """True for a Reuters instrument page masquerading as a news item."""
+    text = html.unescape(title or "").strip()
+    if not text:
+        return False
+    if _QUOTE_PAGE_PHRASE in text.lower():
+        return True
+    return _BARE_INSTRUMENT_TITLE.match(text) is not None
 
 
 # ── Host spacing ──────────────────────────────────────────────────────────────

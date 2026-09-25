@@ -782,3 +782,20 @@ def test_derived_title_drops_nitters_footer_permalink():
     )
     assert "http" not in e["title"]
     assert "status/2" in e["summary"], "the body still carries the permalink"
+
+
+def test_the_brief_never_reads_a_quote_page_as_a_headline(monkeypatch):
+    entries = [
+        {"title": "XEQ2.DE - Reuters", "published_raw": "Fri", "summary": ""},
+        {
+            "title": "Germany approves fuel tax discount - Reuters",
+            "published_raw": "Fri",
+            "summary": "",
+        },
+    ]
+    monkeypatch.setattr(
+        brief, "fetch_feed_entries", lambda f: brief.FeedFetch(entries=entries)
+    )
+    out = brief.fetch_rss({"name": "Reuters Business", "category": "macro"})
+    assert "Germany approves fuel tax discount" in out
+    assert "XEQ2.DE" not in out

@@ -1064,3 +1064,37 @@ def test_a_feed_absent_from_the_source_list_falls_back_to_nominal(store):
     verdict = capture.failing_feeds(store, NOW, feeds=[])
     assert verdict is not None
     assert "Ghost" in verdict[1]
+
+
+def test_capture_drops_quote_pages_before_storing(store, monkeypatch):
+    """The flood is stopped at the door: a quote page never becomes an item,
+    so nothing downstream (triage, integration, the bill) ever sees it."""
+    feed = {
+        "name": "OK Wire",
+        "url": "https://ok.example/feed",
+        "category": "macro",
+        "kind": "wire",
+    }
+    entries = [
+        _entry(url="https://ok.example/a", guid="g1", title="MSTS.DE - Reuters"),
+        _entry(
+            url="https://ok.example/b",
+            guid="g2",
+            title="Sterling treads water at 3-month low - Reuters",
+        ),
+    ]
+    monkeypatch.setattr(common, "CAPTURE_ENABLED", True)
+    monkeypatch.setattr(capture, "capture_sources", lambda: [feed])
+    monkeypatch.setattr(
+        brief,
+        "fetch_feed_entries",
+        lambda f: brief.FeedFetch(entries=list(entries), failure=None),
+    )
+
+    tally = capture.run(store, spacer=common.HostSpacer(0))
+
+    titles = [r[0] for r in store.execute("SELECT title FROM items").fetchall()]
+    assert titles == ["Sterling treads water at 3-month low - Reuters"]
+    assert tally.quote_pages_dropped == 1
+    assert tally.items_seen == 1, "a dropped quote page was never an item seen"
+    assert store.execute("SELECT entries_seen FROM feed_polls").fetchone()[0] == 2

@@ -1779,7 +1779,8 @@ def fetch_rss(feed: dict, max_items: int = 25) -> str:
             feed.get("state_funded", False),
         )
     ]
-    for entry in got.entries[:max_items]:
+    entries = [e for e in got.entries if not common.is_quote_page(e.get("title"))]
+    for entry in entries[:max_items]:
         lines.append(
             f"- {entry['title']} ({entry['published_raw']})\n  {entry['summary'][:400]}"
         )
