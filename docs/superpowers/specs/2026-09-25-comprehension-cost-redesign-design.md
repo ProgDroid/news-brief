@@ -195,11 +195,14 @@ would cost ~$0.56/day. The phase-1 week measures it (§7).
   overdraft is one call (≤ ~$0.09 at `INTEGRATE_MAX_TOKENS` 8192).
 - **Alerting.** A Telegram message goes out once per exhaustion episode, stating the balance,
   the allowance and the untriaged/awaiting counts. It copies the `capture.liveness` contract:
-  the key names the situation, and it is sent before the key is stored. **"Recovered" needs a
-  definition**, because the balance accrues continuously and would otherwise count as
-  recovered the moment it goes above zero. The key clears only when the balance is back to
-  **≥ one day's allowance**. That hysteresis is what separates "fires once per episode" from
-  "fires every hour".
+  the key names the situation, and it is sent before the key is stored. **At most ONE alert per
+  UTC day on which the budget ran out** (key `budget:<date>`). Each alert carries that day's
+  `stale` and `aged_out` counts, so budget-starved items are never silent. *Revised
+  2026-09-25 after the phase-1 plan's red-team:* the first design cleared the episode only once
+  a full day's allowance was banked. The estimated spend is about equal to the allowance, so the
+  balance might never get back there, and the alert would have fired once, probably during the
+  deliberate test, and never again. A per-day key cannot go permanently silent, and it cannot
+  fire more than daily.
 
 ### 4.4 Comprehension: newest-first with a staleness horizon
 
@@ -244,7 +247,7 @@ would cost ~$0.56/day. The phase-1 week measures it (§7).
 - **Rule order:** stale first, then quote page, then tracked topic, then the model. All three
   rules are free; stale goes first so that no index match runs on an item that will be
   skipped anyway.
-- **The model half moves to Haiku 4.5** via the `TRIAGE_MODEL` row. The plan verifies which
+- **The model half moves to Haiku 4.5** via the **`NEWSBRIEF_TRIAGE_MODEL`** settings row. The knob's attribute is `TRIAGE_MODEL`, but its key is the env name (`common.py:289`), and a `TRIAGE_MODEL` row is accepted and read by nothing (phase-1 plan red-team). Verify by effect in `comprehend_spend.model`. The plan verifies which
   `thinking` value Haiku 4.5 accepts: the call currently sends `{"type": "disabled"}`, which is
   correct for Sonnet 5.
 - **The triage prompt is not tightened in this phase.** Routing entity-only items to the model
@@ -441,7 +444,7 @@ Written into the parent spec §8.2 when phase 2 is ready to flip, and before it 
    Capture's changes (§4.1) take effect immediately and need no flag.
 2. On or after 2026-09-30 00:13:37Z: run the old gate once and record its output verbatim
    (§6.1). **Comprehension must not be enabled before this step.**
-3. Host: set the `TRIAGE_MODEL` row. Run the §4.6 recovery. Flip `COMPREHEND_ENABLED` true.
+3. Host: set the `NEWSBRIEF_TRIAGE_MODEL` row (not `TRIAGE_MODEL`, see §4.5). Run the §4.6 recovery. Flip `COMPREHEND_ENABLED` true.
    Verify by effect (§7).
 4. Phase 2 code (§5). Write Amendment 3 (§6.2). Deploy with integration batching live.
 5. Host: capture the phase-2 cutover from the flipping statement. The 7-day window starts.
