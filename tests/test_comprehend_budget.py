@@ -1,11 +1,14 @@
 """Spend accounting and the budget (spec 2026-09-25 section 4.3)."""
 
 import logging
+import math
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
+import common
 import comprehend
+import config
 import db
 
 needs_db = pytest.mark.skipif(
@@ -347,3 +350,86 @@ def test_an_empty_bucket_skips_integration(kb, monkeypatch, state_store):
     tally = comprehend.run(kb, now=NOW_T)
 
     assert tally.budget_exhausted is True
+
+
+def _seed_one(kb):
+    """One item that clears the free rules and reaches the model, same title
+    convention as `_seed` (both dodge `is_quote_page` and `triage_by_rules`)."""
+    outlet = kb.execute(
+        "INSERT INTO outlets (name, kind) VALUES ('Wire', 'wire') RETURNING id"
+    ).fetchone()[0]
+    kb.execute(
+        "INSERT INTO items (outlet_id, url, title, content_hash, published_at) "
+        "VALUES (%s, 'u', 'Trade talk', 'H1', now())",
+        (outlet,),
+    )
+    kb.commit()
+
+
+@needs_db
+def test_a_debit_is_persisted_not_just_held_in_memory(kb, monkeypatch):
+    """R15 (reviewer finding): tests/conftest.py's `state_store` fixture
+    fakes config.runtime_state/set_runtime_state with a dict that
+    `Budget.debit` mutates and `store.update` then merges back into --
+    aliasing that hides a DELETED `config.set_runtime_state(...)` call inside
+    `debit`, since the in-memory object was already correct regardless. The
+    real `runtime_state` table round-trips through JSON, so this test does
+    NOT use state_store and reads the persisted row back through
+    config.runtime_state() -- an aliasing bug cannot fake that.
+
+    Must NOT exhaust the bucket: mark_exhausted persists the whole state too,
+    so an exhausting pass would mask a debit-persist deletion just as well as
+    state_store's aliasing does.
+    """
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_SAMPLE_PER_DAY", 0)
+    NOW_T = datetime.now(timezone.utc)
+    config.set_runtime_state(
+        {comprehend.BUDGET_STATE_KEY: {"balance_usd": 1.0, "at": NOW_T.isoformat()}}
+    )
+    _seed_one(kb)
+    calls = []
+    monkeypatch.setattr(comprehend, "call_triage", _fake_triage_costing(calls))
+
+    comprehend.run(kb, now=NOW_T)
+
+    state = config.runtime_state()[comprehend.BUDGET_STATE_KEY]
+    assert len(calls) == 1
+    assert state["balance_usd"] == pytest.approx(0.997)
+    assert "exhausted_on" not in state
+
+
+@needs_db
+def test_exhaustion_is_persisted(kb, monkeypatch):
+    """R15, the mark_exhausted half of the same finding."""
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_SAMPLE_PER_DAY", 0)
+    NOW_T = datetime.now(timezone.utc)
+    config.set_runtime_state(
+        {comprehend.BUDGET_STATE_KEY: {"balance_usd": 0.0, "at": NOW_T.isoformat()}}
+    )
+    _seed_one(kb)
+    calls = []
+    monkeypatch.setattr(comprehend, "call_triage", _fake_triage_costing(calls))
+
+    comprehend.run(kb, now=NOW_T)
+
+    state = config.runtime_state()[comprehend.BUDGET_STATE_KEY]
+    assert state["exhausted_on"] == NOW_T.date().isoformat()
+
+
+def test_non_finite_budget_values_cannot_disable_the_guard(monkeypatch):
+    """R16 (6): an operator-set inf/nan allowance, or a corrupted non-finite
+    stored balance, must fall back to a finite default rather than making the
+    bucket non-finite (an effectively unbounded budget)."""
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_DAILY_BUDGET_USD", float("inf"))
+    allowance, _max_days = comprehend._allowance()
+    assert math.isfinite(allowance)
+    assert allowance == pytest.approx(
+        common.KNOBS["COMPREHEND_DAILY_BUDGET_USD"].default
+    )
+
+    s = comprehend.accrue(
+        {"balance_usd": float("nan"), "at": T0.isoformat()}, T0, 1.5, 3
+    )
+    assert s["balance_usd"] == pytest.approx(1.5)

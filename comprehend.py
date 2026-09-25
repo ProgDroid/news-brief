@@ -16,6 +16,7 @@ whether this works is scripts/score_comprehension.py.
 
 import html
 import json
+import math
 import re
 import time
 from dataclasses import dataclass, field
@@ -439,9 +440,20 @@ def accrue(state, now, allowance: float, max_days: float) -> dict:
     day's allowance rather than crashing every pass. A timestamp in the future
     (clock moved back) accrues nothing rather than a negative amount.
     """
-    fresh = {"balance_usd": float(allowance), "at": now.isoformat()}
+    # min(), not bare allowance: without it a first pass under a MAX_DAYS < 1
+    # (a fractional cap, tightened during an incident) would open above the
+    # cap it is meant to respect.
+    fresh = {
+        "balance_usd": min(float(allowance), float(allowance) * float(max_days)),
+        "at": now.isoformat(),
+    }
     try:
         balance = float(state["balance_usd"])
+        if not math.isfinite(balance):
+            # A hand-edited or corrupted `inf`/`nan` row must be treated the
+            # same as an unreadable one -- reinitialised, not carried forward
+            # into an arithmetic op that turns the whole bucket non-finite.
+            raise ValueError("non-finite balance_usd")
         then = datetime.fromisoformat(state["at"])
         # INSIDE the try: a hand-edited naive timestamp parses fine and then
         # raises TypeError (aware minus naive) on the subtraction, on every pass.
@@ -481,10 +493,28 @@ class Budget:
         config.set_runtime_state({BUDGET_STATE_KEY: self.state})
 
 
+def _finite_or_default(value: float, knob_name: str) -> float:
+    """A non-finite or negative operator value falls back to the KNOBS
+    default rather than reaching accrue(), where inf/nan would make the
+    bucket non-finite forever (an unbounded budget, silently)."""
+    if not math.isfinite(value) or value < 0:
+        default = common.KNOBS[knob_name].default
+        log.warning(
+            f"Comprehend: {knob_name}={value!r} is not a usable non-negative "
+            f"number; using its default {default}"
+        )
+        return float(default)
+    return value
+
+
 def _allowance() -> tuple[float, float]:
     return (
-        float(common.COMPREHEND_DAILY_BUDGET_USD),
-        float(common.COMPREHEND_BUDGET_MAX_DAYS),
+        _finite_or_default(
+            float(common.COMPREHEND_DAILY_BUDGET_USD), "COMPREHEND_DAILY_BUDGET_USD"
+        ),
+        _finite_or_default(
+            float(common.COMPREHEND_BUDGET_MAX_DAYS), "COMPREHEND_BUDGET_MAX_DAYS"
+        ),
     )
 
 
@@ -514,7 +544,10 @@ def run(conn, now=None) -> Tally:
     now = now or datetime.now(timezone.utc)
     tally = Tally(enabled=bool(common.COMPREHEND_ENABLED))
     if not tally.enabled:
-        log.info("Comprehend: disabled by COMPREHEND_ENABLED; nothing read")
+        log.info(
+            "Comprehend: disabled by COMPREHEND_ENABLED; no items read "
+            "(budget clock paused)"
+        )
         pause_budget(now)
         return tally
 
