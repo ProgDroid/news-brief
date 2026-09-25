@@ -558,3 +558,49 @@ def test_the_abort_alert_fires_once_per_episode(monkeypatch, state_store):
 
     assert len(sent) == 1
     assert "claude-sonnet-9" in sent[0]
+
+
+@needs_db
+def test_stale_today_is_counted_on_the_utc_day_not_the_session_day(kb, monkeypatch):
+    """R18 (fix round 1): `created_at >= %s::date` casts the bound in the
+    SESSION TimeZone, which db.connect() never pins to UTC. Pacific/Kiritimati
+    is UTC+14, so local midnight on `today` is 10:00 UTC the day BEFORE --
+    wide enough to pull a row from yesterday-UTC into "today" under the old
+    cast. `today` is derived from `now`, which every caller in this module
+    already treats as UTC, so the boundary must be built the same way: a
+    tz-aware UTC midnight, no cast.
+    """
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_DAILY_BUDGET_USD", 1.5)
+    kb.execute("SET TIME ZONE 'Pacific/Kiritimati'")
+
+    outlet = kb.execute(
+        "INSERT INTO outlets (name, kind) VALUES ('Wire', 'wire') RETURNING id"
+    ).fetchone()[0]
+    item_id = kb.execute(
+        "INSERT INTO items (outlet_id, url, title, content_hash, published_at) "
+        "VALUES (%s, 'u', 'Old trade talk', 'H1', now()) RETURNING id",
+        (outlet,),
+    ).fetchone()[0]
+    # Yesterday-UTC at noon: unambiguously NOT today, whichever way the
+    # session zone might shift the boundary.
+    yesterday_utc_noon = T0 - timedelta(days=1)
+    kb.execute(
+        "INSERT INTO item_triage "
+        "  (item_id, verdict, reason, triage_prompt_version, created_at) "
+        "VALUES (%s, 'stale', 'stale', %s, %s)",
+        (item_id, comprehend.TRIAGE_PROMPT_VERSION, yesterday_utc_noon),
+    )
+    kb.commit()
+
+    today = T0.date().isoformat()  # the day AFTER yesterday_utc_noon's date
+    state = {
+        comprehend.BUDGET_STATE_KEY: {
+            "balance_usd": 0.0,
+            "at": T0.isoformat(),
+            "exhausted_on": today,
+        }
+    }
+
+    _, message = comprehend.budget_verdict(kb, state, T0)
+
+    assert "0 went stale today" in message

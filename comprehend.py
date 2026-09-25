@@ -854,6 +854,18 @@ def run(conn, now=None) -> Tally:
     # is the monitor's only memory across the hourly process restart, and
     # leaving it set after recovery would keep telling the operator about a
     # failure that stopped happening (capture.liveness contract).
+    #
+    # R19 (kept as-is on review): this clears on ANY pass that reaches this
+    # line, not only one that spent money -- a pass with nothing to do is
+    # "clean" too. That is a deliberate trade, not an oversight: a premature
+    # clear fails LOUD, not silent. If the account is still actually broken,
+    # the very next pass with work to do aborts again, and because
+    # _alert_once's key was cleared it simply re-sends -- worst case, one
+    # duplicate Telegram message. The stricter alternative ("only a
+    # successfully PAID call clears") would have to special-case
+    # unpriced_model, which never spends by design, against billing/auth,
+    # which do -- more state to get wrong for a failure mode that costs at
+    # most a repeat.
     if ABORT_STATE_KEY in config.runtime_state():
         config.clear_runtime_state([ABORT_STATE_KEY])
     log.info(f"Comprehend: {tally}")
@@ -951,10 +963,18 @@ def budget_verdict(conn, state: dict, now) -> tuple[str, str] | None:
     allowance, max_days = _allowance()
     # Budget-starved items must never be silent (spec 4.3, revised): the day's
     # structural outcomes ride along with the one alert.
+    #
+    # R18: NOT `created_at >= %s::date`. Postgres casts a bare date to
+    # timestamptz in the SESSION TimeZone, and db.connect() never sets one --
+    # on a non-UTC host "today" would silently shift to that session's
+    # midnight instead of UTC midnight. `today` here is already derived from
+    # `now`, which every caller in this module treats as UTC, so the boundary
+    # must be built the same way: a tz-aware UTC midnight computed in Python,
+    # compared with no cast at all.
+    today_start_utc = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
     stale_today = conn.execute(
-        "SELECT count(*) FROM item_triage WHERE verdict = 'stale' "
-        "AND created_at >= %s::date",
-        (today,),
+        "SELECT count(*) FROM item_triage WHERE verdict = 'stale' AND created_at >= %s",
+        (today_start_utc,),
     ).fetchone()[0]
     # R13: the same query run() tallies, through the one function -- never a
     # second copy of it (reconstruction-drifts-from-production).
