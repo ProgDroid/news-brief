@@ -13,6 +13,7 @@ and green; nothing further happens in this repo until the flag is on.
 
 | step | state |
 |---|---|
+| — | superseded for the restart by `docs/2026-09-25-host-runbook-cost-redesign-phase-1.md`; step 5 (the gate) is still run from HERE |
 | 0 — deploy | **done** 2026-09-22 |
 | 1 — new defaults live (`goq`, `0p3`) | **done** 2026-09-22. `goq` stays open: the code cannot close it, only a run of clean `:30` passes can. |
 | 2 — flip `COMPREHEND_ENABLED` | **done** 2026-09-22, cutover `2026-09-22 18:13:37.571434+00` |
