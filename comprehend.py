@@ -123,6 +123,7 @@ class Tally:
     # (billing, auth) or a refusal to spend (unpriced model) stops the WHOLE
     # pass without charging any item: nothing about the items was judged.
     aborted: str = ""
+    spent_usd: float = 0.0
     failures: dict = field(default_factory=dict)
 
 
@@ -364,6 +365,65 @@ def _chunk(seq, size):
         yield seq[i : i + size]
 
 
+# $ per million tokens, (input, output). Source: the Anthropic model table
+# (claude-api skill, cached 2026-06-24), checked 2026-09-25. Cache tokens use
+# the documented multipliers. A model missing from this table REFUSES to run
+# (UnpricedModel): pricing an unknown model at $0 would make the budget an
+# accepted-and-inert config the moment a settings row named a new model.
+PRICES_PER_MTOK: dict[str, tuple[float, float]] = {
+    "claude-sonnet-5": (2.00, 10.00),
+    "claude-haiku-4-5": (1.00, 5.00),
+    "claude-haiku-4-5-20251001": (1.00, 5.00),
+}
+BATCH_FACTOR = 0.5
+_CACHE_WRITE_MULT = 1.25
+_CACHE_READ_MULT = 0.10
+
+
+class UnpricedModel(RuntimeError):
+    """A model with no entry in PRICES_PER_MTOK."""
+
+
+def price_of(model: str) -> tuple[float, float]:
+    try:
+        return PRICES_PER_MTOK[model]
+    except KeyError:
+        raise UnpricedModel(model) from None
+
+
+def cost_usd(model: str, usage: dict, *, batch: bool = False) -> float:
+    """Dollars for one call's `usage`. Raises UnpricedModel before anything else."""
+    pin, pout = price_of(model)
+    if not usage:
+        log.warning(f"Comprehend: {model} response carried no usage; costed at $0")
+        return 0.0
+    tokens_in = (
+        (usage.get("input_tokens") or 0) * pin
+        + (usage.get("cache_creation_input_tokens") or 0) * pin * _CACHE_WRITE_MULT
+        + (usage.get("cache_read_input_tokens") or 0) * pin * _CACHE_READ_MULT
+    )
+    usd = (tokens_in + (usage.get("output_tokens") or 0) * pout) / 1_000_000
+    return usd * (BATCH_FACTOR if batch else 1.0)
+
+
+def record_spend(conn, stage, model, usage, *, batch_id=None, batch=False) -> float:
+    usd = cost_usd(model, usage, batch=batch)
+    conn.execute(
+        "INSERT INTO comprehend_spend "
+        "  (stage, model, input_tokens, output_tokens, usd, batch_id) "
+        "VALUES (%s, %s, %s, %s, %s, %s)",
+        (
+            stage,
+            model,
+            (usage or {}).get("input_tokens") or 0,
+            (usage or {}).get("output_tokens") or 0,
+            usd,
+            batch_id,
+        ),
+    )
+    return usd
+
+
 def run(conn) -> Tally:
     """One full pass. Bounded by DEADLINE_SECONDS.
 
@@ -374,6 +434,13 @@ def run(conn) -> Tally:
     if not tally.enabled:
         log.info("Comprehend: disabled by COMPREHEND_ENABLED; nothing read")
         return tally
+
+    # Refuse to spend on a model we cannot price, BEFORE any call (spec 4.3).
+    for model in {_triage_model(), _integrate_model()}:
+        try:
+            price_of(model)
+        except UnpricedModel:
+            return _abort(conn, tally, f"unpriced_model:{model}")
 
     deadline = time.monotonic() + DEADLINE_SECONDS
     index = SurfaceIndex.build(conn)
@@ -424,9 +491,11 @@ def run(conn) -> Tally:
             break
         payload = [dict(it, outlet=outlets.get(it["outlet_id"], "?")) for it in batch]
         try:
-            verdicts = parse_triage_response(
-                call_triage(build_triage_request(payload)), {it["id"] for it in batch}
+            resp = call_triage(build_triage_request(payload))
+            tally.spent_usd += record_spend(
+                conn, "triage", _triage_model(), resp.get("usage") or {}
             )
+            verdicts = parse_triage_response(resp, {it["id"] for it in batch})
         except Exception as exc:
             kind = _account_failure(exc)
             if kind:
@@ -518,10 +587,14 @@ def run(conn) -> Tally:
         )
 
         try:
+            resp = call_integration(
+                build_integration_request(payload, cand_entities, cand_events)
+            )
+            tally.spent_usd += record_spend(
+                conn, "integration", _integrate_model(), resp.get("usage") or {}
+            )
             extractions = parse_integration_response(
-                call_integration(
-                    build_integration_request(payload, cand_entities, cand_events)
-                ),
+                resp,
                 {it["id"] for it in batch},
                 label_map(_ENTITY_LABEL, cand_entities),
                 label_map(_EVENT_LABEL, cand_events),
