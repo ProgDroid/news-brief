@@ -571,8 +571,20 @@ def run(conn, now=None) -> Tally:
         pause_budget(now)
         return tally
 
+    # Resolved ONCE, here, and threaded through every use below. The settings
+    # cache TTL is 60s and a pass can run up to DEADLINE_SECONDS (40 minutes),
+    # so re-resolving at each call site let an operator's mid-pass model edit
+    # steer LATER calls in this same pass to a different model than the one
+    # just priced -- reviewer's probe (I1): a mid-pass switch to an unpriced
+    # model produced 0 ledger rows, a $0 debit, and 3 items marked `failed`,
+    # because UnpricedModel was raised by record_spend AFTER the paid call had
+    # already happened. One resolution per pass makes the price check above
+    # and every request/ledger/provenance write below agree by construction.
+    triage_model = _triage_model()
+    integrate_model = _integrate_model()
+
     # Refuse to spend on a model we cannot price, BEFORE any call (spec 4.3).
-    for model in {_triage_model(), _integrate_model()}:
+    for model in {triage_model, integrate_model}:
         try:
             price_of(model)
         except UnpricedModel:
@@ -632,8 +644,8 @@ def run(conn, now=None) -> Tally:
             break
         payload = [dict(it, outlet=outlets.get(it["outlet_id"], "?")) for it in batch]
         try:
-            resp = call_triage(build_triage_request(payload))
-            usd = record_spend(conn, "triage", _triage_model(), resp.get("usage") or {})
+            resp = call_triage(build_triage_request(payload, model=triage_model))
+            usd = record_spend(conn, "triage", triage_model, resp.get("usage") or {})
             tally.spent_usd += usd
             budget.debit(usd)
             verdicts = parse_triage_response(resp, {it["id"] for it in batch})
@@ -649,7 +661,7 @@ def run(conn, now=None) -> Tally:
                     it["id"],
                     "failed",
                     "error",
-                    _triage_model(),
+                    triage_model,
                     TRIAGE_PROMPT_VERSION,
                 )
             conn.commit()
@@ -661,7 +673,7 @@ def run(conn, now=None) -> Tally:
                 it["id"],
                 "material" if material else "immaterial",
                 "topical" if material else "none",
-                _triage_model(),
+                triage_model,
                 TRIAGE_PROMPT_VERSION,
             )
             tally.triaged_by_model += 1
@@ -696,6 +708,36 @@ def run(conn, now=None) -> Tally:
             tally.budget_exhausted = True
             budget.mark_exhausted(now)
             break
+
+        # Quote pages triaged `material` before this deploy still reach here:
+        # is_quote_page is otherwise consulted only in the triage rules loop
+        # above, so a page triaged under an older code version keeps its old
+        # verdict forever (I2, reviewer finding -- the runbook's step-4
+        # recovery SQL re-queues exactly this population). Reclassify for
+        # free, the same pair the triage rules loop already writes for a page
+        # seen for the first time; 0014's CHECK constraints allow
+        # (immaterial, quote_page), and record_triage's ON CONFLICT overwrites
+        # the existing (material, tracked_entity) row rather than erroring.
+        quote_page_ids = {
+            it["id"] for it in batch if common.is_quote_page(it.get("title"))
+        }
+        if quote_page_ids:
+            for it in batch:
+                if it["id"] in quote_page_ids:
+                    record_triage(
+                        conn,
+                        it["id"],
+                        "immaterial",
+                        "quote_page",
+                        None,
+                        TRIAGE_PROMPT_VERSION,
+                    )
+                    tally.quote_pages += 1
+            conn.commit()
+            batch = [it for it in batch if it["id"] not in quote_page_ids]
+            if not batch:
+                continue
+
         payload = [dict(it, outlet=outlets.get(it["outlet_id"], "?")) for it in batch]
         hits = [
             sf
@@ -733,10 +775,12 @@ def run(conn, now=None) -> Tally:
 
         try:
             resp = call_integration(
-                build_integration_request(payload, cand_entities, cand_events)
+                build_integration_request(
+                    payload, cand_entities, cand_events, model=integrate_model
+                )
             )
             usd = record_spend(
-                conn, "integration", _integrate_model(), resp.get("usage") or {}
+                conn, "integration", integrate_model, resp.get("usage") or {}
             )
             tally.spent_usd += usd
             budget.debit(usd)
@@ -836,7 +880,7 @@ def run(conn, now=None) -> Tally:
 
         for e in extractions:
             e["published_at"] = published.get(e["item_id"])
-        write_batch(conn, extractions, index, tally)
+        write_batch(conn, extractions, index, tally, model=integrate_model)
         conn.commit()
 
     tally.gave_up_integration = conn.execute(
@@ -1284,7 +1328,9 @@ def _triage_model() -> str:
     return common.TRIAGE_MODEL or common.MODEL
 
 
-def build_triage_request(items: list[dict]) -> dict:
+def build_triage_request(items: list[dict], *, model: str | None = None) -> dict:
+    """`model` lets run() pass the value it froze at pass start (I1); a direct
+    caller (tests, scripts) that omits it gets the live resolver, unchanged."""
     lines = []
     for it in items:
         # clean() so the model never sees `&nbsp;` noise either. Measured
@@ -1296,7 +1342,7 @@ def build_triage_request(items: list[dict]) -> dict:
             f"title={clean(it['title'])!r} lead={body[:300]!r}"
         )
     return {
-        "model": _triage_model(),
+        "model": model if model is not None else _triage_model(),
         "max_tokens": TRIAGE_MAX_TOKENS,
         # Forced-tool extraction on a tight budget: thinking OFF. Omitting the
         # field runs ADAPTIVE thinking on Sonnet 5, which spends max_tokens.
@@ -1706,8 +1752,14 @@ def _resolve_label(raw, labels: dict[str, int], tally) -> int | None:
 
 
 def build_integration_request(
-    items: list[dict], entities: list[dict], events: list[dict]
+    items: list[dict],
+    entities: list[dict],
+    events: list[dict],
+    *,
+    model: str | None = None,
 ) -> dict:
+    """`model` lets run() pass the value it froze at pass start (I1); a direct
+    caller (tests, scripts) that omits it gets the live resolver, unchanged."""
     # Labels, never raw ids. Rendered from the SAME label_map the parser accepts
     # against, so what is offered and what is understood cannot drift apart.
     ent_lines = (
@@ -1747,7 +1799,7 @@ def build_integration_request(
     # prefix match rendered tools -> system -> messages, and every volatile
     # value (candidates, item text) is in `messages`, after everything static.
     return {
-        "model": _integrate_model(),
+        "model": model if model is not None else _integrate_model(),
         "max_tokens": INTEGRATE_MAX_TOKENS,
         "thinking": {"type": "disabled"},
         "system": _INTEGRATE_SYSTEM,
@@ -1972,8 +2024,14 @@ def _validate_item(
     return {"item_id": item_id, "entities": entities, "events": events}
 
 
-def _resolve_entity(conn, spec: dict, tally: Tally) -> int | None:
-    """A candidate id, or an upserted new entity. None means refused."""
+def _resolve_entity(
+    conn, spec: dict, tally: Tally, *, model: str | None = None
+) -> int | None:
+    """A candidate id, or an upserted new entity. None means refused.
+
+    `model` lets write_extraction pass through the value run() froze at pass
+    start (I1); a direct caller (tests) that omits it gets the live resolver.
+    """
     if "candidate_id" in spec:
         tally.entities_resolved += 1
         return spec["candidate_id"]
@@ -2004,7 +2062,7 @@ def _resolve_entity(conn, spec: dict, tally: Tally) -> int | None:
             name,
             etype,
             spec.get("aliases") or [],
-            _integrate_model(),
+            model if model is not None else _integrate_model(),
             INTEGRATE_PROMPT_VERSION,
         ),
     ).fetchone()
@@ -2018,13 +2076,24 @@ def _resolve_entity(conn, spec: dict, tally: Tally) -> int | None:
     ).fetchone()[0]
 
 
-def write_extraction(conn, extraction: dict, index: SurfaceIndex, tally: Tally) -> bool:
+def write_extraction(
+    conn,
+    extraction: dict,
+    index: SurfaceIndex,
+    tally: Tally,
+    *,
+    model: str | None = None,
+) -> bool:
     """Write one item's extraction inside its OWN savepoint.
 
     capture.store_items already established this pattern and documented why:
     each entry gets its own savepoint so neither a duplicate nor a rejected
     entry can lose the entries around it. Here the payload is far more
     expensive to re-derive, so the argument is stronger, not weaker.
+
+    `model` lets write_batch pass through the value run() froze at pass start
+    (I1) for every provenance write below (entities, events, assertions); a
+    direct caller (tests) that omits it gets the live resolver, unchanged.
 
     Returns True if the item was integrated.
     """
@@ -2100,11 +2169,12 @@ def write_extraction(conn, extraction: dict, index: SurfaceIndex, tally: Tally) 
         tally.entityless_extraction += 1
         return True
 
+    resolved_model = model if model is not None else _integrate_model()
     try:
         with conn.transaction():
             entity_ids = []
             for spec in extraction["entities"]:
-                eid = _resolve_entity(conn, spec, tally)
+                eid = _resolve_entity(conn, spec, tally, model=resolved_model)
                 if eid is not None:
                     entity_ids.append(eid)
                     if "name" in spec:
@@ -2140,7 +2210,7 @@ def write_extraction(conn, extraction: dict, index: SurfaceIndex, tally: Tally) 
                             # NOT NULL; the CHECK still rejects a non-member.
                             ev.get("commitment_state"),
                             extraction.get("published_at"),
-                            _integrate_model(),
+                            resolved_model,
                             INTEGRATE_PROMPT_VERSION,
                         ),
                     ).fetchone()[0]
@@ -2163,7 +2233,7 @@ def write_extraction(conn, extraction: dict, index: SurfaceIndex, tally: Tally) 
                         item_id,
                         event_id,
                         ev["standing"],
-                        _integrate_model(),
+                        resolved_model,
                         INTEGRATE_PROMPT_VERSION,
                     ),
                 ).fetchone()
@@ -2193,7 +2263,9 @@ def write_extraction(conn, extraction: dict, index: SurfaceIndex, tally: Tally) 
     return True
 
 
-def write_batch(conn, extractions, index: SurfaceIndex, tally: Tally) -> int:
+def write_batch(
+    conn, extractions, index: SurfaceIndex, tally: Tally, *, model: str | None = None
+) -> int:
     """One transaction for the batch, one savepoint per item inside it.
 
     The OUTER `conn.transaction()` is load-bearing and must not be removed as
@@ -2204,6 +2276,13 @@ def write_batch(conn, extractions, index: SurfaceIndex, tally: Tally) -> int:
     an open transaction -- which differs between a test that just committed and
     the run loop, which has an open SELECT. A test would then assert semantics
     production never uses.
+
+    `model` lets run() pass through the value it froze at pass start (I1); a
+    direct caller (tests) that omits it gets the live resolver, unchanged.
     """
     with conn.transaction():
-        return sum(1 for e in extractions if write_extraction(conn, e, index, tally))
+        return sum(
+            1
+            for e in extractions
+            if write_extraction(conn, e, index, tally, model=model)
+        )

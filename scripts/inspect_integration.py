@@ -18,6 +18,11 @@ has drifted from the function it claims to explain.
 READ-ONLY. It SELECTs, calls the model once, prints, and rolls back — no
 `item_triage` counter moves, so it burns no integration attempts.
 
+That one model call is still a REAL, PAID Anthropic call (M6): it is not recorded
+in `comprehend_spend` and does not draw on the comprehension token bucket, so it
+is invisible to both the ledger and the budget, and shows up only on the account's
+console usage.
+
 Run (there is no checkout on the deploy host, so this runs from the image):
 
     docker compose run --rm --entrypoint python newsbrief \

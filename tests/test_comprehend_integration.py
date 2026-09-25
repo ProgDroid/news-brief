@@ -598,6 +598,67 @@ def test_a_bumped_integration_prompt_version_re_integrates(kb, monkeypatch):
     ), "the bump must advance the stored version, or task 10 re-selects forever"
 
 
+def test_a_quote_page_triaged_material_before_this_deploy_is_reclassified_free(
+    kb, monkeypatch
+):
+    """I2, reviewer finding. common.is_quote_page is otherwise consulted only
+    in the triage rules loop, so a page triaged `material` under an OLDER
+    deploy -- before the Reuters quote-page filter existed -- still reaches
+    the integration loop carrying its stale verdict. This is not
+    hypothetical: the runbook's step-4 recovery SQL
+    (`integrate_attempts = 0 ...`) re-queues exactly this population, and the
+    first pass after that recovery would otherwise pay to integrate every one
+    of them. call_integration is patched to fail the test if it is ever
+    called, so the "no model call" half of the fix is enforced, not assumed.
+    """
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
+    outlet_id = kb.execute(
+        "INSERT INTO outlets (name, kind) VALUES ('Reuters', 'wire') RETURNING id"
+    ).fetchone()[0]
+    item_id = kb.execute(
+        "INSERT INTO items (outlet_id, url, title, content_hash, published_at) "
+        "VALUES (%s, 'u', 'MSTS.DE - Reuters', 'H1', now()) RETURNING id",
+        (outlet_id,),
+    ).fetchone()[0]
+    comprehend.record_triage(
+        kb,
+        item_id,
+        "material",
+        "tracked_entity",
+        None,
+        comprehend.TRIAGE_PROMPT_VERSION,
+    )
+    kb.commit()
+
+    monkeypatch.setattr(
+        comprehend,
+        "call_integration",
+        lambda req: pytest.fail("a quote page reached the model"),
+    )
+
+    tally = comprehend.run(kb)
+
+    row = kb.execute(
+        "SELECT verdict, reason FROM item_triage WHERE item_id = %s", (item_id,)
+    ).fetchone()
+    assert row == ("immaterial", "quote_page")
+    assert tally.quote_pages == 1
+
+
+def test_integration_takes_the_newest_material_first(kb):
+    """M4. Nothing pinned pending_integration's `ORDER BY i.id DESC` -- the
+    same D4 recency policy pending_triage already has a test for
+    (test_triage_takes_the_newest_items_first, tests/test_comprehend_triage.py)."""
+    older = _item(kb, "Older item", h="Ha")
+    newer = _item(kb, "Newer item", h="Hb")
+    kb.commit()
+
+    rows = comprehend.pending_integration(kb, 1)
+
+    assert [r["id"] for r in rows] == [newer]
+    assert older < newer
+
+
 # --- news-brief-uer: an item with genuinely nothing in it is not a failure.
 # _validate_item returned None both for a MALFORMED row and for a well-formed
 # row carrying nothing, so run() could not tell them apart: the empty item was

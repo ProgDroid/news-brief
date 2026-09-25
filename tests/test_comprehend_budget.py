@@ -176,6 +176,164 @@ def test_a_successful_integration_call_ledgers_its_spend(kb, monkeypatch):
     assert tally.spent_usd == pytest.approx(0.003)
 
 
+@needs_db
+def test_a_model_row_edit_mid_pass_does_not_change_this_pass(kb, monkeypatch):
+    """I1 (triage side, reviewer finding). comprehend.run() resolves
+    `_triage_model()`/`_integrate_model()` once for the unpriced-model check,
+    but every OTHER use re-resolved at call time -- the request builder, both
+    record_spend calls, record_triage's model argument, and the provenance
+    writes inside write_batch/write_extraction. The settings cache TTL is 60s
+    and a pass can run up to 40 minutes, so a settings-row edit mid-pass sent
+    LATER calls in the same pass to a different model.
+
+    The reviewer's probe: flipping the model to an unpriced one mid-pass
+    produced 0 ledger rows, a $0 debit, and 3 items marked `failed`, because
+    UnpricedModel was raised by record_spend AFTER the (already-paid-for) call.
+    Batches of size 1 over 3 items so each of the three triage calls is a
+    separate iteration of the model-half loop -- the loop the row edit must
+    not be able to steer once it has started.
+    """
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_SAMPLE_PER_DAY", 0)
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_TRIAGE_BATCH", 1)
+    _seed(kb, 3)
+    started_as = comprehend._triage_model()
+
+    calls = []
+
+    def fake_triage(req):
+        calls.append(req)
+        if len(calls) == 1:
+            # An unpriced model: if the pass re-resolved after this point, the
+            # NEXT record_spend call would raise UnpricedModel instead of
+            # ledgering -- which is exactly the failure mode this test exists
+            # to catch, not something it should tolerate by swallowing it.
+            monkeypatch.setattr(comprehend.common, "TRIAGE_MODEL", "claude-opus-9")
+        ids = [
+            int(line.split("id=")[1].split()[0])
+            for line in req["messages"][0]["content"].splitlines()
+            if line.startswith("- id=")
+        ]
+        return {
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 1000, "output_tokens": 100},
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "emit_triage",
+                    "input": {"items": [{"id": i, "material": False} for i in ids]},
+                }
+            ],
+        }
+
+    monkeypatch.setattr(comprehend, "call_triage", fake_triage)
+
+    tally = comprehend.run(kb)
+    kb.commit()
+
+    assert len(calls) == 3
+    assert {req["model"] for req in calls} == {started_as}, (
+        "every request must use the model resolved at pass start"
+    )
+
+    rows = kb.execute(
+        "SELECT model FROM comprehend_spend WHERE stage = 'triage'"
+    ).fetchall()
+    assert len(rows) == 3
+    assert {r[0] for r in rows} == {started_as}
+    assert tally.failed_triage == 0
+
+
+@needs_db
+def test_a_model_row_edit_inside_the_call_does_not_change_the_integration_ledger(
+    kb, monkeypatch
+):
+    """I1 (integration side). Complements the triage test above: this flips
+    INTEGRATE_MODEL from INSIDE the fake call_integration -- the earliest point
+    a settings-row edit could land relative to run()'s single resolution -- and
+    checks the ledger row still carries the model the request actually used,
+    not whatever the row reads by the time record_spend runs. Also covers the
+    deferred gap "the triage spend is ledgered with the right model through
+    run()" on the integration side, since nothing before this pinned the
+    integration ledger row's model end-to-end through run() with a value that
+    could plausibly have drifted mid-call.
+    """
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
+    kb.execute("INSERT INTO stories (name, scope) VALUES ('Ukraine talks', 'episodic')")
+    outlet_id = kb.execute(
+        "INSERT INTO outlets (name, kind) VALUES ('Reuters', 'wire') RETURNING id"
+    ).fetchone()[0]
+    item_id = kb.execute(
+        "INSERT INTO items (outlet_id, url, title, body, content_hash, published_at) "
+        "VALUES (%s, 'u', 'Ukraine talks resume', 'body', 'H1', now()) RETURNING id",
+        (outlet_id,),
+    ).fetchone()[0]
+    kb.commit()
+
+    started_as = comprehend._integrate_model()
+
+    def fake_integrate(req):
+        # Flip the settings row from inside the call, as if an operator's edit
+        # landed between the request being built and the response coming back.
+        monkeypatch.setattr(comprehend.common, "INTEGRATE_MODEL", "claude-opus-9")
+        assert req["model"] == started_as
+        return {
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 1000, "output_tokens": 100},
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "emit_extraction",
+                    "input": {
+                        "items": [
+                            {
+                                "item_id": item_id,
+                                "entities": [
+                                    {
+                                        "name": "Ukraine",
+                                        "type": "country",
+                                        "aliases": [],
+                                    }
+                                ],
+                                "events": [
+                                    {
+                                        "summary": "Talks resumed",
+                                        "type": "action",
+                                        "commitment_state": "in_force",
+                                        "standing": "reported",
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                }
+            ],
+        }
+
+    monkeypatch.setattr(comprehend, "call_integration", fake_integrate)
+
+    tally = comprehend.run(kb)
+    kb.commit()
+
+    assert tally.material == 1
+    rows = kb.execute(
+        "SELECT model FROM comprehend_spend WHERE stage = 'integration'"
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0][0] == started_as, (
+        "the ledger row's model must equal the model the request actually used, "
+        "not the row read after the mid-call edit"
+    )
+    # The provenance columns write the same frozen value (I1's other call sites).
+    assert (
+        kb.execute("SELECT extractor_model FROM entities").fetchone()[0] == started_as
+    )
+    assert kb.execute("SELECT extractor_model FROM events").fetchone()[0] == started_as
+    assert (
+        kb.execute("SELECT extractor_model FROM assertions").fetchone()[0] == started_as
+    )
+
+
 T0 = datetime(2026, 9, 26, 12, 0, tzinfo=timezone.utc)
 
 
