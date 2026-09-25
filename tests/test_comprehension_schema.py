@@ -200,3 +200,88 @@ def test_0009_rolls_back_and_reapplies(conn):
     conn.commit()
     assert reapplied == reverted[::-1]
     assert db.applied_versions(conn) == stack
+
+
+# --- Migration 0014: `stale` verdict, `quote_page` / `stale` reasons -------
+
+TARGET_0014 = "0014_triage_stale_quote_page"
+
+
+def _triage_row(conn, verdict, reason):
+    """Like `_item` + `_triage`, but self-contained: a randomized outlet name
+    and content_hash so repeated calls within ONE test (the round-trip test
+    calls this twice against the same undropped schema) never collide on
+    outlets_name or items_outlet_hash."""
+    outlet = conn.execute(
+        "INSERT INTO outlets (name, kind) VALUES ('O' || gen_random_uuid(), 'wire') RETURNING id"
+    ).fetchone()[0]
+    item = conn.execute(
+        "INSERT INTO items (outlet_id, url, title, content_hash) "
+        "VALUES (%s, 'u', 't', gen_random_uuid()::text) RETURNING id",
+        (outlet,),
+    ).fetchone()[0]
+    conn.execute(
+        "INSERT INTO item_triage (item_id, verdict, reason, triage_prompt_version) "
+        "VALUES (%s, %s, %s, 1)",
+        (item, verdict, reason),
+    )
+
+
+@pytest.mark.parametrize(
+    "verdict,reason",
+    [
+        ("stale", "stale"),
+        ("immaterial", "quote_page"),
+    ],
+)
+def test_the_new_legal_pairs_are_accepted(kb, verdict, reason):
+    _triage_row(kb, verdict, reason)
+
+
+@pytest.mark.parametrize(
+    "verdict,reason",
+    [
+        ("material", "quote_page"),  # a structural reject cannot be material
+        ("material", "stale"),
+        ("stale", "tracked_story"),  # a stale row claims no tracking reason
+    ],
+)
+def test_the_biconditional_refuses_the_mismatched_pairs(kb, verdict, reason):
+    with pytest.raises(psycopg.errors.CheckViolation):
+        _triage_row(kb, verdict, reason)
+
+
+@pytest.mark.parametrize(
+    "verdict,reason",
+    [
+        # Both pairs satisfy item_triage_check (the biconditional): neither side
+        # claims 'material', and neither reason is excluded from the non-material
+        # side. Only item_triage_stale_check -- verdict='stale' iff reason='stale'
+        # -- refuses them, so these discriminate that constraint specifically.
+        ("stale", "none"),
+        ("immaterial", "stale"),
+    ],
+)
+def test_the_stale_check_refuses_pairs_the_biconditional_allows(kb, verdict, reason):
+    with pytest.raises(psycopg.errors.CheckViolation):
+        _triage_row(kb, verdict, reason)
+
+
+def test_0014_rolls_back_and_forward(kb):
+    _triage_row(kb, "stale", "stale")
+    kb.commit()
+    # The FULL stem: db names versions by file stem, and steps_back_through
+    # asserts membership, so "0014" alone raises "0014 is not applied".
+    db.run_migrations(
+        kb, direction="down", steps=conftest.steps_back_through(kb, TARGET_0014)
+    )
+    kb.commit()
+    assert (
+        kb.execute(
+            "SELECT count(*) FROM item_triage WHERE verdict = 'stale'"
+        ).fetchone()[0]
+        == 0
+    )
+    db.run_migrations(kb)
+    kb.commit()
+    _triage_row(kb, "stale", "stale")

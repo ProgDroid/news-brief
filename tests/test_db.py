@@ -52,6 +52,7 @@ def test_up_creates_the_expected_tables(conn):
         "0011_optional_commitment_state",
         "0012_pg_trgm",
         "0013_integrate_defers",
+        "0014_triage_stale_quote_page",
     ]
     assert {
         "schema_migrations",
