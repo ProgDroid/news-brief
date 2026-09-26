@@ -978,3 +978,16 @@ def test_a_malformed_row_logs_a_warning_naming_the_item_and_the_exception(caplog
     message = warnings[0].getMessage()
     assert "2" in message, "the item id must be in the record"
     assert "TypeError" in message, "the exception TYPE name must be in the record"
+
+
+def test_the_event_schema_offers_new_label():
+    """Task 5: the published tool schema must offer a `new_label` property on
+    events, and `candidate`'s description must tell the model a NEW label
+    declared earlier in the response is a valid value there -- or a model
+    obeying the schema exactly, as bqa.16 established it will, can never
+    produce the in-request link at all."""
+    member = _member_schema("events")
+    assert member["properties"]["new_label"]["type"] == "string"
+    candidate_desc = member["properties"]["candidate"]["description"]
+    assert "NEW1" in candidate_desc
+    assert "earlier in your response" in candidate_desc.lower()

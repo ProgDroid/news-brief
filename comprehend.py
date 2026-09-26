@@ -31,7 +31,7 @@ from common import log
 # Bump on any material change to the triage prompt. A prompt change that is not
 # versioned is indistinguishable from a change in the world.
 TRIAGE_PROMPT_VERSION = 1
-INTEGRATE_PROMPT_VERSION = 2
+INTEGRATE_PROMPT_VERSION = 3
 
 # A pass must not outlive its own fire time: supervisor's _due_jobs loop alerts
 # on any job still running at its next fire. Hourly schedule, 40-minute bound.
@@ -1688,10 +1688,18 @@ Distinguish what was DONE from what was SAID. "Trump declared the ceasefire \
 over" is a statement; whether the ceasefire is over is a separate matter.
 
 CANDIDATE LABELS. Candidates are listed with labels like ENT1 and EVT1. Set \
-`candidate` to one of those labels ONLY to refer to that exact listed item. \
-OMIT `candidate` entirely for anything new -- never invent or number a label \
-yourself. Entities are deduplicated by name automatically, so you do not need \
-an id to link two mentions of the same actor across items."""
+`candidate` to one of those labels ONLY to refer to that exact listed item, \
+or to a NEW label as described below. OMIT `candidate` for an event you are \
+the first to report -- never invent an ENT or EVT label. Entities are \
+deduplicated by name automatically, so you do not need an id to link two \
+mentions of the same actor across items.
+
+IN-REQUEST LINKS. When two items in this request report the SAME event, set \
+`new_label` (NEW1, NEW2, ...) on that event in the item that comes FIRST in \
+your response, and in each item LATER in your response set `candidate` to \
+that NEW label instead of describing the event again. Each item must still \
+list its own actors under `entities`. Reference only a NEW label declared \
+earlier in your response, never one declared in the same item."""
 
 _INTEGRATE_TOOL = {
     "name": "emit_extraction",
@@ -1758,9 +1766,22 @@ _INTEGRATE_TOOL = {
                                     "candidate": {
                                         "type": "string",
                                         "description": (
-                                            "A label from CANDIDATE EVENTS, "
-                                            "e.g. 'EVT1'. Omit entirely for a "
-                                            "new event; never invent a label."
+                                            "A label from CANDIDATE EVENTS "
+                                            "(e.g. 'EVT1'), or a NEW label "
+                                            "that an item EARLIER IN YOUR "
+                                            "RESPONSE declared (e.g. "
+                                            "'NEW1'). Omit it for an event "
+                                            "you are the first to report."
+                                        ),
+                                    },
+                                    "new_label": {
+                                        "type": "string",
+                                        "description": (
+                                            "Only when an item LATER in "
+                                            "your response reports the "
+                                            "same event: a label NEW1, "
+                                            "NEW2, ... that it sets as "
+                                            "its `candidate`."
                                         ),
                                     },
                                     "summary": {"type": "string"},
@@ -2431,19 +2452,27 @@ def write_extraction(
         tally.empty_extraction += 1
         return True
 
-    # Events but NO entities. Refusing to write is correct: candidate_events
-    # retrieves BY entity id, so an entity-less event can never be offered as a
-    # candidate or matched -- it would inflate events_created while never
-    # touching events_matched, depressing the corroboration ratio the
+    # Events but NO entities. A NEW event with no entities is refused: it
+    # would be an event no entity can ever retrieve, and candidate_events
+    # retrieves BY entity id -- an entity-less NEW event can never be offered
+    # as a candidate or matched, inflating events_created while never
+    # touching events_matched and depressing the corroboration ratio the
     # pre-registered gate reads. That is the same by-construction trap the
     # occurred_at comment below describes.
     #
-    # What was WRONG (news-brief-bqa.17) was refusing by raising inside the
-    # savepoint and charging an attempt. The outcome is DETERMINISTIC for this
-    # item at this prompt version, so it failed identically every pass and
-    # burned three 8192-token generations to reach a verdict available on the
-    # first. Terminal and uncharged instead -- the model answered, it just
-    # answered "no entities".
+    # A REFERENCE (a candidate_id match or a resolved new_ref) has no such
+    # trap: the event it points at already exists, was already reachable
+    # through its OWN entities, and this item is only attesting to it, so
+    # falling through to the savepoint below and writing entity_ids == []
+    # loses nothing candidate_events depends on. This is the entity-less
+    # fall-through this task adds; every row it writes is stamped v3.
+    #
+    # What was WRONG (news-brief-bqa.17) was refusing a NEW event by raising
+    # inside the savepoint and charging an attempt. The outcome is
+    # DETERMINISTIC for this item at this prompt version, so it failed
+    # identically every pass and burned three 8192-token generations to reach
+    # a verdict available on the first. Terminal and uncharged instead -- the
+    # model answered, it just answered "no entities".
     #
     # NoEntitySurvived below keeps its attempt and keeps its name: entities
     # WERE offered there and every one was refused, which is work rejected
@@ -2451,15 +2480,20 @@ def write_extraction(
     # claimed that distinction; until now nothing enforced it, because
     # `not entity_ids` is true in both cases.
     if not extraction["entities"]:
-        conn.execute(
-            "UPDATE item_triage SET integrated_at = now(), "
-            "  integrate_prompt_version = %s "
-            "WHERE item_id = %s AND triage_prompt_version = %s "
-            "  AND verdict = 'material'",
-            (INTEGRATE_PROMPT_VERSION, item_id, TRIAGE_PROMPT_VERSION),
+        has_new_event = any(
+            "candidate_id" not in ev and "new_ref" not in ev
+            for ev in extraction["events"]
         )
-        tally.entityless_extraction += 1
-        return True
+        if has_new_event:
+            conn.execute(
+                "UPDATE item_triage SET integrated_at = now(), "
+                "  integrate_prompt_version = %s "
+                "WHERE item_id = %s AND triage_prompt_version = %s "
+                "  AND verdict = 'material'",
+                (INTEGRATE_PROMPT_VERSION, item_id, TRIAGE_PROMPT_VERSION),
+            )
+            tally.entityless_extraction += 1
+            return True
 
     resolved_model = model if model is not None else _integrate_model()
     try:
@@ -2471,7 +2505,13 @@ def write_extraction(
                     entity_ids.append(eid)
                     if "name" in spec:
                         index.add_entity(eid, spec["name"], spec.get("aliases") or [])
-            if not entity_ids:
+            # Only when `extraction["entities"]` was non-empty: entities WERE
+            # offered and every one was refused, which is work rejected. An
+            # entity-less REFERENCE reaches here by design with entity_ids
+            # == [] and extraction["entities"] == [] -- that is the
+            # fall-through above, not a resolution failure, and must not
+            # raise.
+            if not entity_ids and extraction["entities"]:
                 raise NoEntitySurvived("no entity survived resolution")
 
             # Labels this item declares, staged here rather than written
@@ -2566,6 +2606,8 @@ def write_extraction(
         # [R2: D3].
         new_events.update(declared_here)
         tally.events_linked_in_request += new_ref_count
+        if not extraction["entities"]:
+            tally.entityless_reference_written += 1
     except Exception as exc:
         tally.items_lost_to_savepoint += 1
         tally.failed_integration += 1

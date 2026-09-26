@@ -1533,3 +1533,119 @@ def test_a_rolled_back_referencer_is_not_counted_as_a_link(kb):
         "SELECT integrate_attempts FROM item_triage WHERE item_id = %s", (b,)
     ).fetchone()
     assert row == (1,), "b's own fault -- charged, not deferred"
+
+
+# --- Task 5: the entity-less-reference fall-through. A REFERENCE (a
+# candidate_id match or a resolved new_ref) needs nothing candidate_events
+# depends on -- the event it points at already exists and was already
+# reachable through its OWN entities -- so an entity-less item carrying only
+# references is written, not refused. A NEW event with no entities stays
+# refused exactly as bqa.17 established: it is the fall-through that changed,
+# not the original terminal case.
+
+
+def test_an_entityless_referencer_is_written(kb):
+    """Task 3's link test, with item b carrying NO entities at all."""
+    a = _item(kb, "A declares NEW1", h="Ha", outlet="Reuters")
+    b = _item(kb, "B refers to NEW1, no entities", h="Hb", outlet="AP")
+    kb.commit()
+    tally = comprehend.Tally()
+    index = comprehend.SurfaceIndex([])
+
+    extraction_a = _fresh(a)
+    extraction_a["events"][0]["new_label"] = "NEW1"
+    extraction_b = {
+        "item_id": b,
+        "entities": [],
+        "events": [{"new_ref": "NEW1", "standing": "reported"}],
+    }
+
+    written = comprehend.write_batch(kb, [extraction_a, extraction_b], index, tally)
+    kb.commit()
+
+    assert written == 2
+    assert tally.events_linked_in_request == 1
+    assert tally.entityless_reference_written == 1
+    assert tally.entityless_extraction == 0
+
+
+def test_an_entityless_EVT_match_is_written(kb):
+    """A candidate_id match needs nothing new_ref does either. The written
+    assertion's prompt_version is 3 -- this is new behaviour this task
+    switches on, so every row it writes must be stamped with it."""
+    ent = _entity(kb)
+    ev = _event(kb, ent)
+    iid = _item(kb)
+    kb.commit()
+    tally = comprehend.Tally()
+
+    extraction = {
+        "item_id": iid,
+        "entities": [],
+        "events": [{"candidate_id": ev, "standing": "reported"}],
+    }
+    assert (
+        comprehend.write_extraction(kb, extraction, comprehend.SurfaceIndex([]), tally)
+        is True
+    )
+    kb.commit()
+
+    rows = kb.execute(
+        "SELECT event_id, prompt_version FROM assertions WHERE item_id = %s", (iid,)
+    ).fetchall()
+    assert rows == [(ev, 3)]
+    assert tally.entityless_reference_written == 1
+
+
+def test_an_entityless_extraction_with_a_new_event_is_still_terminal(kb):
+    """The fall-through is for REFERENCES only. An entity-less item proposing
+    a brand-new event stays terminal-uncharged exactly as bqa.17 established
+    -- no event is created, since candidate_events retrieves by entity id and
+    a new event with none could never be offered as a candidate."""
+    iid = _item(kb)
+    tally = comprehend.Tally()
+
+    extraction = dict(_fresh(iid), entities=[])
+
+    assert (
+        comprehend.write_extraction(kb, extraction, comprehend.SurfaceIndex([]), tally)
+        is True
+    )
+    kb.commit()
+
+    assert kb.execute("SELECT count(*) FROM events").fetchone()[0] == 0
+    assert tally.entityless_extraction == 1
+    assert tally.entityless_reference_written == 0
+
+
+def test_an_entityless_item_with_an_unresolved_reference_is_deferred_not_integrated(
+    kb,
+):
+    """Pins ORDER: the reference pre-check in write_extraction runs BEFORE
+    the entity-less branch. An entity-less item whose only event is an
+    unresolved new_ref must be deferred like any other unresolved reference,
+    never mistaken for the entity-less-terminal case."""
+    iid = _item(kb)
+    kb.commit()
+    tally = comprehend.Tally()
+
+    extraction = {
+        "item_id": iid,
+        "entities": [],
+        "events": [{"new_ref": "NEW1", "standing": "reported"}],
+    }
+    assert (
+        comprehend.write_extraction(kb, extraction, comprehend.SurfaceIndex([]), tally)
+        is False
+    )
+    kb.commit()
+
+    row = kb.execute(
+        "SELECT integrated_at, integrate_link_defers FROM item_triage "
+        "WHERE item_id = %s",
+        (iid,),
+    ).fetchone()
+    assert row[0] is None
+    assert row[1] == 1
+    assert tally.entityless_extraction == 0
+    assert tally.entityless_reference_written == 0

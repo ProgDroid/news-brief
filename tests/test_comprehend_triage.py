@@ -4,6 +4,7 @@ import pytest
 
 import comprehend
 import db
+from scripts import score_comprehension as sc
 
 pytestmark = pytest.mark.skipif(
     not db.is_configured(),
@@ -2142,3 +2143,89 @@ def test_a_reference_nobody_declared_is_charged(kb, monkeypatch):
     assert _attempts(kb, item_id) == 1
     assert _link_defers(kb, item_id) == 0
     assert tally.deferred_neighbour == 0
+
+
+def test_the_prompt_lets_later_items_reference_new_labels():
+    """The system prompt, not just the schema, must tell the model the
+    in-request link exists: `new_label` on a declaring item, `candidate` set
+    to that label -- earlier in the response -- on a later one."""
+    text = comprehend._INTEGRATE_SYSTEM
+    assert "NEW1" in text
+    lowered = text.lower()
+    assert "still list" in lowered
+    assert "earlier in your response" in lowered
+
+
+def test_a_cold_start_pass_links_two_outlets_in_one_request(kb, monkeypatch):
+    """End to end through comprehend.run, empty KB, two tracked-story items
+    from two outlets in one request: the declarer (created SECOND, so it is
+    the newer id and `pending_integration`'s `ORDER BY i.id DESC` lists it
+    FIRST) declares NEW1 with a brand-new event; the referencer (created
+    FIRST, listed SECOND) reports `entities: []` and `candidate: "NEW1"`.
+    Read scripts.score_comprehension.corroboration_by_outlet's return shape
+    and call it -- never re-derive its SQL."""
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
+    kb.execute("INSERT INTO stories (name, scope) VALUES ('Moldova', 'episodic')")
+    referencer = _add_item(
+        kb, "Moldova border talks", h="Hr", outlet_id=_outlet(kb, "AP")
+    )
+    declarer = _add_item(
+        kb, "Moldova border talks resume", h="Hd", outlet_id=_outlet(kb, "Reuters")
+    )
+    assert declarer > referencer, "the declarer must be the item created SECOND"
+    kb.commit()
+
+    def fake_integrate(req):
+        sent = [
+            int(line.split("item_id=")[1].split()[0])
+            for line in req["messages"][0]["content"].splitlines()
+            if "item_id=" in line
+        ]
+        items = []
+        for i in sent:
+            if i == declarer:
+                items.append(
+                    {
+                        "item_id": i,
+                        "entities": [
+                            {"name": "Moldova", "type": "country", "aliases": []}
+                        ],
+                        "events": [
+                            {
+                                "summary": "Border checks resume",
+                                "type": "action",
+                                "commitment_state": "in_force",
+                                "standing": "reported",
+                                "new_label": "NEW1",
+                            }
+                        ],
+                    }
+                )
+            else:
+                items.append(
+                    {
+                        "item_id": i,
+                        "entities": [],
+                        "events": [{"candidate": "NEW1", "standing": "reported"}],
+                    }
+                )
+        return {
+            "stop_reason": "tool_use",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "emit_extraction",
+                    "input": {"items": items},
+                }
+            ],
+        }
+
+    monkeypatch.setattr(comprehend, "call_integration", fake_integrate)
+
+    tally = comprehend.run(kb)
+    kb.commit()
+
+    assert tally.events_linked_in_request == 1
+    rate, total, multi = sc.corroboration_by_outlet(kb)
+    assert (total, multi) == (1, 1)
+    assert rate == 1.0
