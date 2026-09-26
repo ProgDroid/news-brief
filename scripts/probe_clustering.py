@@ -62,7 +62,9 @@ PRE-REGISTERED 2026-09-26, before any run (bead news-brief-vlg's spike child):
   reconciled.
 
 Run:  docker compose run --rm --entrypoint python newsbrief \\
-          scripts/probe_clustering.py
+          scripts/probe_clustering.py [--sweep]
+
+--sweep runs M1, the density sweep (news-brief-4le), instead of the spike.
 """
 
 import datetime as dt
@@ -415,15 +417,50 @@ def _pct(x: float) -> str:
     return f"{100 * x:5.1f}%"
 
 
-def measure(conn, pairs: list[Pair], index, births) -> dict:
-    """Every variant's visibility over the same pairs, per window size."""
+def _pair_range(pairs: list[Pair]) -> tuple[dt.datetime, dt.datetime]:
     start = min(min(p.a_at, p.b_at) for p in pairs) - dt.timedelta(hours=2)
     end = max(max(p.a_at, p.b_at) for p in pairs) + dt.timedelta(hours=2)
-    items = material_items(conn, start, end)
+    return start, end
+
+
+def _cached_hits(index, members, cache) -> dict[int, set[int]]:
+    """An item's hits do not depend on its window, so compute each once."""
+    todo = [m for m in members if m["id"] not in cache]
+    if todo:
+        cache.update(item_entity_hits(index, todo))
+    return {m["id"]: cache[m["id"]] for m in members}
+
+
+def _cached_title_edges(conn, key, ids, cache) -> dict:
+    """Pairwise similarity does not depend on who else is in the window, so a
+    thinned window's edges are the FULL window's edges restricted to its
+    survivors. The cache must therefore be filled by an unthinned run first --
+    which the sweep does, and whose output is its own control."""
+    if key not in cache:
+        cache[key] = title_edges(conn, ids, CLUSTER_SIMILARITY)
+    keep = set(ids)
+    return {e: s for e, s in cache[key].items() if e[0] in keep and e[1] in keep}
+
+
+def measure(
+    conn,
+    pairs: list[Pair],
+    index,
+    births,
+    items: list[dict] | None = None,
+    window_hours=WINDOW_HOURS,
+    cache: dict | None = None,
+) -> dict:
+    """Every variant's visibility over the same pairs, per window size."""
+    cache = cache if cache is not None else {"hits": {}, "edges": {}}
+    if items is None:
+        items = material_items(conn, *_pair_range(pairs))
     by_id = {it["id"]: it for it in items}
     pair_ids = {p.a_id for p in pairs} | {p.b_id for p in pairs}
     missing = pair_ids - set(by_id)
-    hits = item_entity_hits(index, [by_id[i] for i in pair_ids if i in by_id])
+    hits = _cached_hits(
+        index, [by_id[i] for i in pair_ids if i in by_id], cache["hits"]
+    )
     report: dict = {"items": len(items), "missing": len(missing), "by_window": {}}
 
     # Only pairs whose items are both in the membership can be placed at all.
@@ -442,9 +479,9 @@ def measure(conn, pairs: list[Pair], index, births) -> dict:
 
     wanted_windows = {
         h: {window_key(by_id[i]["created_at"], h) for i in pair_ids if i in by_id}
-        for h in WINDOW_HOURS
+        for h in window_hours
     }
-    for h in WINDOW_HOURS:
+    for h in window_hours:
         windows: dict[int, list[dict]] = defaultdict(list)
         for it in items:
             k = window_key(it["created_at"], h)
@@ -456,8 +493,8 @@ def measure(conn, pairs: list[Pair], index, births) -> dict:
         for k, members in windows.items():
             ids = sorted((m["id"] for m in members), reverse=True)
             window_start = dt.datetime.fromtimestamp(k * h * 3600, tz=dt.UTC)
-            t_edges = title_edges(conn, ids, CLUSTER_SIMILARITY)
-            w_hits = item_entity_hits(index, members)
+            t_edges = _cached_title_edges(conn, (h, k), ids, cache["edges"])
+            w_hits = _cached_hits(index, members, cache["hits"])
             e_edges = entity_edges(prior_hits(w_hits, births, window_start))
             te_edges = {**e_edges, **t_edges}  # title similarity wins the ordering
             components.extend(component_sizes(ids, te_edges))
@@ -500,7 +537,96 @@ def exactness_control(index, items, rng) -> int:
     return bad
 
 
-def main() -> int:
+# --- M1: the density sweep (news-brief-4le), pre-registered in
+# docs/2026-09-26-clustering-recall-spike-result.md before this code existed.
+#
+# The spike's verdict was measured at ~42 material items per hour, and phase 1
+# lowers that on purpose. The sweep asks where batching crosses real time. Which
+# row DECIDES is fixed in advance: the one at or above phase 1's measured p90
+# material items per capture-hour. That number does not exist yet, so the sweep
+# prints no verdict.
+
+SWEEP_PER_HOUR = (5, 10, 20)  # plus the unthinned row, which is the control
+SWEEP_SEEDS = 5
+
+
+def thin(items, pair_ids, per_hour: int, rng: random.Random) -> list[dict]:
+    """Keep every pair item; sample the rest down to `per_hour` per capture-hour.
+
+    Pair items always survive, on the model that multi-outlet news is what
+    triage keeps material. An hour whose pair items alone exceed the target
+    keeps them all, so the REALISED density is reported, not assumed.
+    """
+    by_hour: dict[int, list[dict]] = defaultdict(list)
+    for it in items:
+        by_hour[window_key(it["created_at"], 1)].append(it)
+    out = []
+    for members in by_hour.values():
+        keep = [m for m in members if m["id"] in pair_ids]
+        rest = [m for m in members if m["id"] not in pair_ids]
+        room = max(0, per_hour - len(keep))
+        keep.extend(rng.sample(rest, min(room, len(rest))))
+        out.extend(keep)
+    return sorted(out, key=lambda m: m["id"])
+
+
+def _shares(r: dict, h: int) -> tuple[float, dict[str, float]]:
+    rt = r["rt"]
+    w = r["by_window"][h]["visible"]
+    return sum(rt) / len(rt), {v: sum(w[v]) / len(w[v]) for v in VARIANTS}
+
+
+def run_sweep(conn, pairs, index, births) -> None:
+    h = DECISION_WINDOW_HOURS
+    items = material_items(conn, *_pair_range(pairs))
+    pair_ids = {p.a_id for p in pairs} | {p.b_id for p in pairs}
+    hours = len({window_key(it["created_at"], 1) for it in items}) or 1
+    cache = {"hits": {}, "edges": {}}
+
+    # The control goes FIRST: it fills the edge cache from full windows, and it
+    # must reproduce the spike's published W=2h row exactly.
+    full = measure(conn, pairs, index, births, items, (h,), cache)
+    rt, sh = _shares(full, h)
+    print(f"\n=== M1 density sweep at W = {h}h (5-pt rule; row chosen by phase-1 p90)")
+    print(
+        f"CONTROL unthinned ({len(items) / hours:.1f} items/h): RT {_pct(rt)}  "
+        + "  ".join(f"{v} {_pct(s)}" for v, s in sh.items())
+    )
+    print(
+        "  must equal the spike's published row: RT 97.2%  T 53.7%  T-cc 56.3%  TE-cc 65.4%"
+    )
+
+    print(
+        f"\n{'target/h':>8} {'real/h':>7} {'RT':>16} "
+        + " ".join(f"{v:>22}" for v in VARIANTS)
+    )
+    for per_hour in SWEEP_PER_HOUR:
+        runs = []
+        for seed in range(SWEEP_SEEDS):
+            sub = thin(items, pair_ids, per_hour, random.Random(seed))
+            r = measure(conn, pairs, index, births, sub, (h,), cache)
+            runs.append((len(sub) / hours, *_shares(r, h)))
+        real = sum(x[0] for x in runs) / len(runs)
+        rts = [x[1] for x in runs]
+        cols = []
+        for v in VARIANTS:
+            vs = [x[2][v] for x in runs]
+            gap = sum(a - b for a, b in zip(vs, rts, strict=True)) / len(runs)
+            ok = "ok" if gap >= -TOLERANCE - 1e-9 else "--"
+            cols.append(f"{_pct(sum(vs) / len(vs))} ({100 * gap:+5.1f}) {ok}")
+        print(
+            f"{per_hour:8d} {real:7.1f} "
+            f"{_pct(sum(rts) / len(rts))} [{100 * min(rts):4.1f}-{100 * max(rts):4.1f}] "
+            + " ".join(f"{c:>22}" for c in cols)
+        )
+    print(
+        "\nNo verdict: apply the 5-pt rule at the row at or above phase 1's measured p90 "
+        "material items per capture-hour (news-brief-4le)."
+    )
+
+
+def main(argv=None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
     rng = random.Random(20260926)
     with db.connect() as conn:
         pairs = cross_outlet_pairs(conn, PAIR_GAP_HOURS)
@@ -521,6 +647,9 @@ def main() -> int:
         if bad:
             print("REFUSING: the prefiltered matcher is not exact on this corpus.")
             return 2
+        if "--sweep" in argv:
+            run_sweep(conn, pairs, index, births)
+            return 0
 
         r = measure(conn, pairs, index, births)
         usable = r["usable"]

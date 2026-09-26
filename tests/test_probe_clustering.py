@@ -294,3 +294,61 @@ def test_the_prefiltered_matcher_agrees_with_surface_index(kb):
     assert got[1] == {us, ukr}
     assert got[2] == set()
     assert got[3] == {s_p}
+
+
+# --- M1: the density sweep.
+
+
+def _it(i, minutes):
+    return {"id": i, "created_at": T0 + dt.timedelta(minutes=minutes)}
+
+
+def test_thinning_keeps_every_pair_item_and_caps_the_rest():
+    items = [_it(i, i) for i in range(1, 31)]  # 30 items in one hour
+    kept = pcl.thin(items, pair_ids={1, 2, 3}, per_hour=10, rng=pcl.random.Random(0))
+    ids = {m["id"] for m in kept}
+    assert {1, 2, 3} <= ids
+    assert len(kept) == 10
+
+
+def test_thinning_never_drops_pairs_to_meet_a_target():
+    items = [_it(i, i) for i in range(1, 11)]
+    kept = pcl.thin(
+        items, pair_ids=set(range(1, 9)), per_hour=5, rng=pcl.random.Random(0)
+    )
+    # 8 pair items exceed the target of 5: all survive, so the realised density is 8.
+    assert len(kept) == 8
+
+
+def test_thinning_is_per_capture_hour():
+    items = [_it(i, i) for i in range(1, 21)] + [_it(i, 60 + i) for i in range(21, 41)]
+    kept = pcl.thin(items, pair_ids=set(), per_hour=5, rng=pcl.random.Random(0))
+    assert len(kept) == 10
+
+
+def test_thinning_is_reproducible_per_seed():
+    items = [_it(i, i) for i in range(1, 41)]
+    a = pcl.thin(items, set(), 5, pcl.random.Random(3))
+    b = pcl.thin(items, set(), 5, pcl.random.Random(3))
+    assert a == b
+
+
+def test_cached_edges_restricted_to_a_subset_equal_direct_edges(kb):
+    """The sweep's correctness rests on this: a thinned window's edges are the
+    full window's, filtered. If pg_trgm similarity depended on membership, the
+    cache would silently hand every thinned run the wrong graph."""
+    r = _outlet(kb, "R")
+    titles = [
+        "Iran fires missiles at Israel",
+        "Iran fires missiles at Israel - Reuters",
+        "Israel intercepts Iranian missiles",
+        "Bank of Japan holds rates",
+        "Bank of Japan keeps rates on hold",
+    ]
+    ids = [_item(kb, r, t, T0) for t in titles]
+    cache: dict = {}
+    pcl._cached_title_edges(kb, "w", ids, cache)
+    subset = [ids[0], ids[1], ids[3], ids[4]]
+    got = pcl._cached_title_edges(kb, "w", subset, cache)
+    assert got == pcl.title_edges(kb, subset, pcl.CLUSTER_SIMILARITY)
+    assert got  # the subset still has edges, so equality is not vacuous
