@@ -1497,3 +1497,39 @@ def test_a_rolled_back_declaration_is_never_resolved(kb):
     assert tally.deferred_neighbour == 1
     assert tally.failures["defer:new_label_unresolved"] == 1
     assert tally.events_linked_in_request == 0
+
+
+def test_a_rolled_back_referencer_is_not_counted_as_a_link(kb):
+    """The mirror of the rolled-back-DECLARER test above: here the item that
+    RESOLVES the new_ref (a match, inside its own savepoint) then rolls that
+    same savepoint back for an unrelated reason -- a bad standing on the very
+    event it just linked to. `events_matched` is incremented inside the loop
+    by design (a plain Python counter, not the DB write) and stays counted;
+    `events_linked_in_request` must NOT, since it is only folded in once the
+    `with` block exits normally -- exactly the D8 guard mutation 4 exercises.
+    """
+    a = _item(kb, "A declares NEW1", h="Ha", outlet="Reuters")
+    b = _item(kb, "B references then rolls back", h="Hb", outlet="AP")
+    kb.commit()
+    tally = comprehend.Tally()
+    index = comprehend.SurfaceIndex([])
+
+    extraction_a = _fresh(a)
+    extraction_a["events"][0]["new_label"] = "NEW1"
+    extraction_b = {
+        "item_id": b,
+        "entities": [{"name": "Georgia", "type": "country", "aliases": []}],
+        "events": [{"new_ref": "NEW1", "standing": "not_a_standing"}],
+    }
+
+    written = comprehend.write_batch(kb, [extraction_a, extraction_b], index, tally)
+    kb.commit()
+
+    assert written == 1, "a committed, b rolled back on its own fault"
+    assert kb.execute("SELECT count(*) FROM assertions").fetchone()[0] == 1
+    assert tally.events_matched == 1
+    assert tally.events_linked_in_request == 0
+    row = kb.execute(
+        "SELECT integrate_attempts FROM item_triage WHERE item_id = %s", (b,)
+    ).fetchone()
+    assert row == (1,), "b's own fault -- charged, not deferred"
