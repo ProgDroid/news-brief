@@ -6,6 +6,17 @@
 > ships**, against the code as it landed, and after a read-only host spike. Do not execute it
 > as written. The rewrite must address:
 >
+> **2026-09-26: the spike exists, but it has not run on the host.** It is `scripts/probe_clustering.py`
+> (bead `news-brief-1tl`, which blocks `vlg`). Its docstring holds the pre-registration.
+> - **Variants:** RT (real time) is the baseline. T (spec §5.3 as written), T-cc (transitive) and
+>   TE-cc (title or a prior-born entity) are compared against it.
+> - **Operator's rule:** at W = 2h, the simplest of T, T-cc, TE-cc within 5 points of RT is what
+>   this rewrite builds. If none is, the blindness is redesigned before any batching task.
+>
+> D1 was re-affirmed the same day. Haiku 4.5 in real time costs the same as a Sonnet batch, and
+> the operator heard that and kept batching. Record the verbatim output on `1tl` before
+> rewriting.
+>
 > 1. **Clustering recall is unmeasured.** Real time already lets micro-batch *k* see the events
 >    batches 1..*k*-1 created in the same pass; batching removes that. Only the clusters restore
 >    it. **Spike first:** over the KB's existing multi-outlet events, what share of
