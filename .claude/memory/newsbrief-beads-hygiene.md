@@ -61,3 +61,14 @@ and exits 0. See [[fix-the-tooling-dont-route-around-it]] and
 
 
 **`bd create --title` is path-converted by Git Bash (2026-09-11):** a title starting `/trade/history …` was stored as `C:/Program Files/Git/trade/history …`; the create echoed the rewritten title back as if I had typed it, and only `bd list` showed it. Prefix `MSYS_NO_PATHCONV=1` on any `bd` call whose title/description starts with `/`. Also: a bead can be FIXED and never closed — `qiz` was fixed in 7f0a904 and blocked `9tq` a day later; when a close is refused for a blocker, read the blocker's code before assuming it is real work.
+## `bd update --notes` REPLACES the notes, despite its help text (2026-09-26)
+
+`bd update --help` describes `--notes` as "Additional notes". It **overwrites**. Adding a
+status note to `b42.5` silently erased the operator's 2026-09-22 hold reasoning (why the feed
+retiming was paused, the half-tick slack bug, the phase split). It was restored only because the
+committed `.beads/issues.jsonl` at `HEAD` still held the old text.
+
+**How to apply:** to add to a bead that already has notes, use **`--append-notes`**. Use `--notes`
+only on a bead whose notes you have just read and mean to rewrite. After any notes edit, check
+that a marker phrase from the OLD text survives. The committed JSONL is the recovery path, so
+export and commit after every bead change session.
