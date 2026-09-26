@@ -44,12 +44,12 @@ from comprehend import (  # noqa: E402
     CANDIDATE_ENTITY_CAP,
     SurfaceIndex,
     Tally,
-    _validate_item,
     build_integration_request,
     call_integration,
     candidate_events,
     clean,
     label_map,
+    parse_integration_response,
     pending_integration,
 )
 
@@ -88,7 +88,9 @@ def build_candidates(conn, batch: list[dict]) -> tuple[list[dict], list[dict]]:
         if entity_ids
         else []
     )
-    return cand_entities, candidate_events(conn, entity_ids, Tally(enabled=True))
+    return cand_entities, candidate_events(
+        conn, entity_ids, [it["title"] for it in batch], Tally(enabled=True)
+    )
 
 
 def report(conn, limit: int) -> int:
@@ -139,29 +141,34 @@ def report(conn, limit: int) -> int:
         print("\n'items' is not a list; parse_integration_response would raise here.")
         return 1
 
-    print("\n=== _validate_item verdict per row ===")
+    print("\n=== parse_integration_response verdict per item ===")
+    # One call to the SAME function `run()` calls, not a hand-rolled per-row
+    # loop: a mirror of `_validate_item` agrees with itself by construction and
+    # cannot detect that it has drifted from the function it claims to explain
+    # (see the module docstring). This also exercises Task 4's per-row
+    # isolation and in-request NEW-label bookkeeping for free.
     tally = Tally(enabled=True)
-    accepted = 0
-    for i, row in enumerate(items):
-        if not isinstance(row, dict):
-            print(f"[{i}] row is {type(row).__name__}, not an object")
-            continue
-        ok = (
-            _validate_item(row, offered_items, entity_labels, event_labels, tally)
-            is not None
-        )
-        accepted += int(ok)
-        print(
-            f"[{i}] item_id={row.get('item_id')} {'ACCEPT' if ok else 'REJECT'} "
-            f"(entities={len(row.get('entities') or [])}, "
-            f"events={len(row.get('events') or [])})"
-        )
+    neighbour_faults: set[int] = set()
+    extractions = parse_integration_response(
+        resp,
+        offered_items,
+        entity_labels,
+        event_labels,
+        tally,
+        neighbour_faults=neighbour_faults,
+    )
+    survived = {e["item_id"] for e in extractions}
+    for item_id in sorted(offered_items):
+        verdict = "ACCEPT" if item_id in survived else "REJECT"
+        print(f"item_id={item_id} {verdict}")
 
     print(
         f"\nrows={len(items)} offered={len(offered_items)} "
-        f"accepted={accepted} rejected={len(items) - accepted} "
+        f"accepted={len(survived)} rejected={len(offered_items) - len(survived)} "
         f"unmapped_candidate={tally.unmapped_candidate}"
     )
+    print(f"neighbour_faults={sorted(neighbour_faults) or '(none)'}")
+    print(f"tally.failures={tally.failures}")
     if tally.unmapped_candidate:
         print(
             "unmapped_candidate > 0 means the model supplied labels that match "

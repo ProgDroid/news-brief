@@ -2017,3 +2017,128 @@ def test_a_null_published_at_falls_back_to_created_at(kb):
     }
 
     assert rows == {fresh: False, old: True}
+
+
+# --- Task 4: run() defers a neighbour's fault instead of charging it
+# (news-brief "in-request-new-links" spec).
+
+
+def test_a_referencer_whose_declarer_was_dropped_is_deferred_not_charged(
+    kb, monkeypatch
+):
+    """`pending_integration`'s `ORDER BY i.id DESC` lists the NEWEST item
+    first, so the declarer -- created SECOND, with the higher id -- is the
+    one `fake_integrate` sees first and the one the parser validates first.
+
+    The declarer's own fault (an invalid entity type) drops it for its OWN
+    reason and is charged normally. The referencer's only fault is that its
+    neighbour's declaration never landed -- Task 4's whole point is that this
+    must NOT be charged alongside it.
+    """
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
+    kb.execute("INSERT INTO stories (name, scope) VALUES ('Ukraine', 'episodic')")
+    referencer = _add_item(kb, "Ukraine talks resume", h="Hr")
+    declarer = _add_item(kb, "Ukraine border incident", h="Hd")
+    kb.commit()
+
+    def fake_integrate(req):
+        sent = [
+            int(line.split("item_id=")[1].split()[0])
+            for line in req["messages"][0]["content"].splitlines()
+            if "item_id=" in line
+        ]
+        items = []
+        for i in sent:
+            if i == declarer:
+                items.append(
+                    {
+                        "item_id": i,
+                        "entities": [{"name": "Ruritania", "type": "not_a_type"}],
+                        "events": [
+                            {
+                                "summary": "S",
+                                "type": "action",
+                                "commitment_state": "in_force",
+                                "standing": "reported",
+                                "new_label": "NEW1",
+                            }
+                        ],
+                    }
+                )
+            else:
+                items.append(
+                    {
+                        "item_id": i,
+                        "entities": [
+                            {
+                                "name": "Kyiv delegation",
+                                "type": "country",
+                                "aliases": [],
+                            }
+                        ],
+                        "events": [{"candidate": "NEW1", "standing": "reported"}],
+                    }
+                )
+        return {
+            "stop_reason": "tool_use",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "emit_extraction",
+                    "input": {"items": items},
+                }
+            ],
+        }
+
+    monkeypatch.setattr(comprehend, "call_integration", fake_integrate)
+
+    tally = comprehend.run(kb)
+    kb.commit()
+
+    assert _attempts(kb, declarer) == 1
+    assert _attempts(kb, referencer) == 0
+    assert _link_defers(kb, referencer) == 1
+    assert tally.failed_integration == 1
+    assert tally.deferred_neighbour == 1
+    assert tally.deferred_response == 0
+    assert tally.failures["defer:new_label_orphaned"] == 1
+
+
+def test_a_reference_nobody_declared_is_charged(kb, monkeypatch):
+    """Presence sibling: a bare reference with no declarer anywhere in the
+    request is UNDECLARED, which is the item's OWN fault, not a neighbour's --
+    so it must be charged through the ordinary `dropped` path, never
+    deferred."""
+    monkeypatch.setattr(comprehend.common, "COMPREHEND_ENABLED", True)
+    item_id = _tracked_material(kb)
+
+    def fake_integrate(_req):
+        return {
+            "stop_reason": "tool_use",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "emit_extraction",
+                    "input": {
+                        "items": [
+                            {
+                                "item_id": item_id,
+                                "entities": [],
+                                "events": [
+                                    {"candidate": "NEW1", "standing": "reported"}
+                                ],
+                            }
+                        ]
+                    },
+                }
+            ],
+        }
+
+    monkeypatch.setattr(comprehend, "call_integration", fake_integrate)
+
+    tally = comprehend.run(kb)
+    kb.commit()
+
+    assert _attempts(kb, item_id) == 1
+    assert _link_defers(kb, item_id) == 0
+    assert tally.deferred_neighbour == 0

@@ -855,6 +855,11 @@ def run(conn, now=None) -> Tally:
             conn, entity_ids, [it["title"] for it in batch], tally
         )
 
+        # Items whose only fault is referencing a label THIS batch's own
+        # declarer failed to produce -- a neighbour's fault, spent against
+        # integrate_link_defers below, never charged alongside `dropped`
+        # (Task 4).
+        nf: set[int] = set()
         try:
             resp = call_integration(
                 build_integration_request(
@@ -872,6 +877,7 @@ def run(conn, now=None) -> Tally:
                 label_map(_ENTITY_LABEL, cand_entities),
                 label_map(_EVENT_LABEL, cand_events),
                 tally,
+                neighbour_faults=nf,
             )
         except Exception as exc:
             kind = _account_failure(exc)
@@ -939,10 +945,11 @@ def run(conn, now=None) -> Tally:
         # each pass in that window with no operator-visible signal. Charging
         # it an attempt lets the ceiling of 3 retire it first, which is the
         # same treatment a whole-batch failure already gets.
+        extracted_ids = {e["item_id"] for e in extractions}
         dropped = [
             it["id"]
             for it in batch
-            if it["id"] not in {e["item_id"] for e in extractions}
+            if it["id"] not in extracted_ids and it["id"] not in nf
         ]
         if dropped:
             tally.failed_integration += len(dropped)
@@ -955,6 +962,20 @@ def run(conn, now=None) -> Tally:
                 "UPDATE item_triage SET integrate_attempts = integrate_attempts + 1 "
                 "WHERE item_id = ANY(%s)",
                 (dropped,),
+            )
+        # `nf` is EXCLUDED from `dropped` above and charged here instead: its
+        # only fault is a neighbour's declarer failing in this same batch, not
+        # anything about these items' own responses (Task 4).
+        if nf:
+            _defer_or_charge(
+                conn,
+                list(nf),
+                tally,
+                column="integrate_link_defers",
+                ceiling=int(common.COMPREHEND_MAX_LINK_DEFERS),
+                deferred_field="deferred_neighbour",
+                deferred_key="defer:new_label_orphaned",
+                capped_key="defer_capped:new_label_orphaned",
             )
 
         for e in extractions:
@@ -1793,6 +1814,13 @@ def _integrate_model() -> str:
 
 _ENTITY_LABEL = "ENT"
 _EVENT_LABEL = "EVT"
+# A THIRD label space, disjoint from both offered-candidate spaces above: a
+# `candidate` matching this names a label another item in the SAME request
+# declares via `new_label`, never a row from `label_map`. Recognised only when
+# it is a string matching this pattern, checked BEFORE `_resolve_label` --
+# any other value keeps today's meaning through that function unchanged
+# (Tasks 3-4 of the in-request-new-links spec).
+_NEW_LABEL = re.compile(r"^NEW[1-9][0-9]*$")
 
 
 def label_map(prefix: str, candidates: list[dict]) -> dict[str, int]:
@@ -1909,6 +1937,8 @@ def parse_integration_response(
     entity_labels: dict[str, int],
     event_labels: dict[str, int],
     tally=None,
+    *,
+    neighbour_faults: set[int] | None = None,
 ) -> list[dict]:
     """Validated extractions, one per item. Drops an item WHOLE on any defect.
 
@@ -1920,6 +1950,18 @@ def parse_integration_response(
     new" rather than as a reference, because a label the model invented cannot
     collide with a real id -- see `label_map`. It is counted, not silently
     absorbed.
+
+    Rows are validated IN RESPONSE ORDER, one at a time, each inside its own
+    `try/except (TypeError, AttributeError)` (Task 4): a single malformed row
+    can never take the rest of the batch down with it, and is noted as
+    `validate:malformed`. `declared` accumulates NEW-label declarations from
+    rows already validated, so a LATER item may reference an EARLIER one's
+    label but never the reverse -- order is the contract, not an accident of
+    iteration. `orphaned` collects the `new_label`s a DROPPED row would have
+    declared, whether it raised or `_validate_item` returned None for a reason
+    of its own, so a reference to a label whose declarer just failed is
+    attributed to that neighbour via `neighbour_faults` (item ids), never
+    charged as this item's own fault.
     """
     if resp.get("stop_reason") == "max_tokens":
         raise ValueError("integration response truncated at max_tokens; not parsed")
@@ -2002,22 +2044,82 @@ def parse_integration_response(
                     f"items type={type(rows).__name__} "
                     f"items shape={_shape_of(rows)}"
                 )
-            return [
-                p
-                for r in rows
-                if isinstance(r, dict)
-                and (
-                    p := _validate_item(
-                        r, offered_item_ids, entity_labels, event_labels, tally
+            declared: set[str] = set()
+            orphaned: set[str] = set()
+            out: list[dict] = []
+            for r in rows:
+                if not isinstance(r, dict):
+                    continue
+                try:
+                    p = _validate_item(
+                        r,
+                        offered_item_ids,
+                        entity_labels,
+                        event_labels,
+                        tally,
+                        declared=declared,
+                        orphaned=orphaned,
+                        neighbour_faults=neighbour_faults,
                     )
-                )
-            ]
+                except (TypeError, AttributeError):
+                    _note(tally, "validate:malformed")
+                    p = None
+                if p is None:
+                    # Collected from the RAW row, not from `_validate_item`'s
+                    # partial state: whatever field made this row fail (an
+                    # entity type, a raised TypeError) has nothing to do with
+                    # which labels it would have declared, so both a raise and
+                    # an ordinary rejection reach this the same way.
+                    orphaned |= _orphan_labels(r)
+                    continue
+                out.append(p)
+                for ev in p["events"]:
+                    if ev.get("new_label"):
+                        declared.add(ev["new_label"])
+            return out
     raise ValueError("no emit_extraction tool_use block in response")
 
 
+def _orphan_labels(row) -> set[str]:
+    """`new_label` strings a DROPPED row would have declared.
+
+    Guarded with `isinstance` throughout so collecting from an already-bad row
+    can never itself raise -- the row is known bad; a second exception while
+    salvaging what it would have declared would only be worse.
+    """
+    events = row.get("events") if isinstance(row, dict) else None
+    if not isinstance(events, list):
+        return set()
+    return {
+        ev["new_label"]
+        for ev in events
+        if isinstance(ev, dict) and isinstance(ev.get("new_label"), str)
+    }
+
+
 def _validate_item(
-    row, item_ids, entity_labels, event_labels, tally=None
+    row,
+    item_ids,
+    entity_labels,
+    event_labels,
+    tally=None,
+    *,
+    declared=frozenset(),
+    orphaned=frozenset(),
+    neighbour_faults=None,
 ) -> dict | None:
+    """One row's verdict, run inside the caller's per-row
+    `try/except (TypeError, AttributeError)` (Task 4) -- a raise here drops
+    only this row, never the batch.
+
+    `declared`/`orphaned` are this REQUEST's in-progress NEW-label state,
+    threaded through by `parse_integration_response` in response order:
+    `declared` holds labels from rows already validated, `orphaned` holds
+    labels a dropped row would have declared. `neighbour_faults` collects the
+    ids of items whose only fault is referencing an `orphaned` label -- their
+    neighbour's declarer failed, not them, so `run()` defers rather than
+    charges them (see `_defer_or_charge`).
+    """
     item_id = row.get("item_id")
     if not _is_id(item_id) or item_id not in item_ids:
         _note(tally, "validate:item_id")
@@ -2048,50 +2150,116 @@ def _validate_item(
         aliases = [a for a in (e.get("aliases") or []) if isinstance(a, str)]
         entities.append({"name": name.strip(), "type": etype, "aliases": aliases})
 
+    # This item's OWN new_label declarations, computed once. An event may not
+    # reference a label the SAME item declares -- the controller flagged this
+    # as unhandled by the writer, which resolves `new_ref` only from a PRIOR
+    # item's already-committed savepoint, never from one still being built.
+    own = {
+        ev["new_label"]
+        for ev in row.get("events") or []
+        if isinstance(ev, dict) and isinstance(ev.get("new_label"), str)
+    }
+    seen_here: set[str] = set()
     events = []
     for ev in row.get("events") or []:
         if not isinstance(ev, dict) or ev.get("standing") not in _STANDING:
             _note(tally, "validate:event_shape")
             return None
-        cid = _resolve_label(ev.get("candidate"), event_labels, tally)
-        if cid is not None:
-            events.append({"candidate_id": cid, "standing": ev["standing"]})
-            continue
-        summary, etype = ev.get("summary"), ev.get("type")
-        commitment = ev.get("commitment_state")
-        if not (isinstance(summary, str) and summary.strip()):
-            _note(tally, "validate:event_summary")
-            return None
-        # Split, and split again by missing/unknown. The merged
-        # `validate:event_enums` key ranked this cause first (73 of 108
-        # failures on 2026-09-08) but could not choose a fix between them:
-        # four predicates arriving under one label.
-        if etype not in _EVENT_TYPES:
-            _note(tally, f"validate:event_type_{_absence(ev, 'type')}")
-            _log_rejected_value("event type", ev, "type")
-            return None
-        # ABSENT is a legitimate answer, INVALID is not. `commitment_state` is
-        # a property of commitments, and for a factual report there is none --
-        # measured 2026-09-08, the model supplied `type` on 100% of events and
-        # omitted this on 38%, dropping those items WHOLE for a field the tool
-        # schema never required. An explicit null says the same thing as an
-        # omission, so both read as absent; rejecting one spelling and not the
-        # other would reintroduce the bug for the same answer (bqa.16, 0011).
-        if commitment is None:
-            if tally is not None:
-                tally.commitment_omitted += 1
-        elif commitment not in _COMMITMENT:
-            _note(tally, "validate:commitment_unknown")
-            _log_rejected_value("commitment_state", ev, "commitment_state")
-            return None
-        events.append(
-            {
+
+        # A THIRD candidate meaning, checked BEFORE `_resolve_label`: a string
+        # matching `_NEW_LABEL` never names an offered candidate, so letting it
+        # reach `_resolve_label` unchanged would silently miss and fall to the
+        # new-event path for the wrong reason. Any other value -- None, an
+        # int, an offered ENT/EVT label, an unmatched string -- keeps today's
+        # meaning through `_resolve_label`, below, exactly as before Task 4.
+        c = ev.get("candidate")
+        is_new_ref = isinstance(c, str) and bool(_NEW_LABEL.match(c))
+        event_out = None
+
+        if is_new_ref:
+            if c in own:
+                _note(tally, "validate:new_label_self")
+                return None
+            if c in declared:
+                event_out = {"new_ref": c, "standing": ev["standing"]}
+            elif c in orphaned:
+                # Noting nothing is deliberate: this is the NEIGHBOUR's
+                # fault, not this item's own. `constraints.md`'s arithmetic
+                # invariant (`dropped` minus the `validate:*` keys equals
+                # items the model never returned at all) would go false the
+                # moment a neighbour fault also picked up a `validate:*` key.
+                if neighbour_faults is not None:
+                    neighbour_faults.add(item_id)
+                return None
+            # Neither declared nor orphaned: falls through below and is
+            # judged on shape alone, same as an ordinary unmapped candidate.
+        else:
+            cid = _resolve_label(c, event_labels, tally)
+            if cid is not None:
+                event_out = {"candidate_id": cid, "standing": ev["standing"]}
+
+        if event_out is None:
+            summary, etype = ev.get("summary"), ev.get("type")
+            has_new_shape = (
+                isinstance(summary, str)
+                and bool(summary.strip())
+                and etype in _EVENT_TYPES
+            )
+            if is_new_ref and not has_new_shape:
+                _note(tally, "validate:new_label_undeclared")
+                return None
+
+            if not (isinstance(summary, str) and summary.strip()):
+                _note(tally, "validate:event_summary")
+                return None
+            # Split, and split again by missing/unknown. The merged
+            # `validate:event_enums` key ranked this cause first (73 of 108
+            # failures on 2026-09-08) but could not choose a fix between them:
+            # four predicates arriving under one label.
+            if etype not in _EVENT_TYPES:
+                _note(tally, f"validate:event_type_{_absence(ev, 'type')}")
+                _log_rejected_value("event type", ev, "type")
+                return None
+            # ABSENT is a legitimate answer, INVALID is not. `commitment_state`
+            # is a property of commitments, and for a factual report there is
+            # none -- measured 2026-09-08, the model supplied `type` on 100%
+            # of events and omitted this on 38%, dropping those items WHOLE
+            # for a field the tool schema never required. An explicit null
+            # says the same thing as an omission, so both read as absent;
+            # rejecting one spelling and not the other would reintroduce the
+            # bug for the same answer (bqa.16, 0011).
+            commitment = ev.get("commitment_state")
+            if commitment is None:
+                if tally is not None:
+                    tally.commitment_omitted += 1
+            elif commitment not in _COMMITMENT:
+                _note(tally, "validate:commitment_unknown")
+                _log_rejected_value("commitment_state", ev, "commitment_state")
+                return None
+            event_out = {
                 "summary": summary.strip(),
                 "type": etype,
                 "commitment_state": commitment,
                 "standing": ev["standing"],
             }
-        )
+            # Model NON-COMPLIANCE, in the unmapped_candidate family: a `NEWn`
+            # reference naming no declarer this request produced, recovered by
+            # minting a fresh event instead of linking.
+            if is_new_ref and tally is not None:
+                tally.new_label_fallback += 1
+
+        if "new_label" in ev:
+            nl = ev["new_label"]
+            if not (isinstance(nl, str) and _NEW_LABEL.match(nl)):
+                _note(tally, "validate:new_label_shape")
+                return None
+            if nl in declared or nl in seen_here:
+                _note(tally, "validate:new_label_duplicate")
+                return None
+            seen_here.add(nl)
+            event_out["new_label"] = nl
+
+        events.append(event_out)
 
     # An empty list here is NOT a defect: every member that survived the loops
     # above was well-formed, so reaching this point with nothing means the item

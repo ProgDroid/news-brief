@@ -628,3 +628,288 @@ def test_every_shape_the_schema_calls_sufficient_is_accepted(
             f"the schema publishes {sorted(required)} as a sufficient "
             f"{array_name[:-1]}, but the validator rejected the item"
         )
+
+
+# --- Task 4: the parser validates in-request NEW labels, in response order,
+# with rows isolated from each other (news-brief "in-request-new-links" spec).
+#
+# `NEW` labels are a THIRD candidate meaning, disjoint from the offered ENT/EVT
+# label spaces above: a string matching `^NEW[1-9][0-9]*$` never names an
+# offered candidate, and is recognised BEFORE `_resolve_label` gets a look at
+# it (constraints.md).
+
+
+def _item(item_id, entities=None, events=None):
+    """Like `_labelled`, but for a caller that needs a specific item_id --
+    every test below has at least one declarer/referencer PAIR, and both
+    cannot be item 1."""
+    return {
+        "item_id": item_id,
+        "entities": entities if entities is not None else [],
+        "events": events if events is not None else [],
+    }
+
+
+_BARE_NEW1_REF = {"candidate": "NEW1", "standing": "reported"}
+
+
+def test_a_later_item_may_reference_an_earlier_declaration():
+    """Task 3's input shapes, exactly: a plain new event carrying `new_label`,
+    then a bare `new_ref` naming it from a LATER item."""
+    tally = comprehend.Tally()
+    got = comprehend.parse_integration_response(
+        _extraction(
+            [
+                _item(1, events=[dict(NEW_EVENT, new_label="NEW1")]),
+                _item(2, events=[dict(_BARE_NEW1_REF)]),
+            ]
+        ),
+        {1, 2},
+        {},
+        {},
+        tally,
+    )
+    assert len(got) == 2
+    assert got[0]["events"] == [dict(NEW_EVENT, new_label="NEW1")]
+    assert got[1]["events"] == [{"new_ref": "NEW1", "standing": "reported"}]
+    assert tally.failures == {}
+
+
+def test_a_label_on_a_matched_event_is_declared():
+    """The OTHER declaring shape Task 3 consumes: `candidate_id` plus
+    `new_label`, for a label attached to an event that itself matched an
+    offered candidate rather than being new."""
+    got = comprehend.parse_integration_response(
+        _extraction(
+            [
+                _item(
+                    1,
+                    events=[
+                        {
+                            "candidate": "EVT1",
+                            "standing": "reported",
+                            "new_label": "NEW1",
+                        }
+                    ],
+                ),
+                _item(2, events=[dict(_BARE_NEW1_REF)]),
+            ]
+        ),
+        {1, 2},
+        {},
+        {"EVT1": 20},
+    )
+    assert got[0]["events"] == [
+        {"candidate_id": 20, "standing": "reported", "new_label": "NEW1"}
+    ]
+    assert got[1]["events"] == [{"new_ref": "NEW1", "standing": "reported"}]
+
+
+@pytest.mark.parametrize(
+    "rows,key",
+    [
+        pytest.param(
+            [_item(1, events=[dict(_BARE_NEW1_REF)])],
+            "validate:new_label_undeclared",
+            id="no_declaration_anywhere",
+        ),
+        pytest.param(
+            [
+                _item(1, events=[dict(_BARE_NEW1_REF)]),
+                _item(2, events=[dict(NEW_EVENT, new_label="NEW1")]),
+            ],
+            "validate:new_label_undeclared",
+            id="a_forward_reference",
+        ),
+        pytest.param(
+            [
+                _item(1, events=[dict(NEW_EVENT, new_label="NEW1")]),
+                _item(2, events=[dict(NEW_EVENT, new_label="NEW1")]),
+            ],
+            "validate:new_label_duplicate",
+            id="declared_twice_across_items",
+        ),
+        pytest.param(
+            [
+                _item(
+                    1,
+                    events=[
+                        dict(NEW_EVENT, new_label="NEW1"),
+                        dict(NEW_EVENT, new_label="NEW1", summary="A second event."),
+                    ],
+                )
+            ],
+            "validate:new_label_duplicate",
+            id="declared_twice_within_one_item",
+        ),
+        pytest.param(
+            [
+                _item(
+                    1,
+                    events=[dict(NEW_EVENT, new_label="NEW1"), dict(_BARE_NEW1_REF)],
+                )
+            ],
+            "validate:new_label_self",
+            id="a_self_reference",
+        ),
+        pytest.param(
+            [_item(1, events=[dict(NEW_EVENT, new_label="EVT9")])],
+            "validate:new_label_shape",
+            id="new_label_EVT9",
+        ),
+        pytest.param(
+            [_item(1, events=[dict(NEW_EVENT, new_label=7)])],
+            "validate:new_label_shape",
+            id="new_label_7",
+        ),
+    ],
+)
+def test_bad_new_labels_drop_the_item_with_a_named_cause(rows, key):
+    tally = comprehend.Tally()
+    ids = {r["item_id"] for r in rows}
+    comprehend.parse_integration_response(_extraction(rows), ids, {}, {}, tally)
+    assert tally.failures[key] == 1
+
+
+def test_an_undeclared_reference_that_describes_its_event_falls_back_to_new():
+    """A `NEWn` candidate naming no declarer is NOT automatically fatal: when
+    the event ALSO carries a full new-event shape, it recovers as a fresh
+    event rather than dropping the item [R2: D6, D11] -- the same
+    non-compliance `_resolve_label`'s fallback already absorbs for an
+    unmapped ENT/EVT label."""
+    tally = comprehend.Tally()
+    got = comprehend.parse_integration_response(
+        _extraction(
+            [
+                _item(
+                    1,
+                    events=[
+                        {
+                            "candidate": "NEW1",
+                            "summary": "S",
+                            "type": "action",
+                            "standing": "reported",
+                        }
+                    ],
+                )
+            ]
+        ),
+        {1},
+        {},
+        {},
+        tally,
+    )
+    assert len(got) == 1
+    assert got[0]["events"] == [
+        {
+            "summary": "S",
+            "type": "action",
+            "commitment_state": None,
+            "standing": "reported",
+        }
+    ]
+    assert tally.new_label_fallback == 1
+    assert not any(k.startswith("validate:new_label") for k in tally.failures)
+
+
+def test_a_reference_to_a_dropped_declarer_is_the_neighbours_fault():
+    """The declarer's OWN fault (an invalid entity type) drops it before its
+    `new_label` is ever reached -- but the label it WOULD have declared still
+    orphans, and the referencer must be blamed on its NEIGHBOUR, never on
+    itself."""
+    tally = comprehend.Tally()
+    nf: set[int] = set()
+    got = comprehend.parse_integration_response(
+        _extraction(
+            [
+                _item(
+                    1,
+                    entities=[{"name": "X", "type": "not_a_type"}],
+                    events=[dict(NEW_EVENT, new_label="NEW1")],
+                ),
+                _item(2, events=[dict(_BARE_NEW1_REF)]),
+            ]
+        ),
+        {1, 2},
+        {},
+        {},
+        tally,
+        neighbour_faults=nf,
+    )
+    assert got == []
+    assert nf == {2}
+    assert not any(k.startswith("validate:new_label") for k in tally.failures)
+
+
+# --- No single row can fail the batch (constraints.md, [R2: Objection 3]).
+
+
+def _sibling(item_id):
+    return _item(item_id, entities=[dict(NEW_ENTITY)], events=[dict(NEW_EVENT)])
+
+
+@pytest.mark.parametrize(
+    "malformed_row,malformed_survives,expected_key",
+    [
+        pytest.param(
+            _item(2, events=[dict(NEW_EVENT, standing=[])]),
+            False,
+            "validate:malformed",
+            id="standing_list",
+        ),
+        pytest.param(
+            _item(2, events=[dict(NEW_EVENT, type=[])]),
+            False,
+            "validate:malformed",
+            id="type_list",
+        ),
+        pytest.param(
+            _item(2, events=[dict(NEW_EVENT, commitment_state={})]),
+            False,
+            "validate:malformed",
+            id="commitment_state_dict",
+        ),
+        pytest.param(
+            _item(2, events=5),
+            False,
+            "validate:malformed",
+            id="events_not_a_list",
+        ),
+        pytest.param(
+            _item(2, events=[dict(NEW_EVENT, candidate=None)]),
+            True,
+            None,
+            id="candidate_none",
+        ),
+        pytest.param(
+            _item(2, events=[dict(NEW_EVENT, candidate=3)]),
+            True,
+            None,
+            id="candidate_int",
+        ),
+        pytest.param(
+            _item(2, events=[dict(NEW_EVENT, candidate=True)]),
+            True,
+            None,
+            id="candidate_bool",
+        ),
+        pytest.param(
+            _item(2, events=[dict(NEW_EVENT, new_label=[])]),
+            False,
+            "validate:new_label_shape",
+            id="new_label_list",
+        ),
+    ],
+)
+def test_one_malformed_row_never_fails_the_batch(
+    malformed_row, malformed_survives, expected_key
+):
+    tally = comprehend.Tally()
+    got = comprehend.parse_integration_response(
+        _extraction([_sibling(1), malformed_row]), {1, 2}, {}, {}, tally
+    )
+    survived = {e["item_id"] for e in got}
+    assert 1 in survived, "the sibling must survive regardless of its neighbour"
+    assert (2 in survived) == malformed_survives
+    if expected_key is not None:
+        assert tally.failures[expected_key] == 1
