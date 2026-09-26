@@ -459,3 +459,83 @@ Written into the parent spec §8.2 when phase 2 is ready to flip, and before it 
 - **Haiku for integration.** It stacks with batching (≈ ¼ price) but needs its own quality
   measurement against the gate's registered extractor.
 - **Reuters completeness** (`b5s`) and **re-mint dedupe** (`3cc`).
+
+## Amendment A (2026-09-26): §5.4 and §5.6 move forward into real time (`news-brief-6kr`)
+
+**Why.** M1 (`docs/2026-09-26-clustering-recall-spike-result.md`) measured real time's pair
+visibility at 97.2% at historical density (~41 material items/h), but **74.8% at 5/h**. A quiet
+hourly pass is one micro-batch of 5, so same-hour reports from two outlets share it and cannot see
+each other. Phase 1 lowers density by design (D5). **In-request `NEW` linking needs no batching,**
+and it removes this blindness structurally: a pair is either in one request (linked) or in
+successive micro-batches (offered). The operator chose this ahead of M2, with the restart kept on
+schedule.
+
+**Scope: §5.4 in full and §5.6 in full, nothing else.** §5.5 (output trimming) stays in phase 2.
+It changes output size, which the phase-1 ledger is measuring.
+
+**§5.6 is a prerequisite, not an add-on.** The `NEW`-label prompt change bumps
+`INTEGRATE_PROMPT_VERSION` 2 → 3, and today's predicate `integrated_at IS NULL OR
+integrate_prompt_version < current` would re-select every completed item in the 14-day horizon.
+That means a cost spike on the restart, plus duplicate events (`3wb`). The rule becomes: **no
+path re-integrates a completed item because of a version bump.**
+- `pending_integration`, `retirement()`'s at-risk query and `write_extraction`'s `already`
+  guard all key on `integrated_at` alone.
+- Each gets its own test, pinned by mutation (phase-2 red-team defect 6).
+- Re-extraction becomes an explicit operation. Record on `3wb` (becomes unreachable) and on `ymk`
+  (can no longer rely on a bump).
+
+**Real-time specifics, which close the phase-2 red-team's `NEW`-label defects.**
+1. **An undeclared reference has two causes, and only one is the item's fault.**
+   - A `NEWn` declared by NO item in the response is the referencer's own error. It is charged,
+     as any validation drop is.
+   - A `NEWn` declared by an item that was itself DROPPED is the neighbour's fault. The parser
+     returns these separately. The referencer is **deferred through `integrate_defers`** (ceiling
+     10), never charged, so a model habit cannot loop forever and an innocent item never takes
+     a strike.
+2. **A declarer whose savepoint rolls back** after creating its event raises
+   `UnresolvedNewLabel` at the referencer. The referencer is treated as in (1): deferred, not
+   charged. The request-scoped map records a declaration only after the declarer's savepoint has
+   committed. Its test injects the fault **after** the event INSERT (red-team defect 1; the
+   module's helper is `_strikes`).
+3. The validator rejects a `NEWn` reference with no earlier declaration, a duplicate
+   declaration, a self-reference, and a label outside `^NEW[1-9][0-9]*$`. Each rejection gets
+   its own `failures` key.
+4. `Tally.events_linked_in_request` appears in the `Comprehend: {tally}` line.
+
+**Timing and the gate.** 6kr deploys with comprehension still off. It lands at or soon after the
+phase-1 restart, and it must not wait on anything else. It touches no gate window:
+- the old gate runs on the frozen pre-restart corpus;
+- Amendment 3's cutover is the later phase-2 flip, and it will state that 6kr is part of the
+  pipeline being measured;
+- triage is unchanged, so phase 1's material-rate measurement is unaffected.
+
+**Verified by effect after the restart:** `events_linked_in_request > 0` on a day with
+multi-outlet news, and no rise in `integrate_attempts` from `NEW`-label drops.
+
+### Amendment A, revision 1 (2026-09-26, after the plan's red-team)
+
+The red-team is at `docs/superpowers/reviews/2026-09-26-in-request-new-links-redteam.md`. Where
+the text above disagrees with this revision, this revision governs.
+
+1. **A neighbour's fault has its own budget, not `integrate_defers`** (operator's choice).
+   - Migration 0016 adds `item_triage.integrate_link_defers`.
+   - The tally gets its own field (`deferred_neighbour`) and its own failure keys
+     (`defer:new_label_orphaned`, `defer:new_label_unresolved`), each noted exactly once. None of
+     them is ever counted as `failed_integration` or `deferred_response`.
+   - The earlier text broke the repo's rule to count deferrals in their own field, and it would
+     have spent a response-fault budget on faults that were not the item's.
+2. **An extraction with no entities may still attach to events it references.** When every event
+   is a reference (a `candidate` match or a `NEWn`), its assertions are written: the referenced
+   event already carries its entities. The terminal `entityless_extraction` treatment still
+   applies whenever the extraction contains a NEW event, and a declarer with no entities
+   therefore declares nothing.
+   - **This also changes the existing behaviour for entity-less `EVT` matches,** which today are
+     discarded, and that loses corroboration. It is included on purpose, and it is measured.
+3. **Labels are only recognised when they are strings.** A non-string `candidate` keeps today's
+   meaning, "not a reference". A malformed field on one item must never fail the whole batch.
+4. **No re-extraction mechanism exists once §5.6 lands.** That is filed as its own bead. The docs
+   and memories that still say a version bump re-extracts are corrected in the same change.
+5. **Success is measured, not merely alive.** After the restart:
+   - count the multi-outlet events carrying an in-request link;
+   - read that alongside `entityless_extraction`, with the M1-derived expectation pre-registered
+     in the runbook.

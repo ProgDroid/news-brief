@@ -129,3 +129,42 @@ numbers** rather than by a rule set in advance.
 
 If both routes fail, the options left are the reconcile pass or pausing phase 2 (reversing D8).
 Both are the operator's to choose.
+
+## M1 result (host, 2026-09-26): the control holds; batching qualifies only at ≤ 5 items/h
+
+```
+Cross-outlet same-event pairs captured <= 2h apart: 671
+Exactness control: 0 of <= 200 sampled items disagree
+
+=== M1 density sweep at W = 2h (5-pt rule; row chosen by phase-1 p90)
+CONTROL unthinned (40.7 items/h): RT  97.2%  T  53.7%  T-cc  56.3%  TE-cc  65.4%
+  must equal the spike's published row: RT 97.2%  T 53.7%  T-cc 56.3%  TE-cc 65.4%
+
+target/h  real/h               RT                      T                   T-cc                  TE-cc
+       5     5.5  74.8% [74.8-74.8]       65.0% ( -9.8) --       66.9% ( -7.9) --       83.0% ( +8.2) ok
+      10    10.2  86.9% [86.4-87.9]       58.7% (-28.2) --       60.7% (-26.2) --       76.6% (-10.3) --
+      20    19.6  93.5% [93.0-93.9]       55.4% (-38.2) --       57.9% (-35.6) --       69.2% (-24.3) --
+
+No verdict: apply the 5-pt rule at the row at or above phase 1's measured p90 material items per capture-hour (news-brief-4le).
+```
+
+- **The control reproduces the spike exactly**, so the thinned rows can be trusted.
+- **Implication of the pre-registered rule, stated before phase 1 measures anything: M1 passes
+  only if phase 1's p90 is ≤ 5 material items per capture-hour.** Any p90 above 5 selects the
+  10 row, where every variant fails.
+- **Guess scoring.** "A variant qualifies at ≤ 10/h" was wrong: it qualifies at 5/h only. "None at
+  20" was right. The phase-1 p90 guess (15–30/h) is still pending.
+- **The 5 row is the floor of this model.** RT's range across seeds is 0, because at 5/h almost
+  only pair items survive thinning.
+
+### Not pre-registered, and the more important finding: real time goes blind at low density
+
+RT falls from 97.2% (unthinned) to **74.8% at 5/h**. A quiet hourly pass is one micro-batch of 5,
+so two outlets' reports from the same hour share it and cannot see each other. **Phase 1 lowers
+density by design (D5), so it lowers corroboration visibility whether or not phase 2 ever
+ships.** The next gate window inherits that loss.
+
+**Spec §5.4's in-request `NEW`-label linking removes this blindness without any batching.** A
+pair is either in one request (linked) or in successive micro-batches (offered). This is
+structural visibility, and whether the model actually uses `NEW` labels is its own measurement.
+Filed separately.
