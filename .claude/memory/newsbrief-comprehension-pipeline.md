@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: 19b68250-ca61-4936-834b-18d6a595831c
-  modified: 2026-09-08T16:31:08.383Z
+  modified: 2026-09-26T14:24:38.147Z
 ---
 
 **`bqa.4b` CLOSED 2026-09-05.** 26 commits (`25d911f..41d7747`), ruff clean.
@@ -243,8 +243,13 @@ the pre-registered gate, it is one-shot and would record a FAIL on a system mid-
 `51c850c`, and is not evidence the ranking change failed: it averages over 2,999 events,
 almost all created before the cutover. Spec §4 records the consequence — **the gate needs a
 window argument it does not have**, or every post-change run blends two populations.
-`INTEGRATE_PROMPT_VERSION` deliberately stayed at 2, because bumping wakes `3wb` and doubles
-every re-extracted event, inflating the very figure the gate reads.
+`INTEGRATE_PROMPT_VERSION` stayed at 2 at the time for this same cumulative-dilution reason, but
+**that reasoning is now OBSOLETE (Amendment A, `news-brief-3wb`, 2026-09-26): a version bump is
+INERT.** `pending_integration`, `retirement()`'s at-risk query, and `write_extraction`'s `already`
+guard no longer read `INTEGRATE_PROMPT_VERSION` at all — the column is provenance-only. A bump
+neither re-selects nor re-writes anything, so it cannot double events or inflate corroboration.
+Re-extraction (superseding an old event rather than minting a duplicate) has **no mechanism at
+all** yet; see `news-brief-ymk` and `news-brief-wt8`.
 
 **Ceiling arithmetic, both ends honest:** merging the 64 cross-outlet pairs the probe
 detected gives 9.0%, still failing; extrapolating for a detector that keeps only 12% of true
@@ -276,11 +281,18 @@ validator" is wrong when the schema is the thing that lied.
   restates the diff. Deriving each branch's required fields, building a member from exactly
   those, and asserting the validator accepts it fails if either side moves alone — and a flat
   `required` reads as a single branch, so the test failed cleanly on the pre-fix schema.
-- **Do NOT bump `INTEGRATE_PROMPT_VERSION` to ship a schema change** while `news-brief-3wb` is
-  open: a bump re-integrates every completed item and a re-extraction MINTS a fresh event rather
-  than superseding (1 → 2, measured), inflating exactly the corroboration figure `bqa.19` is
-  waiting to read. Items that FAILED have `integrated_at` NULL and pick up a new schema with no
-  bump at all, so the fix reaches everything actually broken. Deferred as `news-brief-ymk`.
+- **CORRECTED 2026-09-26 (Amendment A, `news-brief-3wb`): this used to say "do NOT bump
+  `INTEGRATE_PROMPT_VERSION` to ship a schema change" because a bump re-integrated every
+  completed item and a re-extraction MINTED a fresh event rather than superseding (1 → 2,
+  measured). That was true of the code at the time and is no longer true of the code: the
+  version-comparison clauses were removed from `pending_integration`, `retirement()`'s at-risk
+  query, and `write_extraction`'s `already` guard, so **a bump is now inert** — it changes
+  provenance on newly-written rows only, and never re-selects or re-writes an already-integrated
+  item. A bump is therefore SAFE to ship with a schema change. What is still true, and now the
+  actual constraint: **re-extraction has no mechanism at all** — there is no way to make an
+  already-integrated item redo its extraction, superseding rather than duplicating its old event.
+  That gap is `news-brief-ymk`, tracked further by `news-brief-wt8`. Items that FAILED still have
+  `integrated_at` NULL and pick up any new schema on their next attempt with no bump needed.
 
 ## 2026-09-09 — the floor failure is NOT cumulative dilution (bqa.19)
 

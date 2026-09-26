@@ -562,42 +562,6 @@ def test_reprocessing_the_same_item_does_not_duplicate_assertions(kb):
     assert kb.execute("SELECT count(*) FROM assertions").fetchone()[0] == 1
 
 
-def test_a_bumped_integration_prompt_version_re_integrates(kb, monkeypatch):
-    """0009's two-column split exists so an integration-prompt bump re-extracts
-    WITHOUT touching triage, and spec 4.2's pending predicate is
-    `integrated_at IS NULL OR integrate_prompt_version < :current`. Keyed on
-    integrated_at alone, the guard no-ops forever: task 10's SELECT re-offers
-    the item every run, this function skips it, and the stored version never
-    advances -- the exact single-column bug 0009 says the split retired.
-    """
-    iid = _item(kb)
-    kb.commit()
-    comprehend.write_extraction(
-        kb, _fresh(iid), comprehend.SurfaceIndex([]), comprehend.Tally()
-    )
-    kb.commit()
-    first = kb.execute(
-        "SELECT integrate_prompt_version FROM item_triage WHERE item_id = %s", (iid,)
-    ).fetchone()[0]
-
-    monkeypatch.setattr(comprehend, "INTEGRATE_PROMPT_VERSION", first + 1)
-    assert (
-        comprehend.write_extraction(
-            kb, _fresh(iid), comprehend.SurfaceIndex([]), comprehend.Tally()
-        )
-        is True
-    )
-    kb.commit()
-
-    assert (
-        kb.execute(
-            "SELECT integrate_prompt_version FROM item_triage WHERE item_id = %s",
-            (iid,),
-        ).fetchone()[0]
-        == first + 1
-    ), "the bump must advance the stored version, or task 10 re-selects forever"
-
-
 def test_a_quote_page_triaged_material_before_this_deploy_is_reclassified_free(
     kb, monkeypatch
 ):
@@ -657,6 +621,56 @@ def test_integration_takes_the_newest_material_first(kb):
 
     assert [r["id"] for r in rows] == [newer]
     assert older < newer
+
+
+def test_pending_integration_does_not_reselect_after_a_version_bump(kb, monkeypatch):
+    """Amendment A (3wb): INTEGRATE_PROMPT_VERSION is provenance-only. A bump
+    must never make this SELECT re-offer an item that already completed under
+    the old version -- that re-selects the whole KB on every deploy."""
+    iid = _item(kb)
+    kb.commit()
+    assert (
+        comprehend.write_extraction(
+            kb, _fresh(iid), comprehend.SurfaceIndex([]), comprehend.Tally()
+        )
+        is True
+    )
+    kb.commit()
+
+    monkeypatch.setattr(
+        comprehend, "INTEGRATE_PROMPT_VERSION", comprehend.INTEGRATE_PROMPT_VERSION + 1
+    )
+
+    assert iid not in {it["id"] for it in comprehend.pending_integration(kb, 300)}
+
+
+def test_write_extraction_skips_a_completed_item_after_a_version_bump(kb, monkeypatch):
+    """The write-path twin of the SELECT-side test above: even if something
+    re-offers an already-integrated item, write_extraction's own guard must
+    not treat a version bump as a reason to redo the work."""
+    iid = _item(kb)
+    kb.commit()
+    tally = comprehend.Tally()
+    index = comprehend.SurfaceIndex([])
+    assert comprehend.write_extraction(kb, _fresh(iid), index, tally) is True
+    kb.commit()
+    v = kb.execute(
+        "SELECT integrate_prompt_version FROM item_triage WHERE item_id = %s", (iid,)
+    ).fetchone()[0]
+
+    monkeypatch.setattr(comprehend, "INTEGRATE_PROMPT_VERSION", v + 1)
+
+    assert comprehend.write_extraction(kb, _fresh(iid), index, tally) is True
+    kb.commit()
+
+    assert kb.execute("SELECT count(*) FROM events").fetchone()[0] == 1
+    assert (
+        kb.execute(
+            "SELECT integrate_prompt_version FROM item_triage WHERE item_id = %s",
+            (iid,),
+        ).fetchone()[0]
+        == v
+    )
 
 
 # --- news-brief-uer: an item with genuinely nothing in it is not a failure.
@@ -1185,6 +1199,20 @@ def test_an_item_that_already_integrated_is_not_one_strike_from_anything(kb):
     so counting it would pad the warning with items in no danger at all."""
     _strikes(kb, _item(kb, h="OK"), 2, integrated=True)
     kb.commit()
+    assert comprehend.retirement(kb) is None
+
+
+def test_an_item_completed_under_an_old_version_is_not_at_risk(kb, monkeypatch):
+    """Amendment A (3wb): a version bump alone must not put an already-completed
+    item back into the at-risk count -- that predicate must match exactly what
+    pending_integration reads, and a bump is not one of its conditions."""
+    _strikes(kb, _item(kb, h="OLD"), 2, integrated=True)
+    kb.commit()
+
+    monkeypatch.setattr(
+        comprehend, "INTEGRATE_PROMPT_VERSION", comprehend.INTEGRATE_PROMPT_VERSION + 1
+    )
+
     assert comprehend.retirement(kb) is None
 
 

@@ -950,8 +950,8 @@ def retirement(conn) -> tuple[str, str] | None:
         "SELECT count(*) FROM item_triage "
         "WHERE triage_prompt_version = %s AND verdict = 'material' "
         "  AND integrate_attempts = 2 "
-        "  AND (integrated_at IS NULL OR integrate_prompt_version < %s)",
-        (TRIAGE_PROMPT_VERSION, INTEGRATE_PROMPT_VERSION),
+        "  AND integrated_at IS NULL",
+        (TRIAGE_PROMPT_VERSION,),
     ).fetchone()[0]
     if not retired and not at_risk:
         return None
@@ -1091,11 +1091,11 @@ def pending_integration(conn, limit: int) -> list[dict]:
         "SELECT i.id, i.title, i.body, i.outlet_id, i.published_at FROM items i "
         "JOIN item_triage t ON t.item_id = i.id AND t.triage_prompt_version = %s "
         "WHERE t.verdict = 'material' AND t.integrate_attempts < 3 "
-        "  AND (t.integrated_at IS NULL OR t.integrate_prompt_version < %s) "
+        "  AND t.integrated_at IS NULL "
         "  AND coalesce(i.published_at, i.created_at) "
         "      >= now() - make_interval(days => %s) "
         "ORDER BY i.id DESC LIMIT %s",
-        (TRIAGE_PROMPT_VERSION, INTEGRATE_PROMPT_VERSION, CANDIDATE_WINDOW_DAYS, limit),
+        (TRIAGE_PROMPT_VERSION, CANDIDATE_WINDOW_DAYS, limit),
     ).fetchall()
     return [
         {
@@ -2100,20 +2100,16 @@ def write_extraction(
     item_id = extraction["item_id"]
     # A new event has no unique key to ON CONFLICT against, so re-running the
     # same extraction (a retry, a re-queued item) would otherwise mint a
-    # second event and a second assertion every time. integrated_at alone is
-    # NOT the right guard, though: spec 4.2's pending predicate is
-    # `integrated_at IS NULL OR integrate_prompt_version < :current`, and
-    # 0009's comment names exactly the failure a version-blind guard would
-    # reintroduce -- "bumping the integration prompt left integrated_at set
-    # so nothing could re-extract". Scope the guard to the CURRENT version:
-    # bumping INTEGRATE_PROMPT_VERSION must still re-integrate. A NULL
-    # integrate_prompt_version makes `NULL >= n` NULL (never true), so a row
-    # that was never integrated always falls through and (re-)writes.
+    # second event and a second assertion every time. Guard on integrated_at
+    # alone: INTEGRATE_PROMPT_VERSION is provenance-only (Amendment A, 3wb) --
+    # it records which prompt produced a row, and a bump is never itself a
+    # reason to redo the work. Re-extracting an already-integrated item is an
+    # explicit operation with no mechanism yet, not a deploy side effect.
     already = conn.execute(
         "SELECT 1 FROM item_triage WHERE item_id = %s "
         "AND triage_prompt_version = %s AND verdict = 'material' "
-        "AND integrated_at IS NOT NULL AND integrate_prompt_version >= %s",
-        (item_id, TRIAGE_PROMPT_VERSION, INTEGRATE_PROMPT_VERSION),
+        "AND integrated_at IS NOT NULL",
+        (item_id, TRIAGE_PROMPT_VERSION),
     ).fetchone()
     if already:
         return True
