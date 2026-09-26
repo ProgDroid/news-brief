@@ -1621,10 +1621,16 @@ def test_an_entityless_extraction_with_a_new_event_is_still_terminal(kb):
 def test_an_entityless_item_with_an_unresolved_reference_is_deferred_not_integrated(
     kb,
 ):
-    """Pins ORDER: the reference pre-check in write_extraction runs BEFORE
-    the entity-less branch. An entity-less item whose only event is an
-    unresolved new_ref must be deferred like any other unresolved reference,
-    never mistaken for the entity-less-terminal case."""
+    """An entity-less item whose only event is an unresolved new_ref must be
+    deferred like any other unresolved reference, never mistaken for the
+    entity-less-terminal case.
+
+    This does NOT pin the pre-check/entity-less ORDER: with a single
+    reference-only event, `has_new_event` is False in the entity-less branch
+    regardless of when the pre-check runs, so moving the pre-check after the
+    entity-less branch produces the identical outcome here (falls through
+    either way, then the pre-check -- wherever it sits -- still defers it).
+    The mixed-event test below is what actually discriminates the order."""
     iid = _item(kb)
     kb.commit()
     tally = comprehend.Tally()
@@ -1648,4 +1654,91 @@ def test_an_entityless_item_with_an_unresolved_reference_is_deferred_not_integra
     assert row[0] is None
     assert row[1] == 1
     assert tally.entityless_extraction == 0
+    assert tally.entityless_reference_written == 0
+
+
+def test_an_entityless_mix_of_a_new_event_and_an_unresolved_reference_is_deferred(
+    kb,
+):
+    """Pins ORDER: the reference pre-check in write_extraction must run
+    BEFORE the entity-less branch. Mixing a brand-new event with an
+    unresolved new_ref in one entity-less item is the shape that actually
+    discriminates the two orderings -- a reference-only item does not,
+    because `has_new_event` is False there under EITHER ordering (see the
+    test above). Here `has_new_event` is True (the NEW event has neither
+    candidate_id nor new_ref), so if the pre-check ran AFTER the entity-less
+    branch this item would be wrongly marked terminal instead of deferred."""
+    iid = _item(kb)
+    kb.commit()
+    tally = comprehend.Tally()
+
+    extraction = {
+        "item_id": iid,
+        "entities": [],
+        "events": [
+            {
+                "summary": "Border checks tightened",
+                "type": "action",
+                "commitment_state": "in_force",
+                "standing": "reported",
+            },
+            {"new_ref": "NEW1", "standing": "reported"},
+        ],
+    }
+    assert (
+        comprehend.write_extraction(kb, extraction, comprehend.SurfaceIndex([]), tally)
+        is False
+    )
+    kb.commit()
+
+    row = kb.execute(
+        "SELECT integrated_at, integrate_link_defers FROM item_triage "
+        "WHERE item_id = %s",
+        (iid,),
+    ).fetchone()
+    assert row[0] is None, "deferred, not marked integrated"
+    assert row[1] == 1
+    assert tally.entityless_extraction == 0
+    assert tally.entityless_reference_written == 0
+
+
+def test_an_entityless_extraction_mixing_a_new_event_and_a_reference_is_terminal(
+    kb,
+):
+    """Pins that `has_new_event` is an `any`, not an `all`: ANY new event in
+    an entity-less extraction is enough to keep the whole item terminal,
+    even alongside a event that resolves cleanly. Mutating `any` to `all`
+    would fall through here and INSERT an entity-less NEW event that no
+    entity can ever retrieve -- the trap the comment above the entity-less
+    branch exists to prevent."""
+    ent = _entity(kb)
+    ev = _event(kb, ent)
+    iid = _item(kb)
+    kb.commit()
+    tally = comprehend.Tally()
+
+    extraction = {
+        "item_id": iid,
+        "entities": [],
+        "events": [
+            {
+                "summary": "A brand-new event",
+                "type": "action",
+                "commitment_state": "in_force",
+                "standing": "reported",
+            },
+            {"candidate_id": ev, "standing": "reported"},
+        ],
+    }
+    assert (
+        comprehend.write_extraction(kb, extraction, comprehend.SurfaceIndex([]), tally)
+        is True
+    )
+    kb.commit()
+
+    assert kb.execute("SELECT count(*) FROM events").fetchone()[0] == 1, (
+        "no new event may be created -- the whole item is terminal-uncharged"
+    )
+    assert kb.execute("SELECT count(*) FROM assertions").fetchone()[0] == 0
+    assert tally.entityless_extraction == 1
     assert tally.entityless_reference_written == 0
