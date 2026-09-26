@@ -808,6 +808,64 @@ def test_bad_new_labels_drop_the_item_with_a_named_cause(rows, key, surviving_id
     )
 
 
+def test_a_null_new_label_survives_as_absent():
+    """Final review I1: `commitment_state: null` already reads as absent
+    (bqa.16, 0011) because an explicit null says the same thing as an
+    omission. `new_label` gets the same rule -- a model saying "no label" by
+    sending `null` must not be charged a `validate:new_label_shape` strike,
+    and the event must come through with no `new_label` key at all."""
+    tally = comprehend.Tally()
+    got = comprehend.parse_integration_response(
+        _extraction([_item(1, events=[dict(NEW_EVENT, new_label=None)])]),
+        {1},
+        {},
+        {},
+        tally,
+    )
+    assert got[0]["events"] == [dict(NEW_EVENT)]
+    assert "new_label" not in got[0]["events"][0]
+    assert tally.failures == {}
+
+
+def test_a_label_redeclared_after_its_declarer_dropped_is_a_duplicate():
+    """Final review M1: item 1 declares NEW1 but is dropped for its own
+    fault (an invalid entity type), orphaning NEW1. Item 2 then re-declares
+    NEW1 on its own, unrelated new event -- without the fix this silently
+    adopts the label and item 3's later reference binds to item 2's event,
+    which `corroboration_by_outlet` would count as real corroboration. With
+    the fix, item 2 is dropped as a duplicate (its own fault, `nl in
+    orphaned`), and item 3's reference is then the ORPHANED label's
+    neighbour fault, not a link to item 2."""
+    tally = comprehend.Tally()
+    nf: set[int] = set()
+    got = comprehend.parse_integration_response(
+        _extraction(
+            [
+                _item(
+                    1,
+                    entities=[{"name": "X", "type": "not_a_type"}],
+                    events=[dict(NEW_EVENT, new_label="NEW1")],
+                ),
+                _item(
+                    2,
+                    events=[
+                        dict(NEW_EVENT, new_label="NEW1", summary="A second event.")
+                    ],
+                ),
+                _item(3, events=[dict(_BARE_NEW1_REF)]),
+            ]
+        ),
+        {1, 2, 3},
+        {},
+        {},
+        tally,
+        neighbour_faults=nf,
+    )
+    assert got == []
+    assert nf == {3}
+    assert tally.failures["validate:new_label_duplicate"] == 1
+
+
 def test_an_undeclared_reference_that_describes_its_event_falls_back_to_new():
     """A `NEWn` candidate naming no declarer is NOT automatically fatal: when
     the event ALSO carries a full new-event shape, it recovers as a fresh

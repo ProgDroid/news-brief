@@ -2143,6 +2143,7 @@ def test_a_reference_nobody_declared_is_charged(kb, monkeypatch):
     assert _attempts(kb, item_id) == 1
     assert _link_defers(kb, item_id) == 0
     assert tally.deferred_neighbour == 0
+    assert tally.failures.get("validate:new_label_undeclared") == 1
 
 
 def test_the_prompt_lets_later_items_reference_new_labels():
@@ -2154,6 +2155,7 @@ def test_the_prompt_lets_later_items_reference_new_labels():
     lowered = text.lower()
     assert "still list" in lowered
     assert "earlier in your response" in lowered
+    assert "never invent or number a label" not in lowered
 
 
 def test_a_cold_start_pass_links_two_outlets_in_one_request(kb, monkeypatch):

@@ -80,7 +80,7 @@ class Tally:
     # the same reasoning 0013 gives for the transport/response split: a
     # neighbour's fault and a response fault are different causes, and one
     # budget for both lets a chronic neighbour exhaust the other's ceiling
-    # (Task 2 of the in-request-new-links spec).
+    # (news-brief-6kr).
     deferred_neighbour: int = 0
     gave_up_triage: int = 0
     gave_up_integration: int = 0
@@ -93,9 +93,11 @@ class Tally:
     events_created: int = 0
     events_matched: int = 0
     # New events one item in this request linked to via ANOTHER item's NEW
-    # label, rather than to an existing KB event (Tasks 3-4). Apart from
-    # events_matched because the link is provisional against this request's
-    # own batch, not against the corpus, until every item in it is judged.
+    # label, rather than to an existing KB event (news-brief-6kr). Also
+    # counted in events_matched, by design (D9): this field distinguishes an
+    # in-request link from a corpus match, it does not subtract from it.
+    # Incremented only once the writer's savepoint commits, so it is never
+    # provisional.
     events_linked_in_request: int = 0
     assertions_written: int = 0
     # Distinguishes "one item failed" from "four items were collateral" -- the
@@ -125,10 +127,11 @@ class Tally:
     # Terminal rather than retried, because the answer is deterministic
     # (news-brief-bqa.17).
     entityless_extraction: int = 0
-    # A reference to another item's NEW entity or event, written even though
-    # this item carried no entities of its own (Tasks 3-4). Apart from
-    # entityless_extraction, which is terminal: this one still resolves once
-    # the neighbour's declaration lands, so it must not be counted as final.
+    # An item with no entities of its own that still wrote an assertion, by
+    # linking to another item's NEW label or by matching an existing EVT
+    # candidate directly (spec revision 1 section 2 -- the entity-less
+    # fall-through). Incremented only once the writer's savepoint commits,
+    # so it is a final, written count, never a provisional one.
     entityless_reference_written: int = 0
     # Batches whose `items` arrived as a JSON STRING rather than an array and
     # were recovered. Model NON-COMPLIANCE, not a failure -- counted so a
@@ -140,9 +143,9 @@ class Tally:
     # with different fixes: one is an encoding mistake, this is a nesting one,
     # and a single counter could not say which was continuing.
     items_double_wrapped: int = 0
-    # A NEW-label reference (Tasks 3-4) naming no declarer this request
-    # actually produced, recovered by falling back to a fresh entity/event
-    # instead of linking. Model NON-COMPLIANCE, in the same family as
+    # A NEW-label reference (news-brief-6kr) naming no declarer this request
+    # actually produced, recovered by falling back to a fresh event instead
+    # of linking. Model NON-COMPLIANCE, in the same family as
     # unmapped_candidate.
     new_label_fallback: int = 0
     # Why the pass stopped early, or "" if it did not. An account-level failure
@@ -162,18 +165,6 @@ class NoEntitySurvived(ValueError):
     This class fails the SAME item on every pass and is therefore certain to be
     retired at the ceiling, which is a different operational fact from an item
     that failed once and would succeed on a retry.
-    """
-
-
-class UnresolvedNewLabel(ValueError):
-    """A `new_ref` names no declarer this request produced.
-
-    `write_extraction` itself never raises this: an unresolved reference is a
-    no-verdict outcome (the declarer may still land on a later pass), handled
-    by deferring through `_defer_or_charge` and returning `False` rather than
-    failing the item. This class exists for a direct caller that resolves a
-    single reference outside that deferral loop and needs a named exception
-    to raise instead.
     """
 
 
@@ -201,7 +192,7 @@ def _defer_or_charge(
 ) -> None:
     """The no-verdict budget pattern shared by every cause that must not
     charge `integrate_attempts` while it still has room to defer instead
-    (0013's `integrate_defers`, Task 2's `integrate_link_defers`).
+    (0013's `integrate_defers`, news-brief-6kr's `integrate_link_defers`).
 
     Charges FIRST, then defers. The other order walks a row onto the ceiling
     and charges it in the SAME pass -- 0013's migration comment names this
@@ -858,7 +849,7 @@ def run(conn, now=None) -> Tally:
         # Items whose only fault is referencing a label THIS batch's own
         # declarer failed to produce -- a neighbour's fault, spent against
         # integrate_link_defers below, never charged alongside `dropped`
-        # (Task 4).
+        # (news-brief-6kr).
         nf: set[int] = set()
         try:
             resp = call_integration(
@@ -965,7 +956,7 @@ def run(conn, now=None) -> Tally:
             )
         # `nf` is EXCLUDED from `dropped` above and charged here instead: its
         # only fault is a neighbour's declarer failing in this same batch, not
-        # anything about these items' own responses (Task 4).
+        # anything about these items' own responses (news-brief-6kr).
         if nf:
             _defer_or_charge(
                 conn,
@@ -1840,7 +1831,7 @@ _EVENT_LABEL = "EVT"
 # declares via `new_label`, never a row from `label_map`. Recognised only when
 # it is a string matching this pattern, checked BEFORE `_resolve_label` --
 # any other value keeps today's meaning through that function unchanged
-# (Tasks 3-4 of the in-request-new-links spec).
+# (news-brief-6kr).
 _NEW_LABEL = re.compile(r"^NEW[1-9][0-9]*$")
 
 
@@ -1973,7 +1964,7 @@ def parse_integration_response(
     absorbed.
 
     Rows are validated IN RESPONSE ORDER, one at a time, each inside its own
-    `try/except (TypeError, AttributeError)` (Task 4): a single malformed row
+    `try/except (TypeError, AttributeError)` (news-brief-6kr): a single malformed row
     can never take the rest of the batch down with it, and is noted as
     `validate:malformed`. `declared` accumulates NEW-label declarations from
     rows already validated, so a LATER item may reference an EARLIER one's
@@ -2143,8 +2134,8 @@ def _validate_item(
     neighbour_faults=None,
 ) -> dict | None:
     """One row's verdict, run inside the caller's per-row
-    `try/except (TypeError, AttributeError)` (Task 4) -- a raise here drops
-    only this row, never the batch.
+    `try/except (TypeError, AttributeError)` (news-brief-6kr) -- a raise here
+    drops only this row, never the batch.
 
     `declared`/`orphaned` are this REQUEST's in-progress NEW-label state,
     threaded through by `parse_integration_response` in response order:
@@ -2205,9 +2196,10 @@ def _validate_item(
         # reach `_resolve_label` unchanged would silently miss and fall to the
         # new-event path for the wrong reason. Any other value -- None, an
         # int, an offered ENT/EVT label, an unmatched string -- keeps today's
-        # meaning through `_resolve_label`, below, exactly as before Task 4.
+        # meaning through `_resolve_label`, below, exactly as before
+        # news-brief-6kr.
         c = ev.get("candidate")
-        is_new_ref = isinstance(c, str) and bool(_NEW_LABEL.match(c))
+        is_new_ref = isinstance(c, str) and bool(_NEW_LABEL.fullmatch(c))
         event_out = None
 
         if is_new_ref:
@@ -2218,10 +2210,11 @@ def _validate_item(
                 event_out = {"new_ref": c, "standing": ev["standing"]}
             elif c in orphaned:
                 # Noting nothing is deliberate: this is the NEIGHBOUR's
-                # fault, not this item's own. `constraints.md`'s arithmetic
-                # invariant (`dropped` minus the `validate:*` keys equals
-                # items the model never returned at all) would go false the
-                # moment a neighbour fault also picked up a `validate:*` key.
+                # fault, not this item's own. `run()`'s arithmetic invariant --
+                # `dropped` minus the summed `validate:*` keys equals items the
+                # model never returned at all, noted where `dropped` is
+                # computed -- would go false the moment a neighbour fault also
+                # picked up a `validate:*` key.
                 if neighbour_faults is not None:
                     neighbour_faults.add(item_id)
                 return None
@@ -2282,12 +2275,12 @@ def _validate_item(
             if is_new_ref and tally is not None:
                 tally.new_label_fallback += 1
 
-        if "new_label" in ev:
-            nl = ev["new_label"]
-            if not (isinstance(nl, str) and _NEW_LABEL.match(nl)):
+        nl = ev.get("new_label")
+        if nl is not None:
+            if not (isinstance(nl, str) and _NEW_LABEL.fullmatch(nl)):
                 _note(tally, "validate:new_label_shape")
                 return None
-            if nl in declared or nl in seen_here:
+            if nl in declared or nl in seen_here or nl in orphaned:
                 _note(tally, "validate:new_label_duplicate")
                 return None
             seen_here.add(nl)
@@ -2465,7 +2458,8 @@ def write_extraction(
     # through its OWN entities, and this item is only attesting to it, so
     # falling through to the savepoint below and writing entity_ids == []
     # loses nothing candidate_events depends on. This is the entity-less
-    # fall-through this task adds; every row it writes is stamped v3.
+    # fall-through spec revision 1 section 2 adds; every row it writes is
+    # stamped v3.
     #
     # What was WRONG (news-brief-bqa.17) was refusing a NEW event by raising
     # inside the savepoint and charging an attempt. The outcome is
@@ -2603,7 +2597,8 @@ def write_extraction(
         # that then rolled back (the CHECK-violation case) must never resolve
         # a later item, which is exactly what folding this into the loop
         # above -- reachable even when a later iteration raises -- would do
-        # [R2: D3].
+        # (news-brief-6kr: a rolled-back declarer must never resolve a later
+        # item).
         new_events.update(declared_here)
         tally.events_linked_in_request += new_ref_count
         if not extraction["entities"]:

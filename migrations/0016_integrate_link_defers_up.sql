@@ -1,6 +1,6 @@
 -- A neighbour-fault deferral budget, held apart from 0013's integrate_defers.
 --
--- Tasks 3-4 let one item in an integration request link to another item's
+-- news-brief-6kr lets one item in an integration request link to another item's
 -- NEW entity or event via a label, rather than to something already in the
 -- KB. When the DECLARING item's own write is dropped or rolled back, every
 -- item that referenced its label must be spared too -- but that is a

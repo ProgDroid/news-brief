@@ -228,11 +228,12 @@ zero most days, and that is the expected reading, not a gap in the log.
 - **Link failure.** A steady `events_linked_in_request == 0` alongside
   `new_label_fallback` or `validate:new_label_undeclared` counts that keep rising means
   the model is declaring or referencing labels wrong, not that there is nothing to link
-  — check these together, never `events_linked_in_request` alone.
+  — check these together, never `events_linked_in_request` alone. File a bead and attach
+  the `Comprehend:` tally line.
 - **Recurring neighbour faults.** Any `defer_capped:*` key appearing at all means a
   neighbour fault (an orphaned or unresolved `new_label`) keeps recurring for the same
   item past `COMPREHEND_MAX_LINK_DEFERS` (settings row, default 10) — that item is stuck,
-  not merely deferred once.
+  not merely deferred once. File a bead and attach the `Comprehend:` tally line.
 
 ## Step 6 — the deliberate-exhaustion check
 
@@ -373,14 +374,27 @@ Also record the multi-outlet events with `events.created_at` after the flip and
 `events.prompt_version >= 3`. Entity-less references cannot be told apart in the
 tables: `event_entities` is keyed by event, not by item. Sum
 `entityless_reference_written` across the week's `Comprehend:` log lines instead.
+Paste-ready query, `:flip` again the recorded cutover — executed against a seeded
+v3 fixture (two outlets, one event asserted by both) on the local test DB, which
+confirmed `multi_outlet=1`:
+
+```sql
+SELECT count(*) FILTER (WHERE outlets >= 2) AS multi_outlet, count(*) AS total
+FROM (SELECT e.id, count(DISTINCT i.outlet_id) AS outlets
+      FROM events e JOIN assertions a ON a.event_id = e.id JOIN items i ON i.id = a.item_id
+      WHERE e.prompt_version >= 3 AND e.created_at >= :flip
+      GROUP BY e.id) t;
+```
 
 - **Reading it.** `co_batched_pairs` is every cross-outlet pair that could have linked,
   since most such pairs are different events. `linked_pairs` is those that did. The
   pre-registered expectation is derived from the phase-1 density measured for
   `news-brief-4le`, not assumed.
 - Look up RT's blind share at that density in the M1 table
-  (`docs/2026-09-26-clustering-recall-spike-result.md`, M1 result). Expect roughly that
-  share of true same-event pairs to be co-batched, and expect `linked_pairs` to be a
+  (`docs/2026-09-26-clustering-recall-spike-result.md`, M1 result): RT's blind share is
+  **100% minus the RT column** (visibility), e.g. 25.2% at 5 items/h, where the RT column
+  itself reads 74.8%. Expect roughly that blind share of true same-event pairs to be
+  co-batched, and expect `linked_pairs` to be a
   clear majority of the co-batched pairs whose titles are similar. Record
   `similarity(title, title) >= 0.5` alongside as a proxy for same-event.
 - `linked_pairs == 0` with high-similarity co-batched pairs present means the links are
