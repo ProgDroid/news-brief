@@ -218,6 +218,22 @@ memory of what they might be called. (`quote_pages` is the run-level tally on th
 comprehend side; capture's own tally field for the same idea is spelled differently,
 `quote_pages_dropped` — don't cross-reference the two names as if they were one field.)
 
+**First days: watch the in-request NEW-label tally (`news-brief-6kr`).** Every
+`Comprehend: {tally}` line also carries the fields that landed with in-request linking.
+Record, day by day: `events_linked_in_request`, `entityless_reference_written`,
+`new_label_fallback`, `deferred_neighbour`, and every `defer_capped:*` /
+`validate:new_label_*` / `validate:malformed` key that appears at all — most will be
+zero most days, and that is the expected reading, not a gap in the log.
+
+- **Link failure.** A steady `events_linked_in_request == 0` alongside
+  `new_label_fallback` or `validate:new_label_undeclared` counts that keep rising means
+  the model is declaring or referencing labels wrong, not that there is nothing to link
+  — check these together, never `events_linked_in_request` alone.
+- **Recurring neighbour faults.** Any `defer_capped:*` key appearing at all means a
+  neighbour fault (an orphaned or unresolved `new_label`) keeps recurring for the same
+  item past `COMPREHEND_MAX_LINK_DEFERS` (settings row, default 10) — that item is stuck,
+  not merely deferred once.
+
 ## Step 6 — the deliberate-exhaustion check
 
 **Check first whether this has already been proven (I3).** `_alert_once` (`brief.py`)
@@ -331,6 +347,44 @@ billed by Anthropic but never debited from the bucket, because a timeout never r
 shortfall isn't re-discovered from scratch later. The cleanest fix, if this matters
 enough to chase precisely rather than bound: a separate API key or workspace for
 comprehension, so the console can scope by key instead of by model.
+
+**The in-request NEW-label measurement (`news-brief-6kr`): three terms, not a ratio**
+[R2: Objection 1]. Assertions written in one micro-batch share `created_at` (`now()` is
+transaction time). This query counts co-batched pairs of v3 items from different
+outlets, split into linked (sharing an event) and not linked:
+
+```sql
+WITH batch AS (   -- one row per (micro-batch, item, outlet), v3 only
+    SELECT DISTINCT a.created_at AS txn, a.item_id, i.outlet_id
+    FROM assertions a JOIN items i ON i.id = a.item_id
+    WHERE a.prompt_version >= 3),
+pairs AS (        -- cross-outlet item pairs written in the same micro-batch
+    SELECT x.item_id AS a_item, y.item_id AS b_item
+    FROM batch x JOIN batch y
+      ON y.txn = x.txn AND y.item_id > x.item_id AND y.outlet_id <> x.outlet_id)
+SELECT count(*) AS co_batched_pairs,
+       count(*) FILTER (WHERE EXISTS (
+         SELECT 1 FROM assertions p JOIN assertions q ON q.event_id = p.event_id
+         WHERE p.item_id = a_item AND q.item_id = b_item)) AS linked_pairs
+FROM pairs;
+```
+
+Also record the multi-outlet events with `events.created_at` after the flip and
+`events.prompt_version >= 3`. Entity-less references cannot be told apart in the
+tables: `event_entities` is keyed by event, not by item. Sum
+`entityless_reference_written` across the week's `Comprehend:` log lines instead.
+
+- **Reading it.** `co_batched_pairs` is every cross-outlet pair that could have linked,
+  since most such pairs are different events. `linked_pairs` is those that did. The
+  pre-registered expectation is derived from the phase-1 density measured for
+  `news-brief-4le`, not assumed.
+- Look up RT's blind share at that density in the M1 table
+  (`docs/2026-09-26-clustering-recall-spike-result.md`, M1 result). Expect roughly that
+  share of true same-event pairs to be co-batched, and expect `linked_pairs` to be a
+  clear majority of the co-batched pairs whose titles are similar. Record
+  `similarity(title, title) >= 0.5` alongside as a proxy for same-event.
+- `linked_pairs == 0` with high-similarity co-batched pairs present means the links are
+  not happening. Report it.
 
 ---
 
