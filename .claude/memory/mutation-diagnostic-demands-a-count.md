@@ -199,3 +199,16 @@ freely rewrite.
 **And one that worked: predicting ZERO found a gap.** "Delete the integration spend line" was
 predicted to fail 0 and did. That is a coverage hole named in advance, and the test it prompted is
 what later caught the model swap above.
+
+## A ZERO can mean the guard is DUPLICATED, not untested (2026-09-26, `news-brief-1tl`)
+
+Eight pre-registered mutations on `scripts/probe_clustering.py`; seven matched, one read 0:
+deleting `len(group) < cap` from `capped_bfs`'s `while` failed nothing. The cap test was fine.
+The cap is enforced TWICE, and the inner `if len(group) >= cap: break` held it alone. Removing
+the inner break failed 2; removing both failed 2. So the `while` condition is an early exit,
+and the inner break is the load-bearing guard.
+
+**How to apply:** when a guard mutation reads 0, grep for a second site enforcing the same
+invariant before concluding the test is weak. Then mutate each site alone AND both together.
+The site whose removal fails tests is the real guard. Name it in the record so a later refactor
+does not delete the "redundant" one.

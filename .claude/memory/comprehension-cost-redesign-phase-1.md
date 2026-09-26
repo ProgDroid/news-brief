@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: 9ddd2146-00b2-42bb-a88a-0f15d3efd634
-  modified: 2026-09-25T22:42:02.912Z
+  modified: 2026-09-26T10:17:39.032Z
 ---
 
 **Why it exists:** after re-enabling comprehension, the operator was topping up the Anthropic account by
@@ -33,6 +33,10 @@ pause left a backlog that was drained oldest-first, on Sonnet, with no budget.
 - The triage model moves to Haiku via the `NEWSBRIEF_TRIAGE_MODEL` row, **not `TRIAGE_MODEL`**, which is accepted and read by nothing. `thinking: disabled` on Haiku 4.5 is documented, not observed. A 400 there is a 4xx, and a 4xx CHARGES items, so watch that first pass.
 - Decisions, defects the reviews found, and all 23 rulings: `docs/2026-09-25-comprehension-cost-phase-1-implementation-record.md`.
 - Phase 2 (Message Batches plus clustering) is committed but needs its plan REVISED first (bead `vlg`, after a clustering-recall spike).
+- **2026-09-26: D1 re-affirmed, so don't re-propose Haiku-for-integration as the phase-2 route.** I raised that Haiku 4.5 in real time costs exactly what a Sonnet batch costs ($1/$5 per MTok) with none of the async hazards. The operator kept batching (the gate was registered on Sonnet, and extraction quality is unmeasured).
+- **The spike is BUILT, NOT RUN: `scripts/probe_clustering.py`, bead `1tl`, blocks `vlg`.** Run it on the host with `docker compose run --rm --entrypoint python newsbrief scripts/probe_clustering.py`. It can run before 30 Sep, because it only reads.
+  - **Operator's pre-registered rule:** at W=2h, the simplest of T, then T-cc, then TE-cc within 5 pts of real time wins. If none is, the rewrite redesigns the blindness before batching.
+  - **My guesses:** T 40–60%, TE-cc 85%+, RT 85–95%.
 - Open beads from this work:
   - `2ln` (state_store aliasing);
   - `eqs` (are timed-out requests billed?);

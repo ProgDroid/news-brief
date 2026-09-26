@@ -51,3 +51,18 @@ like independent confirmation. Post span at horizon `h` is `[cutover, now − h)
 agreeing was close to one observation. Say the containment out loud in the output. Related:
 [[analysis-stats-traps]] (correlated observations), [[newsbrief-comprehension-pipeline]],
 [[tests-asserting-less-than-their-name]].
+
+## Second instance: `entities.created_at` dates INTEGRATION, not existence (2026-09-26)
+
+Designing the phase-2 clustering spike (`news-brief-1tl`): "was this entity known when that
+submission was built?" cannot be read off `entities.created_at`. The backlog integrated items
+days after capture, so the column is late by the backlog's lag. The probe dates birth as
+`least(entities.created_at, min(items.created_at))` over items asserting an event tagged
+with the entity.
+
+**The sharper half: a retrospective simulation that consults a PRESENT-STATE lookup leaks the
+future.** `SurfaceIndex.build` loads every entity, including those the probed items themselves
+minted, so an unfiltered probe would "join" two items through an entity the first one created.
+That inflates the result exactly where the question is hardest (new stories). **Before replaying
+history through a production lookup, ask which of its rows the replayed moment could not yet
+have seen, and filter by a birth time you have checked means what you need.**
