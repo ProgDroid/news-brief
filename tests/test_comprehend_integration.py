@@ -302,13 +302,16 @@ def test_a_row_with_two_good_entities_is_accepted_with_BOTH():
     )
 
 
-def _item(kb, title="Ukraine ceasefire", h="H1"):
+def _item(kb, title="Ukraine ceasefire", h="H1", outlet="Reuters"):
     outlet_id = kb.execute(
-        "INSERT INTO outlets (name, kind) VALUES ('Reuters', 'wire') "
-        "ON CONFLICT DO NOTHING RETURNING id"
+        "INSERT INTO outlets (name, kind) VALUES (%s, 'wire') "
+        "ON CONFLICT DO NOTHING RETURNING id",
+        (outlet,),
     ).fetchone()
     if outlet_id is None:
-        outlet_id = kb.execute("SELECT id FROM outlets LIMIT 1").fetchone()
+        outlet_id = kb.execute(
+            "SELECT id FROM outlets WHERE name = %s", (outlet,)
+        ).fetchone()
     oid = outlet_id[0]
     iid = kb.execute(
         "INSERT INTO items (outlet_id, url, title, content_hash) "
@@ -1386,3 +1389,111 @@ def test_the_shape_reaches_the_error_the_operator_actually_reads():
     with pytest.raises(ValueError) as caught:
         comprehend.parse_integration_response(resp, {1}, {}, {})
     assert "'0'" in str(caught.value)
+
+
+def test_a_new_label_links_two_items_to_one_event(kb):
+    """The declaring item's `new_label` and the referencing item's `new_ref`
+    resolve to the SAME event, across two items from two distinct outlets --
+    the shape a corroboration measurement actually reads (score_comprehension
+    counts assertions by outlet, not by item)."""
+    a = _item(kb, "A declares NEW1", h="Ha", outlet="Reuters")
+    b = _item(kb, "B refers to NEW1", h="Hb", outlet="AP")
+    kb.commit()
+    tally = comprehend.Tally()
+    index = comprehend.SurfaceIndex([])
+
+    extraction_a = _fresh(a)
+    extraction_a["events"][0]["new_label"] = "NEW1"
+    extraction_b = {
+        "item_id": b,
+        "entities": [{"name": "Georgia", "type": "country", "aliases": []}],
+        "events": [{"new_ref": "NEW1", "standing": "reported"}],
+    }
+
+    written = comprehend.write_batch(kb, [extraction_a, extraction_b], index, tally)
+    kb.commit()
+
+    assert written == 2
+    assert kb.execute("SELECT count(*) FROM events").fetchone()[0] == 1
+    outlets = kb.execute(
+        "SELECT DISTINCT o.name FROM assertions ast "
+        "JOIN items i ON i.id = ast.item_id "
+        "JOIN outlets o ON o.id = i.outlet_id"
+    ).fetchall()
+    assert {row[0] for row in outlets} == {"Reuters", "AP"}
+    assert tally.events_linked_in_request == 1
+    # A link counts as a match, so scripts/score_comprehension.py's
+    # `matched + created = A` stays exact (R2: D9).
+    assert tally.events_matched == 1
+
+
+def test_a_label_on_a_matched_event_links_to_that_event(kb):
+    """A `new_label` is not exclusive to brand-new events: item a matches an
+    EXISTING candidate and labels it, and item b's reference must land on
+    that same pre-existing event rather than minting a new one."""
+    ent = _entity(kb)
+    ev = _event(kb, ent)
+    a = _item(kb, "A labels a match", h="Ha", outlet="Reuters")
+    b = _item(kb, "B refers to NEW1", h="Hb", outlet="AP")
+    kb.commit()
+    tally = comprehend.Tally()
+    index = comprehend.SurfaceIndex([])
+
+    extraction_a = {
+        "item_id": a,
+        "entities": [{"candidate_id": ent}],
+        "events": [{"candidate_id": ev, "standing": "reported", "new_label": "NEW1"}],
+    }
+    extraction_b = {
+        "item_id": b,
+        "entities": [{"name": "Georgia", "type": "country", "aliases": []}],
+        "events": [{"new_ref": "NEW1", "standing": "reported"}],
+    }
+
+    written = comprehend.write_batch(kb, [extraction_a, extraction_b], index, tally)
+    kb.commit()
+
+    assert written == 2
+    assert kb.execute("SELECT count(*) FROM events").fetchone()[0] == 1, (
+        "events is unchanged: NEW1 must resolve to the matched event, not a new one"
+    )
+    rows = kb.execute("SELECT DISTINCT event_id FROM assertions").fetchall()
+    assert {row[0] for row in rows} == {ev}
+
+
+def test_a_rolled_back_declaration_is_never_resolved(kb):
+    """The declaring item's savepoint rolls back (a CHECK violation on the
+    assertion, after the event row was already inserted), so its `new_label`
+    must never reach `new_events` -- the referencing item waits instead of
+    resolving onto a row that no longer exists."""
+    a = _item(kb, "A declares then rolls back", h="Ha", outlet="Reuters")
+    b = _item(kb, "B refers to NEW1", h="Hb", outlet="AP")
+    kb.commit()
+    tally = comprehend.Tally()
+    index = comprehend.SurfaceIndex([])
+
+    extraction_a = _fresh(a)
+    extraction_a["events"][0]["new_label"] = "NEW1"
+    extraction_a["events"][0]["standing"] = "not_a_standing"
+    extraction_b = {
+        "item_id": b,
+        "entities": [{"name": "Georgia", "type": "country", "aliases": []}],
+        "events": [{"new_ref": "NEW1", "standing": "reported"}],
+    }
+
+    written = comprehend.write_batch(kb, [extraction_a, extraction_b], index, tally)
+    kb.commit()
+
+    assert written == 0
+    assert kb.execute("SELECT count(*) FROM events").fetchone()[0] == 0
+    assert kb.execute("SELECT count(*) FROM assertions").fetchone()[0] == 0
+    row = kb.execute(
+        "SELECT integrate_attempts, integrate_link_defers FROM item_triage "
+        "WHERE item_id = %s",
+        (b,),
+    ).fetchone()
+    assert row == (0, 1)
+    assert tally.failed_integration == 1, "a only -- b deferred, not charged"
+    assert tally.deferred_neighbour == 1
+    assert tally.failures["defer:new_label_unresolved"] == 1
+    assert tally.events_linked_in_request == 0

@@ -165,6 +165,18 @@ class NoEntitySurvived(ValueError):
     """
 
 
+class UnresolvedNewLabel(ValueError):
+    """A `new_ref` names no declarer this request produced.
+
+    `write_extraction` itself never raises this: an unresolved reference is a
+    no-verdict outcome (the declarer may still land on a later pass), handled
+    by deferring through `_defer_or_charge` and returning `False` rather than
+    failing the item. This class exists for a direct caller that resolves a
+    single reference outside that deferral loop and needs a named exception
+    to raise instead.
+    """
+
+
 def _note(tally, cause: str, n: int = 1) -> None:
     """Attribute a failure by cause, so `failures` can say WHICH one fired.
 
@@ -2150,6 +2162,7 @@ def write_extraction(
     tally: Tally,
     *,
     model: str | None = None,
+    new_events: dict[str, int] | None = None,
 ) -> bool:
     """Write one item's extraction inside its OWN savepoint.
 
@@ -2162,8 +2175,17 @@ def write_extraction(
     (I1) for every provenance write below (entities, events, assertions); a
     direct caller (tests) that omits it gets the live resolver, unchanged.
 
+    `new_events` maps this REQUEST's in-request labels (`new_label`) to the
+    event id they resolved to, once the declaring item's savepoint has
+    committed. `write_batch` owns one such dict per request and threads it
+    through every call; a direct caller (tests) that omits it gets a fresh
+    `{}`, which resolves nothing -- there is no prior item to have declared
+    into it.
+
     Returns True if the item was integrated.
     """
+    if new_events is None:
+        new_events = {}
     item_id = extraction["item_id"]
     # A new event has no unique key to ON CONFLICT against, so re-running the
     # same extraction (a retry, a re-queued item) would otherwise mint a
@@ -2180,6 +2202,32 @@ def write_extraction(
     ).fetchone()
     if already:
         return True
+
+    # A `new_ref` naming no declarer THIS request has produced yet is a
+    # no-verdict outcome, not a failure: the declarer may still land on a
+    # later pass (or never, if its own savepoint rolls back), and a partial
+    # write here -- some events linked, others not -- would be a
+    # half-extraction. The whole item waits and is re-offered, sharing Task
+    # 2's neighbour-fault budget rather than integrate_attempts, because a
+    # forever-unresolved reference is the model's neighbour's fault, not this
+    # item's. Checked before the empty/entity-less returns and the savepoint,
+    # so a reference-only item never reaches either.
+    missing_refs = any(
+        "new_ref" in ev and ev["new_ref"] not in new_events
+        for ev in extraction.get("events") or []
+    )
+    if missing_refs:
+        _defer_or_charge(
+            conn,
+            [item_id],
+            tally,
+            column="integrate_link_defers",
+            ceiling=int(common.COMPREHEND_MAX_LINK_DEFERS),
+            deferred_field="deferred_neighbour",
+            deferred_key="defer:new_label_unresolved",
+            capped_key="defer_capped:new_label_unresolved",
+        )
+        return False
 
     # Nothing to extract. Mark it done and charge it nothing: it is neither a
     # model failure nor a parser failure, and leaving integrated_at NULL is the
@@ -2245,10 +2293,26 @@ def write_extraction(
             if not entity_ids:
                 raise NoEntitySurvived("no entity survived resolution")
 
+            # Labels this item declares, staged here rather than written
+            # straight into `new_events`: the savepoint below can still roll
+            # back (a CHECK violation on the assertion, e.g.), and a label
+            # pointing at a row that was never committed would resolve a
+            # later item onto nothing. Folded into `new_events` only after
+            # the `with` block exits normally, below.
+            declared_here: dict[str, int] = {}
+            new_ref_count = 0
             for ev in extraction["events"]:
                 if "candidate_id" in ev:
                     event_id = ev["candidate_id"]
                     tally.events_matched += 1
+                elif "new_ref" in ev:
+                    # Resolved by the reference-resolution check above every
+                    # `new_ref` is already in `new_events` by the time
+                    # execution reaches here -- a missing one returned False
+                    # before this savepoint ever opened.
+                    event_id = new_events[ev["new_ref"]]
+                    tally.events_matched += 1
+                    new_ref_count += 1
                 else:
                     # occurred_at is NOT optional here, and omitting it is fatal
                     # rather than untidy. candidate_events filters
@@ -2278,6 +2342,9 @@ def write_extraction(
                         ),
                     ).fetchone()[0]
                     tally.events_created += 1
+
+                if ev.get("new_label"):
+                    declared_here[ev["new_label"]] = event_id
 
                 for eid in entity_ids:
                     conn.execute(
@@ -2310,6 +2377,14 @@ def write_extraction(
                 "  AND verdict = 'material'",
                 (INTEGRATE_PROMPT_VERSION, item_id, TRIAGE_PROMPT_VERSION),
             )
+        # Only reached once the `with` block above has exited WITHOUT
+        # raising, i.e. the savepoint committed: a declaration made by a row
+        # that then rolled back (the CHECK-violation case) must never resolve
+        # a later item, which is exactly what folding this into the loop
+        # above -- reachable even when a later iteration raises -- would do
+        # [R2: D3].
+        new_events.update(declared_here)
+        tally.events_linked_in_request += new_ref_count
     except Exception as exc:
         tally.items_lost_to_savepoint += 1
         tally.failed_integration += 1
@@ -2342,10 +2417,17 @@ def write_batch(
 
     `model` lets run() pass through the value it froze at pass start (I1); a
     direct caller (tests) that omits it gets the live resolver, unchanged.
+
+    Owns one `new_events` dict for the whole request, so an item declaring a
+    `new_label` can be resolved by a later item in the SAME batch that
+    references it -- the entire point of the in-request link.
     """
+    new_events: dict[str, int] = {}
     with conn.transaction():
         return sum(
             1
             for e in extractions
-            if write_extraction(conn, e, index, tally, model=model)
+            if write_extraction(
+                conn, e, index, tally, model=model, new_events=new_events
+            )
         )
