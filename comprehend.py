@@ -2061,8 +2061,21 @@ def parse_integration_response(
                         orphaned=orphaned,
                         neighbour_faults=neighbour_faults,
                     )
-                except (TypeError, AttributeError):
+                except (TypeError, AttributeError) as exc:
                     _note(tally, "validate:malformed")
+                    # These two types are plan-mandated because a malformed
+                    # ROW must not fail the batch -- but silently converting a
+                    # genuine code bug into a `validate:malformed` count would
+                    # retire the item at the 3-strike ceiling with nothing
+                    # anywhere pointing at the code rather than the model.
+                    # `item_id` and the exception TYPE stay in the message
+                    # itself (not just `exc_info`), so a log search for either
+                    # finds this without needing traceback context.
+                    log.warning(
+                        f"Comprehend: item_id={r.get('item_id')} raised "
+                        f"validating NEW labels: {type(exc).__name__}: {exc}",
+                        exc_info=True,
+                    )
                     p = None
                 if p is None:
                     # Collected from the RAW row, not from `_validate_item`'s

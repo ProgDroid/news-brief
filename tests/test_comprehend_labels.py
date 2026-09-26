@@ -706,11 +706,12 @@ def test_a_label_on_a_matched_event_is_declared():
 
 
 @pytest.mark.parametrize(
-    "rows,key",
+    "rows,key,surviving_ids",
     [
         pytest.param(
             [_item(1, events=[dict(_BARE_NEW1_REF)])],
             "validate:new_label_undeclared",
+            [],
             id="no_declaration_anywhere",
         ),
         pytest.param(
@@ -719,6 +720,9 @@ def test_a_label_on_a_matched_event_is_declared():
                 _item(2, events=[dict(NEW_EVENT, new_label="NEW1")]),
             ],
             "validate:new_label_undeclared",
+            # item 1 carries the fault and is dropped; item 2's declaration is
+            # a legitimate sibling with nothing wrong with it and must survive.
+            [2],
             id="a_forward_reference",
         ),
         pytest.param(
@@ -727,6 +731,9 @@ def test_a_label_on_a_matched_event_is_declared():
                 _item(2, events=[dict(NEW_EVENT, new_label="NEW1")]),
             ],
             "validate:new_label_duplicate",
+            # item 1's declaration is the legitimate FIRST one and survives;
+            # item 2 carries the fault (the re-declaration) and is dropped.
+            [1],
             id="declared_twice_across_items",
         ),
         pytest.param(
@@ -740,6 +747,7 @@ def test_a_label_on_a_matched_event_is_declared():
                 )
             ],
             "validate:new_label_duplicate",
+            [],
             id="declared_twice_within_one_item",
         ),
         pytest.param(
@@ -750,25 +758,54 @@ def test_a_label_on_a_matched_event_is_declared():
                 )
             ],
             "validate:new_label_self",
+            [],
             id="a_self_reference",
         ),
         pytest.param(
             [_item(1, events=[dict(NEW_EVENT, new_label="EVT9")])],
             "validate:new_label_shape",
+            [],
             id="new_label_EVT9",
         ),
         pytest.param(
             [_item(1, events=[dict(NEW_EVENT, new_label=7)])],
             "validate:new_label_shape",
+            [],
             id="new_label_7",
         ),
     ],
 )
-def test_bad_new_labels_drop_the_item_with_a_named_cause(rows, key):
+def test_bad_new_labels_drop_the_item_with_a_named_cause(rows, key, surviving_ids):
+    """Fix round 1, Important 1: the previous version asserted only
+    `tally.failures[key] == 1` and discarded `parse_integration_response`'s
+    return value, so neither a missing `return None` after the `duplicate`
+    note (the row survives with the bad label written into its output) nor
+    one after the `self` note (the row still drops, but for TWO reasons
+    instead of one) could ever fail here.
+
+    `surviving_ids` names every item that legitimately has nothing wrong with
+    it -- only `a_forward_reference` and `declared_twice_across_items` have
+    one, because those two need a second item to set up the scenario at all.
+    The `validate:*` sum (rather than just `tally.failures[key]`) is what
+    catches a row falling through to a SECOND branch after a `return` is
+    deleted: the named key still fires with count 1, but so does another one.
+    """
     tally = comprehend.Tally()
     ids = {r["item_id"] for r in rows}
-    comprehend.parse_integration_response(_extraction(rows), ids, {}, {}, tally)
+    got = comprehend.parse_integration_response(_extraction(rows), ids, {}, {}, tally)
+    assert [e["item_id"] for e in got] == surviving_ids, (
+        "every row carrying the named fault must be dropped -- only a "
+        "legitimate sibling declaration may survive"
+    )
     assert tally.failures[key] == 1
+    validate_total = sum(
+        v for k, v in tally.failures.items() if k.startswith("validate:")
+    )
+    assert validate_total == 1, (
+        f"exactly one validate:* key must fire per dropped item, got "
+        f"{tally.failures} -- a deleted `return` lets a row fall through to "
+        f"a second branch, which `tally.failures[key] == 1` alone cannot see"
+    )
 
 
 def test_an_undeclared_reference_that_describes_its_event_falls_back_to_new():
@@ -913,3 +950,31 @@ def test_one_malformed_row_never_fails_the_batch(
     assert (2 in survived) == malformed_survives
     if expected_key is not None:
         assert tally.failures[expected_key] == 1
+
+
+def test_a_malformed_row_logs_a_warning_naming_the_item_and_the_exception(caplog):
+    """Fix round 1, Important 2: the per-row `try/except (TypeError,
+    AttributeError)` is plan-mandated so one malformed row can never fail the
+    batch, but logging NOTHING would let a genuine code bug hide behind
+    `validate:malformed` forever -- no traceback, no exception text, no item
+    id, and because malformed is charged, the item retires at the 3-strike
+    ceiling with nothing pointing at the code.
+
+    Asserted on caplog's RECORDS and the structured item id / exception type,
+    never on a free-text phrase: a rephrased log message must not silently
+    stop being covered."""
+    row = _item(2, events=[dict(NEW_EVENT, standing=[])])
+    tally = comprehend.Tally()
+    with caplog.at_level("WARNING"):
+        got = comprehend.parse_integration_response(
+            _extraction([row]), {2}, {}, {}, tally
+        )
+
+    assert got == []
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1, (
+        "exactly one warning per malformed row -- neither silent nor doubled"
+    )
+    message = warnings[0].getMessage()
+    assert "2" in message, "the item id must be in the record"
+    assert "TypeError" in message, "the exception TYPE name must be in the record"
