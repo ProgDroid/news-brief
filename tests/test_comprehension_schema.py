@@ -285,3 +285,42 @@ def test_0014_rolls_back_and_forward(kb):
     db.run_migrations(kb)
     kb.commit()
     _triage_row(kb, "stale", "stale")
+
+
+# --- Migration 0016: integrate_link_defers ---------------------------------
+
+TARGET_0016 = "0016_integrate_link_defers"
+
+
+def _has_column(conn, table, column) -> bool:
+    return (
+        conn.execute(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name = %s AND column_name = %s",
+            (table, column),
+        ).fetchone()
+        is not None
+    )
+
+
+def test_0016_rolls_back_and_reapplies(kb):
+    """No down migration is trusted until it has been run (0007's test makes
+    the same point). The step count is DERIVED, like 0009's own round-trip
+    test: adding a later migration must not require an edit here."""
+    assert _has_column(kb, "item_triage", "integrate_link_defers")
+
+    reverted = db.run_migrations(
+        kb, direction="down", steps=conftest.steps_back_through(kb, TARGET_0016)
+    )
+    kb.commit()
+
+    assert reverted[-1] == TARGET_0016
+    assert not _has_column(kb, "item_triage", "integrate_link_defers")
+    assert _has_column(kb, "item_triage", "integrate_defers"), (
+        "rolling back 0016 must not take 0013's column with it"
+    )
+
+    reapplied = db.run_migrations(kb)
+    kb.commit()
+    assert reapplied == reverted[::-1]
+    assert _has_column(kb, "item_triage", "integrate_link_defers")

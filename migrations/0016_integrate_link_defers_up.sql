@@ -1,0 +1,22 @@
+-- A neighbour-fault deferral budget, held apart from 0013's integrate_defers.
+--
+-- Tasks 3-4 let one item in an integration request link to another item's
+-- NEW entity or event via a label, rather than to something already in the
+-- KB. When the DECLARING item's own write is dropped or rolled back, every
+-- item that referenced its label must be spared too -- but that is a
+-- statement about a NEIGHBOUR's fault, not about this item's own response or
+-- content. Charging it against integrate_defers would let a batch with one
+-- chronically-failing declarer exhaust the SAME budget the response-failure
+-- path (0013) depends on, so a fault this item did not cause could retire an
+-- item that a completely unrelated parsing failure never touched.
+--
+-- Two columns rather than one, on 0013's own reasoning: "how many times did
+-- the RESPONSE fail to parse" and "how many times was this item's own
+-- integration undone by someone else's failure" are different operational
+-- facts, and folding them into one counter makes neither attributable.
+--
+-- DEFAULT 0 rather than NULL: every existing row has, by construction, never
+-- been deferred for a neighbour's fault, and a nullable counter would make
+-- `>= ceiling` silently false for the whole back catalogue.
+ALTER TABLE item_triage
+    ADD COLUMN integrate_link_defers INTEGER NOT NULL DEFAULT 0;

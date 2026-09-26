@@ -1437,6 +1437,25 @@ def _attempts(kb, item_id):
     ).fetchone()[0]
 
 
+def _link_defers(kb, item_id):
+    return kb.execute(
+        "SELECT integrate_link_defers FROM item_triage WHERE item_id = %s",
+        (item_id,),
+    ).fetchone()[0]
+
+
+def _material_triage_row(kb, item_id, *, integrate_link_defers=0):
+    """A material item_triage row `_defer_or_charge` can be pointed at
+    directly, without paying for a real triage + integration pass -- Task 2's
+    helper is tested at the SQL layer, not through run()."""
+    kb.execute(
+        "INSERT INTO item_triage "
+        "(item_id, verdict, reason, triage_prompt_version, integrate_link_defers) "
+        "VALUES (%s, 'material', 'tracked_story', 1, %s)",
+        (item_id, integrate_link_defers),
+    )
+
+
 def test_a_response_shape_failure_leaves_the_items_lifetime_budget_intact(
     kb, monkeypatch
 ):
@@ -1612,6 +1631,52 @@ def test_the_defer_ceiling_is_a_settings_knob_not_a_constant():
     default is a guess bounded by measurement, and the host must be able to
     retune it from real failure rates without a redeploy."""
     assert "COMPREHEND_MAX_DEFERS" in comprehend.common.KNOBS
+
+
+def test_the_link_defer_ceiling_is_a_settings_knob_not_a_constant():
+    """Sibling of the test above, for the neighbour-fault budget (migration
+    0016). Its failure rate is unmeasured -- Tasks 3-4 have not shipped yet --
+    so the host must be able to retune it without a redeploy the moment one
+    exists."""
+    assert "COMPREHEND_MAX_LINK_DEFERS" in comprehend.common.KNOBS
+
+
+def test_the_link_budget_charges_first_then_defers(kb):
+    """`_defer_or_charge`, called directly against integrate_link_defers the
+    way Tasks 3-4 will call it -- not through run()'s response-failure
+    branch, which owns integrate_defers only.
+
+    Two items: one already at ceiling - 1 (has room to defer once more), one
+    already at the ceiling (must convert to a charge instead).
+    """
+    ceiling = 3
+    below_id = _add_item(kb, "below the ceiling", h="L1")
+    at_id = _add_item(kb, "at the ceiling", h="L2")
+    _material_triage_row(kb, below_id, integrate_link_defers=ceiling - 1)
+    _material_triage_row(kb, at_id, integrate_link_defers=ceiling)
+    kb.commit()
+
+    tally = comprehend.Tally()
+    comprehend._defer_or_charge(
+        kb,
+        [below_id, at_id],
+        tally,
+        column="integrate_link_defers",
+        ceiling=ceiling,
+        deferred_field="deferred_neighbour",
+        deferred_key="neighbour_fault",
+        capped_key="neighbour_fault_capped",
+    )
+    kb.commit()
+
+    assert (_attempts(kb, below_id), _link_defers(kb, below_id)) == (0, ceiling)
+    assert (_attempts(kb, at_id), _link_defers(kb, at_id)) == (1, ceiling)
+    assert {_defers(kb, below_id), _defers(kb, at_id)} == {0}, (
+        "integrate_defers is a different budget and must be untouched"
+    )
+    assert tally.deferred_neighbour == 1
+    assert tally.deferred_response == 0
+    assert tally.failed_integration == 1
 
 
 def test_an_entityless_item_is_never_re_offered(kb, monkeypatch):

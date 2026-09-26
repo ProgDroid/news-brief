@@ -287,6 +287,15 @@ KNOBS: dict[str, Knob] = {
     # -- which is exactly the case a ceiling should retire. A row, so the host
     # can retune it once the shape faults are fixed and the rate moves.
     "COMPREHEND_MAX_DEFERS": Knob(int, 10),
+    # The sibling ceiling for a no-verdict cause that is a NEIGHBOUR's fault
+    # rather than a response fault (migration 0016): an item spared because
+    # another item's new-entity/new-event declaration in the same request was
+    # dropped or rolled back. Held apart from COMPREHEND_MAX_DEFERS so a
+    # chronically-failing declarer cannot exhaust the budget the unrelated
+    # response-parsing path depends on. Same default as its sibling, for the
+    # same reason: no measurement of this failure rate exists yet, so the
+    # starting point is a guess the host can retune once one does.
+    "COMPREHEND_MAX_LINK_DEFERS": Knob(int, 10),
     # The comprehension token bucket (spec 2026-09-25 4.3). A daily allowance
     # in USD that accrues continuously while enabled and is capped at MAX_DAYS
     # of allowance, so quiet days bank budget for busy ones without letting a

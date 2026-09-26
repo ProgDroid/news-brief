@@ -54,6 +54,7 @@ def test_up_creates_the_expected_tables(conn):
         "0013_integrate_defers",
         "0014_triage_stale_quote_page",
         "0015_comprehend_spend",
+        "0016_integrate_link_defers",
     ]
     assert {
         "schema_migrations",

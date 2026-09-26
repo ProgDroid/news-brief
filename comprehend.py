@@ -74,6 +74,14 @@ class Tally:
     # being a property of the item, which is the one case where charging a
     # no-verdict failure is the right answer.
     defer_cap_hit: int = 0
+    # Spared only because a NEIGHBOUR item in the same batch failed -- its
+    # declarer was dropped or rolled back -- and not because anything about
+    # THIS item's own response was unreadable. Apart from deferred_response on
+    # the same reasoning 0013 gives for the transport/response split: a
+    # neighbour's fault and a response fault are different causes, and one
+    # budget for both lets a chronic neighbour exhaust the other's ceiling
+    # (Task 2 of the in-request-new-links spec).
+    deferred_neighbour: int = 0
     gave_up_triage: int = 0
     gave_up_integration: int = 0
     # Material items past the horizon, never to be integrated (spec D4). A
@@ -84,6 +92,11 @@ class Tally:
     entities_resolved: int = 0
     events_created: int = 0
     events_matched: int = 0
+    # New events one item in this request linked to via ANOTHER item's NEW
+    # label, rather than to an existing KB event (Tasks 3-4). Apart from
+    # events_matched because the link is provisional against this request's
+    # own batch, not against the corpus, until every item in it is judged.
+    events_linked_in_request: int = 0
     assertions_written: int = 0
     # Distinguishes "one item failed" from "four items were collateral" -- the
     # exact confusion a batch-wide transaction would have produced.
@@ -112,6 +125,11 @@ class Tally:
     # Terminal rather than retried, because the answer is deterministic
     # (news-brief-bqa.17).
     entityless_extraction: int = 0
+    # A reference to another item's NEW entity or event, written even though
+    # this item carried no entities of its own (Tasks 3-4). Apart from
+    # entityless_extraction, which is terminal: this one still resolves once
+    # the neighbour's declaration lands, so it must not be counted as final.
+    entityless_reference_written: int = 0
     # Batches whose `items` arrived as a JSON STRING rather than an array and
     # were recovered. Model NON-COMPLIANCE, not a failure -- counted so a
     # healthy failure count cannot hide it continuing.
@@ -122,6 +140,11 @@ class Tally:
     # with different fixes: one is an encoding mistake, this is a nesting one,
     # and a single counter could not say which was continuing.
     items_double_wrapped: int = 0
+    # A NEW-label reference (Tasks 3-4) naming no declarer this request
+    # actually produced, recovered by falling back to a fresh entity/event
+    # instead of linking. Model NON-COMPLIANCE, in the same family as
+    # unmapped_candidate.
+    new_label_fallback: int = 0
     # Why the pass stopped early, or "" if it did not. An account-level failure
     # (billing, auth) or a refusal to spend (unpriced model) stops the WHOLE
     # pass without charging any item: nothing about the items was judged.
@@ -151,6 +174,53 @@ def _note(tally, cause: str, n: int = 1) -> None:
     if tally is None:
         return
     tally.failures[cause] = tally.failures.get(cause, 0) + n
+
+
+def _defer_or_charge(
+    conn,
+    ids: list[int],
+    tally: Tally,
+    *,
+    column: str,
+    ceiling: int,
+    deferred_field: str,
+    deferred_key: str,
+    capped_key: str,
+) -> None:
+    """The no-verdict budget pattern shared by every cause that must not
+    charge `integrate_attempts` while it still has room to defer instead
+    (0013's `integrate_defers`, Task 2's `integrate_link_defers`).
+
+    Charges FIRST, then defers. The other order walks a row onto the ceiling
+    and charges it in the SAME pass -- 0013's migration comment names this
+    exactly -- which raises the effective ceiling by one every time and never
+    reaches it, because the row the defer step just bumped to `ceiling` would
+    otherwise be picked up by a charge step that ran after it.
+
+    `column` is interpolated into the UPDATE text rather than bound as a
+    parameter (Postgres cannot bind an identifier), so it is restricted to a
+    fixed allowlist before it ever reaches a query string.
+    """
+    assert column in {"integrate_defers", "integrate_link_defers"}
+    charged = conn.execute(
+        f"UPDATE item_triage SET integrate_attempts = integrate_attempts + 1 "
+        f"WHERE item_id = ANY(%s) AND {column} >= %s "
+        f"RETURNING item_id",
+        (ids, ceiling),
+    ).fetchall()
+    deferred = conn.execute(
+        f"UPDATE item_triage SET {column} = {column} + 1 "
+        f"WHERE item_id = ANY(%s) AND {column} < %s "
+        f"RETURNING item_id",
+        (ids, ceiling),
+    ).fetchall()
+    if charged:
+        tally.failed_integration += len(charged)
+        tally.defer_cap_hit += len(charged)
+        _note(tally, capped_key, len(charged))
+    if deferred:
+        setattr(tally, deferred_field, getattr(tally, deferred_field) + len(deferred))
+        _note(tally, deferred_key, len(deferred))
 
 
 def _absence(obj: dict, field_name: str) -> str:
@@ -820,33 +890,30 @@ def run(conn, now=None) -> Tally:
             # it. So the ceiling converts the failure back into a charge, and
             # the three-strike door still closes behind it.
             #
-            # Charge FIRST, then defer. The other order walks a row onto the
-            # ceiling and charges it in the same pass, which raises the
-            # effective ceiling by one every time and never reaches it.
+            # Charge FIRST, then defer -- see _defer_or_charge's docstring for
+            # why the other order never reaches the ceiling.
             ids = [it["id"] for it in batch]
             ceiling = int(common.COMPREHEND_MAX_DEFERS)
-            charged = conn.execute(
-                "UPDATE item_triage SET integrate_attempts = integrate_attempts + 1 "
-                "WHERE item_id = ANY(%s) AND integrate_defers >= %s "
-                "RETURNING item_id",
-                (ids, ceiling),
-            ).fetchall()
-            deferred = conn.execute(
-                "UPDATE item_triage SET integrate_defers = integrate_defers + 1 "
-                "WHERE item_id = ANY(%s) AND integrate_defers < %s "
-                "RETURNING item_id",
-                (ids, ceiling),
-            ).fetchall()
-            if charged:
-                tally.failed_integration += len(charged)
-                tally.defer_cap_hit += len(charged)
-                _note(tally, f"batch_capped:{type(exc).__name__}", len(charged))
-            if deferred:
-                tally.deferred_response += len(deferred)
-                _note(tally, f"batch:{type(exc).__name__}", len(deferred))
+            name = type(exc).__name__
+            before_charged, before_deferred = (
+                tally.failed_integration,
+                tally.deferred_response,
+            )
+            _defer_or_charge(
+                conn,
+                ids,
+                tally,
+                column="integrate_defers",
+                ceiling=ceiling,
+                deferred_field="deferred_response",
+                deferred_key=f"batch:{name}",
+                capped_key=f"batch_capped:{name}",
+            )
+            charged_n = tally.failed_integration - before_charged
+            deferred_n = tally.deferred_response - before_deferred
             log.warning(
                 f"Comprehend: integration batch failed; "
-                f"{len(deferred)} deferred, {len(charged)} charged at the "
+                f"{deferred_n} deferred, {charged_n} charged at the "
                 f"defer ceiling of {ceiling}",
                 exc_info=True,
             )
