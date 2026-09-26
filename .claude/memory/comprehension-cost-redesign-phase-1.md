@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: 9ddd2146-00b2-42bb-a88a-0f15d3efd634
-  modified: 2026-09-26T10:17:39.032Z
+  modified: 2026-09-26T18:14:31.815Z
 ---
 
 **Why it exists:** after re-enabling comprehension, the operator was topping up the Anthropic account by
@@ -37,6 +37,11 @@ pause left a backlog that was drained oldest-first, on Sonnet, with no budget.
 - **The spike is BUILT, NOT RUN: `scripts/probe_clustering.py`, bead `1tl`, blocks `vlg`.** Run it on the host with `docker compose run --rm --entrypoint python newsbrief scripts/probe_clustering.py`. It can run before 30 Sep, because it only reads.
   - **Operator's pre-registered rule:** at W=2h, the simplest of T, then T-cc, then TE-cc within 5 pts of real time wins. If none is, the rewrite redesigns the blindness before batching.
   - **My guesses:** T 40–60%, TE-cc 85%+, RT 85–95%.
+- **2026-09-26 later, the spike ran.** VERDICT: NONE (TE-cc 65.4% vs RT 97.2%). M1 (the density sweep, `4le`) found that batching qualifies only at ≤ 5 material items/h, and that **RT itself falls to 74.8% at 5/h**. M2 (Haiku replay, `y1x`) is pre-registered but not built. Everything is in `docs/2026-09-26-clustering-recall-spike-result.md`.
+- **In-request NEW links (`6kr`) are BUILT on main, as integration prompt v3**, and deploy inert while comprehension is off. Record: `docs/2026-09-26-in-request-new-links-implementation-record.md`.
+  - A prompt-version bump no longer re-integrates anything, so do NOT rely on a bump to re-extract (`wt8`).
+  - Before the restart, do `jwm` (add `unmapped_candidate` to the runbook watch list).
+  - After 7 days, runbook Step 7's co-batched and linked pair counts are owed.
 - Open beads from this work:
   - `2ln` (state_store aliasing);
   - `eqs` (are timed-out requests billed?);
