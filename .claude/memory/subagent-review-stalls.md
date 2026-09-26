@@ -194,3 +194,11 @@ See [[newsbrief-commit-to-main]] (solo repo → commit straight to main during t
 - **The controller re-reviewing small fix rounds itself (by reading the diff and checking the
   pre-registered mutations) was ruled OK (R20).** It was offset by pointing the final review at
   exactly those commits, which then cleared them.
+
+## 2026-09-26 (6kr, 6 tasks): the prevention works, but only if it is in the brief you actually send
+
+The shared `env.md` omitted "run long commands in the FOREGROUND", and Task 2 parked on its
+background gate run exactly as recorded above. From Task 3 on, the line was in every dispatch,
+and there were 0 parks in 4 tasks. The rule was already in this file. The index line carried
+only the cure ("nudge"), so it was not in view at dispatch time. **Put the prevention in the
+shared context file before the first dispatch.**

@@ -212,3 +212,20 @@ and the inner break is the load-bearing guard.
 invariant before concluding the test is weak. Then mutate each site alone AND both together.
 The site whose removal fails tests is the real guard. Name it in the record so a later refactor
 does not delete the "redundant" one.
+
+## 2026-09-26 (6kr): a change can blind its OWN test, and a relocation can be a non-mutation
+
+Three mutation checks lost in one build, and each was a test that could not fail. All three were
+found by running mutations or traces; none by the two plan red-teams.
+- **The task's own change made the order test unobservable.** A test pinned "reference pre-check
+  runs before the entity-less return". Task 5 then made the entity-less branch fall through for
+  reference-only items, so moving the pre-check changed nothing for that fixture. The order was
+  observable only on a MIXED item (a NEW event plus an unresolved reference). **When a task
+  changes a branch, re-ask which inputs still discriminate every guard around it.** This is
+  `the-rule-exempts-its-own-origin` at unit scale.
+- **Moving an increment to the END of a block is not a mutation of "increment after commit"**,
+  because nothing after it can raise. It reads 0 honestly. Name the regression the guard exists
+  for (here, an eager per-event increment) and mutate THAT.
+- **A required mutation can be silently skipped.** The implementer's table had 3 rows, and the
+  controller had required 4. Check each report's mutation table against the list of required
+  rows before dispatching review; do not rely on the review to count them.
