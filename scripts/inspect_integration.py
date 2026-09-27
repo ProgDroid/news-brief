@@ -41,13 +41,11 @@ import db  # noqa: E402  (path shim above must run first)
 from comprehend import (  # noqa: E402
     _ENTITY_LABEL,
     _EVENT_LABEL,
-    CANDIDATE_ENTITY_CAP,
     SurfaceIndex,
     Tally,
     build_integration_request,
     call_integration,
-    candidate_events,
-    clean,
+    integration_candidates,
     label_map,
     parse_integration_response,
     pending_integration,
@@ -62,34 +60,16 @@ def select_batch(conn, limit: int) -> list[dict]:
 
 
 def build_candidates(conn, batch: list[dict]) -> tuple[list[dict], list[dict]]:
-    """Candidate entities and events, assembled exactly as `run()` assembles them.
+    """Candidate entities and events, from the SAME function `run()` calls.
 
     Approximating this would measure a different layer than the one that failed:
     the candidate lists are part of the prompt, and an id the model was never
-    offered is one of the things `_validate_item` rejects on.
+    offered is one of the things `_validate_item` rejects on. This used to be a
+    hand copy of run()'s inline assembly; it is now `integration_candidates`
+    (news-brief-y1x).
     """
-    index = SurfaceIndex.build(conn)
-    hits = [
-        sf
-        for it in batch
-        for sf in index.match(f"{clean(it['title'])}\n{clean(it['body'])}")
-        if sf.entity_id is not None
-    ]
-    ranked = sorted(dict.fromkeys(sf.entity_id for sf in hits), reverse=True)
-    entity_ids = ranked[:CANDIDATE_ENTITY_CAP]
-    cand_entities = (
-        [
-            {"id": r[0], "name": r[1], "type": r[2]}
-            for r in conn.execute(
-                "SELECT id, name, type FROM entities WHERE id = ANY(%s)",
-                (entity_ids,),
-            ).fetchall()
-        ]
-        if entity_ids
-        else []
-    )
-    return cand_entities, candidate_events(
-        conn, entity_ids, [it["title"] for it in batch], Tally(enabled=True)
+    return integration_candidates(
+        conn, SurfaceIndex.build(conn), batch, Tally(enabled=True)
     )
 
 

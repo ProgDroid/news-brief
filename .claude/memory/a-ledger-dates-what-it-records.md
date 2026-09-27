@@ -66,3 +66,17 @@ minted, so an unfiltered probe would "join" two items through an entity the firs
 That inflates the result exactly where the question is hardest (new stories). **Before replaying
 history through a production lookup, ask which of its rows the replayed moment could not yet
 have seen, and filter by a birth time you have checked means what you need.**
+
+**Two more leaks of the same kind, found by review of the M2 replay before it ran (2026-09-26,
+`y1x`).** Both were in code that already filtered by birth:
+- **A BATCH replays as of its EARLIEST member, not its anchor.** Its members are integrated
+  together, so nothing any of them produced exists at call time. With the anchor as the
+  cut-off, a member 30 minutes older was offered its own entity AND its own event, because the
+  backlog integrated it before the anchor's capture. Every run would then have "agreed" by
+  matching itself, pushing a model-comparison verdict toward "equivalent".
+- **"Born" must mean an item that NAMES it.** `entity_births` took the earliest item asserting
+  ANY event tagged with the entity. But the writer tags a MATCHED older event with the matching
+  item's NEW entities, so that rule dated entities to before they existed.
+  **Tell: a birth derived through a join that the write path also appends to later.**
+  Ask which writes can attach a row to OLDER history.
+

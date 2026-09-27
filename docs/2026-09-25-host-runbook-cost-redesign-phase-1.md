@@ -88,6 +88,17 @@ says**, and record the output verbatim in `docs/`.
 > refuses on its own rather than relying on the ordering being remembered. If it returns
 > a verdict rather than refusing, that verdict stands.
 
+**`li9` landed 2026-09-26, before this run, and its bound was registered then.** If the
+deployed image includes it, the gate refuses when any gap between consecutive cohort
+events, or from the last of them to `end`, exceeds the horizon. The bound is 6h for this
+run. The header line now reads `... last event <t>, largest gap <h>h (<from> to <to>)`.
+Record that line with the rest of the output. It is the continuity fact, and it is
+printed on every run, not only on refusals.
+It can only change this run's outcome in the case the ordering above already forbids: a
+restart that makes `last_event_at` fresh while the cohort has a hole. zp8's frozen branch
+is checked first. So if the corpus is still stopped at run time, the refusal reads "the
+corpus is FROZEN", with or without `li9`.
+
 Nothing appeals this run. Whatever `docs/2026-09-22-host-runbook-comprehension-restart.md`
 step 5 returns is the recorded result.
 
@@ -221,7 +232,7 @@ comprehend side; capture's own tally field for the same idea is spelled differen
 **First days: watch the in-request NEW-label tally (`news-brief-6kr`).** Every
 `Comprehend: {tally}` line also carries the fields that landed with in-request linking.
 Record, day by day: `events_linked_in_request`, `entityless_reference_written`,
-`new_label_fallback`, `deferred_neighbour`, and every `defer_capped:*` /
+`new_label_fallback`, `deferred_neighbour`, `unmapped_candidate`, and every `defer_capped:*` /
 `validate:new_label_*` / `validate:malformed` key that appears at all — most will be
 zero most days, and that is the expected reading, not a gap in the log.
 
@@ -234,6 +245,16 @@ zero most days, and that is the expected reading, not a gap in the log.
   neighbour fault (an orphaned or unresolved `new_label`) keeps recurring for the same
   item past `COMPREHEND_MAX_LINK_DEFERS` (settings row, default 10) — that item is stuck,
   not merely deferred once. File a bead and attach the `Comprehend:` tally line.
+- **`unmapped_candidate` above zero (`news-brief-jwm`).** It counts a `candidate` the
+  model supplied that names nothing offered. A compliant model keeps it at 0, the reading
+  recorded after the opaque-label fix.
+  Prompt v4 says NEW labels go on events only, because v3's wording left room for an
+  entity `candidate: "NEW1"`. That case does no harm to the data: `_resolve_label` falls
+  back to a name match, and the entity is still written. But it would raise this counter
+  for a reason that is not the label-collision fault the counter was built to catch. A
+  non-zero day means reading the payload before assuming either cause:
+  `scripts/inspect_integration.py` prints the raw `emit_extraction` input. File a bead
+  and attach the tally line.
 
 ## Step 6 — the deliberate-exhaustion check
 

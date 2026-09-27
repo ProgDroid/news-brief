@@ -2158,6 +2158,22 @@ def test_the_prompt_lets_later_items_reference_new_labels():
     assert "never invent or number a label" not in lowered
 
 
+def test_the_prompt_scopes_new_labels_to_events():
+    """news-brief-jwm. v3's CANDIDATE LABELS sentence offered NEW labels
+    without naming what carries them, and it covers ENT and EVT alike, so an
+    entity `candidate: NEW1` read as permitted. That is harmless to the data
+    (`_resolve_label` falls back to a name match) but it raises
+    `unmapped_candidate`, which is the compliance meter for the opaque-label
+    fix -- so the prompt, not the meter, has to carry the scope. A string
+    check, and only that: whether the model obeys it is the runbook's
+    first-days watch, not something a unit test can see."""
+    lowered = comprehend._INTEGRATE_SYSTEM.lower()
+    labels_paragraph = lowered.split("candidate labels.", 1)[1].split("\n\n", 1)[0]
+    assert "on an event only, to a new label" in labels_paragraph
+    assert "never on an entity" in labels_paragraph
+    assert comprehend.INTEGRATE_PROMPT_VERSION == 4
+
+
 def test_a_cold_start_pass_links_two_outlets_in_one_request(kb, monkeypatch):
     """End to end through comprehend.run, empty KB, two tracked-story items
     from two outlets in one request: the declarer (created SECOND, so it is

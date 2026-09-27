@@ -28,7 +28,7 @@ pause left a backlog that was drained oldest-first, on Sonnet, with no budget.
 - models frozen once per pass.
 
 **How to apply:**
-- **Nothing ran on the host.** Execute `docs/2026-09-25-host-runbook-cost-redesign-phase-1.md` IN ORDER. Step 2 (the old corroboration gate) must run BEFORE comprehension is enabled; `zp8` cannot see a mid-window hole (`li9`). The epic stays open until the operator reports the runbook's observations.
+- **Nothing ran on the host.** Execute `docs/2026-09-25-host-runbook-cost-redesign-phase-1.md` IN ORDER. Step 2 (the old corroboration gate) must run BEFORE comprehension is enabled; `li9` (2026-09-26) now refuses a cohort gap > horizon, interior or trailing, and prints the largest gap. zp8's frozen branch still fires first, so li9 cannot change the 09-30 run unless comprehension restarted too early. The epic stays open until the operator reports the runbook's observations.
 - A push to main publishes `:latest`, so the phase-1 image may already be deployed. That is runbook step 1, and it is safe only because comprehension is off.
 - The triage model moves to Haiku via the `NEWSBRIEF_TRIAGE_MODEL` row, **not `TRIAGE_MODEL`**, which is accepted and read by nothing. `thinking: disabled` on Haiku 4.5 is documented, not observed. A 400 there is a 4xx, and a 4xx CHARGES items, so watch that first pass.
 - Decisions, defects the reviews found, and all 23 rulings: `docs/2026-09-25-comprehension-cost-phase-1-implementation-record.md`.
@@ -37,10 +37,10 @@ pause left a backlog that was drained oldest-first, on Sonnet, with no budget.
 - **The spike is BUILT, NOT RUN: `scripts/probe_clustering.py`, bead `1tl`, blocks `vlg`.** Run it on the host with `docker compose run --rm --entrypoint python newsbrief scripts/probe_clustering.py`. It can run before 30 Sep, because it only reads.
   - **Operator's pre-registered rule:** at W=2h, the simplest of T, then T-cc, then TE-cc within 5 pts of real time wins. If none is, the rewrite redesigns the blindness before batching.
   - **My guesses:** T 40–60%, TE-cc 85%+, RT 85–95%.
-- **2026-09-26 later, the spike ran.** VERDICT: NONE (TE-cc 65.4% vs RT 97.2%). M1 (the density sweep, `4le`) found that batching qualifies only at ≤ 5 material items/h, and that **RT itself falls to 74.8% at 5/h**. M2 (Haiku replay, `y1x`) is pre-registered but not built. Everything is in `docs/2026-09-26-clustering-recall-spike-result.md`.
+- **2026-09-26 later, the spike ran.** VERDICT: NONE (TE-cc 65.4% vs RT 97.2%). M1 (the density sweep, `4le`) found that batching qualifies only at ≤ 5 material items/h, and that **RT itself falls to 74.8% at 5/h**. M2 (Haiku replay, `y1x`) is **BUILT, NOT RUN** (`scripts/replay_haiku.py`; host: `--dry-run`, `--limit 2`, then full, <= $10). A pre-run review caught a self-offer leak that would have biased it toward Haiku qualifying. Everything is in `docs/2026-09-26-clustering-recall-spike-result.md`.
 - **In-request NEW links (`6kr`) are BUILT on main, as integration prompt v3**, and deploy inert while comprehension is off. Record: `docs/2026-09-26-in-request-new-links-implementation-record.md`.
   - A prompt-version bump no longer re-integrates anything, so do NOT rely on a bump to re-extract (`wt8`).
-  - Before the restart, do `jwm` (add `unmapped_candidate` to the runbook watch list).
+  - `jwm` DONE 2026-09-26: integration prompt **v4** scopes NEW labels to events; runbook Step 5 watches `unmapped_candidate`.
   - After 7 days, runbook Step 7's co-batched and linked pair counts are owed.
 - Open beads from this work:
   - `2ln` (state_store aliasing);

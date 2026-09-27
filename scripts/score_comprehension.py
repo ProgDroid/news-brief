@@ -202,6 +202,28 @@ def corroboration_by_outlet(conn, since=None, until=None, horizon_hours=None):
     return (multi / total if total else 0.0), total, multi
 
 
+def largest_gap(conn, since, until):
+    """The longest stretch of [since, until) with no event created in it,
+    measured between consecutive events and from the last of them to `until`.
+    Returns (gap, start, stop), earliest first on a tie, or None if the window
+    holds no event at all.
+
+    The LEAD stretch, `since` to the first event, is deliberately excluded
+    (news-brief-li9): a pipeline that starts late misstates the span but mixes
+    no populations, whereas a stop-and-restart inside the window does both.
+    """
+    row = conn.execute(
+        "WITH c AS (SELECT created_at FROM events "
+        "           WHERE created_at >= %s AND created_at < %s), "
+        "s AS (SELECT lag(created_at) OVER (ORDER BY created_at) AS a, "
+        "             created_at AS b FROM c "
+        "      UNION ALL SELECT max(created_at), %s::timestamptz FROM c) "
+        "SELECT a, b FROM s WHERE a IS NOT NULL ORDER BY b - a DESC, a LIMIT 1",
+        (since, until, until),
+    ).fetchone()
+    return (row[1] - row[0], row[0], row[1]) if row else None
+
+
 def gate_corroboration(conn, cutover, horizon_hours, now=None):
     """Spec 8.2's outlet direction, scoped to ONE post-cutover cohort.
 
@@ -244,6 +266,7 @@ def gate_corroboration(conn, cutover, horizon_hours, now=None):
             "multi": 0,
             "span": None,
             "last_event_at": last_event_at,
+            "largest_gap": None,
         }
     rate, total, multi = corroboration_by_outlet(
         conn, since=cutover, until=end, horizon_hours=horizon_hours
@@ -262,7 +285,9 @@ def gate_corroboration(conn, cutover, horizon_hours, now=None):
             "multi": 0,
             "span": span,
             "last_event_at": last_event_at,
+            "largest_gap": None,
         }
+    gap = largest_gap(conn, cutover, end)
     if last_event_at is not None and last_event_at < end - timedelta(
         hours=horizon_hours
     ):
@@ -297,6 +322,35 @@ def gate_corroboration(conn, cutover, horizon_hours, now=None):
             "multi": multi,
             "span": span,
             "last_event_at": last_event_at,
+            "largest_gap": gap,
+        }
+    if gap[0] > timedelta(hours=horizon_hours):
+        # news-brief-li9. zp8 above reads the newest event ANYWHERE, so a
+        # corpus that stops and RESTARTS inside the window -- or restarts after
+        # it, leaving the cohort's tail empty -- satisfies it, and the rate
+        # below would be a binding verdict on two pipelines and a multi-day
+        # hole. Same margin as zp8, for zp8's reason: `horizon_hours` is the
+        # caller's parameter, and zp8's own test IS this one applied to the
+        # trailing stretch only. Pre-registered 2026-09-26, before use on any
+        # window.
+        _, start, stop = gap
+        closes = "the end of the window" if stop == end else f"{stop:%Y-%m-%d %H:%M %Z}"
+        return {
+            "status": "not_measurable",
+            "reason": (
+                f"the cohort has a HOLE: no event was created between "
+                f"{start:%Y-%m-%d %H:%M %Z} and {closes}, "
+                f"{gap[0].total_seconds() / 3600:.1f}h, longer than the "
+                f"{horizon_hours:g}h horizon. The {total} events in this window "
+                "come from a pipeline that stopped mid-cohort, so they are not "
+                "one population and their rate is a verdict on none"
+            ),
+            "rate": None,
+            "total": total,
+            "multi": multi,
+            "span": span,
+            "last_event_at": last_event_at,
+            "largest_gap": gap,
         }
     if rate < CORROBORATION_FLOOR:
         status = "fail"
@@ -321,6 +375,7 @@ def gate_corroboration(conn, cutover, horizon_hours, now=None):
         "multi": multi,
         "span": span,
         "last_event_at": last_event_at,
+        "largest_gap": gap,
     }
 
 
@@ -596,10 +651,18 @@ def run_gate(conn, cutover=None, horizon_hours=None) -> list[str]:
             freshness = (
                 f"{last:%Y-%m-%d %H:%M %Z}" if last is not None else "NONE (empty KB)"
             )
+            # And its continuity beside it, for the same reason (news-brief-li9).
+            gap = verdict["largest_gap"]
+            continuity = (
+                f"{gap[0].total_seconds() / 3600:.1f}h "
+                f"({gap[1]:%Y-%m-%d %H:%M} to {gap[2]:%Y-%m-%d %H:%M %Z})"
+                if gap is not None
+                else "n/a (no events in the cohort)"
+            )
             print(
                 f"cohort [{span[0]:%Y-%m-%d %H:%M %Z}, "
                 f"{span[1]:%Y-%m-%d %H:%M %Z}), exposure {horizon_hours:g}h, "
-                f"last event {freshness}"
+                f"last event {freshness}, largest gap {continuity}"
             )
         if verdict["status"] == "not_measurable":
             failures.append(f"{NOT_MEASURABLE}: corroboration ({verdict['reason']})")

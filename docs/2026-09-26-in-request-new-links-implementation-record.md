@@ -82,8 +82,9 @@ then 2, 1, 4, 1, 1) and Task 2's order swap (2).
 ## Open work
 
 **Before the phase-1 restart:**
-- `news-brief-jwm`: add `unmapped_candidate` to the runbook's first-days list. The v3 CANDIDATE
-  LABELS sentence also covers entities.
+- ~~`news-brief-jwm`~~ DONE 2026-09-26: prompt **v4** scopes NEW labels in the CANDIDATE
+  LABELS sentence to events only, and the runbook's Step 5 first-days list now watches
+  `unmapped_candidate`.
 
 **Owed on the host:**
 - `6kr` is closed, but its close reason names the observation still owed: runbook Step 7's

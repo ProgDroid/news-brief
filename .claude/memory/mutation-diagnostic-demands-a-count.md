@@ -229,3 +229,13 @@ found by running mutations or traces; none by the two plan red-teams.
 - **A required mutation can be silently skipped.** The implementer's table had 3 rows, and the
   controller had required 4. Check each report's mutation table against the list of required
   rows before dispatching review; do not rely on the review to count them.
+- **An inclusive-boundary test on decimal operands can be unable to fail** (2026-09-26, `y1x`).
+  `0.85 - 0.05 == 0.7999999999999999`, so a case "exactly at 5 points" passes under `>=` AND
+  `>`. Found while pre-registering the `>=`-to-`>` mutation: a correct prediction of "1 failure"
+  was impossible. Compare `round(a - b, 9)` against the tolerance. **Writing the expected count
+  is what exposes a boundary test that cannot discriminate.**
+- **A count far ABOVE the prediction usually means a broken MUTANT.** 14 failures against a
+  predicted 2 came from a mutant that was a SQL type error (`timestamptz + timestamptz`) and
+  crashed every test that touched it. Fix the mutant and re-run before believing that the tests
+  are "very sensitive". A mutant that fails to execute is not a mutation.
+

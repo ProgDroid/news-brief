@@ -1,6 +1,7 @@
 """Integration stage: candidates, parsing, and the savepoint write path."""
 
 import json
+from datetime import timedelta
 
 import pytest
 
@@ -1571,8 +1572,10 @@ def test_an_entityless_referencer_is_written(kb):
 
 def test_an_entityless_EVT_match_is_written(kb):
     """A candidate_id match needs nothing new_ref does either. The written
-    assertion's prompt_version is 3 -- this is new behaviour this task
-    switches on, so every row it writes must be stamped with it."""
+    assertion carries the LIVE prompt_version -- this behaviour arrived in
+    v3, so every row it writes must be stamped with a version at least
+    that new. Read from the constant, not hardcoded: v4 (news-brief-jwm)
+    broke the literal 3 without changing anything this test is about."""
     ent = _entity(kb)
     ev = _event(kb, ent)
     iid = _item(kb)
@@ -1593,7 +1596,8 @@ def test_an_entityless_EVT_match_is_written(kb):
     rows = kb.execute(
         "SELECT event_id, prompt_version FROM assertions WHERE item_id = %s", (iid,)
     ).fetchall()
-    assert rows == [(ev, 3)]
+    assert rows == [(ev, comprehend.INTEGRATE_PROMPT_VERSION)]
+    assert comprehend.INTEGRATE_PROMPT_VERSION >= 3
     assert tally.entityless_reference_written == 1
 
 
@@ -1742,3 +1746,59 @@ def test_an_entityless_extraction_mixing_a_new_event_and_a_reference_is_terminal
     assert kb.execute("SELECT count(*) FROM assertions").fetchone()[0] == 0
     assert tally.entityless_extraction == 1
     assert tally.entityless_reference_written == 0
+
+
+# ── news-brief-y1x: ONE definition of an integration call's candidates ─────
+#
+# run() assembled candidates inline and scripts/inspect_integration.py kept a
+# hand copy; the Haiku replay needs the same assembly AS OF a past instant. A
+# third copy is how a diagnostic ends up measuring a query production no
+# longer runs (reconstruction-drifts-from-production), so it is a function.
+
+
+def test_integration_candidates_offers_what_the_batch_mentions(kb):
+    ent = _entity(kb, "Ukraine")
+    other = _entity(kb, "Chile")
+    ev = _event(kb, ent)
+    _event(kb, other, summary="An election was held")
+    kb.commit()
+    index = comprehend.SurfaceIndex.build(kb)
+    batch = [{"id": 1, "title": "Ukraine ceasefire", "body": ""}]
+    ents, evs = comprehend.integration_candidates(kb, index, batch, comprehend.Tally())
+    assert [e["id"] for e in ents] == [ent]
+    assert ents[0]["name"] == "Ukraine" and ents[0]["type"] == "country"
+    assert [e["id"] for e in evs] == [ev]
+
+
+def test_integration_candidates_passes_as_of_through_to_candidate_events(kb):
+    """An event created AFTER `as_of` must not be offered: the replay asks
+    what a past call would have seen, and a future event is exactly what it
+    would not have."""
+    ent = _entity(kb, "Ukraine")
+    ev = _event(kb, ent)
+    kb.commit()
+    created = kb.execute(
+        "SELECT created_at FROM events WHERE id = %s", (ev,)
+    ).fetchone()[0]
+    index = comprehend.SurfaceIndex.build(kb)
+    batch = [{"id": 1, "title": "Ukraine ceasefire", "body": ""}]
+    before = comprehend.integration_candidates(
+        kb, index, batch, comprehend.Tally(), as_of=created
+    )[1]
+    after = comprehend.integration_candidates(
+        kb, index, batch, comprehend.Tally(), as_of=created + timedelta(seconds=1)
+    )[1]
+    assert before == []
+    assert [e["id"] for e in after] == [ev]
+
+
+def test_integration_candidates_caps_entities_newest_first(kb, monkeypatch):
+    monkeypatch.setattr(comprehend, "CANDIDATE_ENTITY_CAP", 2)
+    ids = [_entity(kb, name) for name in ("Alpha", "Bravo", "Charlie")]
+    kb.commit()
+    index = comprehend.SurfaceIndex.build(kb)
+    tally = comprehend.Tally()
+    batch = [{"id": 1, "title": "Alpha Bravo Charlie", "body": ""}]
+    ents, _ = comprehend.integration_candidates(kb, index, batch, tally)
+    assert sorted(e["id"] for e in ents) == sorted(ids[1:])
+    assert tally.candidate_cap_hit == 1

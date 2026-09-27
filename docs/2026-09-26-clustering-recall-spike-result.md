@@ -168,3 +168,72 @@ ships.** The next gate window inherits that loss.
 pair is either in one request (linked) or in successive micro-batches (offered). This is
 structural visibility, and whether the model actually uses `NEW` labels is its own measurement.
 Filed separately.
+
+## M2 built (2026-09-26): refinements fixed before any run
+
+`scripts/replay_haiku.py` (`news-brief-y1x`). The M2 pre-registration above left four details
+open. The operator settled them on 2026-09-26, **before the script existed**, and they are
+fixed in its docstring:
+
+- **Batches.** 100 are anchored on the later item of a random cross-outlet pair (≤ 2 h apart,
+  both items material). 50 are anchored on a random material item. Each anchor is batched
+  with up to 4 material items captured in the hour before it, which is a real-time
+  micro-batch. The two kinds are shuffled together, with seed `20260926`, so a stop at the
+  spend cap still holds both.
+- **Spend.** Hard cap **$10**. Before each batch, the guard holds back a worst case for every
+  attempt of all three runs (a transient fault is retried once): input at 3 chars/token, and
+  the full 8192-token output budget. A failed attempt may still have been billed, so it is
+  charged against the cap at its worst case. Calls that finish alongside an abort are still
+  counted. A free `--dry-run` prints the batches and a projection built from
+  `comprehend_spend`'s historical means.
+- **Population.** Agreement is measured over items **all three** runs extracted, so A-A′ and
+  A-H share one denominator. The operator chose "all items both kept" over a match-only
+  subset. The match-only subset (items where any run matched something) is printed beside it
+  and not ruled on.
+- **Decision.** An item's decision is the set of existing events it matched, plus the
+  in-request clusters it belongs to. A cluster is the set of items that share one
+  `NEW`-labelled event, the declarer included. Label names differ between runs, so
+  clusters are compared as item sets, and it does not matter which item the model made the
+  declarer. A `NEW` label declared on an existing event resolves to that event.
+- **Boundary.** Both 5-point clauses are inclusive. The differences are rounded to 1e-9
+  before comparison, because `0.85 − 0.05` is `0.7999…` in binary. Rule, guesses and
+  `MIN_BATCHES = 30` are unchanged from the section above.
+
+**Cut-off and births, corrected by the pre-run review**
+(`docs/superpowers/reviews/2026-09-26-jwm-li9-y1x-review.md`: one blocker, one major, six
+minor, all fixed and each fix mutation-checked before any run):
+- **The batch's cut-off is its EARLIEST member's capture, not the anchor's.** A real-time
+  micro-batch integrates its members together, so nothing they produce exists when the call
+  is made. With the anchor as cut-off, a member captured 30 minutes earlier would have been
+  offered its own entity and its own event (backlog-integrated before the anchor). Both
+  agreements would have been pushed toward 100%, and the verdict toward "qualifies".
+- **An entity is born with the first asserting item whose text NAMES it**, capped at
+  `entities.created_at`. `probe_clustering.entity_births` dates it from ANY item asserting a
+  tagged event. But `write_extraction` tags a MATCHED older event with the matching item's
+  new entities, so that rule dates such an entity before it existed.
+- **Consequence for the spike above, stated and not re-run.** TE-cc's entity edge used
+  `entity_births`, so it saw entities early. That inflates TE-cc's visible share, which is
+  the direction that favours batching. TE-cc still missed the rule by 31.7 points, so the
+  NONE verdict stands with this bias removed. M1's sweep inherits the same upward bias on
+  TE-cc: its one qualifying cell (TE-cc at 5/h, +8.2) is an upper estimate.
+- **Pair batches are selected by production's own past links** (historical Sonnet asserted
+  both items onto one event), which favours A-A′ on that stratum. The script prints both
+  strata and names the random stratum as the unconfounded one.
+
+What stays **out** of the measurement, stated rather than hidden:
+- The replay runs the production functions `integration_candidates` (extracted from
+  `run()` for this purpose, and now shared with `inspect_integration.py`),
+  `build_integration_request` and `parse_integration_response`. There is no copy of the
+  candidate ranking.
+- Events are offered as of **`events.created_at`**, and the backlog wrote that late. So a
+  pair's earlier event may be missing at the batch's cut-off. The script prints how many pair
+  batches were offered the earlier item's event. That count bounds how much signal the match
+  decisions carry. When the earlier item is INSIDE the batch, the link can only be made
+  in-request, exactly as in real time.
+- A 4xx other than 429 **aborts** the run. The case in mind is Haiku refusing the
+  `thinking: disabled` shape (runbook step 5, documented-not-observed). Scoring it as 100%
+  dropped would fail Haiku on a request-shape fault.
+
+**Run order on the host:** `--dry-run` (free), then `--limit 2` (a smoke run of roughly
+$0.10, no verdict), then the full run. Record the full run's output verbatim in this
+document, and close `y1x` on it.

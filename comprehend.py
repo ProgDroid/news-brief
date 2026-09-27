@@ -31,7 +31,7 @@ from common import log
 # Bump on any material change to the triage prompt. A prompt change that is not
 # versioned is indistinguishable from a change in the world.
 TRIAGE_PROMPT_VERSION = 1
-INTEGRATE_PROMPT_VERSION = 3
+INTEGRATE_PROMPT_VERSION = 4
 
 # A pass must not outlive its own fire time: supervisor's _due_jobs loop alerts
 # on any job still running at its next fire. Hourly schedule, 40-minute bound.
@@ -812,39 +812,7 @@ def run(conn, now=None) -> Tally:
                 continue
 
         payload = [dict(it, outlet=outlets.get(it["outlet_id"], "?")) for it in batch]
-        hits = [
-            sf
-            for it in batch
-            for sf in index.match(f"{clean(it['title'])}\n{clean(it['body'])}")
-            if sf.entity_id is not None
-        ]
-        # Most-recent-first (spec §6), same as the event cap's ORDER BY DESC:
-        # truncation should drop the least likely candidates. Entity ids are
-        # monotonically increasing, so `id DESC` IS newest-first, and it is
-        # unambiguous -- unlike index insertion order, which is index-build
-        # order (SurfaceIndex.build's SELECT has no ORDER BY, so DB order is
-        # arbitrary) followed by this-run's add_entity appends. Keeping the
-        # FIRST N of insertion order means an entity THIS RUN just created is
-        # the first one dropped, defeating the mid-run index refresh that
-        # exists specifically to surface it as a candidate.
-        ranked = sorted(dict.fromkeys(sf.entity_id for sf in hits), reverse=True)
-        if len(ranked) > CANDIDATE_ENTITY_CAP:
-            tally.candidate_cap_hit += 1
-        entity_ids = ranked[:CANDIDATE_ENTITY_CAP]
-        cand_entities = (
-            [
-                {"id": r[0], "name": r[1], "type": r[2]}
-                for r in conn.execute(
-                    "SELECT id, name, type FROM entities WHERE id = ANY(%s)",
-                    (entity_ids,),
-                ).fetchall()
-            ]
-            if entity_ids
-            else []
-        )
-        cand_events = candidate_events(
-            conn, entity_ids, [it["title"] for it in batch], tally
-        )
+        cand_entities, cand_events = integration_candidates(conn, index, batch, tally)
 
         # Items whose only fault is referencing a label THIS batch's own
         # declarer failed to produce -- a neighbour's fault, spent against
@@ -1553,6 +1521,54 @@ CANDIDATE_WINDOW_DAYS = 14
 INTEGRATE_MAX_TOKENS = 8192
 
 
+def integration_candidates(
+    conn, index: "SurfaceIndex", batch: list[dict], tally: Tally, *, as_of=None
+) -> tuple[list[dict], list[dict]]:
+    """Candidate entities and events for ONE integration call. The ONE
+    definition: run() calls it, and so do scripts/inspect_integration.py and
+    scripts/replay_haiku.py, which used to need -- or would have needed -- a
+    copy (news-brief-y1x; see pending_integration for why copies drift).
+
+    `as_of` is passed to candidate_events unchanged. The caller owns what
+    `index` holds, so a replay asking what a PAST call saw passes an index
+    filtered to the entities that existed then.
+    """
+    hits = [
+        sf
+        for it in batch
+        for sf in index.match(f"{clean(it['title'])}\n{clean(it['body'])}")
+        if sf.entity_id is not None
+    ]
+    # Most-recent-first (spec §6), same as the event cap's ORDER BY DESC:
+    # truncation should drop the least likely candidates. Entity ids are
+    # monotonically increasing, so `id DESC` IS newest-first, and it is
+    # unambiguous -- unlike index insertion order, which is index-build
+    # order (SurfaceIndex.build's SELECT has no ORDER BY, so DB order is
+    # arbitrary) followed by this-run's add_entity appends. Keeping the
+    # FIRST N of insertion order means an entity THIS RUN just created is
+    # the first one dropped, defeating the mid-run index refresh that
+    # exists specifically to surface it as a candidate.
+    ranked = sorted(dict.fromkeys(sf.entity_id for sf in hits), reverse=True)
+    if len(ranked) > CANDIDATE_ENTITY_CAP:
+        tally.candidate_cap_hit += 1
+    entity_ids = ranked[:CANDIDATE_ENTITY_CAP]
+    cand_entities = (
+        [
+            {"id": r[0], "name": r[1], "type": r[2]}
+            for r in conn.execute(
+                "SELECT id, name, type FROM entities WHERE id = ANY(%s)",
+                (entity_ids,),
+            ).fetchall()
+        ]
+        if entity_ids
+        else []
+    )
+    cand_events = candidate_events(
+        conn, entity_ids, [it["title"] for it in batch], tally, as_of=as_of
+    )
+    return cand_entities, cand_events
+
+
 def candidate_events(
     conn, entity_ids: list[int], titles: list[str], tally: Tally, *, as_of=None
 ) -> list[dict]:
@@ -1680,7 +1696,8 @@ over" is a statement; whether the ceasefire is over is a separate matter.
 
 CANDIDATE LABELS. Candidates are listed with labels like ENT1 and EVT1. Set \
 `candidate` to one of those labels ONLY to refer to that exact listed item, \
-or to a NEW label as described below. OMIT `candidate` for an event you are \
+or, on an EVENT only, to a NEW label as described below -- never on an \
+entity. OMIT `candidate` for an event you are \
 the first to report -- never invent an ENT or EVT label. Entities are \
 deduplicated by name automatically, so you do not need an id to link two \
 mentions of the same actor across items.

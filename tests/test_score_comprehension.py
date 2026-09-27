@@ -671,3 +671,160 @@ def test_the_gate_prints_the_last_event_beside_the_cohort_span(kb, capsys):
     sc.run_gate(kb, cutover=BASE - timedelta(hours=24), horizon_hours=6)
     out = capsys.readouterr().out
     assert "last event" in out
+
+
+# ── news-brief-li9: a HOLE mid-cohort is not a live sample either ─────────────
+#
+# zp8 compares the newest event ANYWHERE in the KB against the end of the
+# cohort, so it sees a corpus that stopped -- and nothing else. A corpus that
+# stops and RESTARTS passes it, and the gate then renders a binding verdict on
+# a population mixing two pipelines across a multi-day gap (red-team of the
+# cost redesign, 2026-09-25, Objection 2(b)). The concrete case is the 09-30
+# run: the old corpus stopped ~09-25, and a phase-1 restart after the cohort's
+# end but before the run leaves zp8 satisfied and the cohort's tail empty.
+#
+# PRE-REGISTERED 2026-09-26, before use on any window: a cohort refuses when
+# any gap between consecutive events inside [cutover, end), or from the last
+# of them to `end`, exceeds `horizon_hours`. The bound is the caller's own
+# horizon, for the reason zp8 gave -- zp8's check is the trailing gap measured
+# from the newest event anywhere, so this is the same rule applied to every
+# gap. The LEAD gap (cutover to the first event) is deliberately not counted:
+# a late start misstates the span but mixes no pipelines.
+
+COHORT_DAYS = 7
+
+
+def _holed_cohort(kb):
+    """Events every 4h on days 1-3, none on days 4-5, every 4h on days 6-7,
+    single-outlet throughout. The newest lands after `end` so zp8 is
+    satisfied: ONLY a continuity check can refuse this."""
+    cutover = BASE - timedelta(days=COHORT_DAYS)
+    for h in range(1, 72, 4):  # days 1-3
+        _event_with_outlets(kb, cutover + timedelta(hours=h), 1)
+    for h in range(121, 167, 4):  # days 6-7, last at BASE - 3h
+        _event_with_outlets(kb, cutover + timedelta(hours=h), 1)
+    kb.commit()
+    return cutover
+
+
+def test_a_hole_mid_cohort_is_not_measurable(kb):
+    """The acceptance case. The OLD code returns a confident 0.0% "fail" here:
+    zp8 sees an event 3h before `now`, and the window is not empty."""
+    cutover = _holed_cohort(kb)
+    verdict = sc.gate_corroboration(kb, cutover=cutover, horizon_hours=6, now=BASE)
+    assert verdict["status"] == "not_measurable"
+    assert verdict["rate"] is None
+    assert "floor" not in verdict["reason"]
+    # Name WHERE the hole is, as zp8 names when the corpus stopped.
+    assert "2026-09-05" in verdict["reason"]  # the hole opens on day 3
+    assert "2026-09-07" in verdict["reason"]  # and closes on day 6
+
+
+def test_a_continuous_cohort_with_the_same_count_still_renders_a_verdict(kb):
+    """THE CONTROL. Same event count as the holed cohort, spread evenly, no
+    gap over the horizon: it must still FAIL on the floor. A check that
+    refused unconditionally would pass the test above and destroy the gate."""
+    holed = _holed_cohort(kb)
+    holed_total = sc.gate_corroboration(kb, cutover=holed, horizon_hours=6, now=BASE)[
+        "total"
+    ]
+    kb.execute("TRUNCATE events, assertions CASCADE")
+    kb.commit()
+
+    cutover = BASE - timedelta(days=COHORT_DAYS)
+    end = BASE - timedelta(hours=6)
+    step = (end - cutover) / (holed_total + 1)
+    assert step < timedelta(hours=6)
+    for k in range(1, holed_total + 1):
+        _event_with_outlets(kb, cutover + step * k, 1)
+    _event_with_outlets(kb, BASE - timedelta(hours=3), 1)  # after `end`
+    kb.commit()
+
+    verdict = sc.gate_corroboration(kb, cutover=cutover, horizon_hours=6, now=BASE)
+    assert verdict["total"] == holed_total
+    assert verdict["status"] == "fail"
+    assert "floor" in verdict["reason"]
+
+
+def test_a_hole_at_the_cohort_tail_is_not_measurable_even_after_a_restart(kb):
+    """The 09-30 shape. The cohort's events stop on day 3, and the pipeline
+    restarts AFTER `end`, so the newest event anywhere is fresh and zp8 is
+    satisfied. No gap BETWEEN cohort events is long: the hole is from the
+    last of them to `end`, and it must count."""
+    cutover = BASE - timedelta(days=COHORT_DAYS)
+    for h in range(1, 72, 4):
+        _event_with_outlets(kb, cutover + timedelta(hours=h), 1)
+    _event_with_outlets(kb, BASE - timedelta(hours=2), 1)  # restart after end
+    kb.commit()
+    verdict = sc.gate_corroboration(kb, cutover=cutover, horizon_hours=6, now=BASE)
+    assert verdict["status"] == "not_measurable"
+    assert "floor" not in verdict["reason"]
+
+
+def test_the_continuity_bound_is_the_exposure_horizon_and_not_a_new_number(kb):
+    """Events every 2h with a single 9h hole, running right up to `now`. At a
+    6h horizon the hole refuses; at 12h the same corpus is measured. A
+    constant bound could not produce both outcomes."""
+    cutover = BASE - timedelta(days=3)
+    t = cutover + timedelta(hours=1)
+    hole_at = cutover + timedelta(hours=20)
+    while t < BASE:
+        _event_with_outlets(kb, t, 1)
+        t += (
+            timedelta(hours=9)
+            if hole_at <= t < hole_at + timedelta(hours=2)
+            else (timedelta(hours=2))
+        )
+    kb.commit()
+    at_6 = sc.gate_corroboration(kb, cutover=cutover, horizon_hours=6, now=BASE)
+    at_12 = sc.gate_corroboration(kb, cutover=cutover, horizon_hours=12, now=BASE)
+    assert at_6["status"] == "not_measurable"
+    assert at_12["status"] == "fail"
+    assert at_6["largest_gap"][0] == timedelta(hours=9)
+
+
+def test_every_measured_verdict_carries_the_largest_gap(kb):
+    """Provenance beside the number on the PASSING path too, as zp8 did for
+    last_event_at: a precondition printed only when it fails is one nobody can
+    audit on the runs that passed."""
+    for _ in range(3):
+        _event_with_outlets(kb, BASE - timedelta(hours=12), 2)
+    for _ in range(7):
+        _event_with_outlets(kb, BASE - timedelta(hours=10), 1)
+    _event_with_outlets(kb, BASE - timedelta(hours=1), 1)
+    kb.commit()
+    verdict = sc.gate_corroboration(
+        kb, cutover=BASE - timedelta(hours=24), horizon_hours=6, now=BASE
+    )
+    assert verdict["status"] == "pass"
+    # The trailing stretch (last cohort event to `end` = BASE - 6h, 4h) beats
+    # the 2h interior gap, so this also pins that the stretch to `end` counts.
+    gap, start, stop = verdict["largest_gap"]
+    assert (gap, start, stop) == (
+        timedelta(hours=4),
+        BASE - timedelta(hours=10),
+        BASE - timedelta(hours=6),
+    )
+
+
+def test_the_gate_prints_the_largest_gap_beside_the_last_event(kb, capsys):
+    for _ in range(10):
+        _event_with_outlets(kb, BASE - timedelta(hours=12), 1)
+    _event_with_outlets(kb, BASE - timedelta(hours=2), 1)
+    kb.commit()
+    sc.run_gate(kb, cutover=BASE - timedelta(hours=24), horizon_hours=6)
+    header = next(
+        line for line in capsys.readouterr().out.splitlines() if "last event" in line
+    )
+    assert "largest gap" in header
+
+
+def test_equal_gaps_report_the_earliest(kb):
+    """largest_gap's docstring promises the earliest of equal gaps, so the
+    printed stretch is reproducible rather than whatever the plan returned."""
+    c = BASE - timedelta(hours=10)
+    for h in (1, 4, 7, 8):  # gaps 3, 3, 1, then 1 to the end
+        _event_with_outlets(kb, c + timedelta(hours=h), 1)
+    kb.commit()
+    gap = sc.largest_gap(kb, c, c + timedelta(hours=9))
+    assert gap == (timedelta(hours=3), c + timedelta(hours=1), c + timedelta(hours=4))
