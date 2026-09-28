@@ -133,39 +133,11 @@ def pooled_share(
     return confirmed / total if total else float("nan")
 
 
-def _system_clusters(
-    items: set[int],
-    outlet_of: dict[int, int],
-    events_of: dict[int, set[int]],
-) -> dict[int, frozenset[int]]:
-    """Connected components over `items`, linked when two items are on
-    different outlets and share an event id -- the same pairwise rule as
-    `confirms`, generalised to a whole cluster via union-find."""
-    parent = {i: i for i in items}
-
-    def find(x: int) -> int:
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    def union(x: int, y: int) -> None:
-        rx, ry = find(x), find(y)
-        if rx != ry:
-            parent[rx] = ry
-
-    ordered = sorted(items)
-    for i, a in enumerate(ordered):
-        for b in ordered[i + 1 :]:
-            if outlet_of[a] != outlet_of[b] and (
-                events_of.get(a, set()) & events_of.get(b, set())
-            ):
-                union(a, b)
-
-    components: dict[int, set[int]] = {}
-    for i in ordered:
-        components.setdefault(find(i), set()).add(i)
-    return {i: frozenset(components[find(i)]) for i in ordered}
+def _directly_linked(a: int, b: int, events_of: dict[int, set[int]]) -> bool:
+    """Two items are linked by the system iff they share an event id --
+    direct only, never transitive. A system that links x-y and y-z has NOT
+    linked x-z (R7 controller ruling, 2026-09-28)."""
+    return bool(events_of.get(a, set()) & events_of.get(b, set()))
 
 
 def pair_recall(
@@ -173,13 +145,13 @@ def pair_recall(
     outlet_of: dict[int, int],
     events_of: dict[int, set[int]],
 ) -> float:
-    """Of the cross-outlet pairs inside each true group, the share also
-    linked (sharing an event, cross-outlet) by the system."""
+    """Of the cross-outlet pairs inside each true (multi-outlet) group, the
+    share also directly linked (sharing an event) by the system. No
+    transitive closure: a pair counts only when that specific pair shares an
+    event, never via a third item."""
     hits = 0
     total = 0
     for window_groups in windows:
-        window_items: set[int] = set().union(*window_groups) if window_groups else set()
-        sys_clusters = _system_clusters(window_items, outlet_of, events_of)
         for g in window_groups:
             items = sorted(g)
             for i, a in enumerate(items):
@@ -187,7 +159,7 @@ def pair_recall(
                     if outlet_of[a] == outlet_of[b]:
                         continue
                     total += 1
-                    if b in sys_clusters[a]:
+                    if _directly_linked(a, b, events_of):
                         hits += 1
     return hits / total if total else float("nan")
 
@@ -197,17 +169,26 @@ def bcubed_recall(
     outlet_of: dict[int, int],
     events_of: dict[int, set[int]],
 ) -> float:
-    """The B-cubed recall of the system's event clusters against the true
-    groups: for each item, the share of its true group's members that also
-    fall in its system cluster, averaged over items."""
+    """Standard B-cubed recall of the system's direct links against the true
+    (multi-outlet) groups: for each item i in a group G(i), the share of
+    G(i) that is i itself or directly linked to i, averaged over items.
+
+    This is outlet-agnostic by design (`outlet_of` is accepted for interface
+    symmetry with `pair_recall` but not used) and a secondary clustering
+    metric only -- the cross-outlet headline is `confirms`/`pooled_share`.
+    Like `pair_recall`, linkage is direct only, never transitive: two
+    same-outlet items that each bridge to a third item are not counted as
+    linked to each other just because that third item links both.
+    """
     total = 0.0
     count = 0
     for window_groups in windows:
-        window_items: set[int] = set().union(*window_groups) if window_groups else set()
-        sys_clusters = _system_clusters(window_items, outlet_of, events_of)
         for g in window_groups:
             for i in g:
-                total += len(g & sys_clusters[i]) / len(g)
+                linked = sum(
+                    1 for j in g if j == i or _directly_linked(i, j, events_of)
+                )
+                total += linked / len(g)
                 count += 1
     return total / count if count else float("nan")
 

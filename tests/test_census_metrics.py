@@ -115,6 +115,35 @@ def test_pair_and_bcubed_recall_on_a_hand_partition():
     assert bcubed_recall(windows, outlet_of, events_of) == pytest.approx(5 / 9)
 
 
+def test_recall_is_not_transitive():
+    # x-y share event 1, y-z share event 2, but x-z share nothing: a system
+    # that links x-y and y-z has NOT linked x-z (R7 ruling).
+    outlet_of = {"x": 1, "y": 2, "z": 3}
+    events_of = {"x": {1}, "y": {1, 2}, "z": {2}}
+    windows = [[frozenset({"x", "y", "z"})]]
+
+    assert pair_recall(windows, outlet_of, events_of) == pytest.approx(2 / 3)
+    assert bcubed_recall(windows, outlet_of, events_of) == pytest.approx(
+        (2 / 3 + 1 + 2 / 3) / 3
+    )
+
+
+def test_bcubed_recall_same_outlet_pair_is_not_linked_via_bridge():
+    # p and q are on the SAME outlet and share no event with each other, but
+    # each shares a distinct event with r (a different outlet). Direct-link
+    # bcubed must not credit p and q as linked to each other through that
+    # bridge -- if it did (transitive closure), the recall below would be
+    # 1.0 (a perfect cluster) instead of 7/9.
+    outlet_of = {"p": 1, "q": 1, "r": 2}
+    events_of = {"p": {5}, "q": {6}, "r": {5, 6}}
+    windows = [[frozenset({"p", "q", "r"})]]
+
+    recall = bcubed_recall(windows, outlet_of, events_of)
+
+    assert recall == pytest.approx(7 / 9)
+    assert recall != pytest.approx(1.0)
+
+
 def test_pairwise_agreement_and_ari():
     ref = {1: 1, 2: 1, 3: 2, 4: 2}
     other_identical = dict(ref)
@@ -290,10 +319,22 @@ def test_deciles_returns_nine_cut_points():
     assert d == tuple(sorted(d))
 
 
-def test_item_bootstrap_interval_brackets_the_point_estimate():
-    ref = {i: (i % 2) for i in range(20)}
-    other = dict(ref)
+def test_item_bootstrap_interval_varies_and_is_seed_stable():
+    # ref != other, so the bootstrap distribution is non-degenerate: a
+    # broken resample (e.g. not actually sampling with replacement) or a
+    # broken percentile calculation would show up as a collapsed or shifted
+    # interval, unlike the ref == other case this replaces (constant 1.0 for
+    # every replicate regardless of whether the resample logic runs at all).
+    ref = {i: i % 3 for i in range(20)}
+    other = {i: (i // 2) % 3 for i in range(20)}
 
-    lo, hi = item_bootstrap_interval(adjusted_rand_index, ref, other, reps=200, seed=1)
+    point = adjusted_rand_index(ref, other)
+    lo, hi = item_bootstrap_interval(adjusted_rand_index, ref, other, reps=300, seed=7)
 
-    assert lo <= 1.0 <= hi + 1e-9
+    assert lo < hi
+    assert lo - 1e-9 <= point <= hi + 1e-9
+
+    lo2, hi2 = item_bootstrap_interval(
+        adjusted_rand_index, ref, other, reps=300, seed=7
+    )
+    assert (lo2, hi2) == (lo, hi)
