@@ -3910,6 +3910,14 @@ def mode_census_prepare():
     except ValueError:
         print(f"CENSUS_C439ADE_DEPLOYED_AT is missing or unparseable: {raw!r}")
         sys.exit(2)
+    if c439ade_deployed_at.tzinfo is None:
+        # R9: a naive value would be stored under whatever TimeZone the
+        # connection happens to have, and this date decides whether the
+        # block straddles the c439ade Reuters-proxy deploy (spec sec 4.2
+        # item 3) -- silently misreading it by a session's offset is worse
+        # than refusing.
+        print(f"CENSUS_C439ADE_DEPLOYED_AT has no timezone offset: {raw!r}")
+        sys.exit(2)
 
     now = datetime.now(timezone.utc)
     with db.connect() as conn:

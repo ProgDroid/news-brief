@@ -11,6 +11,11 @@ import census
 
 DEPLOYED_AT = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
 
+# Pinned (plan Global Constraint F13, "Tests pin `now`"): every census test
+# passes this instead of `datetime.now(timezone.utc)`, so `prepared_at` is an
+# assertable, exact value rather than "not None".
+NOW = datetime(2026, 10, 1, 9, 0, tzinfo=timezone.utc)
+
 
 def _outlet(conn, label: str) -> int:
     name = f"{label} {uuid.uuid4().hex[:8]}"
@@ -104,7 +109,7 @@ def seed_gap_pairs(
             )
 
 
-def prepared(conn, today: date = date(2026, 10, 1)) -> None:
+def prepared(conn, today: date = date(2026, 10, 1), now: datetime = NOW) -> None:
     """Seed a corpus large enough to fill every stratum, plus short-gap
     merged pairs, and run `census.prepare` -- leaving the census in the
     state most Task 4+ tests want to start from.
@@ -114,4 +119,4 @@ def prepared(conn, today: date = date(2026, 10, 1)) -> None:
     seed_corpus(conn, block.start, days=days, per_window=45, outlets=3)
     seed_gap_pairs(conn, block.start)
     conn.commit()
-    census.prepare(conn, today, DEPLOYED_AT, datetime.now(timezone.utc))
+    census.prepare(conn, today, DEPLOYED_AT, now)

@@ -127,7 +127,11 @@ def window_stats(
 ) -> tuple[list[WindowStat], list[tuple[datetime, str]]]:
     """One SQL pass over `[block.start, block.end)`, bucketed into 6-hour UTC
     windows. A window with fewer than MIN_WINDOW_ITEMS eligible items is
-    skipped, with a reason naming the count actually seen (F7).
+    skipped, with a reason naming the count actually seen (F7) -- including a
+    window with NO captured items at all, which gets "(0)" (M1): every 6-hour
+    slot in the block is enumerated up front, not only the ones a row landed
+    in, so a capture outage is recorded rather than silently vanishing from
+    both `windows` and `skipped`.
     """
     rows = conn.execute(
         "SELECT id, title, published_at, created_at FROM items "
@@ -153,10 +157,18 @@ def window_stats(
         if published_at is None:
             bucket["null_published"] += 1
 
+    total_slots = int(
+        (block.end - block.start).total_seconds() // (WINDOW_HOURS * 3600)
+    )
+    all_starts = [
+        block.start + timedelta(hours=i * WINDOW_HOURS) for i in range(total_slots)
+    ]
+
     windows: list[WindowStat] = []
     skipped: list[tuple[datetime, str]] = []
-    for w_start in sorted(buckets):
-        bucket = buckets[w_start]
+    empty_bucket = {"eligible": [], "backlog_excluded": 0, "null_published": 0}
+    for w_start in all_starts:
+        bucket = buckets.get(w_start, empty_bucket)
         n = len(bucket["eligible"])
         if n < MIN_WINDOW_ITEMS:
             skipped.append(
@@ -250,24 +262,41 @@ def prepare(conn, today: date, c439ade_deployed_at: datetime, now: datetime) -> 
     """Freeze the block and the 16-window order (plus the pass-2 repeat), in
     one transaction. Idempotent: a second call is a no-op that reports the
     existing block (spec sec 6.1, "it does, in one run").
+
+    Every early return or raise below rolls back first (M5/F21): the
+    "already prepared" read and the gap check both leave the session in an
+    open transaction, and `prepare` must not depend on its caller (a
+    `db.advisory_lock`'s cleanup, or a test's own `conn.commit()`) to close
+    it, or a future caller of `prepare` that does neither leaves one idle.
     """
     existing = conn.execute(
         "SELECT block_start, block_end FROM census_block"
     ).fetchone()
     if existing is not None:
         b_start, b_end = existing
+        conn.rollback()
         return f"already prepared: block {b_start.date()} to {b_end.date()}"
 
-    gap = gap_check(conn)
+    try:
+        gap = gap_check(conn)
+    except CensusRefusal:
+        conn.rollback()
+        raise
+
     if gap.band == "stop":
+        conn.rollback()
         raise CensusRefusal(
             f"gap split share {gap.split_share:.1%} exceeds 50%; refusing to "
             f"prepare the census -- bring the window length back to the operator"
         )
 
-    block = compute_block(today)
-    windows, skipped = window_stats(conn, block)
-    order = draw_order(windows, seed=SEED)
+    try:
+        block = compute_block(today)
+        windows, skipped = window_stats(conn, block)
+        order = draw_order(windows, seed=SEED)
+    except CensusRefusal:
+        conn.rollback()
+        raise
 
     try:
         window_ids: dict[int, int] = {}

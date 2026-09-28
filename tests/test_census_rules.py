@@ -36,21 +36,22 @@ def test_lookback_matches_comprehend():
 
 
 @pytest.mark.parametrize(
-    "title,published_hours_before,expected",
+    "title,published_delta,expected",
     [
         ("  ", None, "empty_title"),
-        ("A real headline", 25, "backlog"),
-        ("A real headline", 23, None),
+        ("A real headline", timedelta(hours=25), "backlog"),
+        ("A real headline", timedelta(hours=23), None),
         ("A real headline", None, None),
+        # The boundary itself (M4): spec says "more than 24h", so exactly 24h
+        # is kept and a `>` -> `>=` mutation at census.py's backlog check
+        # flips this case and fails.
+        ("A real headline", timedelta(hours=24), None),
+        ("A real headline", timedelta(hours=24, seconds=1), "backlog"),
     ],
 )
-def test_exclusion_reasons(title, published_hours_before, expected):
+def test_exclusion_reasons(title, published_delta, expected):
     created_at = datetime(2026, 9, 20, 12, 0, tzinfo=timezone.utc)
-    published_at = (
-        None
-        if published_hours_before is None
-        else created_at - timedelta(hours=published_hours_before)
-    )
+    published_at = None if published_delta is None else created_at - published_delta
     assert census.exclusion_reason(title, published_at, created_at) == expected
 
 
@@ -66,7 +67,9 @@ def test_quote_pages_are_excluded_through_common(monkeypatch):
 
 def _synthetic_windows(counts: dict[int, int]) -> list[census.WindowStat]:
     """`counts` maps stratum -> how many windows to synthesize for it, each
-    ten minutes apart so `sorted(by start)` is deterministic and distinct."""
+    one day apart (within a stratum) so `sorted(by start)` is deterministic
+    and every window's start is distinct (M6: this previously said "ten
+    minutes apart", which was never true of the `timedelta(days=i)` below)."""
     windows = []
     for stratum, n in counts.items():
         base = datetime(2026, 9, 18, stratum * 6, 0, tzinfo=timezone.utc)
@@ -106,3 +109,36 @@ def test_draw_order_refuses_a_thin_stratum():
     windows = _synthetic_windows({0: 10, 1: 10, 2: 10, 3: 3})
     with pytest.raises(census.CensusRefusal, match="stratum 3"):
         census.draw_order(windows)
+
+
+def test_draw_order_matches_the_golden_sequence_for_seed():
+    """M8: pins the exact order_no -> (stratum, window_start) draw for SEED
+    on the standard synthetic input (computed once by actually running
+    `draw_order` against it, not hand-derived), so a refactor of the
+    interleaving -- e.g. collapsing the per-round fresh
+    `rng.sample([0, 1, 2, 3], 4)` into one permutation drawn once, which
+    plan ruling R8 says is also a valid reading of the brief -- cannot
+    silently change the already-frozen draw without failing a test."""
+    windows = _synthetic_windows({0: 10, 1: 10, 2: 10, 3: 10})
+    order = census.draw_order(windows)
+
+    expected = [
+        (0, "2026-09-26T00:00:00+00:00"),
+        (3, "2026-09-18T18:00:00+00:00"),
+        (2, "2026-09-21T12:00:00+00:00"),
+        (1, "2026-09-19T06:00:00+00:00"),
+        (0, "2026-09-22T00:00:00+00:00"),
+        (3, "2026-09-22T18:00:00+00:00"),
+        (1, "2026-09-25T06:00:00+00:00"),
+        (2, "2026-09-23T12:00:00+00:00"),
+        (2, "2026-09-18T12:00:00+00:00"),
+        (0, "2026-09-18T00:00:00+00:00"),
+        (3, "2026-09-24T18:00:00+00:00"),
+        (1, "2026-09-23T06:00:00+00:00"),
+        (1, "2026-09-22T06:00:00+00:00"),
+        (0, "2026-09-19T00:00:00+00:00"),
+        (2, "2026-09-27T12:00:00+00:00"),
+        (3, "2026-09-23T18:00:00+00:00"),
+    ]
+    got = [(w.stratum, w.start.isoformat()) for w in order]
+    assert got == expected

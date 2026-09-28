@@ -7,6 +7,7 @@ schema per test, migrated all the way up (through 0017).
 import uuid
 from datetime import date, datetime, timedelta, timezone
 
+import psycopg
 import pytest
 
 import census
@@ -119,9 +120,7 @@ def test_prepare_is_a_no_op_the_second_time(kb):
     cf.prepared(kb)
     before = _census_row_counts(kb)
 
-    result = census.prepare(
-        kb, date(2026, 10, 1), cf.DEPLOYED_AT, datetime.now(timezone.utc)
-    )
+    result = census.prepare(kb, date(2026, 10, 1), cf.DEPLOYED_AT, cf.NOW)
 
     assert result.startswith("already prepared")
     assert _census_row_counts(kb) == before
@@ -177,6 +176,58 @@ def test_backlog_excluded_and_null_published_kept(kb):
     assert w.backlog_excluded == 3
 
 
+def test_quote_pages_and_empty_titles_are_excluded_from_window_stats(kb):
+    """I1a: `window_stats` must apply `exclusion_reason`'s quote-page and
+    empty-title branches, not just compute them -- this is the exclusion that
+    matters most in production (the 2026-09-15 Reuters quote-page flood).
+    Deleting `if reason is not None: continue` (census.py) makes both items
+    below eligible, which would change `len(w.item_ids)` and put their ids in
+    it."""
+    outlet = _outlet(kb, "T3")
+    w0 = datetime(2026, 9, 18, 18, 0, tzinfo=timezone.utc)
+
+    for i in range(40):
+        _item(kb, outlet, w0 + timedelta(minutes=i))
+    quote_id = _item(kb, outlet, w0 + timedelta(minutes=41), title="LCO - Reuters")
+    blank_id = _item(kb, outlet, w0 + timedelta(minutes=42), title="   ")
+    kb.commit()
+
+    block = census.Block(start=w0, end=w0 + timedelta(hours=6))
+    windows, skipped = census.window_stats(kb, block)
+
+    assert not skipped
+    w = windows[0]
+    assert len(w.item_ids) == 40
+    assert quote_id not in w.item_ids
+    assert blank_id not in w.item_ids
+
+
+def test_empty_window_is_recorded_as_skipped_with_zero(kb):
+    """M1: a 6-hour slot with NO captured items at all must still appear in
+    `skipped` (a capture outage), not just one whose items were all
+    excluded. `window_stats` must enumerate every slot in the block, not only
+    the ones a row landed in."""
+    outlet = _outlet(kb, "T4")
+    w0 = datetime(2026, 9, 18, 0, 0, tzinfo=timezone.utc)
+    w1 = w0 + timedelta(hours=6)  # left completely empty
+    w2 = w0 + timedelta(hours=12)
+
+    for i in range(40):
+        _item(kb, outlet, w0 + timedelta(minutes=i))
+    for i in range(40):
+        _item(kb, outlet, w2 + timedelta(minutes=i))
+    kb.commit()
+
+    block = census.Block(start=w0, end=w0 + timedelta(hours=18))
+    windows, skipped = census.window_stats(kb, block)
+
+    skip_map = dict(skipped)
+    assert skip_map[w1] == "fewer than 40 eligible items (0)"
+    assert {w.start for w in windows} == {w0, w2}
+    # Every 6h slot in the block is accounted for as eligible or skipped.
+    assert len(windows) + len(skipped) == 3
+
+
 def test_windows_bucket_in_utc(kb):
     kb.execute("SET TIME ZONE 'Asia/Tokyo'")
     cf.prepared(kb)
@@ -188,14 +239,33 @@ def test_windows_bucket_in_utc(kb):
 
 
 def test_gap_pairs_are_distinct_items(kb):
+    """F9, plus I1b and M4.
+
+    The brief's own wording ("an item with two assertions on one event") is
+    impossible: `assertions_item_event` is `UNIQUE (item_id, event_id)`
+    (migration 0006:127), so one item cannot hold two assertions on the SAME
+    event. This test instead gives item_a and item_b assertions on TWO
+    events (E1 and E2) they both share, which still exercises the
+    `SELECT DISTINCT` dedup the rule protects: a naive join would produce two
+    rows (one per shared event) for the one (item_a, item_b) pair.
+
+    `item_c` shares outlet_a with item_a and asserts a THIRD event (E3) only
+    item_a also asserts -- never one item_b asserts too, so item_c has no
+    event in common with item_b at all, and the only way it can appear in a
+    pair is through item_a (I1b): deleting the `i1.outlet_id <> i2.outlet_id`
+    filter would then count the (item_a, item_c) pair too, since every OTHER
+    seeded pair in this suite is already cross-outlet and cannot catch that
+    mutation.
+    """
     outlet_a = _outlet(kb, "GA")
     outlet_b = _outlet(kb, "GB")
     t0 = datetime(2026, 9, 20, 0, 0, tzinfo=timezone.utc)
     item_a = _item(kb, outlet_a, t0)
     item_b = _item(kb, outlet_b, t0 + timedelta(minutes=10))
+    item_c = _item(kb, outlet_a, t0 + timedelta(minutes=20))
 
     events = []
-    for label in ("E1", "E2"):
+    for label in ("E1", "E2", "E3"):
         events.append(
             kb.execute(
                 "INSERT INTO events (summary, type, commitment_state, occurred_at) "
@@ -203,18 +273,30 @@ def test_gap_pairs_are_distinct_items(kb):
                 (label, t0),
             ).fetchone()[0]
         )
+    e1, e2, e3 = events
 
-    for event_id in events:
+    for event_id in (e1, e2):
         for item_id in (item_a, item_b):
             kb.execute(
                 "INSERT INTO assertions (item_id, event_id, standing, created_at) "
                 "VALUES (%s, %s, 'reported', %s)",
                 (item_id, event_id, t0),
             )
+    # item_c: same outlet as item_a, shares E3 with item_a only -- item_b
+    # never asserts E3, so item_c cannot form a legitimate cross-outlet pair
+    # through item_b either.
+    for item_id in (item_a, item_c):
+        kb.execute(
+            "INSERT INTO assertions (item_id, event_id, standing, created_at) "
+            "VALUES (%s, %s, 'reported', %s)",
+            (item_id, e3, t0),
+        )
     kb.commit()
 
     result = census.gap_check(kb)
     assert result.pairs == 1
+    # M4: item_a and item_b both fall in the same 00:00-06:00 UTC window.
+    assert result.windows == 1
 
 
 def test_prepare_refuses_when_gap_share_exceeds_half(kb):
@@ -224,7 +306,7 @@ def test_prepare_refuses_when_gap_share_exceeds_half(kb):
     kb.commit()
 
     with pytest.raises(census.CensusRefusal, match="50%"):
-        census.prepare(kb, today, cf.DEPLOYED_AT, datetime.now(timezone.utc))
+        census.prepare(kb, today, cf.DEPLOYED_AT, cf.NOW)
 
     assert all(n == 0 for n in _census_row_counts(kb).values())
 
@@ -238,7 +320,7 @@ def test_prepare_records_within_6h_band(kb):
     cf.seed_gap_pairs(kb, block.start, n=5, gap_minutes=162)
     kb.commit()
 
-    result = census.prepare(kb, today, cf.DEPLOYED_AT, datetime.now(timezone.utc))
+    result = census.prepare(kb, today, cf.DEPLOYED_AT, cf.NOW)
     assert "prepared" in result
 
     row = kb.execute("SELECT gap_band, gap_deciles FROM census_block").fetchone()
@@ -253,8 +335,17 @@ def test_prepare_arms_the_hold(kb):
     ).fetchone()
     assert row is not None
     prepared_at, deployed_at = row
-    assert prepared_at is not None
+    assert prepared_at == cf.NOW
     assert deployed_at == cf.DEPLOYED_AT
+
+    # M7: the row's existence is not the hold -- prove a pre-block item
+    # delete actually raises.
+    outlet = _outlet(kb, "Held")
+    held_item = _item(kb, outlet, cf.NOW - timedelta(days=20))
+    kb.commit()
+    with pytest.raises(psycopg.errors.RaiseException, match="held by the event census"):
+        kb.execute("DELETE FROM items WHERE id = %s", (held_item,))
+    kb.rollback()
 
 
 def test_prepare_refuses_with_no_merged_pairs(kb):
@@ -265,6 +356,50 @@ def test_prepare_refuses_with_no_merged_pairs(kb):
     kb.commit()
 
     with pytest.raises(census.CensusRefusal, match="no merged cross-outlet pairs"):
-        census.prepare(kb, today, cf.DEPLOYED_AT, datetime.now(timezone.utc))
+        census.prepare(kb, today, cf.DEPLOYED_AT, cf.NOW)
 
     assert all(n == 0 for n in _census_row_counts(kb).values())
+
+
+def test_prepare_leaves_no_open_transaction_when_already_prepared(kb):
+    cf.prepared(kb)
+    census.prepare(kb, date(2026, 10, 1), cf.DEPLOYED_AT, cf.NOW)
+    assert kb.info.transaction_status == psycopg.pq.TransactionStatus.IDLE
+
+
+def test_prepare_leaves_no_open_transaction_on_gap_stop_refusal(kb):
+    today = date(2026, 10, 1)
+    block = census.compute_block(today)
+    cf.seed_gap_pairs(kb, block.start, n=5, gap_minutes=12 * 60)
+    kb.commit()
+
+    with pytest.raises(census.CensusRefusal):
+        census.prepare(kb, today, cf.DEPLOYED_AT, cf.NOW)
+
+    assert kb.info.transaction_status == psycopg.pq.TransactionStatus.IDLE
+
+
+def test_prepare_leaves_no_open_transaction_on_no_merged_pairs_refusal(kb):
+    today = date(2026, 10, 1)
+    block = census.compute_block(today)
+    days = (block.end - block.start).days
+    cf.seed_corpus(kb, block.start, days=days, per_window=45, outlets=3)
+    kb.commit()
+
+    with pytest.raises(census.CensusRefusal):
+        census.prepare(kb, today, cf.DEPLOYED_AT, cf.NOW)
+
+    assert kb.info.transaction_status == psycopg.pq.TransactionStatus.IDLE
+
+
+def test_prepare_leaves_no_open_transaction_on_block_refusal(kb):
+    today = date(2026, 9, 30)  # too early: compute_block itself refuses
+    cf.seed_gap_pairs(
+        kb, datetime(2026, 9, 19, tzinfo=timezone.utc), n=5, gap_minutes=20
+    )
+    kb.commit()
+
+    with pytest.raises(census.CensusRefusal):
+        census.prepare(kb, today, cf.DEPLOYED_AT, cf.NOW)
+
+    assert kb.info.transaction_status == psycopg.pq.TransactionStatus.IDLE
