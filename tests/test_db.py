@@ -55,6 +55,7 @@ def test_up_creates_the_expected_tables(conn):
         "0014_triage_stale_quote_page",
         "0015_comprehend_spend",
         "0016_integrate_link_defers",
+        "0017_census",
     ]
     assert {
         "schema_migrations",
@@ -80,6 +81,16 @@ def test_up_creates_the_expected_tables(conn):
         "story_members",
         "open_questions",
         "links",
+        "census_block",
+        "census_window_order",
+        "census_skipped_windows",
+        "census_windows",
+        "census_window_items",
+        "census_groups",
+        "census_assignments",
+        "census_adjudications",
+        "census_sessions",
+        "census_events",
     } <= _tables(conn)
 
 
