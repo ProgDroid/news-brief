@@ -28,7 +28,8 @@ CREATE TABLE census_block (
 CREATE TABLE census_window_order (
     order_no     INTEGER     PRIMARY KEY,
     window_start TIMESTAMPTZ NOT NULL UNIQUE,
-    stratum      TEXT        NOT NULL
+    -- `start.hour // 6`, i.e. one of the day's four 6-hour bands (plan Task 3).
+    stratum      SMALLINT    NOT NULL CHECK (stratum BETWEEN 0 AND 3)
 );
 
 -- Windows the preparation step excluded from the schedule (e.g. a hole in the
@@ -48,8 +49,11 @@ CREATE TABLE census_windows (
                      CHECK (status IN ('prepared', 'open', 'blind_done',
                                        'complete', 'abandoned')),
     abandon_reason   TEXT        NULL,
-    backlog_excluded BOOLEAN     NOT NULL DEFAULT FALSE,
-    null_published   BOOLEAN     NOT NULL DEFAULT FALSE,
+    -- Counts, not flags (spec 4.1): the number of backlog items excluded from
+    -- the window, and the number kept despite a NULL published_at, each
+    -- reported per window by the readout.
+    backlog_excluded INTEGER     NOT NULL DEFAULT 0 CHECK (backlog_excluded >= 0),
+    null_published   INTEGER     NOT NULL DEFAULT 0 CHECK (null_published >= 0),
     opened_at        TIMESTAMPTZ NULL,
     blind_done_at    TIMESTAMPTZ NULL,
     completed_at     TIMESTAMPTZ NULL
@@ -66,10 +70,13 @@ CREATE TABLE census_window_items (
     PRIMARY KEY (window_id, item_id)
 );
 
+-- No DEFAULT now() on the timestamp: every writer injects its own clock
+-- (plan Global Constraint), so a missing value must fail NOT NULL rather
+-- than silently stamp wall-clock time.
 CREATE TABLE census_groups (
     id         BIGSERIAL   PRIMARY KEY,
     window_id  BIGINT      NOT NULL REFERENCES census_windows(id),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at TIMESTAMPTZ NOT NULL
 );
 
 -- B5: one labeller can submit the same (window, item) more than once across
@@ -83,7 +90,10 @@ CREATE TABLE census_assignments (
     unsure     BOOLEAN     NOT NULL,
     tab_id     TEXT        NOT NULL,
     client_seq INTEGER     NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- No DEFAULT now(): every writer injects its own clock (plan Global
+    -- Constraint), and a default would let a forgetful writer stamp
+    -- wall-clock time silently.
+    created_at TIMESTAMPTZ NOT NULL,
     UNIQUE (window_id, tab_id, client_seq, item_id)
 );
 
@@ -100,7 +110,8 @@ CREATE TABLE census_adjudications (
     item_a     BIGINT      NOT NULL REFERENCES items(id),
     item_b     BIGINT      NOT NULL REFERENCES items(id),
     decision   TEXT        NOT NULL CHECK (decision IN ('same', 'different')),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- No DEFAULT now(): see census_groups above.
+    created_at TIMESTAMPTZ NOT NULL,
     CHECK (item_a < item_b),
     UNIQUE (kind, item_a, item_b)
 );
@@ -121,7 +132,8 @@ CREATE TABLE census_events (
     window_id BIGINT      NOT NULL REFERENCES census_windows(id),
     kind      TEXT        NOT NULL
               CHECK (kind IN ('open', 'action', 'heartbeat', 'finish', 'abandon')),
-    at        TIMESTAMPTZ NOT NULL DEFAULT now()
+    -- No DEFAULT now(): see census_groups above.
+    at        TIMESTAMPTZ NOT NULL
 );
 
 -- The retention hold (spec section 7). A naive item delete already fails

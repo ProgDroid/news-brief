@@ -263,8 +263,9 @@ def test_down_refuses_with_labels_and_runs_when_empty(kb):
     window_id = _window(kb)
     item_id = _item(kb, "2026-09-20T00:00:00+00:00")
     kb.execute(
-        "INSERT INTO census_assignments (window_id, item_id, unsure, tab_id, client_seq) "
-        "VALUES (%s, %s, false, 't1', 1)",
+        "INSERT INTO census_assignments "
+        "(window_id, item_id, unsure, tab_id, client_seq, created_at) "
+        "VALUES (%s, %s, false, 't1', 1, '2026-09-20T00:00:00+00:00')",
         (window_id, item_id),
     )
     kb.commit()
@@ -296,7 +297,64 @@ def test_adjudication_pair_order_is_checked(kb):
 
     with rejects(kb, psycopg.errors.CheckViolation):
         kb.execute(
-            "INSERT INTO census_adjudications (window_id, kind, item_a, item_b, decision) "
-            "VALUES (%s, 'precision', 5, 3, 'same')",
+            "INSERT INTO census_adjudications "
+            "(window_id, kind, item_a, item_b, decision, created_at) "
+            "VALUES (%s, 'precision', 5, 3, 'same', '2026-09-20T00:00:00+00:00')",
             (window_id,),
+        )
+
+
+def test_backlog_excluded_and_null_published_are_integer_counts(kb):
+    """Important #1: spec 4.1 stores the NUMBER excluded/kept per window, and
+    plan Task 3's WindowStat writes both as int -- a BOOLEAN column would
+    reject that insert outright."""
+    window_id = kb.execute(
+        "INSERT INTO census_windows "
+        "(order_no, window_start, pass, status, backlog_excluded, null_published) "
+        "VALUES (1, '2026-09-01T00:00:00+00:00', 1, 'open', 3, 5) RETURNING id"
+    ).fetchone()[0]
+
+    row = kb.execute(
+        "SELECT backlog_excluded, null_published FROM census_windows WHERE id = %s",
+        (window_id,),
+    ).fetchone()
+    assert row == (3, 5)
+
+    with rejects(kb, psycopg.errors.CheckViolation):
+        kb.execute(
+            "INSERT INTO census_windows "
+            "(order_no, window_start, pass, status, backlog_excluded) "
+            "VALUES (2, '2026-09-02T00:00:00+00:00', 1, 'open', -1)"
+        )
+
+
+def test_stratum_is_a_checked_smallint(kb):
+    """Minor #1: stratum is `start.hour // 6`, an int 0..3 (plan Task 3); a
+    TEXT column would accept an out-of-range or non-numeric value and only
+    fail later, silently, when something compares it to an int."""
+    kb.execute(
+        "INSERT INTO census_window_order (order_no, window_start, stratum) "
+        "VALUES (1, '2026-09-01T00:00:00+00:00', 3)"
+    )
+
+    with rejects(kb, psycopg.errors.CheckViolation):
+        kb.execute(
+            "INSERT INTO census_window_order (order_no, window_start, stratum) "
+            "VALUES (2, '2026-09-01T06:00:00+00:00', 4)"
+        )
+
+
+def test_assignment_created_at_has_no_default_and_is_required(kb):
+    """Minor #2, representative table: every plan Task 4 writer injects its
+    own clock rather than relying on SQL now(), so a writer that forgets the
+    timestamp must fail NOT NULL rather than silently stamp wall-clock time."""
+    window_id = _window(kb)
+    item_id = _item(kb, "2026-09-20T00:00:00+00:00")
+    kb.commit()
+
+    with rejects(kb, psycopg.errors.NotNullViolation):
+        kb.execute(
+            "INSERT INTO census_assignments (window_id, item_id, unsure, tab_id, client_seq) "
+            "VALUES (%s, %s, false, 't1', 1)",
+            (window_id, item_id),
         )
