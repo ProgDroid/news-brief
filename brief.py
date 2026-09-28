@@ -25,6 +25,7 @@ poller would 409):
 import html
 import os
 import re
+import sys
 import json
 import time
 import hashlib
@@ -3892,6 +3893,38 @@ def mode_comprehend():
         comprehend.run(conn)
 
 
+def mode_census_prepare():
+    """Freeze the event census block and its 16-window order.
+
+    Run manually (`docker compose run --rm newsbrief census_prepare`), never
+    scheduled: it is in MODES but deliberately not in JOB_MODES (spec
+    docs/superpowers/specs/2026-09-28-gold-set-labelling-design.md sec 6.1).
+    It makes no model call and is idempotent, so a re-run after a partial
+    failure is always safe.
+    """
+    import census
+
+    raw = os.environ.get("CENSUS_C439ADE_DEPLOYED_AT", "")
+    try:
+        c439ade_deployed_at = datetime.fromisoformat(raw)
+    except ValueError:
+        print(f"CENSUS_C439ADE_DEPLOYED_AT is missing or unparseable: {raw!r}")
+        sys.exit(2)
+
+    now = datetime.now(timezone.utc)
+    with db.connect() as conn:
+        with db.advisory_lock(conn, "census_prepare") as acquired:
+            if not acquired:
+                print("census_prepare is already running")
+                sys.exit(2)
+            try:
+                result = census.prepare(conn, now.date(), c439ade_deployed_at, now)
+            except census.CensusRefusal as e:
+                print(str(e))
+                sys.exit(2)
+    print(result)
+
+
 # Module level, not inside __main__, so a test can assert JOB_MODES is covered.
 # A mode in JOB_MODES but missing here is not a quiet no-op: the supervisor
 # spawns it, gets exit 1 from the usage branch, and alerts on every fire time.
@@ -3905,6 +3938,7 @@ MODES = {
     "backup": mode_backup,
     "capture": mode_capture,
     "comprehend": mode_comprehend,
+    "census_prepare": mode_census_prepare,
 }
 
 
@@ -4005,8 +4039,6 @@ def run_job(mode, fn, *, scheduled_for=None, trigger="manual", run_id=None) -> i
 
 
 if __name__ == "__main__":
-    import sys
-
     missing = [k for k in REQUIRED_ENV if not os.environ.get(k)]
     if missing:
         print(f"Missing required environment variables: {', '.join(missing)}")
@@ -4055,7 +4087,8 @@ if __name__ == "__main__":
             sys.exit(supervisor.serve())
         print(
             "Usage: brief.py "
-            "[serve|submit|collect|weekly|paper|commands|monitor|backup|capture]"
+            "[serve|submit|collect|weekly|paper|commands|monitor|backup|capture|"
+            "census_prepare]"
         )
         sys.exit(1)
 
