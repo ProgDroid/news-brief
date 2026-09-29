@@ -533,4 +533,5 @@ def test_census_grants_docstring_keeps_the_password_off_the_command_line():
 
     doc = census_grants.__doc__
     assert "CENSUS_LABELLER_PASSWORD=..." not in doc
-    assert ". ./.env" in doc
+    assert "grep '^CENSUS_LABELLER_PASSWORD=' .env" in doc
+    assert ". ./.env" not in doc

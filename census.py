@@ -307,6 +307,21 @@ def prepare(conn, today: date, c439ade_deployed_at: datetime, now: datetime) -> 
         conn.rollback()
         return f"already prepared: block {b_start.date()} to {b_end.date()}"
 
+    # A released census (runbook step 11 deletes census_block only) leaves its
+    # order and window rows behind; inserting over them dies on a unique
+    # violation deep in the write. Refuse up front, before anything is written.
+    leftover = conn.execute(
+        "SELECT (SELECT count(*) FROM census_window_order), "
+        "(SELECT count(*) FROM census_windows)"
+    ).fetchone()
+    if any(leftover):
+        conn.rollback()
+        raise CensusRefusal(
+            "a released census's rows remain (census_window_order / "
+            "census_windows are not empty while census_block is absent); "
+            "prepare will not start a new census over them"
+        )
+
     try:
         gap = gap_check(conn)
     except CensusRefusal:

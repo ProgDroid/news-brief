@@ -415,3 +415,20 @@ def test_prepare_leaves_no_open_transaction_on_block_refusal(kb):
         census.prepare(kb, today, cf.DEPLOYED_AT, cf.NOW)
 
     assert kb.info.transaction_status == psycopg.pq.TransactionStatus.IDLE
+
+
+def test_prepare_refuses_over_the_rows_of_a_released_census(kb):
+    """Runbook step 11 deletes census_block; the old order/window rows remain.
+    A second prepare must refuse up front (a CensusRefusal, which the mode
+    turns into exit 2), not die on a unique violation, and write nothing."""
+    cf.prepared(kb)
+    kb.execute("DELETE FROM census_block")
+    kb.commit()
+    before = _census_row_counts(kb)
+    assert before["census_windows"] == 17  # control: the old rows are there
+
+    with pytest.raises(census.CensusRefusal, match="released census"):
+        census.prepare(kb, date(2026, 10, 1), cf.DEPLOYED_AT, cf.NOW)
+
+    assert kb.info.transaction_status == psycopg.pq.TransactionStatus.IDLE
+    assert _census_row_counts(kb) == before

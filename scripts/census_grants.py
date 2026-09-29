@@ -8,10 +8,10 @@ holds in schema public, so the result is exactly that list. It does not touch
 role attributes or role memberships: if the labeller refuses to start naming
 one, remove it by hand (`ALTER ROLE` / `REVOKE <role> FROM census_labeller`).
 
-Run it with the password loaded from `.env`, never typed on the command line
+Run it with the password read from `.env`, never typed on the command line
 (a command line lands in shell history):
 
-    set -a; . ./.env; set +a
+    export CENSUS_LABELLER_PASSWORD="$(grep '^CENSUS_LABELLER_PASSWORD=' .env | cut -d= -f2-)"
     py scripts/census_grants.py
 """
 

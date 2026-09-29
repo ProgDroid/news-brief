@@ -197,14 +197,14 @@ docker compose run --rm -e CENSUS_LABELLER_PASSWORD --entrypoint sh newsbrief -c
 ```
 
 Expected: `REAL_EXIT=0`. If it prints `REAL_EXIT=1`, the variable did not reach the container:
-load `.env` into this shell and re-run the check:
+read that one key from `.env` into this shell and re-run the check:
 
 ```sh
-set -a; . ./.env; set +a
+export CENSUS_LABELLER_PASSWORD="$(grep '^CENSUS_LABELLER_PASSWORD=' .env | cut -d= -f2-)"
 ```
 
-This loads the value without it ever appearing on a command line (a typed
-`export CENSUS_LABELLER_PASSWORD=...` lands in shell history).
+The value never appears in the command text or in shell history (sourcing the whole
+compose `.env` as shell is avoided on purpose: a value with a space or `$` breaks it).
 
 Then create the role and apply its grants:
 
@@ -217,8 +217,13 @@ the check above was skipped or failed.
 
 **An external database** (the host sets `DATABASE_URL`): the script runs as the main role
 (`db.connect()`), and it creates `census_labeller` and sets its password, so that role needs
-`CREATEROLE`. Without it the script fails at `CREATE ROLE`; have a superuser create the role or
-grant `CREATEROLE` to the main role first.
+`CREATEROLE`, and it must be the role that creates `census_labeller` (PG 16+ lets a role alter
+only roles it holds ADMIN OPTION on, and a creator gets that automatically). Grant `CREATEROLE`
+to the main role BEFORE the first run, while `census_labeller` does not exist yet. Having a
+superuser create the role instead does NOT work: the script then fails at `ALTER ROLE ...
+PASSWORD` (`permission denied to alter role`). If `census_labeller` already exists, a superuser
+first runs `GRANT census_labeller TO <main role> WITH ADMIN OPTION;`. This only matters for an
+external database; the stack's own postgres has a superuser main role.
 
 The script is idempotent: it creates `census_labeller` if absent, sets its password (a SCRAM
 verifier computed client-side, so the plaintext never appears in SQL), and applies every grant
@@ -373,8 +378,11 @@ sub-projects 1 and 2 no longer need the block's items:
 DELETE FROM census_block;
 ```
 
-**After this delete, `census_prepare` would prepare a NEW block** (it prints `already prepared`
-only while the `census_block` row exists). Do not re-run it unless a new census is intended.
+**After this delete, `census_prepare` refuses.** It stops printing `already prepared` (that needs
+the `census_block` row), but the old `census_window_order` and `census_windows` rows remain, so
+it exits 2 with `a released census's rows remain ... prepare will not start a new census over
+them` and writes nothing. Starting a new census would need those old rows cleared first; that is
+out of scope for this runbook.
 
 This lifts the **time-based** hold: the delete trigger and the truncate trigger both stop
 refusing. **It does not free everything,** by design:
