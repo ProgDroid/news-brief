@@ -399,3 +399,18 @@ def test_labeller_service_holds_no_secret_but_its_own():
         r'^\s*entrypoint:\s*\["python",\s*"labeller\.py"\]\s*$', text, re.M
     )
     assert "POSTGRES_USER=census_labeller" in text
+
+
+def test_census_runbook_scripts_ship_in_the_image():
+    """The host runbook runs `scripts/census_report.py` and
+    `scripts/census_grants.py` inside the container, so both must sit under a
+    directory the Dockerfile copies wholesale. If `scripts/` is ever dropped
+    from the image, this fails instead of the runbook failing on the host."""
+    packages = _copy_listed_packages()
+    for name in ("census_report.py", "census_grants.py"):
+        path = REPO_ROOT / "scripts" / name
+        assert path.is_file(), f"{name} is missing from scripts/"
+        assert any(pkg in path.parents for pkg in packages), (
+            f"scripts/{name} is not under a directory the Dockerfile copies "
+            f"({sorted(p.name for p in packages)})"
+        )
