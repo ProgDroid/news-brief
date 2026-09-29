@@ -1258,9 +1258,14 @@ def apply_labeller_grants(conn, password: str) -> None:
     transaction, so the role is never seen half-granted. Idempotent: roles
     are cluster-global and outlive DROP SCHEMA.
 
-    That revoke scope is exactly what `privilege_surplus` checks, so every
-    surplus it names is one a re-run clears. Role attributes are not
-    touched: they need a superuser's ALTER ROLE."""
+    That revoke scope is the ACL part of what `privilege_surplus` checks,
+    so a stale ACL entry it names is one a re-run clears -- provided the
+    grant was made by the role running this (or by the owner, when a
+    superuser or the owner runs it): REVOKE removes only grants whose
+    grantor is the executing role. Role attributes and memberships are not
+    touched: the main role may lack ADMIN on a granted role, and attributes
+    need a superuser's ALTER ROLE. The labeller refuses to start while
+    either is present, naming it; the operator removes it by hand."""
     role = sql.Identifier(LABELLER_ROLE)
     conn.execute(
         sql.SQL(
@@ -1357,7 +1362,7 @@ SELECT 'column', c.relname, t.attname, a.privilege_type
        aclexplode(t.attacl) a
  WHERE n.nspname = 'public' AND a.grantee = %(role)s
 """
-_ROLE_ATTRIBUTES = ("SUPERUSER", "CREATEROLE", "CREATEDB", "BYPASSRLS")
+_ROLE_ATTRIBUTES = ("SUPERUSER", "CREATEROLE", "CREATEDB", "BYPASSRLS", "REPLICATION")
 
 
 def _describe(kind: str, obj: str, column: str | None, privilege: str) -> str:
@@ -1375,21 +1380,28 @@ def privilege_surplus(conn) -> list[str]:
     """Everything the CURRENT role holds beyond LABELLER_GRANTS, as readable
     strings, sorted; empty when it holds exactly that set.
 
-    Scope -- exactly what `apply_labeller_grants` revokes, so every surplus
-    named here is one the grants script clears: the role's own ACL entries on
-    schema public itself (e.g. CREATE), and on every table, view, sequence and
-    column in it. Every privilege type the server records is compared, read
-    from the ACLs rather than from a list, so PG 17+'s MAINTAIN is included.
-    Plus the role attributes SUPERUSER, CREATEROLE, CREATEDB and BYPASSRLS,
-    which the script does NOT clear (an operator's `ALTER ROLE` does).
+    Scope:
+    - the role's own ACL entries on schema public itself (e.g. CREATE), and
+      on every table, view, sequence and column in it -- exactly what
+      `apply_labeller_grants` revokes, so a re-run clears these (subject to
+      its grantor caveat). Every privilege type the server records is
+      compared, read from the ACLs rather than from a list, so PG 17+'s
+      MAINTAIN is included;
+    - the role attributes SUPERUSER, CREATEROLE, CREATEDB, BYPASSRLS and
+      REPLICATION (replication connections read all data);
+    - every role the labeller is a MEMBER of (review I1): a membership such
+      as pg_read_all_data, or the owner role, grants what no ACL on public
+      shows. Filtered on `member`, so the reverse-direction grant PG 16+
+      gives a CREATEROLE creator over the role it created is not flagged.
+    The grants script clears neither attributes nor memberships; the
+    operator's `ALTER ROLE` / `REVOKE <role> FROM census_labeller` does.
 
     Out of scope: functions (PUBLIC holds EXECUTE by default), privileges
-    reached through PUBLIC or through membership of another role, and
-    objects outside schema public.
+    reached through PUBLIC, and objects outside schema public.
     """
     row = conn.execute(
-        "SELECT oid, rolsuper, rolcreaterole, rolcreatedb, rolbypassrls "
-        "FROM pg_roles WHERE rolname = current_user"
+        "SELECT oid, rolsuper, rolcreaterole, rolcreatedb, rolbypassrls, "
+        "rolreplication FROM pg_roles WHERE rolname = current_user"
     ).fetchone()
     role_oid, *attributes = row
     held = {tuple(r) for r in conn.execute(_ROLE_ACL, {"role": role_oid}).fetchall()}
@@ -1408,5 +1420,14 @@ def privilege_surplus(conn) -> list[str]:
         f"role attribute {name}"
         for name, has in zip(_ROLE_ATTRIBUTES, attributes, strict=True)
         if has
+    ]
+    surplus += [
+        f"member of role {name}"
+        for (name,) in conn.execute(
+            "SELECT r.rolname FROM pg_auth_members m "
+            "JOIN pg_roles r ON r.oid = m.roleid "
+            "WHERE m.member = %s ORDER BY r.rolname",
+            (role_oid,),
+        ).fetchall()
     ]
     return surplus

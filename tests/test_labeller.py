@@ -324,6 +324,19 @@ def test_service_exits_naming_a_surplus_role_attribute(kb, tmp_path):
     assert "surplus privilege: role attribute CREATEDB" in err, err
 
 
+def test_service_exits_naming_a_surplus_role_membership(kb, tmp_path):
+    # Cluster-global: revoked in `finally` (review I1).
+    kb.execute("GRANT pg_read_all_data TO census_labeller")
+    kb.commit()
+    try:
+        code, err = _exit_and_stderr(tmp_path)
+    finally:
+        kb.execute("REVOKE pg_read_all_data FROM census_labeller")
+        kb.commit()
+    assert code == 3, err
+    assert "surplus privilege: member of role pg_read_all_data" in err, err
+
+
 # ── No knob reads (spec 6.1, 10) ────────────────────────────────────────────
 
 

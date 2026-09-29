@@ -4,7 +4,9 @@ Re-runnable host-runbook script: run it after migration 0017 is confirmed in
 `schema_migrations`, and again after any restore (roles are cluster-global and
 survive DROP SCHEMA, but grants do not). The grant list lives once, in
 `census.LABELLER_GRANTS`, and a re-run first revokes everything else the role
-holds in schema public, so the result is exactly that list.
+holds in schema public, so the result is exactly that list. It does not touch
+role attributes or role memberships: if the labeller refuses to start naming
+one, remove it by hand (`ALTER ROLE` / `REVOKE <role> FROM census_labeller`).
 
 Run it with the password loaded from `.env`, never typed on the command line
 (a command line lands in shell history):

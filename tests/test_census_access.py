@@ -407,6 +407,37 @@ def test_privilege_surplus_names_a_role_attribute(kb):
     assert _surplus_as_labeller() == []
 
 
+def test_privilege_surplus_names_replication(kb):
+    """REPLICATION allows replication connections, which read all data."""
+    kb.execute("ALTER ROLE census_labeller REPLICATION")
+    kb.commit()
+    try:
+        assert _surplus_as_labeller() == ["role attribute REPLICATION"]
+    finally:
+        kb.execute("ALTER ROLE census_labeller NOREPLICATION")
+        kb.commit()
+    assert _surplus_as_labeller() == []
+
+
+def test_privilege_surplus_names_a_role_membership(kb):
+    """Review I1: a membership (here pg_read_all_data) grants what no ACL on
+    public shows. Only the labeller's OWN memberships count: a grant in the
+    other direction (the labeller role granted to another role, as PG 16+
+    does automatically for a CREATEROLE creator) is not flagged. Memberships
+    are cluster-global, so both are revoked in `finally`."""
+    main = kb.execute("SELECT current_user").fetchone()[0]
+    kb.execute("GRANT pg_read_all_data TO census_labeller")
+    kb.execute(f'GRANT census_labeller TO "{main}"')
+    kb.commit()
+    try:
+        assert _surplus_as_labeller() == ["member of role pg_read_all_data"]
+    finally:
+        kb.execute("REVOKE pg_read_all_data FROM census_labeller")
+        kb.execute(f'REVOKE census_labeller FROM "{main}"')
+        kb.commit()
+    assert _surplus_as_labeller() == []
+
+
 def test_census_tables_constant_matches_the_catalog(kb):
     """`_CENSUS_TABLES` is hand-written on purpose: deriving it from the
     catalog would silently widen the labeller's SELECT to every future
