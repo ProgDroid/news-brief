@@ -182,9 +182,13 @@ def window_stats(
         if published_at is None:
             bucket["null_published"] += 1
 
-    total_slots = int(
-        (block.end - block.start).total_seconds() // (WINDOW_HOURS * 3600)
-    )
+    block_seconds = (block.end - block.start).total_seconds()
+    if block_seconds % (WINDOW_HOURS * 3600) != 0:
+        raise CensusRefusal(
+            f"block length {block_seconds / 3600:g}h is not a multiple of "
+            f"WINDOW_HOURS ({WINDOW_HOURS}h)"
+        )
+    total_slots = int(block_seconds // (WINDOW_HOURS * 3600))
     all_starts = [
         block.start + timedelta(hours=i * WINDOW_HOURS) for i in range(total_slots)
     ]

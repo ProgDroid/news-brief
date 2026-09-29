@@ -56,7 +56,10 @@ CREATE TABLE census_windows (
     null_published   INTEGER     NOT NULL DEFAULT 0 CHECK (null_published >= 0),
     opened_at        TIMESTAMPTZ NULL,
     blind_done_at    TIMESTAMPTZ NULL,
-    completed_at     TIMESTAMPTZ NULL
+    completed_at     TIMESTAMPTZ NULL,
+    -- One row per (order_no, pass): the repeat window is pass 2 of the same
+    -- order_no, never a second pass-1 row.
+    UNIQUE (order_no, pass)
 );
 
 -- The membership of a window. `item_id` is RESTRICT, not CASCADE: this is the

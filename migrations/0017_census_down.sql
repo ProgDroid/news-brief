@@ -3,8 +3,12 @@
 -- cannot (that only lifts the retention hold, spec section 7 "Release").
 DO $$
 BEGIN
-    IF EXISTS (SELECT 1 FROM census_assignments) THEN
-        RAISE EXCEPTION 'the event census has labels; refusing to drop it';
+    -- to_regclass: a partially applied up may never have created the table.
+    -- Nested IF, not AND: the inner statement is planned only when reached.
+    IF to_regclass('census_assignments') IS NOT NULL THEN
+        IF EXISTS (SELECT 1 FROM census_assignments) THEN
+            RAISE EXCEPTION 'the event census has labels; refusing to drop it';
+        END IF;
     END IF;
 END $$;
 

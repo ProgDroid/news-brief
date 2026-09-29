@@ -149,6 +149,18 @@ def test_forty_item_rule_counts_eligible_items(kb):
     assert len(matched.item_ids) == 40
 
 
+def test_window_stats_refuses_a_block_that_is_not_a_multiple_of_the_window(kb):
+    w0 = datetime(2026, 9, 18, 12, 0, tzinfo=timezone.utc)
+    block = census.Block(start=w0, end=w0 + timedelta(hours=7))
+
+    with pytest.raises(census.CensusRefusal) as excinfo:
+        census.window_stats(kb, block)
+
+    message = str(excinfo.value)
+    assert str(census.WINDOW_HOURS) in message
+    assert "7" in message
+
+
 def test_backlog_excluded_and_null_published_kept(kb):
     outlet = _outlet(kb, "T2")
     w0 = datetime(2026, 9, 18, 12, 0, tzinfo=timezone.utc)

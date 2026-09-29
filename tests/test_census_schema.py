@@ -208,8 +208,11 @@ def test_truncate_items_is_refused_while_census_exists(kb):
     _block(kb, "2026-01-01T00:00:00+00:00", "2026-09-28T12:00:00+00:00")
     kb.commit()
 
-    with rejects(kb, psycopg.errors.RaiseException):
-        kb.execute("TRUNCATE items CASCADE")
+    with pytest.raises(psycopg.errors.RaiseException) as excinfo:
+        with kb.transaction():
+            kb.execute("TRUNCATE items CASCADE")
+
+    assert "held by the event census" in str(excinfo.value)
 
 
 def test_post_block_item_delete_succeeds(kb):
@@ -327,6 +330,13 @@ def test_backlog_excluded_and_null_published_are_integer_counts(kb):
             "VALUES (2, '2026-09-02T00:00:00+00:00', 1, 'open', -1)"
         )
 
+    with rejects(kb, psycopg.errors.CheckViolation):
+        kb.execute(
+            "INSERT INTO census_windows "
+            "(order_no, window_start, pass, status, null_published) "
+            "VALUES (3, '2026-09-03T00:00:00+00:00', 1, 'open', -1)"
+        )
+
 
 def test_stratum_is_a_checked_smallint(kb):
     """Minor #1: stratum is `start.hour // 6`, an int 0..3 (plan Task 3); a
@@ -358,3 +368,58 @@ def test_assignment_created_at_has_no_default_and_is_required(kb):
             "VALUES (%s, %s, false, 't1', 1)",
             (window_id, item_id),
         )
+
+
+def test_duplicate_order_no_and_pass_is_rejected(kb):
+    _window(kb, order_no=1, window_start="2026-09-01T00:00:00+00:00", pass_=1)
+
+    with rejects(kb, psycopg.errors.UniqueViolation):
+        _window(kb, order_no=1, window_start="2026-09-01T06:00:00+00:00", pass_=1)
+
+    # Control: the same order_no in the other pass is the repeat window, legal.
+    assert _window(kb, order_no=1, window_start="2026-09-01T00:00:00+00:00", pass_=2)
+
+
+def test_down_tolerates_a_partially_applied_up(kb):
+    """A partially applied up can leave no census_assignments table; the
+    refusal DO block must not itself fail on the missing relation."""
+    steps = conftest.steps_back_through(kb, TARGET)
+    kb.execute("DROP TABLE census_assignments")
+    kb.commit()
+
+    reverted = db.run_migrations(kb, direction="down", steps=steps)
+    kb.commit()
+
+    assert reverted[-1] == TARGET
+    assert not (CENSUS_TABLES & _tables(kb))
+
+
+def test_truncate_items_without_a_block_succeeds(kb):
+    """No-block control for the truncate refusal: with no census_block row the
+    statement trigger must let TRUNCATE through."""
+    _item(kb, "2026-09-20T12:00:00+00:00")
+    kb.commit()
+
+    kb.execute("TRUNCATE items CASCADE")
+
+    assert kb.execute("SELECT count(*) FROM items").fetchone()[0] == 0
+
+
+def test_down_runs_on_a_freshly_reset_schema(kb):
+    """The label-refusal test leaves its schema used; this one starts from a
+    schema it resets itself, so the down script is proven against a clean up."""
+    kb.rollback()
+    kb.execute("DROP SCHEMA public CASCADE")
+    kb.execute("CREATE SCHEMA public")
+    kb.commit()
+    db.run_migrations(kb)
+    kb.commit()
+    assert CENSUS_TABLES <= _tables(kb)
+
+    steps = conftest.steps_back_through(kb, TARGET)
+    reverted = db.run_migrations(kb, direction="down", steps=steps)
+    kb.commit()
+
+    assert reverted[-1] == TARGET
+    assert not (CENSUS_TABLES & _tables(kb))
+    assert not any(name.startswith("census_hold_") for name in _functions(kb))
