@@ -41,21 +41,21 @@ def _read_block(conn) -> tuple | None:
     ).fetchone()
 
 
-def _read_windows(conn) -> list[tuple]:
+def _read_windows(conn) -> list[census._Window]:
     """Every window in session order: pass 1 by order_no, with the pass-2
-    repeat slotted after order_no REPEAT_AFTER_ORDER_NO."""
-    rows = conn.execute(
-        "SELECT id, order_no, pass, status, window_start, opened_at, "
-        "blind_done_at, null_published, abandon_reason FROM census_windows"
-    ).fetchall()
+    repeat slotted after order_no REPEAT_AFTER_ORDER_NO.
 
-    def key(row):
+    Read through `census._windows`, the one reader of census_windows, and
+    sorted here: `_windows` keeps its own ORDER BY (pass, order_no), which
+    `_current_task`'s loops depend on."""
+
+    def key(w: census._Window):
         # the repeat runs after order_no REPEAT_AFTER_ORDER_NO
-        if row[2] == 2:
-            return (census.REPEAT_AFTER_ORDER_NO + 0.5, row[1])
-        return (float(row[1]), row[1])
+        if w.pass_ == 2:
+            return (census.REPEAT_AFTER_ORDER_NO + 0.5, w.order_no)
+        return (float(w.order_no), w.order_no)
 
-    return sorted(rows, key=key)
+    return sorted(census._windows(conn), key=key)
 
 
 def _fmt(x: float, digits: int = 2) -> str:
@@ -77,19 +77,30 @@ def _gap_section(block: tuple) -> list[str]:
     ]
 
 
-def _block_section(block: tuple) -> tuple[list[str], datetime]:
+def _block_section(block: tuple) -> list[str]:
     start, end, _prepared, deployed = block[0], block[1], block[2], block[3]
-    mid = start + (end - start) / 2
     straddles = start < deployed < end
-    return (
-        [
-            "== Block ==",
-            f"start {start:%Y-%m-%d %H:%M} UTC, end {end:%Y-%m-%d %H:%M} UTC",
-            f"c439ade deployed {deployed:%Y-%m-%d}; block straddles it: "
-            f"{'yes' if straddles else 'no'}",
-            f"by-half split point (block midpoint): {mid:%Y-%m-%d %H:%M} UTC",
-        ],
-        mid,
+    return [
+        "== Block ==",
+        f"start {start:%Y-%m-%d %H:%M} UTC, end {end:%Y-%m-%d %H:%M} UTC",
+        f"c439ade deployed {deployed:%Y-%m-%d}; block straddles it: "
+        f"{'yes' if straddles else 'no'}",
+    ]
+
+
+def _split_point(block: tuple) -> tuple[datetime, str]:
+    """D3: the by-half table splits at the recorded c439ade deploy time when
+    it falls inside the block, else at the block midpoint. Returns the point
+    and the text naming which one was used."""
+    start, end, deployed = block[0], block[1], block[3]
+    if start < deployed < end:
+        at = deployed.astimezone(timezone.utc)
+        return deployed, f"the recorded c439ade deploy time, {at:%Y-%m-%d %H:%M} UTC"
+    mid = start + (end - start) / 2
+    at = mid.astimezone(timezone.utc)
+    return mid, (
+        f"the block midpoint, {at:%Y-%m-%d %H:%M} UTC "
+        "(the c439ade deploy time falls outside the block)"
     )
 
 
@@ -105,44 +116,67 @@ def _stats(conn, window_id: int) -> dict:
     }
 
 
-def _window_lines(conn, windows: list[tuple], stats: dict[int, dict]) -> list[str]:
-    lines = ["== Windows (planned order) =="]
-    for (
-        wid,
-        order_no,
-        pass_,
-        status,
-        _start,
-        opened,
-        done_at,
-        null_pub,
-        reason,
-    ) in windows:
-        s = stats[wid]
-        head = f"#{order_no} pass {pass_} [{status}] items {s['items']}"
-        if status == "prepared":
-            lines.append(head + f", NULL-published {_pct(null_pub, s['items'])}")
+def _wall_start(conn, w: census._Window) -> datetime | None:
+    """Where the window's wall-clock minutes start: the LAST `open` event at
+    or before its first activity (its earliest `action` event or
+    assignment), else `opened_at`.
+
+    Not the first open: the page reloads itself after the previous window
+    completes, so the window's first open can precede the sitting by hours
+    or days. Not the last open overall: a reload mid-sitting stamps one too.
+    """
+    (at,) = conn.execute(
+        "SELECT max(e.at) FROM census_events e "
+        "WHERE e.window_id = %(w)s AND e.kind = 'open' AND e.at <= LEAST("
+        "  (SELECT min(a.at) FROM census_events a "
+        "   WHERE a.window_id = %(w)s AND a.kind = 'action'),"
+        "  (SELECT min(s.created_at) FROM census_assignments s "
+        "   WHERE s.window_id = %(w)s))",
+        {"w": w.id},
+    ).fetchone()
+    return at if at is not None else w.opened_at
+
+
+def _window_lines(
+    conn, windows: list[census._Window], stats: dict[int, dict]
+) -> list[str]:
+    lines = [
+        "== Windows (planned order) ==",
+        "active min: the gaps of at most "
+        f"{census_metrics.IDLE_CAP_MINUTES} min between the window's events, up "
+        "to the end of its blind pass; wall min: from the last page open at or "
+        "before the window's first action or assignment (its opened_at when "
+        "there is none) to its blind_done_at",
+    ]
+    for w in windows:
+        s = stats[w.id]
+        head = f"#{w.order_no} pass {w.pass_} [{w.status}] items {s['items']}"
+        if w.status == "prepared":
+            lines.append(
+                head + f", NULL-published {_pct(w.null_published, s['items'])}"
+            )
             continue
-        active = census._window_active_minutes(conn, wid)
+        active = census._window_active_minutes(conn, w.id)
+        start = _wall_start(conn, w)
         wall = (
-            f"{(done_at - opened).total_seconds() / 60:.1f}"
-            if opened is not None and done_at is not None
+            f"{(w.blind_done_at - start).total_seconds() / 60:.1f}"
+            if start is not None and w.blind_done_at is not None
             else "n/a"
         )
         lines.append(
             head
             + f", groups {s['groups']}, singletons {s['singletons']}"
             + f", unsure {_pct(s['unsure'], s['items'])}"
-            + f", NULL-published {_pct(null_pub, s['items'])}"
+            + f", NULL-published {_pct(w.null_published, s['items'])}"
             + f", multi-outlet groups {s['multi']}"
             + f", active/wall min {active:.1f}/{wall}"
-            + (f" ({reason})" if reason else "")
+            + (f" ({w.abandon_reason})" if w.abandon_reason else "")
         )
     return lines
 
 
-def _go_lines(conn, override: str | None) -> list[str]:
-    gate = census._go_status(conn, census._windows(conn))
+def _go_lines(conn, windows: list[census._Window], override: str | None) -> list[str]:
+    gate = census._go_status(conn, windows)
     if gate is None:
         return []
     return [
@@ -155,12 +189,12 @@ def _go_lines(conn, override: str | None) -> list[str]:
     ]
 
 
-def _mde_lines(windows: list[tuple], stats: dict[int, dict]) -> list[str]:
-    done = [w for w in windows if w[2] == 1 and w[3] in _BLIND_DONE]
+def _mde_lines(windows: list[census._Window], stats: dict[int, dict]) -> list[str]:
+    done = [w for w in windows if w.pass_ == 1 and w.status in _BLIND_DONE]
     k = len(done)
     if k < 2:
         return []
-    m_values = [stats[w[0]]["multi"] for w in done]
+    m_values = [stats[w.id]["multi"] for w in done]
     head = "== Achieved detectable difference (spec 4.5) =="
     if statistics.mean(m_values) == 0:
         # Ruling R14: mde divides by the mean; a no-group state is a NO-GO
@@ -218,21 +252,22 @@ def _consistency_rows(a: dict, b: dict, reps: int) -> list[tuple[str, float, str
     return rows
 
 
-def _consistency_lines(conn, windows: list[tuple]) -> list[str]:
-    repeat = next((w for w in windows if w[2] == 2), None)
+def _consistency_lines(conn, windows: list[census._Window]) -> list[str]:
+    repeat = next((w for w in windows if w.pass_ == 2), None)
     if repeat is None:
         return []
-    if repeat[3] == "abandoned":
+    if repeat.status == "abandoned":
         return ["== Consistency (spec 4.6) ==", "consistency unavailable: repeat void"]
-    if repeat[3] not in _BLIND_DONE:
+    if repeat.status not in _BLIND_DONE:
         return []
     first = next(
-        (w for w in windows if w[2] == 1 and w[1] == census.REPEAT_ORDER_NO), None
+        (w for w in windows if w.pass_ == 1 and w.order_no == census.REPEAT_ORDER_NO),
+        None,
     )
     if first is None:
         return []
-    a = _labels(conn, first[0])
-    b = _labels(conn, repeat[0])
+    a = _labels(conn, first.id)
+    b = _labels(conn, repeat.id)
     common = sorted(set(a) & set(b))
     a = {i: a[i] for i in common}
     b = {i: b[i] for i in common}
@@ -257,12 +292,12 @@ def _precision_counts(conn, window_id: int) -> tuple[int, int]:
     return yes, asked
 
 
-def _precision_lines(conn, windows: list[tuple]) -> list[str]:
+def _precision_lines(conn, windows: list[census._Window]) -> list[str]:
     per_window = [
         c
         for w in windows
-        if w[2] == 1 and w[3] == "complete"
-        for c in [_precision_counts(conn, w[0])]
+        if w.pass_ == 1 and w.status == "complete"
+        for c in [_precision_counts(conn, w.id)]
         if c[1] > 0
     ]
     lines = ["== Blind precision (spec 6.4) =="]
@@ -285,20 +320,33 @@ def _precision_lines(conn, windows: list[tuple]) -> list[str]:
 
 
 def _half_lines(
-    conn, windows: list[tuple], stats: dict[int, dict], mid: datetime
+    conn,
+    windows: list[census._Window],
+    stats: dict[int, dict],
+    split: tuple[datetime, str],
 ) -> list[str]:
-    lines = ["== By block half (descriptive only) =="]
+    point, named = split
+    lines = [
+        "== By block half (descriptive only) ==",
+        f"split at {named}",
+        "a window is classified by its window_start, so one whose "
+        f"{census.WINDOW_HOURS} hours contain the split point counts as before",
+    ]
     for name, pick in (
-        ("first half", lambda t: t < mid),
-        ("second half", lambda t: t >= mid),
+        ("before the split", lambda t: t < point),
+        ("after the split", lambda t: t >= point),
     ):
-        done = [w for w in windows if w[2] == 1 and w[3] == "complete" and pick(w[4])]
+        done = [
+            w
+            for w in windows
+            if w.pass_ == 1 and w.status == "complete" and pick(w.window_start)
+        ]
         if not done:
             lines.append(f"{name}: no complete windows")
             continue
-        mean_multi = statistics.mean(stats[w[0]]["multi"] for w in done)
-        mean_items = statistics.mean(stats[w[0]]["items"] for w in done)
-        counts = [_precision_counts(conn, w[0]) for w in done]
+        mean_multi = statistics.mean(stats[w.id]["multi"] for w in done)
+        mean_items = statistics.mean(stats[w.id]["items"] for w in done)
+        counts = [_precision_counts(conn, w.id) for w in done]
         yes = sum(c[0] for c in counts)
         asked = sum(c[1] for c in counts)
         lines.append(
@@ -315,19 +363,18 @@ def render(conn, now: datetime) -> str:
     if block is None:
         return "The census is not prepared."
     windows = _read_windows(conn)
-    stats = {w[0]: _stats(conn, w[0]) for w in windows}
-    block_lines, mid = _block_section(block)
+    stats = {w.id: _stats(conn, w.id) for w in windows}
 
     sections = [
         [f"Event census readout as of {now:%Y-%m-%d %H:%M} UTC"],
         _gap_section(block),
-        block_lines,
+        _block_section(block),
         _window_lines(conn, windows, stats),
-        _go_lines(conn, block[9]),
+        _go_lines(conn, windows, block[9]),
         _mde_lines(windows, stats),
         _consistency_lines(conn, windows),
         _precision_lines(conn, windows),
-        _half_lines(conn, windows, stats, mid),
+        _half_lines(conn, windows, stats, _split_point(block)),
     ]
     return "\n\n".join("\n".join(s) for s in sections if s) + "\n"
 

@@ -1,5 +1,7 @@
 """`scripts/census_report.py`: the read-only readout (plan Task 9)."""
 
+from datetime import timedelta, timezone
+
 import psycopg
 import pytest
 
@@ -245,3 +247,108 @@ def test_report_consistency_point_values(ready):
     assert f"ARI {ari:.2f} (" in text
     assert f"{len(items)} sure items in both passes" in text
     assert "resamples undefined)" in text
+
+
+# ── Wall-clock minutes (objection 3) ────────────────────────────────────────
+
+
+def _window_line(text: str, order_no: int, pass_: int = 1) -> str:
+    return next(
+        ln for ln in text.splitlines() if ln.startswith(f"#{order_no} pass {pass_} ")
+    )
+
+
+def test_wall_minutes_start_at_the_last_open_before_the_first_action(ready):
+    """The auto-reload after the previous window's completion stamps an open
+    hours or days before the sitting: the FIRST open measures the gap
+    between sittings. A reload mid-sitting stamps a later one: the LAST open
+    overall would cut the sitting short."""
+    w1 = cf.window_id(ready, 1)
+    assert census.serve_page(ready, NOW - timedelta(days=1)).window_id == w1
+    assert census.serve_page(ready, NOW).window_id == w1  # the sitting begins
+    first = NOW + timedelta(minutes=1)
+    [group] = cf.cross_outlet_groups(ready, w1, 1)
+    gid = census.create_group(ready, w1, first)
+    census.save_assignments(
+        ready, w1, "tab", 1, [(i, gid, False) for i in group], first
+    )
+    census.record_event(ready, w1, "action", first)
+    assert census.serve_page(ready, NOW + timedelta(minutes=5)).window_id == w1
+    census.finish_blind(ready, w1, NOW + timedelta(minutes=10))
+
+    text = census_report.render(ready, NOW + timedelta(minutes=11))
+    # first open: 1450.0; opened_at (first assignment): 9.0; last open: 5.0
+    assert "active/wall min 10.0/10.0" in _window_line(text, 1)
+    assert (
+        "wall min: from the last page open at or before the window's first "
+        "action or assignment (its opened_at when there is none) to its "
+        "blind_done_at" in text
+    )
+
+
+def test_wall_minutes_fall_back_to_opened_at_without_an_action_or_assignment(
+    ready,
+):
+    w1 = cf.window_id(ready, 1)
+    assert census.serve_page(ready, NOW - timedelta(days=1)).window_id == w1
+    census.save_assignments(ready, w1, "tab", 1, [], NOW)  # sets opened_at only
+    census.finish_blind(ready, w1, NOW + timedelta(minutes=5))
+
+    text = census_report.render(ready, NOW + timedelta(minutes=6))
+    # opened_at: 5.0; the (stale) open: 1445.0; no fallback: n/a
+    assert "active/wall min 0.0/5.0" in _window_line(text, 1)
+
+
+# ── The by-half table's split point (D3) ────────────────────────────────────
+
+
+def _complete_two_windows_starting(conn, starts) -> None:
+    """Windows 1 and 2 complete with nothing grouped, their window_start then
+    moved in SQL: the readout classifies by window_start and reads nothing
+    else of it, so only the split point decides which half each lands in."""
+    cf.finish_empty(conn, [1, 2], NOW)
+    for order_no, start in zip((1, 2), starts):
+        conn.execute(
+            "UPDATE census_windows SET window_start = %s "
+            "WHERE order_no = %s AND pass = 1",
+            (start, order_no),
+        )
+    conn.commit()
+
+
+def test_by_half_splits_at_the_deploy_and_a_straddling_window_counts_before(ready):
+    deployed = cf.DEPLOYED_AT  # inside the fixture's block
+    _complete_two_windows_starting(
+        ready, [deployed - timedelta(hours=3), deployed + timedelta(hours=1)]
+    )
+    text = census_report.render(ready, NOW)
+    assert "split at the recorded c439ade deploy time, 2026-09-25 12:00 UTC" in text
+    assert (
+        "a window is classified by its window_start, so one whose "
+        f"{census.WINDOW_HOURS} hours contain the split point counts as before"
+    ) in text
+    # The straddling window (its six hours contain the deploy) is "before".
+    assert "before the split: 1 windows" in text
+    assert "after the split: 1 windows" in text
+
+
+def test_by_half_splits_at_the_block_midpoint_when_the_deploy_is_outside(ready):
+    start, end = ready.execute(
+        "SELECT block_start, block_end FROM census_block"
+    ).fetchone()
+    ready.execute(
+        "UPDATE census_block SET c439ade_deployed_at = %s",
+        (start - timedelta(days=1),),
+    )
+    ready.commit()
+    mid = start + (end - start) / 2
+    _complete_two_windows_starting(
+        ready, [mid - timedelta(hours=3), mid + timedelta(hours=1)]
+    )
+    text = census_report.render(ready, NOW)
+    assert (
+        f"split at the block midpoint, {mid.astimezone(timezone.utc):%Y-%m-%d %H:%M}"
+        " UTC (the c439ade deploy time falls outside the block)"
+    ) in text
+    assert "before the split: 1 windows" in text
+    assert "after the split: 1 windows" in text

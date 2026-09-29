@@ -456,6 +456,12 @@ class _Window:
     pass_: int
     status: str
     blind_done_at: datetime | None
+    # Read only by the readout (scripts/census_report.py), which reuses this
+    # reader rather than keeping a second query of census_windows.
+    window_start: datetime
+    opened_at: datetime | None
+    null_published: int
+    abandon_reason: str | None
 
     @property
     def done(self) -> bool:
@@ -487,9 +493,12 @@ def _transaction(fn):
 
 
 def _windows(conn) -> list[_Window]:
-    """Every census window, pass 1 before pass 2, each in order_no order."""
+    """Every census window, pass 1 before pass 2, each in order_no order.
+    `_current_task`'s loops depend on this order; the readout sorts its own
+    copy for display."""
     rows = conn.execute(
-        "SELECT id, order_no, pass, status, blind_done_at FROM census_windows "
+        "SELECT id, order_no, pass, status, blind_done_at, window_start, "
+        "opened_at, null_published, abandon_reason FROM census_windows "
         "ORDER BY pass, order_no"
     ).fetchall()
     return [_Window(*row) for row in rows]
