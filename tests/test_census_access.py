@@ -149,7 +149,7 @@ def test_labeller_can_run_the_session_code(kb):
         assert census.session_valid(conn, session, NOW) is True
         assert census.current_task(conn, NOW).kind == "blind"
         items = census.window_items(conn, w1)
-        census.record_event(conn, w1, "open", NOW)
+        assert census.serve_page(conn, NOW).window_id == w1
         group = census.create_group(conn, w1, NOW)
         census.save_assignments(
             conn, w1, "c", 1, [(i["id"], group, False) for i in items[:2]], NOW

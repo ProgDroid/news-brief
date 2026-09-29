@@ -205,7 +205,9 @@ def render_page(data: dict) -> bytes:
 
 
 def _page_data(conn, now: datetime) -> dict:
-    task = census.current_task(conn, now)
+    # One transaction decides what to serve and stamps its `open` event
+    # (D1a): the stamp claims the window against the repeat.
+    task = census.serve_page(conn, now)
     data: dict = {
         "kind": task.kind,
         "session_no": task.session_no,
@@ -214,7 +216,6 @@ def _page_data(conn, now: datetime) -> dict:
         "heartbeat_seconds": HEARTBEAT_SECONDS,
     }
     if task.kind == "blind":
-        census.record_event(conn, task.window_id, "open", now)
         # No `detail` here: it is "<n> items", and the header shows the
         # session number only (F23, sec 4.6).
         data["items"] = [
@@ -227,7 +228,6 @@ def _page_data(conn, now: datetime) -> dict:
             ).items()
         }
     elif task.kind == "precision":
-        census.record_event(conn, task.window_id, "open", now)
         pairs = census.precision_pairs(conn, task.window_id)
         wanted = {i for pair in pairs for i in pair}
         data["pairs"] = [list(p) for p in pairs]

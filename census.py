@@ -462,13 +462,12 @@ class _Window:
         return self.status in _DONE
 
 
-# What callers may log through `record_event`. `finish` and `abandon` are
-# written only by `finish_blind` and `abandon` (review m1): a stray abandon
-# event would cap a live window's active minutes (`_window_active_minutes`).
-_CALLER_EVENT_KINDS = ("open", "action", "heartbeat")
-# Kinds that are part of the blind pass itself, refused once it is over.
-# `open` is not: the precision page is opened after Finish.
-_BLIND_EVENT_KINDS = ("action", "heartbeat")
+# What callers may log through `record_event`: the blind pass's own events,
+# refused once it is over. `finish` and `abandon` are written only by
+# `finish_blind` and `abandon` (review m1): a stray abandon event would cap a
+# live window's active minutes (`_window_active_minutes`). `open` is written
+# only by `serve_page`, in the same transaction that decides what to serve.
+_CALLER_EVENT_KINDS = ("action", "heartbeat")
 _DECISIONS = ("same", "different")
 _GATE_ORDER_NOS = (1, 2)
 
@@ -652,8 +651,30 @@ def _item_count(conn, window_id: int) -> int:
     ).fetchone()[0]
 
 
-@_transaction
-def current_task(conn, now: datetime) -> Task:
+def _claimed_since_last_completion(conn, window_id: int) -> bool:
+    """D1a (claim on serve): whether `window_id`'s page was served -- it has
+    an `open` event -- later than the most recent completion of ANY window.
+
+    A completion is any of: a `blind_done_at`, a `completed_at`, or an
+    `abandon` event (abandon records no timestamp column; its event is its
+    only time). So an open event left over from before the previous window
+    finished claims nothing: only a page served in the current session
+    boundary does.
+    """
+    return conn.execute(
+        "SELECT EXISTS ("
+        "  SELECT 1 FROM census_events e"
+        "  WHERE e.window_id = %s AND e.kind = 'open' AND e.at > ("
+        "    SELECT COALESCE(max(t), '-infinity'::timestamptz) FROM ("
+        "      SELECT blind_done_at AS t FROM census_windows"
+        "      UNION ALL SELECT completed_at FROM census_windows"
+        "      UNION ALL SELECT at FROM census_events WHERE kind = 'abandon'"
+        "    ) done))",
+        (window_id,),
+    ).fetchone()[0]
+
+
+def _current_task(conn, now: datetime) -> Task:
     """What to serve at `now` (plan Task 4, in priority order):
 
     1. no block -> not_prepared;
@@ -662,10 +683,16 @@ def current_task(conn, now: datetime) -> Task:
     4. a saved blind pass with precision pairs offered -> precision
        (order_no 2's are held until the repeat is done);
     5. the repeat, once order_no 8 is done and REPEAT_MIN_DAYS have passed
-       since order_no 2's blind pass -> blind on it;
+       since order_no 2's blind pass -> blind on it -- UNLESS the lowest
+       pass-1 window not done was served (has an `open` event) since the most
+       recent window completion (D1a, claim on serve): a page already loaded
+       is never pre-empted, so the repeat takes over at a session boundary;
     6. the lowest pass-1 window not done -> blind;
     7. only the repeat remains, not yet eligible -> waiting, with the date;
     8. complete.
+
+    Never commits: the writers call it as their guard while they hold the
+    window's row lock (F17), and the public `current_task` wraps it.
     """
     block = conn.execute("SELECT go_override_reason FROM census_block").fetchone()
     if block is None:
@@ -705,7 +732,12 @@ def current_task(conn, now: datetime) -> Task:
         eligible_at = anchor.blind_done_at + timedelta(days=REPEAT_MIN_DAYS)
         after = by_order.get(REPEAT_AFTER_ORDER_NO)
         if after is not None and after.done and now >= eligible_at:
-            return blind(repeat)
+            nxt = next(
+                (by_order[o] for o in sorted(by_order) if not by_order[o].done),
+                None,
+            )
+            if nxt is None or not _claimed_since_last_completion(conn, nxt.id):
+                return blind(repeat)
 
     for order_no in sorted(by_order):
         if not by_order[order_no].done:
@@ -720,6 +752,26 @@ def current_task(conn, now: datetime) -> Task:
             f"the repeat of window {REPEAT_ORDER_NO} opens {at_utc:%Y-%m-%d %H:%M} UTC",
         )
     return Task("complete", None, done, "the census is complete")
+
+
+@_transaction
+def current_task(conn, now: datetime) -> Task:
+    """What to serve at `now`; see `_current_task`. Stamps nothing: `/label`
+    and the morning nudge ask without claiming a window (D1a)."""
+    return _current_task(conn, now)
+
+
+@_transaction
+def serve_page(conn, now: datetime) -> Task:
+    """A page load: compute what to serve at `now` and, for a blind or
+    precision task, stamp its `open` event -- in ONE transaction, so no state
+    change can fall between the decision and the stamp. The stamp is what
+    claims a pass-1 window against the repeat (D1a), and the only writer of
+    `open` events."""
+    task = _current_task(conn, now)
+    if task.kind in ("blind", "precision"):
+        _insert_event(conn, task.window_id, "open", now)
+    return task
 
 
 @_transaction
@@ -751,19 +803,17 @@ def _insert_event(conn, window_id: int, kind: str, at: datetime) -> None:
 
 @_transaction
 def record_event(conn, window_id: int, kind: str, at: datetime) -> None:
-    """Append one caller timing event: `open`, `action` or `heartbeat`.
+    """Append one caller timing event: `action` or `heartbeat`.
 
     BadWrite (never a psycopg error, review m2) for any other kind --
     `finish` and `abandon` are written only by `finish_blind` and `abandon`
-    (m1) -- for a window that does not exist, and for an `action` or
-    `heartbeat` on a window whose blind pass is over. `open` is accepted on
-    any existing window: the precision page is opened after Finish, and
-    `_window_active_minutes` ignores events after `blind_done_at`.
+    (m1), `open` only by `serve_page` -- for a window that does not exist,
+    and for an event on a window whose blind pass is over.
     """
     if kind not in _CALLER_EVENT_KINDS:
         raise BadWrite(f"event kind {kind!r} cannot be recorded by a caller")
     status, _blind_done_at, _order_no, _pass = _lock_window(conn, window_id)
-    if kind in _BLIND_EVENT_KINDS and status in _DONE:
+    if status in _DONE:
         raise BadWrite(f"window {window_id} is {status}; no {kind} event")
     _insert_event(conn, window_id, kind, at)
 

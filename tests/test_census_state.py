@@ -594,6 +594,130 @@ def test_complete_census_is_session_seventeen(ready):
     assert task.session_no == census.TOTAL_SESSIONS == 17
 
 
+# ── Claim on serve (D1a) and page loads ─────────────────────────────────────
+
+
+def _events(conn, window_id: int) -> list[tuple]:
+    rows = conn.execute(
+        "SELECT kind, at FROM census_events WHERE window_id = %s ORDER BY id",
+        (window_id,),
+    ).fetchall()
+    conn.commit()
+    return rows
+
+
+def _to_window_nine(conn):
+    """Windows 1-8 done at NOW with the gate passed: window 9 is the next
+    pass-1 window, and the repeat becomes eligible at NOW + REPEAT_MIN_DAYS."""
+    cf.pass_gate(conn, NOW)
+    cf.finish_empty(conn, range(3, 9), NOW)
+    eligible = NOW + timedelta(days=census.REPEAT_MIN_DAYS)
+    return (
+        cf.window_id(conn, 9),
+        cf.window_id(conn, census.REPEAT_ORDER_NO, pass_=2),
+        eligible,
+    )
+
+
+def test_a_served_window_is_not_preempted_by_the_repeat(ready):
+    """The red team's sequence: window 9's page is served, the repeat's
+    eligibility passes while the operator reads, and window 9 is still what
+    the census serves."""
+    w9, _repeat, eligible = _to_window_nine(ready)
+    task = census.serve_page(ready, eligible - timedelta(minutes=5))
+    assert (task.kind, task.window_id) == ("blind", w9)
+
+    task = census.current_task(ready, eligible + timedelta(minutes=1))
+    assert (task.kind, task.window_id) == ("blind", w9)
+
+
+def test_without_an_open_event_the_repeat_is_served(ready):
+    w9, repeat, eligible = _to_window_nine(ready)
+    # current_task stamps nothing, so asking does not claim window 9.
+    assert census.current_task(ready, eligible - timedelta(minutes=5)).window_id == w9
+    task = census.current_task(ready, eligible + timedelta(minutes=1))
+    assert (task.kind, task.window_id) == ("blind", repeat)
+    assert _events(ready, w9) == []
+
+
+def test_the_reload_after_the_claimed_window_completes_serves_the_repeat(ready):
+    w9, repeat, eligible = _to_window_nine(ready)
+    census.serve_page(ready, eligible - timedelta(minutes=5))
+    done_at = eligible + timedelta(minutes=20)
+    cf.label(ready, w9, [], done_at)  # nothing grouped: completes at Finish
+
+    reload_at = done_at + timedelta(seconds=1)
+    task = census.serve_page(ready, reload_at)
+    assert (task.kind, task.window_id) == ("blind", repeat)
+    assert _events(ready, repeat) == [("open", reload_at)]
+
+
+def test_an_open_event_before_the_last_completion_claims_nothing(ready):
+    """Only a page served since the most recent completion claims."""
+    w9, repeat, eligible = _to_window_nine(ready)
+    # Seeded: the served order cannot stamp window 9 before window 8 is done.
+    ready.execute(
+        "INSERT INTO census_events (window_id, kind, at) VALUES (%s, 'open', %s)",
+        (w9, NOW - timedelta(minutes=1)),
+    )
+    ready.commit()
+    task = census.current_task(ready, eligible)
+    assert (task.kind, task.window_id) == ("blind", repeat)
+
+
+def test_an_abandon_counts_as_a_completion(ready):
+    """`abandon` records no timestamp column; its event is its completion
+    time. An open on window 9 that predates window 8's abandon claims
+    nothing."""
+    cf.pass_gate(ready, NOW)
+    cf.finish_empty(ready, range(3, 8), NOW)
+    w9 = cf.window_id(ready, 9)
+    ready.execute(
+        "INSERT INTO census_events (window_id, kind, at) VALUES (%s, 'open', %s)",
+        (w9, NOW + timedelta(hours=1)),
+    )
+    ready.commit()
+    census.abandon(
+        ready, cf.window_id(ready, 8), "bad window", NOW + timedelta(hours=2)
+    )
+
+    task = census.current_task(ready, NOW + timedelta(days=census.REPEAT_MIN_DAYS))
+    assert (task.kind, task.window_id) == (
+        "blind",
+        cf.window_id(ready, census.REPEAT_ORDER_NO, pass_=2),
+    )
+
+
+def test_serve_page_stamps_the_blind_and_the_precision_page(ready):
+    w1 = cf.window_id(ready, 1)
+    task = census.serve_page(ready, NOW)
+    assert (task.kind, task.window_id, task.session_no) == ("blind", w1, 1)
+    assert ready.info.transaction_status == IDLE
+    assert _events(ready, w1) == [("open", NOW)]
+
+    finish_at = NOW + timedelta(minutes=10)
+    cf.label(ready, w1, cf.cross_outlet_groups(ready, w1, 3), finish_at)
+    page_at = finish_at + timedelta(seconds=1)
+    task = census.serve_page(ready, page_at)
+    assert (task.kind, task.window_id) == ("precision", w1)
+    assert _events(ready, w1) == [
+        ("open", NOW),
+        ("finish", finish_at),
+        ("open", page_at),
+    ]
+
+
+def test_serve_page_stamps_nothing_without_a_window(ready):
+    cf.pass_gate(ready, NOW, groups=3)
+    before = ready.execute("SELECT count(*) FROM census_events").fetchone()[0]
+    ready.commit()
+    assert census.serve_page(ready, NOW).kind == "gate_failed"
+    after = ready.execute("SELECT count(*) FROM census_events").fetchone()[0]
+    ready.commit()
+    assert after == before
+    assert ready.info.transaction_status == IDLE
+
+
 # ── Timing (sec 6.3, F19) ───────────────────────────────────────────────────
 
 
@@ -605,11 +729,12 @@ def _event_count(conn, window_id: int) -> int:
     return n
 
 
-def test_record_event_refuses_finish_and_abandon(ready):
+def test_record_event_refuses_finish_abandon_and_open(ready):
     """m1: only finish_blind and abandon write those kinds -- a stray
-    abandon event would cap a live window's active minutes."""
+    abandon event would cap a live window's active minutes. D1a: only
+    serve_page writes `open`, in the transaction that decides what to serve."""
     w1 = cf.window_id(ready, 1)
-    for kind in ("abandon", "finish", "bogus"):
+    for kind in ("abandon", "finish", "open", "bogus"):
         with pytest.raises(census.BadWrite):
             census.record_event(ready, w1, kind, NOW)
         assert ready.info.transaction_status == IDLE
@@ -625,37 +750,42 @@ def test_record_event_refuses_unknown_and_closed_windows(ready):
         census.record_event(ready, unknown, "heartbeat", NOW)
     assert ready.info.transaction_status == IDLE
 
+    # Walked in the served order: window 1 saved and its precision answered,
+    # then window 2 (served next) abandoned.
     w1 = cf.window_id(ready, 1)
     cf.label(ready, w1, cf.cross_outlet_groups(ready, w1, 3), NOW)
-    w3 = cf.window_id(ready, 3)
-    census.abandon(ready, w3, "stopped", NOW)
-    before = {w: _event_count(ready, w) for w in (w1, w3)}
+    cf.answer_precision(ready, w1, NOW)
+    w2 = cf.window_id(ready, 2)
+    census.abandon(ready, w2, "stopped", NOW)
+    before = {w: _event_count(ready, w) for w in (w1, w2)}
 
-    for window in (w1, w3):
+    for window in (w1, w2):
         for kind in ("action", "heartbeat"):
             with pytest.raises(census.BadWrite):
                 census.record_event(ready, window, kind, NOW + timedelta(minutes=1))
             assert ready.info.transaction_status == IDLE
-    assert {w: _event_count(ready, w) for w in (w1, w3)} == before
-
-    # `open` is still accepted after Finish: the precision page opens then.
-    census.record_event(ready, w1, "open", NOW + timedelta(minutes=2))
-    assert _event_count(ready, w1) == before[w1] + 1
+    assert {w: _event_count(ready, w) for w in (w1, w2)} == before
 
 
 def test_active_minutes_stop_at_blind_done(ready):
     w1 = cf.window_id(ready, 1)
     m = timedelta(minutes=1)
-    census.record_event(ready, w1, "open", NOW)
+    assert census.serve_page(ready, NOW).window_id == w1  # the `open` event
     # Heartbeats bridge what would otherwise be a 10-minute idle gap.
     census.record_event(ready, w1, "heartbeat", NOW + 4 * m)
     census.record_event(ready, w1, "heartbeat", NOW + 8 * m)
+    for seq, members in enumerate(cf.cross_outlet_groups(ready, w1, 3), start=1):
+        gid = census.create_group(ready, w1, NOW + 10 * m)
+        census.save_assignments(
+            ready, w1, "t", seq, [(i, gid, False) for i in members], NOW + 10 * m
+        )
     census.record_event(ready, w1, "action", NOW + 10 * m)
     census.finish_blind(ready, w1, NOW + 12 * m)
     # After blind_done_at: the precision page is opened, twice. Each would
     # add minutes (gaps of 1 and 1) if the cap were missing.
-    census.record_event(ready, w1, "open", NOW + 13 * m)
-    census.record_event(ready, w1, "open", NOW + 14 * m)
+    for at in (NOW + 13 * m, NOW + 14 * m):
+        task = census.serve_page(ready, at)
+        assert (task.kind, task.window_id) == ("precision", w1)
 
     assert census.window_active_minutes(ready, w1) == pytest.approx(12.0)
 
@@ -663,11 +793,16 @@ def test_active_minutes_stop_at_blind_done(ready):
 def test_active_minutes_of_an_abandoned_window_count_to_the_end(ready):
     w1 = cf.window_id(ready, 1)
     m = timedelta(minutes=1)
-    census.record_event(ready, w1, "open", NOW)
+    assert census.serve_page(ready, NOW).window_id == w1  # the `open` event
     census.record_event(ready, w1, "action", NOW + 3 * m)
     census.abandon(ready, w1, "stopped", NOW + 5 * m)
-    # A page opened after the abandon adds nothing.
-    census.record_event(ready, w1, "open", NOW + 6 * m)
+    # An event after the abandon adds nothing. Seeded in SQL: the served
+    # order would now stamp window 2, and every writer refuses window 1.
+    ready.execute(
+        "INSERT INTO census_events (window_id, kind, at) VALUES (%s, 'open', %s)",
+        (w1, NOW + 6 * m),
+    )
+    ready.commit()
     assert census.window_active_minutes(ready, w1) == pytest.approx(5.0)
 
 
@@ -678,10 +813,13 @@ def test_every_function_leaves_no_transaction_open(ready):
     w1 = cf.window_id(ready, 1)
     x = census.window_items(ready, w1)[0]["id"]
 
+    # In the served order: window 1 is finished with nothing grouped (so it
+    # completes), and window 2, served next, is abandoned.
     calls = [
         lambda: census.current_task(ready, NOW),
+        lambda: census.serve_page(ready, NOW),
         lambda: census.window_items(ready, w1),
-        lambda: census.record_event(ready, w1, "open", NOW),
+        lambda: census.record_event(ready, w1, "heartbeat", NOW),
         lambda: census.create_group(ready, w1, NOW),
         lambda: census.save_assignments(ready, w1, "p", 1, [(x, None, False)], NOW),
         lambda: census.latest_assignments(ready, w1),
@@ -690,7 +828,7 @@ def test_every_function_leaves_no_transaction_open(ready):
         lambda: census.go_status(ready),
         lambda: census.finish_blind(ready, w1, NOW),
         lambda: census.precision_pairs(ready, w1),
-        lambda: census.abandon(ready, cf.window_id(ready, 3), "reason", NOW),
+        lambda: census.abandon(ready, cf.window_id(ready, 2), "reason", NOW),
     ]
     for call in calls:
         call()
