@@ -299,3 +299,24 @@ def test_missing_sequence_is_named_when_the_lookup_would_fail(kb):
     finally:
         conn.close()
     assert "USAGE on sequence of census_groups (not found)" in missing
+
+
+def test_labeller_role_can_render_the_readout_read_only(kb):
+    """The runbook runs the readout from the pinned image AS the labeller role
+    (final review I1): every SELECT `census_report.render` issues must be
+    covered by LABELLER_GRANTS, inside READ ONLY, with the same text as the
+    owner's connection produces."""
+    from scripts import census_report
+
+    cf.prepared(kb)
+    cf.pass_gate(kb, NOW)
+    expected = census_report.render(kb, NOW)
+    kb.commit()
+    assert "Go/no-go" in expected  # the control: the readout has content
+    conn = _labeller()
+    try:
+        conn.execute("SET TRANSACTION READ ONLY")
+        assert census_report.render(conn, NOW) == expected
+    finally:
+        conn.rollback()
+        conn.close()

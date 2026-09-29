@@ -401,6 +401,13 @@ def test_labeller_service_holds_no_secret_but_its_own():
     assert "POSTGRES_USER=census_labeller" in text
 
 
+def test_labeller_service_restarts_unless_stopped():
+    """The census spans weeks; a host or Docker restart must not take the page
+    down silently (final review m4)."""
+    text = chr(10).join(_labeller_block())
+    assert re.search(r"^\s*restart:\s*unless-stopped\s*$", text, re.M)
+
+
 def test_census_runbook_scripts_ship_in_the_image():
     """The host runbook runs `scripts/census_report.py` and
     `scripts/census_grants.py` inside the container, so both must sit under a

@@ -380,8 +380,11 @@ class _Handler(BaseHTTPRequestHandler):
         if body and self.command != "HEAD":
             self.wfile.write(body)
 
-    def _forbidden(self):
-        self._send(403, b"forbidden", "text/plain; charset=utf-8")
+    def _forbidden(self, reason: str = "session"):
+        """403 whose body names the reason CLASS only (`session` or `origin`),
+        so the page can tell an expired session from a mismatched address
+        without the body leaking which check or value failed."""
+        self._send(403, f"forbidden: {reason}".encode(), "text/plain; charset=utf-8")
 
     def _send_json(self, status, payload):
         if payload is None:
@@ -442,7 +445,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if not self._host_ok():
-            return self._forbidden()
+            return self._forbidden("origin")
         parts = urlsplit(self.path)
         path = parts.path
         if path == "/open":
@@ -505,7 +508,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if not self._host_ok() or not self._origin_ok():
-            return self._forbidden()
+            return self._forbidden("origin")
         # No cookie: refuse before reading the body or opening a DB
         # connection (M5).
         if self._session_token() is None:
@@ -588,6 +591,14 @@ def main() -> int:
         print(f"LABELLER_PORT is not a port: {port_text!r}", file=sys.stderr)
         return 2
 
+    if not os.environ.get("POSTGRES_PASSWORD", "").strip():
+        print(
+            "CENSUS_LABELLER_PASSWORD is unset: set it in .env to the password "
+            "given to the census_labeller role by scripts/census_grants.py",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 3
     code = _self_check()
     if code:
         return code

@@ -230,7 +230,7 @@ def test_service_starts_as_the_labeller_role_and_refuses_without_cookie(kb, tmp_
         assert proc.poll() is None, f"labeller exited: {proc.returncode}"
         assert r is not None, "labeller did not answer within 10 s"
         assert r.status == 403
-        assert r.text == "forbidden"
+        assert r.text == "forbidden: session"  # right Host, no cookie
         _assert_security_headers(r)
     finally:
         proc.terminate()
@@ -255,6 +255,23 @@ def test_service_exits_naming_a_missing_grant(kb, tmp_path):
             proc.wait(timeout=10)
     assert code == 3, err
     assert "missing grant: INSERT on census_events" in err, err
+
+
+def test_service_exits_naming_the_labeller_password_when_it_is_unset(kb, tmp_path):
+    port = _free_port()
+    env = _labeller_env(port, tmp_path)
+    env["POSTGRES_PASSWORD"] = ""
+    proc = _spawn(env)
+    try:
+        code = proc.wait(timeout=20)
+        _out, err = proc.communicate(timeout=10)
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            proc.wait(timeout=10)
+    assert code == 3, err
+    assert "CENSUS_LABELLER_PASSWORD" in err, err
+    assert "&newsbrief" not in err, err
 
 
 def test_service_exits_when_the_database_is_unreachable(kb, tmp_path):
@@ -380,7 +397,7 @@ def test_link_flow_sets_cookie_and_redirects(kb, labeller_server):
 
     reuse = _request(labeller_server, "GET", f"/open?t={quote(link)}")
     assert reuse.status == 403
-    assert reuse.text == "forbidden"
+    assert reuse.text == "forbidden: session"
     assert "Set-Cookie" not in reuse.headers
 
     assert _request(labeller_server, "GET", "/open?t=not-a-token").status == 403
@@ -389,6 +406,21 @@ def test_link_flow_sets_cookie_and_redirects(kb, labeller_server):
     assert _request(labeller_server, "GET", "/", cookie=token).status == 200
     assert _request(labeller_server, "GET", "/", cookie=link).status == 403
     assert _request(labeller_server, "GET", "/").status == 403
+
+
+def test_missing_or_invalid_cookie_is_forbidden_session(kb, labeller_server):
+    """The body names the reason class, so the page can say "session expired"
+    only for a session problem (final review I2)."""
+    cf.prepared(kb)
+    beat = {"window_id": cf.window_id(kb, 1)}
+    for r in (
+        _request(labeller_server, "GET", "/"),
+        _request(labeller_server, "GET", "/", cookie="not-a-session"),
+        _request(labeller_server, "POST", "/api/heartbeat", beat),
+        _request(labeller_server, "POST", "/api/heartbeat", beat, cookie="nope"),
+    ):
+        assert r.status == 403
+        assert r.text == "forbidden: session"
 
 
 def test_expired_link_is_forbidden(kb, labeller_server):
@@ -414,7 +446,7 @@ def test_wrong_host_or_origin_is_forbidden(kb, labeller_server):
         labeller_server, "GET", "/", cookie=cookie, host="evil.test:8765"
     )
     assert wrong_host.status == 403
-    assert wrong_host.text == "forbidden"
+    assert wrong_host.text == "forbidden: origin"
     assert (
         _request(
             labeller_server, "GET", "/", cookie=cookie, host="census.test:9999"
@@ -437,7 +469,7 @@ def test_wrong_host_or_origin_is_forbidden(kb, labeller_server):
             origin=origin,
         )
         assert r.status == 403, origin
-        assert r.text == "forbidden"
+        assert r.text == "forbidden: origin", origin
 
     # A link opened through the wrong Host is refused BEFORE it is consumed.
     link = census.mint_link(kb, NOW)
@@ -532,6 +564,20 @@ def test_link_scheme_filter(kb, labeller_server):
     got = {i["id"]: i["url"] for i in page["items"]}
     assert [got[i] for i in ids] == [None, None, None, "https://ok.example/x"]
     assert "javascript:" not in json.dumps(page)
+
+
+def test_label_js_tells_an_origin_block_from_an_expired_session():
+    """label.js keys on the server's 403 bodies (final review I2) and must not
+    let a throwing op callback stall the queue (m11)."""
+    js = (REPO_ROOT / "labeller_static" / "label.js").read_text(encoding="utf-8")
+    assert "forbidden: origin" in js
+    assert "blocked: page address does not match LABELLER_BASE_URL" in js
+    assert "session expired — open a new /label link" in js
+    normalised = js.replace(chr(13) + chr(10), chr(10))
+    assert (
+        "try {" + chr(10) + "            if (op.done) op.done(result.body);"
+        in normalised
+    )
 
 
 def test_label_js_uses_no_html_sinks():

@@ -162,7 +162,9 @@ LABELLER_IMAGE=<digest>                # see below; unchanged for the whole cens
 
 - **`LABELLER_BASE_URL` must match what the phone sends, byte for byte.** The labeller answers
   only when `Host` equals the URL's `host:port`, and a POST only when `Origin` equals the URL.
-  Anything else gets a bare 403. If you set `LABELLER_PORT`, the URL carries that port.
+  Anything else gets a 403 whose body reads `forbidden: origin` (the page then says
+  "blocked: page address does not match LABELLER_BASE_URL"). A missing or expired session
+  reads `forbidden: session` (the page says "session expired"). If you set `LABELLER_PORT`, the URL carries that port.
 - **`LABELLER_IMAGE` is a digest, not a tag,** so a deploy mid-census cannot change the tool.
   Take it from the image deployed in step 1:
 
@@ -177,7 +179,7 @@ so copy these two pieces into it from the repo's `docker-compose.yml`:
    `environment:`). The `/label` link is built by the `newsbrief` daemon from this variable.
    Without it, `/label` replies that `LABELLER_BASE_URL is not set` and mints nothing;
 2. the whole `labeller:` service (`profiles: [census]`, `entrypoint: ["python", "labeller.py"]`,
-   its `environment:`, `ports:`, `restart: "no"` and `depends_on`).
+   its `environment:`, `ports:`, `restart: unless-stopped` and `depends_on`).
 
 **If the host sets `DATABASE_URL`** (a database outside the stack): in the host's `labeller:`
 service, replace `POSTGRES_HOST`, `POSTGRES_PORT` and `POSTGRES_DB` with that database's
@@ -224,35 +226,55 @@ labeller checks every grant on its own connection before it binds:
 |---|---|---|
 | `missing grant: <grant>` (one line each) | 3 | step 5 did not run, or ran against another database |
 | `database unreachable: …` | 3 | wrong host, port, database or password (step 4) |
+| `CENSUS_LABELLER_PASSWORD is unset` | 3 | step 4's password did not reach the service |
 | `LABELLER_BASE_URL is required` | 2 | step 4's variable did not reach the service |
 | a bind error from `up` | — | `LABELLER_BIND` is not an address this host owns |
 
-`restart: "no"` keeps a failed labeller down, so check `docker compose --profile census ps -a
-labeller`. A labeller failure affects only this service.
+`restart: unless-stopped` brings the labeller back after a host or Docker restart, and a
+crash-loop (a missing grant, say) shows in `docker compose --profile census ps -a labeller`
+and `logs labeller`. If the page ever stops loading, repeat this step. A labeller failure
+affects only this service.
 
 ## Step 7: `/label` from Telegram
 
-Send `/label`. It replies with the progress line (`🏷 Session <n>/17 · <detail>`) and a
-one-time link, `<LABELLER_BASE_URL>/open?t=<token>`. The link:
+Send `/label`. It replies with the progress line (`🏷 Session <n>/17`, with no item count, which would
+reveal the repeat window) and a one-time link, `<LABELLER_BASE_URL>/open?t=<token>`. The link:
 
 - is valid for 10 minutes and works once. Only its SHA-256 is stored;
 - sets a 30-day session cookie on the phone, so later visits need no new link.
 
-Open it on the phone, on the home LAN. Other replies: `not prepared yet` (step 3 has not
+Open it on the phone, on the home LAN.
+
+**Phone save check, before window 1 (mandatory).** Only a POST proves the page can save, and
+the link itself is a GET. On the actual phone, with the link opened, select two items, make
+one group, then reload the page. The group must still be there. **If saves fail** (the page
+shows a banner such as "blocked: page address does not match LABELLER_BASE_URL", or the group
+is gone after reload), **stop and report it; do not start window 1.** Check
+`LABELLER_BASE_URL` against the address the phone types (step 4); if it matches and the
+banner persists, the phone's browser is not sending the expected `Origin`.
+
+Other replies: `not prepared yet` (step 3 has not
 run), `stopped at the go/no-go` (step 9), `Nothing to label yet: the repeat of window 2 opens
 <date> UTC`, and `complete`.
 
 `/label reset` revokes every outstanding link and session, for a lost phone or a leaked link.
 
 At morning-brief delivery, one line `🏷 Session <n>/17 ready · /label` is added while a window
-is waiting. It is fail-safe (an error means no line, never a failed brief) and stops after
-session 17.
+is waiting. While the census is stopped at the go/no-go (step 9), the line is
+`🏷 Census stopped at go/no-go · /label` instead. It is fail-safe (an error means no line,
+never a failed brief), stays silent when the census is waiting, complete or not prepared, and
+stops after session 17.
 
 ## Step 8: the readout
 
 ```sh
-docker compose run --rm --entrypoint python newsbrief scripts/census_report.py
+docker compose --profile census run --rm --entrypoint python labeller scripts/census_report.py
 ```
+
+This runs from the **pinned `LABELLER_IMAGE`**, under the `census_labeller` role, so the
+readout and its go/no-go use the same `census.py` and `census_metrics.py` as the page. (Do
+not run it from the unpinned `newsbrief` image during the census.) The role has SELECT on
+every table the readout reads; a test runs the readout on that role inside READ ONLY.
 
 It is read-only and free: it runs inside `SET TRANSACTION READ ONLY` and makes no model call.
 Before step 3 it prints `The census is not prepared.` and exits 2. It prints the gap check,
@@ -261,11 +283,23 @@ multi-outlet groups, active and wall-clock minutes, status), the go/no-go after 
 after window 16 the achieved detectable difference at ρ = 0.05 / 0.1 / 0.3, blind precision,
 consistency and the by-block-half table (descriptive only). Run it after every window.
 
+## Census freeze: from step 3 to the end of step 10
+
+**No semantic change to `census.py`, `census_metrics.py` or the `census_*` schema** between
+`census_prepare` (step 3) and the end of the census (step 10). The page runs the pinned image
+and the readout now does too, but `/label` and the morning nudge run in the **unpinned
+`newsbrief` image** (`census.current_task`). A change would make them disagree with the page:
+`/label` saying "complete" while the page has work, or a nudge for a session that is not
+there. Sub-project 1 extends these files in new functions and new migrations only.
+
 ## Step 9: go/no-go after windows 1 and 2
 
 The readout prints the go/no-go once windows 1 and 2 are done (spec §4.5): continue only if
 the mean multi-outlet groups per window is at least **8** and the median active minutes per
-window is at most **80**. Both window values are printed. **Record it in the spec's §11
+window is at most **80**. Both window values are printed. **Active minutes are built from heartbeats, which measure
+page-visible time, not interaction:** a tab left open and visible, or a phone set never to
+lock, keeps accruing (only gaps over 5 minutes are dropped). That biases active minutes
+upward, toward NO-GO; read a borderline NO-GO with that in mind. **Record it in the spec's §11
 ("Go/no-go").**
 
 **If it fails,** `/label` answers `The census is stopped at the go/no-go: <reason>` and serves
@@ -303,8 +337,13 @@ DELETE FROM census_block;
 This lifts the **time-based** hold: the delete trigger and the truncate trigger both stop
 refusing. **It does not free everything,** by design:
 
-- the 16 windows' items stay pinned by `census_window_items`' `ON DELETE RESTRICT` foreign key
-  until the `census_*` tables themselves are dropped;
+- a row-level `DELETE` of a window's item stays refused by `census_window_items`' `ON DELETE
+  RESTRICT` foreign key until the `census_*` tables themselves are dropped. **This is true for
+  `DELETE` only. RESTRICT does not apply to `TRUNCATE`:** once the `census_block` row is
+  deleted, `TRUNCATE items CASCADE` silently empties `census_window_items`,
+  `census_assignments` and `census_adjudications`, wiping the labels. Nothing in production
+  truncates `items`; a human or a future script would. Never truncate `items` after the
+  release without exporting the census tables first;
 - the down migration (`0017_census_down.sql`) **refuses while `census_assignments` has any
   row** (`the event census has labels; refusing to drop it`), so a migration reversal cannot
   destroy the labels.

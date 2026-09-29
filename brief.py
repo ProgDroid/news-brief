@@ -3530,8 +3530,9 @@ def _label_render() -> None:
     detail = html.escape(task.detail)
     if token is not None:
         telegram_send(
-            f"🏷 Session {task.session_no}/{census.TOTAL_SESSIONS} "
-            f"· {detail}\n\n{base}/open?t={token}"
+            f"🏷 Session {task.session_no}/{census.TOTAL_SESSIONS}"
+            # No item count: it would fingerprint the repeat window (F23).
+            f"\n\n{base}/open?t={token}"
         )
     elif task.kind == "gate_failed":
         telegram_send(f"🏷 The census is stopped at the go/no-go: {detail}")
@@ -3572,6 +3573,8 @@ def _census_nudge() -> None:
             telegram_send(
                 f"🏷 Session {task.session_no}/{census.TOTAL_SESSIONS} ready · /label"
             )
+        elif task.kind == "gate_failed":
+            telegram_send("🏷 Census stopped at go/no-go · /label")
     except Exception as e:
         log.warning(f"Census nudge skipped: {e}")
 

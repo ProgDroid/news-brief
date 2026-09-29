@@ -87,8 +87,10 @@
     showBanner(text, "fatal");
   }
 
-  function stopFor(status) {
+  function stopFor(status, reason) {
     if (status === 409) stop("window closed — reload");
+    else if (status === 403 && reason === "forbidden: origin")
+      stop("blocked: page address does not match LABELLER_BASE_URL");
     else if (status === 403) stop("session expired — open a new /label link");
     else stop("not saved: the server refused a change (" + status + ") — reload");
   }
@@ -103,7 +105,19 @@
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }).then(function (response) {
-      var result = { ok: response.ok, status: response.status, body: null };
+      var result = { ok: response.ok, status: response.status, body: null, reason: "" };
+      if (response.status === 403) {
+        // The body names only the reason class: "forbidden: session|origin".
+        return response.text().then(
+          function (text) {
+            result.reason = text.trim();
+            return result;
+          },
+          function () {
+            return result;
+          }
+        );
+      }
       if (response.status !== 200) return result;
       return response.json().then(
         function (parsed) {
@@ -141,13 +155,20 @@
         if (stopped) return;
         if (result.ok) {
           queue.shift();
-          if (op.done) op.done(result.body);
+          try {
+            if (op.done) op.done(result.body);
+          } catch (err) {
+            // A throwing callback must not leave the queue silently stalled.
+            console.error("census label callback failed", err);
+            stop("not saved: unexpected page error — reload");
+            return;
+          }
           if (queue.length === 0) hideBanner();
           pump();
         } else if (result.status >= 500 || result.status === 0) {
           retry();
         } else {
-          stopFor(result.status);
+          stopFor(result.status, result.reason);
         }
       },
       function () {
@@ -180,7 +201,7 @@
             // action, if any, gets the 409 and says "window closed".
             stopHeartbeat();
           } else if (result.status === 403 || result.status === 409) {
-            stopFor(result.status);
+            stopFor(result.status, result.reason);
           }
         },
         function () {

@@ -1348,9 +1348,23 @@ def test_label_sends_progress_and_a_link(monkeypatch):
     brief._handle_telegram_update(_update("/label"), _fb())
 
     assert len(sent) == 1
-    assert "\U0001f3f7 Session 3/17 · window 2 blind" in sent[0]
+    assert "\U0001f3f7 Session 3/17" in sent[0]
     assert "https://label.example.org/open?t=TOK123" in sent[0]
     assert minted == ["TOK123"]
+
+
+def test_label_message_hides_the_item_count(monkeypatch):
+    """The count would fingerprint the repeat window (ruling F23)."""
+    sent = _capture(monkeypatch)
+    monkeypatch.setenv("LABELLER_BASE_URL", "https://label.example.org")
+    _label_db(monkeypatch, task=_task(detail="187 items"))
+
+    brief._handle_telegram_update(_update("/label"), _fb())
+
+    assert len(sent) == 1
+    assert "187" not in sent[0]
+    assert "items" not in sent[0]
+    assert "Session 3/17" in sent[0]
 
 
 def test_label_without_base_url_mints_nothing(monkeypatch):
@@ -1411,12 +1425,18 @@ def test_nudge_sends_one_line_when_ready_and_nothing_otherwise(monkeypatch):
     brief._census_nudge()
     assert sent == ["\U0001f3f7 Session 5/17 ready · /label"]
 
-    for kind in ("gate_failed", "waiting", "complete", "not_prepared"):
+    for kind in ("waiting", "complete", "not_prepared"):
         del sent[:]
         _label_db(monkeypatch, task=_task(kind, None, 2, "x"))
         brief._census_nudge()
         assert sent == [], kind
 
+    del sent[:]
+    _label_db(monkeypatch, task=_task("gate_failed", None, 2, "x"))
+    brief._census_nudge()
+    assert sent == ["\U0001f3f7 Census stopped at go/no-go · /label"]
+
+    del sent[:]
     _label_db(monkeypatch, task=_task("precision", 4, 1, "x"))
     brief._census_nudge()
     assert sent == ["\U0001f3f7 Session 1/17 ready · /label"]

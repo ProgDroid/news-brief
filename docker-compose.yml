@@ -254,7 +254,7 @@ services:
       - NEWSBRIEF_LOG_FILE=0
     ports:
       - "${LABELLER_BIND:-127.0.0.1}:${LABELLER_PORT:-8765}:8765"
-    restart: "no"
+    restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
