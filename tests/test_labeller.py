@@ -38,10 +38,11 @@ import common
 import db
 import labeller
 
-pytestmark = pytest.mark.skipif(
-    not db.is_configured(),
-    reason="No database is configured: start a Postgres and export DATABASE_URL",
-)
+# No module-wide skip: a test is skipped without a database only if it needs
+# one, which every such test says by taking `kb` (directly or through
+# `labeller_server`). The HTTP-layer tests that build their own `_server` and
+# the label.js source checks run everywhere.
+NO_DB_REASON = "No database is configured: start a Postgres and export DATABASE_URL"
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 NOW = cf.NOW
@@ -67,6 +68,8 @@ SECURITY_HEADERS = {
 
 @pytest.fixture()
 def kb():
+    if not db.is_configured():
+        pytest.skip(NO_DB_REASON)
     with db.connect() as c:
         c.execute("DROP SCHEMA public CASCADE")
         c.execute("CREATE SCHEMA public")
@@ -1012,9 +1015,10 @@ def test_no_cookie_is_refused_before_any_database_connection(
     assert _request(labeller_server, "GET", "/", cookie="anything").status == 503
 
 
-def test_the_socket_timeout_defaults_to_thirty_seconds(kb, labeller_server):
+def test_the_socket_timeout_defaults_to_thirty_seconds():
     assert labeller.SOCKET_TIMEOUT_SECONDS == 30
-    assert labeller_server.RequestHandlerClass.timeout == 30
+    with _server(BASE) as srv:  # no database: a built server's attribute
+        assert srv.RequestHandlerClass.timeout == 30
 
 
 @pytest.mark.parametrize(
@@ -1121,3 +1125,30 @@ def test_get_errors_render_an_html_status_page(kb, labeller_server, monkeypatch)
     link = _request(labeller_server, "GET", "/open?t=some-link")
     _assert_html_status_page(link, 503)
     assert "Try again" in link.text
+
+
+@pytest.mark.parametrize(
+    ("exc", "status", "says"),
+    [
+        (census.WindowClosed("window 3 is complete"), 409, "already closed"),
+        (census.BadWrite("window 3 is not served"), 400, "could not be loaded"),
+    ],
+    ids=["409", "400"],
+)
+def test_get_409_and_400_render_the_html_status_page(monkeypatch, exc, status, says):
+    """No GET path raises WindowClosed or BadWrite today: `serve_page`,
+    `session_valid` and the page readers never do; only the writers (POST)
+    raise them. So the census call is stubbed to raise, which drives the
+    real GET route's mapping and renderer, without a database."""
+    monkeypatch.setattr(db, "connect", lambda *a, **kw: contextlib.nullcontext())
+    monkeypatch.setattr(census, "session_valid", lambda conn, token, now: True)
+
+    def raises(conn, now):
+        raise exc
+
+    monkeypatch.setattr(census, "serve_page", raises)
+    with _server(BASE) as srv:
+        r = _request(srv, "GET", "/", cookie="anything")
+    _assert_html_status_page(r, status)
+    assert says in r.text
+    assert str(exc) not in r.text  # the cause stays in the log

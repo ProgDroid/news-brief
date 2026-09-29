@@ -329,8 +329,10 @@ def _half_lines(
     lines = [
         "== By block half (descriptive only) ==",
         f"split at {named}",
-        "a window is classified by its window_start, so one whose "
-        f"{census.WINDOW_HOURS} hours contain the split point counts as before",
+        "a window is classified by its window_start: one that starts before "
+        "the split point counts as before, even if its "
+        f"{census.WINDOW_HOURS} hours run past it; one that starts at it "
+        "counts as after",
     ]
     for name, pick in (
         ("before the split", lambda t: t < point),

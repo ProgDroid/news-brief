@@ -382,11 +382,13 @@ def _block_env(block: list[str]) -> dict[str, str]:
     for line in _sub_block(block, start):
         if not _is_content(line):
             continue
-        m = re.match(r"\s*-\s*([A-Z0-9_]+)(?:=(.*))?\s*$", line) or re.match(
-            r"\s*([A-Z0-9_]+):(?:\s+(.*))?\s*$", line
-        )
+        # A list item may be quoted whole: `- "NAME=value"` or `- 'NAME=value'`.
+        m = re.match(
+            r"""\s*-\s*(?P<q>["']?)(?P<name>[A-Z0-9_]+)(?:=(?P<value>.*?))?(?P=q)\s*$""",
+            line,
+        ) or re.match(r"\s*(?P<name>[A-Z0-9_]+):(?:\s+(?P<value>.*))?\s*$", line)
         if m:
-            env[m.group(1)] = (m.group(2) or "").strip()
+            env[m.group("name")] = (m.group("value") or "").strip()
     return env
 
 
@@ -415,6 +417,11 @@ services:
       MAP_URL: http://h:80
     labels:
       NOT_ENV: x
+  quoted:
+    environment:
+      - "DOUBLE=three"
+      - 'SINGLE=four=4'
+      - "QUOTED_BARE"
   after:
     image: other
 """
@@ -425,6 +432,16 @@ def test_the_block_parser_is_not_ended_by_comments_or_blank_lines():
     text = "\n".join(block)
     assert "restart: unless-stopped" in text  # past both comments and the blank
     assert "mapped:" not in text and "MAP_NAME" not in text  # ends at the next
+
+
+def test_the_env_parser_reads_quoted_list_items():
+    """A quoted item would otherwise be silently absent, and the labeller's
+    set-equality test could not see a quoted extra secret."""
+    assert _block_env(_service_block(_SYNTHETIC_COMPOSE, "quoted")) == {
+        "DOUBLE": "three",
+        "SINGLE": "four=4",
+        "QUOTED_BARE": "",
+    }
 
 
 def test_the_env_parser_reads_list_and_mapping_forms():

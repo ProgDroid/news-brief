@@ -324,10 +324,21 @@ def test_by_half_splits_at_the_deploy_and_a_straddling_window_counts_before(read
     text = census_report.render(ready, NOW)
     assert "split at the recorded c439ade deploy time, 2026-09-25 12:00 UTC" in text
     assert (
-        "a window is classified by its window_start, so one whose "
-        f"{census.WINDOW_HOURS} hours contain the split point counts as before"
+        "a window is classified by its window_start: one that starts before the "
+        f"split point counts as before, even if its {census.WINDOW_HOURS} hours "
+        "run past it; one that starts at it counts as after"
     ) in text
     # The straddling window (its six hours contain the deploy) is "before".
+    assert "before the split: 1 windows" in text
+    assert "after the split: 1 windows" in text
+
+
+def test_by_half_a_window_starting_at_the_split_point_counts_after(ready):
+    """It has no time before the split. The fixture's deploy (12:00) is on
+    the 6-hour grid, so a round recorded deploy time can land here."""
+    deployed = cf.DEPLOYED_AT
+    _complete_two_windows_starting(ready, [deployed - timedelta(hours=6), deployed])
+    text = census_report.render(ready, NOW)
     assert "before the split: 1 windows" in text
     assert "after the split: 1 windows" in text
 
