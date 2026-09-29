@@ -329,3 +329,73 @@ def test_a_script_run_as_a_path_can_import_the_root_modules(script):
         f"{script.name} cannot import a root module when run as a path. "
         f"It needs the sys.path shim its siblings carry.\n{done.stderr[-600:]}"
     )
+
+
+# ── The labeller (event census, spec 2026-09-28 §6.1) ─────────────────────────
+
+
+def _labeller_block() -> list[str]:
+    """The `labeller:` service's lines, by indentation (the anchor technique)."""
+    lines = COMPOSE.read_text(encoding="utf-8").splitlines()
+    start = next(
+        (i for i, line in enumerate(lines) if re.match(r"  labeller:\s*$", line)),
+        None,
+    )
+    assert start is not None, "docker-compose.yml has no `labeller:` service"
+    after = lines[start + 1 :]
+    end = next(
+        (
+            i
+            for i, line in enumerate(after)
+            if line.strip() and len(line) - len(line.lstrip()) <= 2
+        ),
+        len(after),
+    )
+    return after[:end]
+
+
+def test_labeller_static_ships_in_the_image():
+    """The page's JS and CSS are files, not modules: absent from the image the
+    page renders unstyled and inert, and nothing errors."""
+    static_dir = REPO_ROOT / "labeller_static"
+    assert static_dir in _copy_listed_packages(), (
+        "labeller_static/ is not copied into the image by the Dockerfile"
+    )
+    served = re.findall(
+        r'"/static/([A-Za-z0-9_.-]+)"',
+        (REPO_ROOT / "labeller.py").read_text(encoding="utf-8"),
+    )
+    assert served, "found no /static/<name> route in labeller.py"
+    missing = sorted(n for n in set(served) if not (static_dir / n).is_file())
+    assert not missing, f"labeller.py serves {missing}, absent from labeller_static/"
+
+
+def test_labeller_static_triggers_a_rebuild():
+    assert "labeller_static/**" in _workflow_path_triggers(), (
+        "editing labeller_static/ alone would publish no new image"
+    )
+
+
+def test_labeller_service_holds_no_secret_but_its_own():
+    block = _labeller_block()
+    text = "\n".join(block)
+    env = {
+        m.group(1) for line in block if (m := re.match(r"\s*-\s*([A-Z0-9_]+)=", line))
+    }
+    assert env == {
+        "POSTGRES_HOST",
+        "POSTGRES_PORT",
+        "POSTGRES_DB",
+        "POSTGRES_USER",
+        "POSTGRES_PASSWORD",
+        "LABELLER_BASE_URL",
+        "NEWSBRIEF_LOG_FILE",
+    }
+    assert "*newsbrief" not in text and "<<:" not in text, (
+        "the labeller must not inherit the anchor: it would carry every secret"
+    )
+    assert re.search(r"^\s*profiles:\s*\[census\]\s*$", text, re.M)
+    assert re.search(
+        r'^\s*entrypoint:\s*\["python",\s*"labeller\.py"\]\s*$', text, re.M
+    )
+    assert "POSTGRES_USER=census_labeller" in text

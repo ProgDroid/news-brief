@@ -236,6 +236,29 @@ services:
       retries: 5
     restart: unless-stopped
 
+  # The event census labelling page (spec 2026-09-28 §6.1). Started only with
+  # `--profile census`; holds DB credentials for a role that can write only census_* tables.
+  # Pin LABELLER_IMAGE to a digest for the whole census, so a deploy cannot change the tool mid-census.
+  labeller:
+    image: ${LABELLER_IMAGE:-ghcr.io/progdroid/news-brief:latest}
+    profiles: [census]
+    entrypoint: ["python", "labeller.py"]
+    user: "${PUID:-1000}:${PGID:-1000}"
+    environment:
+      - POSTGRES_HOST=${POSTGRES_HOST:-postgres}
+      - POSTGRES_PORT=${POSTGRES_PORT:-5432}
+      - POSTGRES_DB=${POSTGRES_DB:-newsbrief}
+      - POSTGRES_USER=census_labeller
+      - POSTGRES_PASSWORD=${CENSUS_LABELLER_PASSWORD:-}
+      - LABELLER_BASE_URL=${LABELLER_BASE_URL:-}
+      - NEWSBRIEF_LOG_FILE=0
+    ports:
+      - "${LABELLER_BIND:-127.0.0.1}:${LABELLER_PORT:-8765}:8765"
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   newsbrief-pgdata:
 
