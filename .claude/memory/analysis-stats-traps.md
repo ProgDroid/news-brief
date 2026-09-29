@@ -110,3 +110,28 @@ you changed;** keep the outcome metric as the gate it was registered as, not as 
 tool. Watch also for a base rate DRIFTING under you: this one fell 6.64% -> 6.49% -> 6.43% across
 three corpus sizes, so waiting for more data made the gate harder, not easier.
 
+## Trap 8: an ABSOLUTE tolerance over a population that agrees by construction is a scaled tolerance on the part that can disagree
+
+Measured 2026-09-27 (M2, `y1x`). The rule was "Haiku qualifies if agreement(A,H) is within 5
+points of agreement(A,A′), over every item all three runs kept".
+- 603 of the 710 items linked nothing in any run. Three empty sets are always equal, so those
+  items agreed **100% by construction** in both comparisons.
+- The ruled difference (−3.2 points) was exactly the 23-item gap on the 107 link items,
+  divided by 710.
+- So the 5-point bar was a **33-point** bar (5 × 710/107) on the only items that could
+  disagree. The verdict was QUALIFIES, while on links Haiku departs from Sonnet about twice as
+  often as Sonnet departs from itself (55.1% vs 76.6%).
+
+**The recommendation that caused it:** "the easy cases inflate both sides and cancel in the
+difference". They DID cancel. But cancelling in a difference does not help when the bar is a
+fixed number of points: dilution shrinks the effect relative to it.
+
+**Before registering an agreement or accuracy rule, count how many units CAN fail at all.**
+If a large share are fixed by construction:
+- rule on the discriminating subset;
+- or scale the tolerance to it;
+- or print the share next to the verdict.
+
+**Tell:** the headline and a "not ruled" subset line disagree by far more than the tolerance.
+The pre-registered verdict still stands. Record the dilution beside it; do not re-rule.
+

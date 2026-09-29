@@ -237,3 +237,94 @@ What stays **out** of the measurement, stated rather than hidden:
 **Run order on the host:** `--dry-run` (free), then `--limit 2` (a smoke run of roughly
 $0.10, no verdict), then the full run. Record the full run's output verbatim in this
 document, and close `y1x` on it.
+
+## M2 result (host, 2026-09-27): HAIKU QUALIFIES under the pre-registered rule
+
+Run at 14:44–15:09 BST from the image committed in `31672d6`. **What is recorded here:** the
+result block below is verbatim. The operator's terminal kept only the tail of the run:
+- **Lost from scroll:** the header lines (models, batch counts, the narrowing control, the pair
+  batches' "earlier event OFFERED / INSIDE" counts, and the worst-case line) and the progress
+  lines for batches 1–8. A `--dry-run` reprints the header for free and selects the same
+  batches while the corpus stays frozen (seed `20260926`).
+- **Omitted here:** the per-call `Comprehend: integration call took ...` telemetry lines.
+- **Visible:** two batches logged `rejected commitment_state 'reported'` three times each: batch
+  28, where A′ kept 2, and batch 144, where H kept 2. These are ordinary validation drops, and
+  they are already counted in the drop rates.
+
+```
+=== M2: Haiku replay (news-brief-y1x) ===
+spend: $5.53 billed + up to $0.00 for failed attempts (cap $10.00)
+complete batches 150, incomplete (transport) 0
+whole-response parse failures in complete batches: A=0, A'=0, H=0
+
+--- pair: 100 batches, 466 items all three kept
+  agreement A-A'   95.9%
+  agreement A-H    92.7%   A-H minus A-A' -3.2 pts (95% CI -5.9, -0.5)
+  validation drop A   2.0%  A'   2.0%  H   3.4%
+  link-only subset (not ruled): n=81 A-A'  76.5%  A-H  58.0%
+
+--- random: 50 batches, 244 items all three kept
+  agreement A-A'   97.5%
+  agreement A-H    94.3%   A-H minus A-A' -3.3 pts (95% CI -6.3, -0.3)
+  validation drop A   0.0%  A'   0.0%  H   2.4%
+  link-only subset (not ruled): n=26 A-A'  76.9%  A-H  46.2%
+  (pair batches are selected by production's own past links, which favours A-A'; random is the unconfounded stratum)
+
+--- combined (the rule's population): 150 batches, 710 items all three kept
+  agreement A-A'   96.5%
+  agreement A-H    93.2%   A-H minus A-A' -3.2 pts (95% CI -5.3, -1.2)
+  validation drop A   1.3%  A'   1.3%  H   3.1%
+  link-only subset (not ruled): n=107 A-A'  76.6%  A-H  55.1%
+
+PRE-REGISTERED guesses: A-A' 80-90%, A-H 65-80% (predicts: fails narrowly).
+Rule: A-H >= A-A' - 5 pts AND drop(H) <= drop(A) + 5 pts, over >= 30 complete batches.
+VERDICT: HAIKU QUALIFIES
+REPLAY COMPLETE
+```
+
+**The rule, applied.**
+- Agreement clause: −3.2 ≥ −5, so it passes, with 1.8 points to spare. The upper end of the
+  95% CI is −1.2, so Haiku does disagree more than Sonnet's own noise. The rule allows up to 5
+  points of that, and the clause passes.
+- Drop clause: 3.1% ≤ 1.3% + 5, so it passes.
+- Complete batches: 150 ≥ 30.
+- **Spend:** $5.53 for 450 calls, against the pre-registered ≈ $5. No transport failures, and no
+  whole-response parse failures.
+
+**Against the guesses.** Both missed HIGH, by the same cause: A-A′ was 96.5% against a guess
+of 80–90%, and A-H was 93.2% against 65–80%. "Fails narrowly" was wrong.
+
+### Beside the verdict, not re-ruling it: the metric diluted the tolerance roughly 6.6-fold
+
+The arithmetic, derived from the printed percentages and checked to reproduce every figure:
+- The link-only subset agrees on **82 of 107** items (A-A′) and **59 of 107** (A-H).
+- The other **603** items are ones where no run linked anything. Three empty sets are always
+  equal, so those items agree **100% in both comparisons, by construction**.
+- So the ruled figures are (82 + 603)/710 = 96.5% and (59 + 603)/710 = 93.2%. The ruled −3.2
+  points is **exactly** the link subset's 23-item gap divided by 710.
+- **A fixed 5-point tolerance over all 710 items was therefore a 33-point tolerance
+  (5 × 710/107) on the 107 items that could disagree at all.**
+- The subset gap is **21.5 points**: Sonnet agrees with itself on 76.6% of link decisions,
+  Haiku with Sonnet on 55.1%. The gap appears in both strata: pair 76.5 vs 58.0 (n=81),
+  random 76.9 vs 46.2 (n=26). So the selection bias on the pair stratum does not explain it.
+
+How the rule came to allow this, stated plainly:
+- The operator chose "all items both kept" on 2026-09-26, on the agent's recommendation.
+- The recommendation argued that easy "new" cases would inflate both agreements and **cancel
+  in the difference**. They did cancel. But the tolerance was an absolute number of points, so
+  diluting the population shrank the measured effect against a fixed bar.
+- That consequence was not identified when the population was chosen. The review that ran
+  before the run did not catch it either.
+- **The pre-registered verdict stands as recorded. Re-ruling after seeing the data would
+  measure nothing.**
+
+**What the verdict does and does not license.**
+- It licenses the claim that Haiku's extractions, taken whole, are within 5 points of Sonnet's
+  run-to-run variation, with a validation drop 1.8 points higher.
+- It does NOT show that Haiku makes the same **linking** decisions. Linking is the only way
+  corroboration is ever recorded (spec §8.2). On links, Haiku departs from Sonnet about twice
+  as often as Sonnet departs from itself: 44.9% of link decisions against 23.4%.
+- **The run does not record which way the departures go:** whether Haiku links less, links
+  more, or links to different targets. The per-item decisions were not saved. That direction
+  decides what routing integration to Haiku would do to the corroboration gate, so it is
+  filed as its own bead rather than inferred here.
