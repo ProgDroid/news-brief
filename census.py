@@ -1141,9 +1141,14 @@ def apply_labeller_grants(conn, password: str) -> None:
             "CREATE ROLE {role} LOGIN; END IF; END $$"
         ).format(name=sql.Literal(LABELLER_ROLE), role=role)
     )
+    # A SCRAM verifier, computed client-side: the plaintext never appears in
+    # SQL text, so a failing statement cannot put it in the server log.
+    verifier = conn.pgconn.encrypt_password(
+        password.encode(), LABELLER_ROLE.encode(), b"scram-sha-256"
+    ).decode()
     conn.execute(
         sql.SQL("ALTER ROLE {role} LOGIN PASSWORD {pw}").format(
-            role=role, pw=sql.Literal(password)
+            role=role, pw=sql.Literal(verifier)
         )
     )
     for g in LABELLER_GRANTS:
@@ -1165,7 +1170,11 @@ def missing_privileges(conn) -> list[str]:
         if g.kind == "schema":
             continue
         if g.kind == "sequence":
-            oid, seq = _sequence_of(conn, g.obj)
+            try:
+                oid, seq = _sequence_of(conn, g.obj)
+            except RuntimeError:
+                missing.append(f"{g.privilege} on sequence of {g.obj} (not found)")
+                continue
             ok = conn.execute(
                 "SELECT has_sequence_privilege(current_user, %s, %s)",
                 (oid, g.privilege),

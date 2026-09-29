@@ -215,3 +215,87 @@ def test_labeller_role_cannot_read_settings_or_write_items(kb):
 def test_grant_list_starts_with_schema_usage():
     first = census.LABELLER_GRANTS[0]
     assert (first.kind, first.obj, first.privilege) == ("schema", "public", "USAGE")
+
+
+_ACTUAL_ACL = """
+SELECT 'schema', n.nspname, NULL, a.privilege_type
+  FROM pg_namespace n, aclexplode(n.nspacl) a
+ WHERE n.nspname = 'public' AND a.grantee = %(role)s
+UNION ALL
+SELECT CASE c.relkind WHEN 'S' THEN 'sequence' ELSE 'table' END,
+       c.relname, NULL, a.privilege_type
+  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace,
+       aclexplode(c.relacl) a
+ WHERE n.nspname = 'public' AND a.grantee = %(role)s
+UNION ALL
+SELECT 'column', c.relname, t.attname, a.privilege_type
+  FROM pg_attribute t JOIN pg_class c ON c.oid = t.attrelid
+       JOIN pg_namespace n ON n.oid = c.relnamespace,
+       aclexplode(t.attacl) a
+ WHERE n.nspname = 'public' AND a.grantee = %(role)s
+"""
+
+
+def _actual_grants(kb) -> set[tuple]:
+    role = kb.execute(
+        "SELECT oid FROM pg_roles WHERE rolname = %s", (census.LABELLER_ROLE,)
+    ).fetchone()[0]
+    rows = kb.execute(_ACTUAL_ACL, {"role": role}).fetchall()
+    kb.commit()
+    return {tuple(r) for r in rows}
+
+
+def _expected_grants(kb) -> set[tuple]:
+    out = set()
+    for g in census.LABELLER_GRANTS:
+        if g.kind == "sequence":
+            _, seq = census._sequence_of(kb, g.obj)
+            out.add(("sequence", seq, None, g.privilege))
+        else:
+            out.add((g.kind, g.obj, g.column, g.privilege))
+    kb.commit()
+    return out
+
+
+def test_labeller_holds_exactly_the_expected_privileges(kb):
+    assert _actual_grants(kb) == _expected_grants(kb)
+
+
+def test_exact_grant_comparison_catches_a_surplus_grant(kb):
+    for surplus in (
+        "GRANT DELETE ON public.census_events TO census_labeller",
+        "GRANT UPDATE ON public.census_windows TO census_labeller",
+        "GRANT UPDATE (revoked_at) ON public.census_sessions TO census_labeller",
+    ):
+        kb.execute(surplus)
+        kb.commit()
+        assert _actual_grants(kb) != _expected_grants(kb), surplus
+        census.apply_labeller_grants(kb, PASSWORD)  # grants only add
+        kb.execute("REVOKE ALL ON ALL TABLES IN SCHEMA public FROM census_labeller")
+        kb.execute(
+            "REVOKE ALL (revoked_at) ON public.census_sessions FROM census_labeller"
+        )
+        kb.commit()
+        census.apply_labeller_grants(kb, PASSWORD)
+        assert _actual_grants(kb) == _expected_grants(kb)
+
+
+def test_password_is_stored_as_a_scram_verifier(kb):
+    stored = kb.execute(
+        "SELECT rolpassword FROM pg_authid WHERE rolname = %s",
+        (census.LABELLER_ROLE,),
+    ).fetchone()[0]
+    kb.commit()
+    assert stored.startswith("SCRAM-SHA-256$")
+    assert PASSWORD not in stored
+
+
+def test_missing_sequence_is_named_when_the_lookup_would_fail(kb):
+    kb.execute("ALTER SEQUENCE public.census_groups_id_seq OWNED BY NONE")
+    kb.commit()
+    conn = _labeller()
+    try:
+        missing = census.missing_privileges(conn)
+    finally:
+        conn.close()
+    assert "USAGE on sequence of census_groups (not found)" in missing
