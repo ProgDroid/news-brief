@@ -610,6 +610,7 @@ def test_collect_trading_failure_does_not_duplicate_brief(monkeypatch):
         lambda: calls.__setitem__("cleared", calls["cleared"] + 1),
     )
     monkeypatch.setattr(brief, "telegram_alert", lambda *a, **k: None)
+    monkeypatch.setattr(brief, "_census_nudge", lambda: None)
 
     def _boom():
         raise RuntimeError("quote provider down")

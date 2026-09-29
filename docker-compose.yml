@@ -58,6 +58,11 @@ x-newsbrief: &newsbrief
     # is declared here. brief.py logs a warning naming the cause when unset.
     - MODAL_PROXY_KEY=${MODAL_PROXY_KEY:-}
     - MODAL_PROXY_SECRET=${MODAL_PROXY_SECRET:-}
+    # Public base URL of the census labelling page, for the link /label sends.
+    # A plain runtime variable, NOT a knob: it is read from the environment at
+    # call time by brief._label_render and has no settings row. Empty makes
+    # /label say so and mint nothing.
+    - LABELLER_BASE_URL=${LABELLER_BASE_URL:-}
     # Runtime knobs. All default to off/empty, and an empty value keeps
     # common.py's built-in default — so omitting them from your .env is
     # exactly as safe as not having these lines at all.

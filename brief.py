@@ -759,6 +759,8 @@ HELP_TEXT = """<b>newsbrief commands</b>
   e.g. <code>/run collect</code>
 
 /capture — feed capture health: last pass, and which feeds are failing
+/label — event-census labelling: progress and a one-time link to the page
+/label reset — revoke every outstanding labelling link
 /reset — clear all overrides
 /status — show current overrides
 /help — this message
@@ -1324,6 +1326,12 @@ def _handle_telegram_update(update: dict, fb: dict) -> dict:
 
     elif text == "/capture":
         _capture_render()
+
+    elif text == "/label":
+        _label_render()
+
+    elif text == "/label reset":
+        _label_reset()
 
     elif text == "/run":
         _run_request("")
@@ -3184,6 +3192,9 @@ def mode_collect():
             )
         except Exception as e:
             log.error(f"Retention skipped (brief unaffected): {e}")
+        # Last, so nothing the collect owes can wait behind it; it swallows its
+        # own failures.
+        _census_nudge()
     else:
         log.error("Could not retrieve brief — will retry next collect run")
         telegram_alert(
@@ -3479,11 +3490,98 @@ def _run_request(job: str) -> None:
     )
 
 
+# The census labelling page is reached through a one-time link. Its base URL is
+# a plain runtime variable (read at call time), not a settings knob.
+CENSUS_STATEMENT_OPTIONS = "-c statement_timeout=5000"
+
+
+def _census_connect():
+    return db.connect(
+        connect_timeout=JOBS_DB_TIMEOUT_SECONDS, options=CENSUS_STATEMENT_OPTIONS
+    )
+
+
+def _label_render() -> None:
+    """/label: where the census stands, plus a one-time link when there is work."""
+    import census
+
+    base = (os.environ.get("LABELLER_BASE_URL") or "").strip().rstrip("/")
+    if not base:
+        telegram_send(
+            "⚠️ LABELLER_BASE_URL is not set, so there is no page to "
+            "link to. No link was minted."
+        )
+        return
+    try:
+        with _census_connect() as conn:
+            now = datetime.now(timezone.utc)
+            task = census.current_task(conn, now)
+            token = (
+                census.mint_link(conn, now)
+                if task.kind in ("blind", "precision")
+                else None
+            )
+    except Exception as e:
+        # An unreadable census must not render as one that was never prepared.
+        log.exception("/label could not read the census tables")
+        telegram_send(f"⚠️ Could not read the census tables: {html.escape(str(e))}")
+        return
+
+    detail = html.escape(task.detail)
+    if token is not None:
+        telegram_send(
+            f"🏷 Session {task.session_no}/{census.TOTAL_SESSIONS} "
+            f"· {detail}\n\n{base}/open?t={token}"
+        )
+    elif task.kind == "gate_failed":
+        telegram_send(f"🏷 The census is stopped at the go/no-go: {detail}")
+    elif task.kind == "waiting":
+        telegram_send(f"🏷 Nothing to label yet: {detail}")
+    elif task.kind == "complete":
+        telegram_send(f"🏷 The census is complete. {detail}")
+    else:
+        telegram_send(f"🏷 The census is not prepared yet. {detail}")
+
+
+def _label_reset() -> None:
+    """/label reset: revoke every outstanding labelling link and session."""
+    import census
+
+    try:
+        with _census_connect() as conn:
+            revoked = census.revoke_all(conn, datetime.now(timezone.utc))
+    except Exception as e:
+        log.exception("/label reset could not revoke")
+        telegram_send(f"⚠️ Could not revoke the labelling links: {html.escape(str(e))}")
+        return
+    telegram_send(f"🏷 Revoked {revoked} labelling link(s) and session(s).")
+
+
+def _census_nudge() -> None:
+    """One line after the morning brief when a labelling session is waiting.
+
+    Fail-safe: a census problem is a log line, never a message and never an
+    exception -- it runs at the end of collect, and the brief is already out.
+    """
+    try:
+        import census
+
+        with _census_connect() as conn:
+            task = census.current_task(conn, datetime.now(timezone.utc))
+        if task.kind in ("blind", "precision"):
+            telegram_send(
+                f"🏷 Session {task.session_no}/{census.TOTAL_SESSIONS} ready · /label"
+            )
+    except Exception as e:
+        log.warning(f"Census nudge skipped: {e}")
+
+
 BOT_COMMANDS = [
     ("help", "Show command help"),
     ("status", "Show current overrides"),
     ("jobs", "Scheduler status: last run, exit code, next due"),
     ("capture", "Feed capture health: last pass, failing feeds"),
+    ("label", "Event-census labelling: progress + one-time link"),
     ("run", "Run a job now (collect, submit, weekly, monitor)"),
     ("addsource", "Add a temporary news source (guided)"),
     ("sources", "List / remove temporary sources"),

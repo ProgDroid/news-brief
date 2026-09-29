@@ -1313,3 +1313,177 @@ def test_capture_reaches_telegram_autocomplete():
 
 def test_capture_is_documented_in_the_help():
     assert "/capture" in brief.HELP_TEXT
+
+
+# ── /label, /label reset and the morning nudge (event census, Task 7) ────────
+
+
+def _label_db(monkeypatch, *, task, token="TOK123", revoked=3):
+    import census
+
+    monkeypatch.setattr(db, "connect", lambda **kw: _FakeConn())
+    monkeypatch.setattr(census, "current_task", lambda conn, now: task)
+    minted = []
+
+    def _mint(conn, now):
+        minted.append(token)
+        return token
+
+    monkeypatch.setattr(census, "mint_link", _mint)
+    monkeypatch.setattr(census, "revoke_all", lambda conn, now: revoked)
+    return minted
+
+
+def _task(kind="blind", window_id=4, session_no=3, detail="window 2 blind"):
+    import census
+
+    return census.Task(kind, window_id, session_no, detail)
+
+
+def test_label_sends_progress_and_a_link(monkeypatch):
+    sent = _capture(monkeypatch)
+    monkeypatch.setenv("LABELLER_BASE_URL", "https://label.example.org")
+    minted = _label_db(monkeypatch, task=_task())
+
+    brief._handle_telegram_update(_update("/label"), _fb())
+
+    assert len(sent) == 1
+    assert "\U0001f3f7 Session 3/17 · window 2 blind" in sent[0]
+    assert "https://label.example.org/open?t=TOK123" in sent[0]
+    assert minted == ["TOK123"]
+
+
+def test_label_without_base_url_mints_nothing(monkeypatch):
+    sent = _capture(monkeypatch)
+    monkeypatch.setenv("LABELLER_BASE_URL", "")
+    minted = _label_db(monkeypatch, task=_task())
+
+    brief._handle_telegram_update(_update("/label"), _fb())
+
+    assert minted == []
+    assert "LABELLER_BASE_URL" in sent[0]
+    assert "/open?t=" not in sent[0]
+
+
+def test_label_reports_a_db_error_rather_than_not_prepared(monkeypatch):
+    sent = _capture(monkeypatch)
+    monkeypatch.setenv("LABELLER_BASE_URL", "https://label.example.org")
+
+    def boom(**kwargs):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(db, "connect", boom)
+
+    brief._handle_telegram_update(_update("/label"), _fb())
+
+    assert "Could not read the census tables" in sent[0]
+    assert "connection refused" in sent[0]
+    assert "not prepared" not in sent[0].lower()
+
+
+def test_label_gives_no_link_when_no_window_is_open(monkeypatch):
+    sent = _capture(monkeypatch)
+    monkeypatch.setenv("LABELLER_BASE_URL", "https://label.example.org")
+    minted = _label_db(
+        monkeypatch, task=_task("gate_failed", None, 2, "recall below the floor")
+    )
+
+    brief._handle_telegram_update(_update("/label"), _fb())
+
+    assert minted == []
+    assert "recall below the floor" in sent[0]
+    assert "/open?t=" not in sent[0]
+
+
+def test_label_reset_revokes(monkeypatch):
+    sent = _capture(monkeypatch)
+    _label_db(monkeypatch, task=_task(), revoked=3)
+
+    brief._handle_telegram_update(_update("/label reset"), _fb())
+
+    assert len(sent) == 1
+    assert "3" in sent[0]
+
+
+def test_nudge_sends_one_line_when_ready_and_nothing_otherwise(monkeypatch):
+    sent = _capture(monkeypatch)
+    _label_db(monkeypatch, task=_task("blind", 4, 5, "x"))
+    brief._census_nudge()
+    assert sent == ["\U0001f3f7 Session 5/17 ready · /label"]
+
+    for kind in ("gate_failed", "waiting", "complete", "not_prepared"):
+        del sent[:]
+        _label_db(monkeypatch, task=_task(kind, None, 2, "x"))
+        brief._census_nudge()
+        assert sent == [], kind
+
+    _label_db(monkeypatch, task=_task("precision", 4, 1, "x"))
+    brief._census_nudge()
+    assert sent == ["\U0001f3f7 Session 1/17 ready · /label"]
+
+
+def test_nudge_error_sends_nothing_and_raises_nothing(monkeypatch, caplog):
+    sent = _capture(monkeypatch)
+    caplog.set_level("WARNING", logger="newsbrief")
+
+    def boom(**kwargs):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(db, "connect", boom)
+
+    brief._census_nudge()
+
+    assert sent == []
+    assert any("connection refused" in r.getMessage() for r in caplog.records)
+
+
+def test_collect_finishes_when_the_nudge_fails(monkeypatch):
+    import census
+
+    calls = {"cleared": 0, "retention": 0}
+    monkeypatch.setattr(brief, "load_state", lambda: {"batch_id": "b1"})
+    monkeypatch.setattr(brief, "poll_batch", lambda bid: "RAW")
+    monkeypatch.setattr(brief, "deliver", lambda *a, **k: None)
+    monkeypatch.setattr(brief, "extract_signals", lambda raw, **kw: ([], "ok"))
+    monkeypatch.setattr(brief, "normalize_signals", lambda raw: ([], []))
+    monkeypatch.setattr(brief, "save_signals", lambda *a, **k: None)
+    monkeypatch.setattr(
+        brief,
+        "clear_batch_state",
+        lambda: calls.__setitem__("cleared", calls["cleared"] + 1),
+    )
+    monkeypatch.setattr(brief, "telegram_alert", lambda *a, **k: None)
+    monkeypatch.setattr(brief, "mode_paper", lambda: {})
+    monkeypatch.setattr(brief, "load_book", lambda: {})
+    monkeypatch.setattr(brief, "daily_trade_message", lambda *a, **k: None)
+
+    def _retention(today):
+        calls["retention"] += 1
+        return {"deleted": 0, "trimmed_lines": 0}
+
+    monkeypatch.setattr(brief, "run_retention", _retention)
+    monkeypatch.setattr(db, "connect", lambda **kw: _FakeConn())
+
+    attempted = []
+
+    def boom(conn, now):
+        attempted.append(1)
+        raise RuntimeError("census down")
+
+    monkeypatch.setattr(census, "current_task", boom)
+    sent = _capture(monkeypatch)
+
+    brief.mode_collect()  # must NOT raise
+
+    assert attempted, "the nudge never ran, so the failure path was not exercised"
+    assert calls == {"cleared": 1, "retention": 1}
+    assert sent == []
+
+
+def test_label_reaches_telegram_autocomplete():
+    assert "label" in [name for name, _ in brief.BOT_COMMANDS]
+
+
+def test_label_is_documented_in_the_help():
+    assert "/label" in brief.HELP_TEXT
+    assert "/label reset" in brief.HELP_TEXT
