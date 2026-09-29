@@ -24,6 +24,12 @@ from psycopg import sql
 
 import census_metrics
 import common
+from census_metrics import (  # noqa: F401 -- re-exported
+    GO_MAX_MEDIAN_MINUTES,
+    GO_MIN_MEAN_GROUPS,
+    IDLE_CAP_MINUTES,
+    PRECISION_PAIRS,
+)
 
 # ── Pinned values (plan Global Constraints) ─────────────────────────────────
 # CAPTURE_DAY_ONE, LOOKBACK_DAYS: capture began 2026-09-04, and the look-back
@@ -45,17 +51,12 @@ WINDOWS_PER_STRATUM = 4
 SEED = 20260928
 REPEAT_ORDER_NO = 2
 
-# Session state (plan Task 4). GO_MIN_MEAN_GROUPS and GO_MAX_MEDIAN_MINUTES
-# name the thresholds `census_metrics.go_no_go` applies; that function takes
-# no threshold parameters, so tests/test_census_rules.py pins the two equal
-# at their boundaries (test_go_thresholds_match_census_metrics).
-GO_MIN_MEAN_GROUPS = 8
-GO_MAX_MEDIAN_MINUTES = 80
+# Session state (plan Task 4). The four thresholds below are DEFINED in
+# census_metrics (the functions take them as defaults) and re-exported here so
+# `census.X` keeps working; never redefine them in this module.
 REPEAT_AFTER_ORDER_NO = 8
 REPEAT_MIN_DAYS = 7
 TOTAL_SESSIONS = 17
-PRECISION_PAIRS = 10
-IDLE_CAP_MINUTES = 5
 
 # "Done" for sequencing (B4): the blind pass is over, whether it was saved
 # (and possibly completed by its precision sample) or abandoned.

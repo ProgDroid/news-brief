@@ -17,6 +17,13 @@ from datetime import datetime
 
 SEED_BOOT = 20260928
 
+# The pre-registered thresholds (spec sec 4.5 go/no-go, 6.4 precision sample,
+# active-minutes idle cap). Defined once, here; census.py re-exports them.
+GO_MIN_MEAN_GROUPS = 8
+GO_MAX_MEDIAN_MINUTES = 80
+PRECISION_PAIRS = 10
+IDLE_CAP_MINUTES = 5
+
 # Two-sided 97.5th percentile and one-sided 80th percentile of Student's t,
 # keyed by degrees of freedom (1..15 -- df = K-1 for K up to 16 windows).
 T975: dict[int, float] = {
@@ -247,6 +254,10 @@ def adjusted_rand_index(
     is special-cased (matching scikit-learn): that partition is unique, so
     the two labellings must already be identical, and the general formula
     would otherwise divide 0 by 0.
+
+    No items is `nan`, deliberately unlike scikit-learn's 1.0: there is
+    nothing to agree on, and `item_bootstrap_interval` drops NaN replicates
+    rather than counting an empty resample as perfect agreement.
     """
     items = sorted(set(a) & set(b))
     n = len(items)
@@ -264,6 +275,11 @@ def adjusted_rand_index(
 
     n_classes = len(clusters_a)
     n_clusters = len(clusters_b)
+    # Both all-singleton or both one-cluster: that partition is unique, so the
+    # labellings are identical and agreement is perfect. Special-cased because
+    # the general formula's denominator is 0 there. This is the ONLY way the
+    # denominator reaches 0 (proved exhaustively for n <= 5 in
+    # test_ari_denominator_is_never_zero_past_the_special_cases).
     if (n_classes == n_clusters == 1) or (n_classes == n_clusters == n):
         return 1.0
 
@@ -281,10 +297,7 @@ def adjusted_rand_index(
     total_pairs = c2(n)
     expected = (sum_a * sum_b) / total_pairs if total_pairs else 0.0
     max_index = 0.5 * (sum_a + sum_b)
-    denom = max_index - expected
-    if denom == 0:
-        return 1.0 if index == expected else float("nan")
-    return (index - expected) / denom
+    return (index - expected) / (max_index - expected)
 
 
 def _percentile(ordered: list[float], pct: float) -> float:
@@ -306,6 +319,44 @@ def _percentile(ordered: list[float], pct: float) -> float:
 MIN_BOOTSTRAP_REPLICATES = 100
 
 
+def item_bootstrap_intervals(
+    stat,
+    a: dict,
+    b: dict,
+    reps: int = 2000,
+    seed: int = SEED_BOOT,
+) -> list[tuple[float | None, float | None, int]]:
+    """Like `item_bootstrap_interval`, for a `stat(a_sub, b_sub)` returning a
+    sequence of components: each resample is scored ONCE and every component
+    gets its own `(lo, hi, n_dropped)`, NaN replicates dropped per component."""
+    items = sorted(set(a) & set(b))
+    n = len(items)
+    rng = random.Random(seed)
+    values: list[list[float]] | None = None
+    dropped: list[int] = []
+    for _ in range(reps):
+        sample = [items[rng.randrange(n)] for _ in range(n)]
+        a_sub = {idx: a[item] for idx, item in enumerate(sample)}
+        b_sub = {idx: b[item] for idx, item in enumerate(sample)}
+        row = stat(a_sub, b_sub)
+        if values is None:
+            values = [[] for _ in row]
+            dropped = [0] * len(row)
+        for k, v in enumerate(row):
+            if math.isnan(v):
+                dropped[k] += 1
+            else:
+                values[k].append(v)
+    out: list[tuple[float | None, float | None, int]] = []
+    for vals, d in zip(values or [], dropped):
+        if len(vals) < min(MIN_BOOTSTRAP_REPLICATES, reps):
+            out.append((None, None, d))
+            continue
+        vals.sort()
+        out.append((_percentile(vals, 2.5), _percentile(vals, 97.5), d))
+    return out
+
+
 def item_bootstrap_interval(
     stat,
     a: dict,
@@ -322,24 +373,9 @@ def item_bootstrap_interval(
     percentiles come out wrong. Fewer than `MIN_BOOTSTRAP_REPLICATES`
     survivors gives `(None, None, n_dropped)`.
     """
-    items = sorted(set(a) & set(b))
-    n = len(items)
-    rng = random.Random(seed)
-    values: list[float] = []
-    dropped = 0
-    for _ in range(reps):
-        sample = [items[rng.randrange(n)] for _ in range(n)]
-        a_sub = {idx: a[item] for idx, item in enumerate(sample)}
-        b_sub = {idx: b[item] for idx, item in enumerate(sample)}
-        v = stat(a_sub, b_sub)
-        if math.isnan(v):
-            dropped += 1
-        else:
-            values.append(v)
-    if len(values) < min(MIN_BOOTSTRAP_REPLICATES, reps):
-        return None, None, dropped
-    values.sort()
-    return _percentile(values, 2.5), _percentile(values, 97.5), dropped
+    return item_bootstrap_intervals(
+        lambda x, y: (stat(x, y),), a, b, reps=reps, seed=seed
+    )[0]
 
 
 def mde(m_values: list[int], rho: float, d: float = 0.5) -> float:
@@ -355,21 +391,30 @@ def mde(m_values: list[int], rho: float, d: float = 0.5) -> float:
     return 100 * crit * math.sqrt(d * de / (k * m_bar))
 
 
-def go_no_go(m_values: list[int], active_minutes: list[float]) -> GoNoGo:
+def go_no_go(
+    m_values: list[int],
+    active_minutes: list[float],
+    min_mean_groups: float = GO_MIN_MEAN_GROUPS,
+    max_median_minutes: float = GO_MAX_MEDIAN_MINUTES,
+) -> GoNoGo:
     """Sec 4.5's pre-registered go/no-go after windows 1 and 2."""
     mean_m = statistics.mean(m_values)
     median_minutes = statistics.median(active_minutes)
-    mean_ok = mean_m >= 8
-    minutes_ok = median_minutes <= 80
+    mean_ok = mean_m >= min_mean_groups
+    minutes_ok = median_minutes <= max_median_minutes
 
     if mean_ok and minutes_ok:
         reason = "mean multi-outlet groups per window and median active minutes both clear the floor"
     else:
         reasons = []
         if not mean_ok:
-            reasons.append(f"mean multi-outlet groups per window {mean_m:.2f} < 8")
+            reasons.append(
+                f"mean multi-outlet groups per window {mean_m:.2f} < {min_mean_groups}"
+            )
         if not minutes_ok:
-            reasons.append(f"median active minutes {median_minutes:.2f} > 80")
+            reasons.append(
+                f"median active minutes {median_minutes:.2f} > {max_median_minutes}"
+            )
         reason = "; ".join(reasons)
 
     return GoNoGo(
@@ -410,7 +455,7 @@ def draw_precision_sample(
     groups: list[frozenset[int]],
     outlet_of: dict[int, int],
     rng: random.Random,
-    n: int = 10,
+    n: int = PRECISION_PAIRS,
 ) -> list[tuple[int, int]]:
     """Sec 6.4's blind precision sample: `min(n, len(groups))` multi-outlet
     groups drawn without replacement, one cross-outlet pair per group."""
@@ -444,6 +489,10 @@ def precision_estimate(
 
     if k < 2:
         return p, None, None
+    if not total_asked:
+        # every window asked nothing: no estimate, and the variance below
+        # would divide by zero
+        return p, None, None
 
     var = (
         (k / (k - 1))
@@ -454,7 +503,9 @@ def precision_estimate(
     return p, max(0.0, p - half), min(1.0, p + half)
 
 
-def active_minutes(stamps: list[datetime], idle_cap_minutes: float = 5) -> float:
+def active_minutes(
+    stamps: list[datetime], idle_cap_minutes: float = IDLE_CAP_MINUTES
+) -> float:
     """Sort the stamps and sum the consecutive gaps of at most
     `idle_cap_minutes`, dropping idle time between bursts of activity."""
     if len(stamps) < 2:

@@ -24,6 +24,7 @@ from census_metrics import (
     go_no_go,
     groups,
     item_bootstrap_interval,
+    item_bootstrap_intervals,
     mde,
     multi_outlet_groups,
     pair_recall,
@@ -368,3 +369,188 @@ def test_item_bootstrap_interval_gives_up_when_too_few_replicates_survive():
         return pairwise_agreement(x, y)[1]
 
     assert item_bootstrap_interval(recall, ref, ref, reps=200) == (None, None, 200)
+
+
+# ── Task 2 (census minors): ARI, F1, precision, constants, bootstrap ────────
+
+
+def _partitions(n: int):
+    """Every set partition of range(n) as a list of block labels (restricted
+    growth strings), so each partition appears exactly once."""
+
+    def grow(prefix: list[int], top: int):
+        if len(prefix) == n:
+            yield list(prefix)
+            return
+        for label in range(top + 1):
+            yield from grow([*prefix, label], max(top, label + 1))
+
+    yield from grow([], 0)
+
+
+def test_ari_denominator_is_never_zero_past_the_special_cases():
+    """The old `denom == 0` branch was dead: over every pair of partitions of
+    n <= 5 items, the general formula's denominator is 0 exactly when both
+    labellings are all-singleton or both are one cluster -- the cases that
+    return 1.0 before it -- and never otherwise."""
+
+    def c2(k):
+        return k * (k - 1) // 2
+
+    checked = special = 0
+    for n in range(1, 6):
+        parts = list(_partitions(n))
+        for pa in parts:
+            for pb in parts:
+                a = dict(enumerate(pa))
+                b = dict(enumerate(pb))
+                sizes_a = [pa.count(k) for k in set(pa)]
+                sizes_b = [pb.count(k) for k in set(pb)]
+                sum_a = sum(c2(s) for s in sizes_a)
+                sum_b = sum(c2(s) for s in sizes_b)
+                expected = sum_a * sum_b / c2(n) if c2(n) else 0.0
+                denom = 0.5 * (sum_a + sum_b) - expected
+                is_special = (len(sizes_a) == len(sizes_b) == 1) or (
+                    len(sizes_a) == len(sizes_b) == n
+                )
+                value = adjusted_rand_index(a, b)
+                if is_special:
+                    special += 1
+                    assert value == 1.0
+                else:
+                    assert denom != 0, (pa, pb)
+                    assert not math.isnan(value), (pa, pb)
+                checked += 1
+    assert checked == sum(len(list(_partitions(n))) ** 2 for n in range(1, 6))
+    assert special > 0
+
+
+def test_ari_special_cases_and_empty_input():
+    # both all-singleton (None items): identical by uniqueness, so 1.0
+    assert (
+        adjusted_rand_index({1: None, 2: None, 3: None}, {1: None, 2: None, 3: None})
+        == 1.0
+    )
+    # both one cluster: likewise 1.0
+    assert adjusted_rand_index({1: 7, 2: 7, 3: 7}, {1: 9, 2: 9, 3: 9}) == 1.0
+    # no shared items: nan (unlike scikit-learn's 1.0) so bootstrap drops it
+    assert math.isnan(adjusted_rand_index({}, {}))
+    assert math.isnan(adjusted_rand_index({1: 1}, {2: 1}))
+
+
+def test_pairwise_f1_with_precision_and_recall_both_fractional():
+    ref = {1: 1, 2: 1, 3: 1, 4: 2}  # same-pairs 12 13 23
+    other = {1: 1, 2: 1, 3: 2, 4: 2}  # same-pairs 12 34
+    precision, recall, f1 = pairwise_agreement(ref, other)
+    assert precision == pytest.approx(1 / 2)
+    assert recall == pytest.approx(1 / 3)
+    assert f1 == pytest.approx(2 / 5)
+    assert f1 != pytest.approx((precision + recall) / 2)
+
+
+def test_precision_estimate_with_nothing_asked_is_undefined_not_an_error():
+    p, lo, hi = precision_estimate([(0, 0), (0, 0)])
+    assert math.isnan(p)
+    assert lo is None and hi is None
+    p, lo, hi = precision_estimate([(0, 0)])
+    assert math.isnan(p) and lo is None and hi is None
+
+
+def test_thresholds_are_named_constants_used_as_defaults():
+    import inspect
+
+    import census_metrics
+
+    assert (
+        census_metrics.GO_MIN_MEAN_GROUPS,
+        census_metrics.GO_MAX_MEDIAN_MINUTES,
+        census_metrics.PRECISION_PAIRS,
+        census_metrics.IDLE_CAP_MINUTES,
+    ) == (8, 80, 10, 5)
+
+    def default(fn, name):
+        return inspect.signature(fn).parameters[name].default
+
+    assert default(go_no_go, "min_mean_groups") == census_metrics.GO_MIN_MEAN_GROUPS
+    assert (
+        default(go_no_go, "max_median_minutes") == census_metrics.GO_MAX_MEDIAN_MINUTES
+    )
+    assert default(draw_precision_sample, "n") == census_metrics.PRECISION_PAIRS
+    assert (
+        default(active_minutes, "idle_cap_minutes") == census_metrics.IDLE_CAP_MINUTES
+    )
+
+
+def test_census_reexports_the_constants_rather_than_redefining_them():
+    import re
+    from pathlib import Path
+
+    import census
+    import census_metrics
+
+    for name in (
+        "GO_MIN_MEAN_GROUPS",
+        "GO_MAX_MEDIAN_MINUTES",
+        "PRECISION_PAIRS",
+        "IDLE_CAP_MINUTES",
+    ):
+        assert getattr(census, name) == getattr(census_metrics, name)
+        source = Path(census.__file__).read_text(encoding="utf-8")
+        assert not re.search(rf"^{name}\s*=", source, re.M), name
+
+
+_BOOT_A = {i: (i // 3 if i % 7 else None) for i in range(24)}
+_BOOT_B = {i: (i // 4 if i % 5 else None) for i in range(24)}
+_SPARSE_A = {0: 1, 1: 1, 2: None, 3: None, 4: None}
+_SPARSE_B = {0: 1, 1: None, 2: 2, 3: 2, 4: None}
+
+
+def _four_stats(x, y):
+    return (*pairwise_agreement(x, y), adjusted_rand_index(x, y))
+
+
+def test_bootstrap_intervals_are_pinned_on_a_fixed_fixture():
+    """Values captured from the one-bootstrap-per-statistic implementation
+    before the refactor to a single shared pass (reps=300)."""
+    got = item_bootstrap_intervals(_four_stats, _BOOT_A, _BOOT_B, reps=300)
+    assert got == [
+        (0.23752941176470588, 0.7710664335664335, 0),
+        (0.22884375, 0.8926923076923073, 0),
+        (0.25252659574468084, 0.7690451388888884, 0),
+        (0.18638702059921144, 0.7438163157460305, 0),
+    ]
+    got = item_bootstrap_intervals(_four_stats, _SPARSE_A, _SPARSE_B, reps=300)
+    assert got == [
+        (0.0, 1.0, 67),
+        (0.0, 1.0, 97),
+        (None, None, 228),
+        (-0.17647058823529413, 1.0, 0),
+    ]
+    # the single-statistic form still agrees with the old per-stat results
+    assert item_bootstrap_interval(
+        adjusted_rand_index, _SPARSE_A, _SPARSE_B, reps=300
+    ) == (-0.17647058823529413, 1.0, 0)
+
+
+def test_bootstrap_scores_pairwise_agreement_once_per_replicate(monkeypatch):
+    import census_metrics
+    from scripts import census_report
+
+    calls = []
+    real = census_metrics.pairwise_agreement
+
+    def counting(x, y):
+        calls.append(1)
+        return real(x, y)
+
+    monkeypatch.setattr(census_metrics, "pairwise_agreement", counting)
+    rows = census_report._consistency_rows(_BOOT_A, _BOOT_B, 50)
+    assert len(calls) == 50 + 1  # one per replicate plus the point value
+    assert [r[0] for r in rows] == [
+        "pairwise precision",
+        "pairwise recall",
+        "pairwise F1",
+        "ARI",
+    ]
+    assert rows[0][1] == pytest.approx(0.2857142857142857)
+    assert rows[1][1] == pytest.approx(0.375)

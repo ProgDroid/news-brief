@@ -189,6 +189,35 @@ def _labels(conn, window_id: int) -> dict[int, int | None]:
     return out
 
 
+_CONSISTENCY_NAMES = ("pairwise precision", "pairwise recall", "pairwise F1", "ARI")
+
+
+def _consistency_stats(x: dict, y: dict) -> tuple[float, ...]:
+    """Precision, recall, F1 (one `pairwise_agreement` call) and ARI."""
+    return (
+        *census_metrics.pairwise_agreement(x, y),
+        census_metrics.adjusted_rand_index(x, y),
+    )
+
+
+def _consistency_rows(a: dict, b: dict, reps: int) -> list[tuple[str, float, str, int]]:
+    """`(name, point value, interval text, n_dropped)` per statistic, each
+    resample scored once for all four."""
+    values = _consistency_stats(a, b)
+    intervals = census_metrics.item_bootstrap_intervals(
+        _consistency_stats, a, b, reps=reps
+    )
+    rows = []
+    for name, value, (lo, hi, dropped) in zip(_CONSISTENCY_NAMES, values, intervals):
+        span = (
+            f"95% item-bootstrap {_fmt(lo)} to {_fmt(hi)}"
+            if lo is not None
+            else "interval unavailable"
+        )
+        rows.append((name, value, span, dropped))
+    return rows
+
+
 def _consistency_lines(conn, windows: list[tuple]) -> list[str]:
     repeat = next((w for w in windows if w[2] == 2), None)
     if repeat is None:
@@ -208,33 +237,14 @@ def _consistency_lines(conn, windows: list[tuple]) -> list[str]:
     a = {i: a[i] for i in common}
     b = {i: b[i] for i in common}
 
-    def component(index: int):
-        return lambda x, y: census_metrics.pairwise_agreement(x, y)[index]
-
-    stats = [
-        ("pairwise precision", component(0)),
-        ("pairwise recall", component(1)),
-        ("pairwise F1", component(2)),
-        ("ARI", census_metrics.adjusted_rand_index),
-    ]
     lines = [
         "== Consistency: pass 2 vs pass 1 of window 2 (spec 4.6) ==",
         f"one window: thin; {len(common)} sure items in both passes",
     ]
-    for name, fn in stats:
-        value = fn(a, b)
-        lo, hi, dropped = census_metrics.item_bootstrap_interval(
-            fn, a, b, reps=BOOTSTRAP_REPS
-        )
-        span = (
-            f"95% item-bootstrap {_fmt(lo)} to {_fmt(hi)}"
-            if lo is not None
-            else "interval unavailable"
-        )
-        lines.append(
-            f"{name} {_fmt(value)} ({span}; "
-            f"{dropped} of {BOOTSTRAP_REPS} resamples undefined)"
-        )
+    lines.extend(
+        f"{name} {_fmt(value)} ({span}; {dropped} of {BOOTSTRAP_REPS} resamples undefined)"
+        for name, value, span, dropped in _consistency_rows(a, b, BOOTSTRAP_REPS)
+    )
     return lines
 
 
