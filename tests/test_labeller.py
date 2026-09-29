@@ -15,6 +15,7 @@ terminated in `finally` (F21): a labeller connection left idle in transaction
 would hang the next fixture's DROP SCHEMA.
 """
 
+import contextlib
 import html
 import http.client
 import json
@@ -81,6 +82,20 @@ def kb():
 def labeller_server(kb, monkeypatch):
     monkeypatch.setattr(labeller, "_now", lambda: NOW)
     srv = labeller.make_server(BASE, "127.0.0.1", 0)
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield srv
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        thread.join(timeout=10)
+
+
+@contextlib.contextmanager
+def _server(base: str):
+    """A labeller server built for `base`, shut down on exit."""
+    srv = labeller.make_server(base, "127.0.0.1", 0)
     thread = threading.Thread(target=srv.serve_forever, daemon=True)
     thread.start()
     try:
@@ -997,14 +1012,112 @@ def test_no_cookie_is_refused_before_any_database_connection(
     assert _request(labeller_server, "GET", "/", cookie="anything").status == 503
 
 
-def test_a_stalled_client_is_dropped(kb, labeller_server, monkeypatch):
-    """M3: a client that sends a partial request and stops must not hold a
-    handler thread forever."""
-    assert labeller._Handler.timeout == labeller.SOCKET_TIMEOUT_SECONDS == 30
-    monkeypatch.setattr(labeller._Handler, "timeout", 0.5)
-    port = labeller_server.server_address[1]
-    with socket.create_connection(("127.0.0.1", port), timeout=10) as s:
-        s.sendall(b"GET / HTTP/1.1\r\nHost: " + HOST.encode())  # never finished
-        started = time.monotonic()
-        assert s.recv(1024) == b""  # the server closed the connection
-        assert time.monotonic() - started < 5
+def test_the_socket_timeout_defaults_to_thirty_seconds(kb, labeller_server):
+    assert labeller.SOCKET_TIMEOUT_SECONDS == 30
+    assert labeller_server.RequestHandlerClass.timeout == 30
+
+
+@pytest.mark.parametrize(
+    "sent",
+    [b"", b"GET / HTTP/1.1\r\nHost: " + HOST.encode()],
+    ids=["sends-nothing", "partial-request"],
+)
+def test_a_stalled_client_is_dropped_within_the_timeout(sent, monkeypatch):
+    """M3: a client that connects and then stalls -- sending nothing, or a
+    request it never finishes -- is dropped once the configured timeout
+    passes. The timeout is shortened through the module's own setting, never
+    by setting the handler attribute here, so a server built without it
+    keeps the connection open and this fails."""
+    monkeypatch.setattr(labeller, "SOCKET_TIMEOUT_SECONDS", 0.5)
+    with _server(BASE) as srv:
+        port = srv.server_address[1]
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
+            if sent:
+                s.sendall(sent)
+            started = time.monotonic()
+            assert s.recv(1024) == b""  # the server closed the connection
+            elapsed = time.monotonic() - started
+    # Dropped BY the timeout: not at once, and well inside the client's 5 s.
+    assert 0.3 <= elapsed < 4, elapsed
+
+
+# ── Host and Origin: the scheme's default port is optional ───────────────────
+
+
+def _host_status(srv, host) -> int:
+    return _request(srv, "GET", "/static/label.js", host=host).status
+
+
+def _origin_text(srv, host, origin) -> str:
+    # No cookie: past the Host/Origin check the answer is "forbidden:
+    # session", before it "forbidden: origin" -- no database involved.
+    return _request(
+        srv, "POST", "/api/heartbeat", {"window_id": 1}, host=host, origin=origin
+    ).text
+
+
+@pytest.mark.parametrize("base", ["http://census.test", "http://census.test:80"])
+def test_host_check_accepts_the_default_port_written_or_not(base):
+    with _server(base) as srv:
+        for host in ("census.test", "census.test:80", "CENSUS.test:80"):
+            assert _host_status(srv, host) == 200, (base, host)
+            for origin in ("http://census.test", "http://census.test:80"):
+                assert _origin_text(srv, host, origin) == "forbidden: session", (
+                    base,
+                    host,
+                    origin,
+                )
+        # Controls: another port, host or scheme is still refused.
+        for host in ("census.test:8080", "census.test:443", "evil.test"):
+            assert _host_status(srv, host) == 403, (base, host)
+        for origin in ("https://census.test", "http://census.test:8080"):
+            assert _origin_text(srv, "census.test", origin) == "forbidden: origin"
+
+
+def test_host_check_knows_the_https_default_port():
+    with _server("https://census.test") as srv:
+        assert _host_status(srv, "census.test:443") == 200
+        assert _host_status(srv, "census.test") == 200
+        assert _host_status(srv, "census.test:80") == 403
+        assert (
+            _origin_text(srv, "census.test:443", "https://census.test:443")
+            == "forbidden: session"
+        )
+        assert _origin_text(srv, "census.test", "http://census.test") == (
+            "forbidden: origin"
+        )
+
+
+def test_a_non_default_port_is_still_required():
+    # BASE carries :8765: the bare host is a different address.
+    with _server(BASE) as srv:
+        assert _host_status(srv, "census.test:8765") == 200
+        assert _host_status(srv, "census.test") == 403
+
+
+# ── GET errors are a short HTML page, never raw JSON ────────────────────────
+
+
+def _assert_html_status_page(r: Resp, status: int):
+    assert r.status == status, r.body[:200]
+    assert r.headers["Content-Type"] == "text/html; charset=utf-8"
+    assert r.text.startswith("<!doctype html>"), r.text[:200]
+    assert f"<h1>{status} " in r.text
+    assert '{"error"' not in r.text
+    _assert_security_headers(r)
+
+
+def test_get_errors_render_an_html_status_page(kb, labeller_server, monkeypatch):
+    def down(*args, **kwargs):
+        raise RuntimeError("database is down")
+
+    monkeypatch.setattr(db, "connect", down)
+    page = _request(labeller_server, "GET", "/", cookie="anything")
+    _assert_html_status_page(page, 503)
+    assert "database is down" not in page.text  # the cause stays in the log
+    assert "Try again" in page.text
+
+    # /open: the link was not consumed, so the page says unavailable too.
+    link = _request(labeller_server, "GET", "/open?t=some-link")
+    _assert_html_status_page(link, 503)
+    assert "Try again" in link.text

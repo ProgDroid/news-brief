@@ -14,7 +14,8 @@ review only.
 
 Environment (plain variables, not knobs):
   LABELLER_BASE_URL  required; the URL the operator's phone uses. `Host` must
-                     equal its host:port and a POST's `Origin` must equal it.
+                     equal its host:port and a POST's `Origin` must equal it,
+                     the scheme's default port optional in both.
   LABELLER_BIND      default 0.0.0.0
   LABELLER_PORT      default 8765
   POSTGRES_* / DATABASE_URL  the labeller role's own connection (db.conninfo).
@@ -36,6 +37,7 @@ import json
 import os
 import sys
 from datetime import datetime, timezone
+from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -52,6 +54,7 @@ COOKIE_MAX_AGE = int(census.SESSION_TTL.total_seconds())
 MAX_BODY_BYTES = 256 * 1024
 # A stalled or slow-loris client may hold a handler thread only this long.
 SOCKET_TIMEOUT_SECONDS = 30
+DEFAULT_PORTS = {"http": 80, "https": 443}
 STATIC_DIR = Path(__file__).resolve().parent / "labeller_static"
 # Exact paths only: nothing under /static/ is resolved against the filesystem.
 STATIC_FILES = {
@@ -113,6 +116,14 @@ GUIDELINE = (
         "than two outlets remain. The unsure share is reported.",
     ),
 )
+
+
+# What a failed GET's HTML status page says, by status.
+_STATUS_PAGE_TEXT = {
+    400: "The page could not be loaded. Reload it to continue.",
+    409: "This window is already closed. Reload the page to continue.",
+    503: "The labelling page is unavailable right now. Try again in a moment.",
+}
 
 
 class _BadRequest(Exception):
@@ -352,13 +363,14 @@ API_ROUTES = {
 
 
 class _Handler(BaseHTTPRequestHandler):
-    # Set per server by make_server.
-    expected_host = ""
-    expected_origin = ""
+    # Set per server by make_server: every spelling of the base URL's
+    # host[:port] and origin (with and without the scheme's default port).
+    expected_hosts: frozenset[str] = frozenset()
+    expected_origins: frozenset[str] = frozenset()
 
     server_version = "census-labeller"
-    # StreamRequestHandler applies this to the socket (M3).
-    timeout = SOCKET_TIMEOUT_SECONDS
+    # `timeout` (M3) is set per server by make_server, from
+    # SOCKET_TIMEOUT_SECONDS; StreamRequestHandler applies it to the socket.
     sys_version = ""
 
     # ── Response plumbing ────────────────────────────────────────────────────
@@ -386,6 +398,23 @@ class _Handler(BaseHTTPRequestHandler):
         without the body leaking which check or value failed."""
         self._send(403, f"forbidden: {reason}".encode(), "text/plain; charset=utf-8")
 
+    def _send_status_page(self, status: int):
+        """A GET that failed: a short HTML page a person can read, never the
+        JSON the API routes answer with. It names the status and what to do,
+        and never the cause (an exception's text stays in the log)."""
+        message = _STATUS_PAGE_TEXT.get(status, "Reload the page to try again.")
+        doc = (
+            "<!doctype html>\n"
+            '<html lang="en"><head><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width, initial-scale=1">'
+            f"<title>Event census: {status}</title>"
+            "</head><body>"
+            f"<h1>{status} {html.escape(HTTPStatus(status).phrase)}</h1>"
+            f"<p>{html.escape(message)}</p>"
+            "</body></html>\n"
+        )
+        self._send(status, doc.encode("utf-8"), "text/html; charset=utf-8")
+
     def _send_json(self, status, payload):
         if payload is None:
             self._send(status)
@@ -403,10 +432,10 @@ class _Handler(BaseHTTPRequestHandler):
     # ── Checks ───────────────────────────────────────────────────────────────
 
     def _host_ok(self) -> bool:
-        return (self.headers.get("Host") or "").lower() == self.expected_host
+        return (self.headers.get("Host") or "").lower() in self.expected_hosts
 
     def _origin_ok(self) -> bool:
-        return (self.headers.get("Origin") or "").lower() == self.expected_origin
+        return (self.headers.get("Origin") or "").lower() in self.expected_origins
 
     def _session_token(self) -> str | None:
         """The first `census_session=` pair of the Cookie header, parsed by
@@ -471,7 +500,7 @@ class _Handler(BaseHTTPRequestHandler):
             return self.send_error(404)
         if status == 200:
             return self._send(200, payload, "text/html; charset=utf-8")
-        return self._send_json(status, payload)
+        return self._send_status_page(status)
 
     def _open(self, query: str):
         token = parse_qs(query).get("t", [""])[0]
@@ -484,7 +513,7 @@ class _Handler(BaseHTTPRequestHandler):
         if status != 200:
             # The link was not consumed (the transaction rolled back), so it
             # can be retried: say "unavailable", not "forbidden".
-            return self._send_json(status, session)
+            return self._send_status_page(status)
         if session is None:
             return self._forbidden()
         cookie = (
@@ -545,18 +574,38 @@ class _Handler(BaseHTTPRequestHandler):
         return self._send_json(status, payload)
 
 
+def _host_forms(scheme: str, netloc: str, port: int | None) -> frozenset[str]:
+    """`netloc` as a client may spell it: a browser drops the scheme's
+    default port from both `Host` and `Origin`, and another client may write
+    it, so `http://h:80` and `http://h` are one address. A non-default port
+    is always required."""
+    netloc = netloc.lower()
+    default = DEFAULT_PORTS[scheme]
+    if port is None:
+        return frozenset({netloc, f"{netloc}:{default}"})
+    if port == default:
+        return frozenset({netloc, netloc.rsplit(":", 1)[0]})
+    return frozenset({netloc})
+
+
 def make_server(base_url: str, bind: str, port: int) -> ThreadingHTTPServer:
     """A threaded server (F25: one slow phone connection must not stall the
-    rest) answering only for `base_url`'s host:port and origin."""
+    rest) answering only for `base_url`'s host:port and origin, the scheme's
+    default port optional."""
     parts = urlsplit(base_url)
     if parts.scheme not in ("http", "https") or not parts.netloc:
         raise ValueError(f"LABELLER_BASE_URL must be an http(s) URL: {base_url!r}")
+    hosts = _host_forms(parts.scheme, parts.netloc, parts.port)
     handler = type(
         "LabellerHandler",
         (_Handler,),
         {
-            "expected_host": parts.netloc.lower(),
-            "expected_origin": f"{parts.scheme}://{parts.netloc}".lower(),
+            "expected_hosts": hosts,
+            "expected_origins": frozenset(f"{parts.scheme}://{h}" for h in hosts),
+            # M3: a stalled or slow-loris client holds a handler thread at
+            # most this long. Read when the server is built, not when the
+            # class is defined.
+            "timeout": SOCKET_TIMEOUT_SECONDS,
         },
     )
     return ThreadingHTTPServer((bind, port), handler)
