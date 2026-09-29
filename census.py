@@ -1,8 +1,10 @@
-"""Event census: the block, the window order and `census_prepare`.
+"""Event census: the block, the window order, `census_prepare`, and the
+session state the labeller drives.
 
 Spec: docs/superpowers/specs/2026-09-28-gold-set-labelling-design.md sec 4
-(windows), 4.3 (the gap check). Plan:
-docs/superpowers/plans/2026-09-28-event-census.md, Task 3.
+(windows), 4.3 (the gap check), 4.5 (go/no-go), 4.6 (the repeat), 6.3 (the
+blind pass) and 6.4 (the precision sample). Plan:
+docs/superpowers/plans/2026-09-28-event-census.md, Tasks 3 and 4.
 
 Imports only `db`, `common`, `census_metrics` and the standard library, so
 both `census_prepare` (a `brief.py` mode) and the later `labeller.py`
@@ -10,6 +12,7 @@ both `census_prepare` (a `brief.py` mode) and the later `labeller.py`
 `brief`, `comprehend`, `config` or anything that imports `anthropic`.
 """
 
+import functools
 import random
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -36,6 +39,19 @@ BACKLOG_HOURS = 24
 WINDOWS_PER_STRATUM = 4
 SEED = 20260928
 REPEAT_ORDER_NO = 2
+
+# Session state (plan Task 4). The go/no-go thresholds themselves (8 groups,
+# 80 minutes) live in census_metrics.go_no_go and are not repeated here.
+REPEAT_AFTER_ORDER_NO = 8
+REPEAT_MIN_DAYS = 7
+TOTAL_SESSIONS = 17
+PRECISION_PAIRS = 10
+IDLE_CAP_MINUTES = 5
+
+# "Done" for sequencing (B4): the blind pass is over, whether it was saved
+# (and possibly completed by its precision sample) or abandoned.
+_DONE = ("blind_done", "complete", "abandoned")
+_REPEAT_VOID_REASON = "repeat void: window 2 abandoned"
 
 
 class CensusRefusal(Exception):
@@ -376,3 +392,544 @@ def prepare(conn, today: date, c439ade_deployed_at: datetime, now: datetime) -> 
         f"{len(order)} windows drawn plus the repeat, {len(skipped)} skipped, "
         f"gap band {gap.band} ({gap.pairs} pairs, {gap.windows} windows)"
     )
+
+
+# ── Session state (plan Task 4) ─────────────────────────────────────────────
+#
+# Every public function below owns its transaction through `_transaction`:
+# commit on return, roll back on any exception (F21). The `_`-prefixed
+# helpers never commit, so a public function built from several of them is
+# still one transaction. The labeller calls these one connection per request.
+
+
+class WindowClosed(Exception):
+    """A write reached a window whose blind pass is over -- `blind_done`,
+    `complete` or `abandoned`. The labeller answers 409 and the client stops
+    retrying (plan Review Focus 4)."""
+
+
+class BadWrite(ValueError):
+    """A write named something outside its window (F18): an item not in
+    `census_window_items`, a group from another window, a precision pair not
+    currently offered, a precision decision other than same/different, an
+    empty abandon reason, or a window that does not exist. The labeller
+    answers 400."""
+
+
+@dataclass(frozen=True)
+class Task:
+    """What the labeller should serve now.
+
+    `kind` is one of 'blind', 'precision', 'gate_failed', 'waiting',
+    'complete', 'not_prepared'. `window_id` is set only for 'blind' and
+    'precision'. `session_no` is 1 + the number of done windows, pass 1 and
+    pass 2 together.
+    """
+
+    kind: str
+    window_id: int | None
+    session_no: int
+    detail: str
+
+
+@dataclass(frozen=True)
+class _Window:
+    id: int
+    order_no: int
+    pass_: int
+    status: str
+    blind_done_at: datetime | None
+
+    @property
+    def done(self) -> bool:
+        return self.status in _DONE
+
+
+_EVENT_KINDS = ("open", "action", "heartbeat", "finish", "abandon")
+_DECISIONS = ("same", "different")
+_GATE_ORDER_NOS = (1, 2)
+
+
+def _transaction(fn):
+    @functools.wraps(fn)
+    def wrapper(conn, *args, **kwargs):
+        try:
+            result = fn(conn, *args, **kwargs)
+        except BaseException:
+            conn.rollback()
+            raise
+        conn.commit()
+        return result
+
+    return wrapper
+
+
+def _windows(conn) -> list[_Window]:
+    """Every census window, pass 1 before pass 2, each in order_no order."""
+    rows = conn.execute(
+        "SELECT id, order_no, pass, status, blind_done_at FROM census_windows "
+        "ORDER BY pass, order_no"
+    ).fetchall()
+    return [_Window(*row) for row in rows]
+
+
+def _lock_window(conn, window_id: int) -> tuple[str, datetime | None, int, int]:
+    """Lock the window row before any write to it (F17), so a Finish and a
+    late assignment cannot interleave. Returns (status, blind_done_at,
+    order_no, pass)."""
+    row = conn.execute(
+        "SELECT status, blind_done_at, order_no, pass FROM census_windows "
+        "WHERE id = %s FOR UPDATE",
+        (window_id,),
+    ).fetchone()
+    if row is None:
+        raise BadWrite(f"no census window {window_id}")
+    return row
+
+
+def _raise_if_closed(window_id: int, status: str) -> None:
+    if status in _DONE:
+        raise WindowClosed(f"window {window_id} is {status}")
+
+
+def _window_item_rows(conn, window_id: int) -> list[tuple]:
+    """The window's frozen membership (F6), in capture order: only
+    `census_window_items` decides who is in, never a re-run of the
+    population filter over `items`."""
+    return conn.execute(
+        "SELECT i.id, i.title, i.url, o.name, i.created_at, i.outlet_id "
+        "FROM census_window_items cwi "
+        "JOIN items i ON i.id = cwi.item_id "
+        "JOIN outlets o ON o.id = i.outlet_id "
+        "WHERE cwi.window_id = %s "
+        "ORDER BY i.created_at, i.id",
+        (window_id,),
+    ).fetchall()
+
+
+def _latest_assignments(conn, window_id: int) -> dict[int, tuple[int | None, bool]]:
+    """THE reader of the assignment log (B5): per item, the row with the
+    highest `id`, which is arrival order -- not `client_seq`, which two tabs
+    number independently. No other SQL in this module reads
+    `census_assignments`."""
+    rows = conn.execute(
+        "SELECT DISTINCT ON (item_id) item_id, group_id, unsure "
+        "FROM census_assignments WHERE window_id = %s "
+        "ORDER BY item_id, id DESC",
+        (window_id,),
+    ).fetchall()
+    return {item_id: (group_id, unsure) for item_id, group_id, unsure in rows}
+
+
+def _window_assignments(conn, window_id: int) -> list[census_metrics.Assignment]:
+    """Every member item with its latest state; an item never touched is a
+    sure singleton (group None, not unsure)."""
+    latest = _latest_assignments(conn, window_id)
+    out = []
+    for item_id, _title, _url, _outlet, _created_at, outlet_id in _window_item_rows(
+        conn, window_id
+    ):
+        group_id, unsure = latest.get(item_id, (None, False))
+        out.append(census_metrics.Assignment(item_id, outlet_id, group_id, unsure))
+    return out
+
+
+def _precision_pairs(conn, window_id: int) -> list[tuple[int, int]]:
+    """The pairs offered now: the window's deterministic sample minus the
+    pairs already answered. Empty unless the window is a pass-1 window whose
+    blind pass is saved, and empty while order_no 2's sample is held for
+    the repeat (sec 4.6: until pass 2 is done, blind_done or abandoned).
+    Pass 2 has no sample: it measures consistency only, and its items are
+    window 2's, whose pairs `UNIQUE (kind, item_a, item_b)` already owns.
+    """
+    row = conn.execute(
+        "SELECT order_no, pass, status FROM census_windows WHERE id = %s",
+        (window_id,),
+    ).fetchone()
+    if row is None:
+        return []
+    order_no, pass_, status = row
+    if pass_ != 1 or status != "blind_done":
+        return []
+    if order_no == REPEAT_ORDER_NO:
+        repeat = conn.execute(
+            "SELECT status FROM census_windows WHERE repeat_of = %s", (window_id,)
+        ).fetchone()
+        if repeat is not None and repeat[0] not in _DONE:
+            return []
+
+    assignments = _window_assignments(conn, window_id)
+    outlet_of = {a.item_id: a.outlet_id for a in assignments}
+    sample = census_metrics.draw_precision_sample(
+        census_metrics.multi_outlet_groups(assignments),
+        outlet_of,
+        random.Random(window_id),
+        n=PRECISION_PAIRS,
+    )
+    answered = {
+        (a, b)
+        for a, b in conn.execute(
+            "SELECT item_a, item_b FROM census_adjudications "
+            "WHERE window_id = %s AND kind = 'precision'",
+            (window_id,),
+        ).fetchall()
+    }
+    return [pair for pair in sample if pair not in answered]
+
+
+def _window_active_minutes(conn, window_id: int) -> float:
+    """Active minutes over the window's events, heartbeats included, up to
+    and including its blind pass's end (F19): `blind_done_at`, or for an
+    abandoned window its first abandon event. A stale tab still
+    heartbeating on the precision page, or after an abandon, adds nothing.
+    """
+    rows = conn.execute(
+        "SELECT e.at FROM census_events e "
+        "JOIN census_windows w ON w.id = e.window_id "
+        "WHERE e.window_id = %s AND e.at <= COALESCE("
+        "  w.blind_done_at,"
+        "  (SELECT min(a.at) FROM census_events a "
+        "   WHERE a.window_id = w.id AND a.kind = 'abandon'),"
+        "  'infinity'::timestamptz)",
+        (window_id,),
+    ).fetchall()
+    return census_metrics.active_minutes(
+        [at for (at,) in rows], idle_cap_minutes=IDLE_CAP_MINUTES
+    )
+
+
+def _go_status(conn, windows: list[_Window]) -> census_metrics.GoNoGo | None:
+    gate = sorted(
+        (w for w in windows if w.pass_ == 1 and w.order_no in _GATE_ORDER_NOS),
+        key=lambda w: w.order_no,
+    )
+    if len(gate) < len(_GATE_ORDER_NOS) or not all(w.done for w in gate):
+        return None
+    for w in gate:
+        if w.status == "abandoned":
+            return census_metrics.GoNoGo(
+                ok=False,
+                mean_m=float("nan"),
+                median_minutes=float("nan"),
+                values=(),
+                reason=(f"window {w.order_no} abandoned; the gate cannot be evaluated"),
+            )
+    m_values = [
+        len(census_metrics.multi_outlet_groups(_window_assignments(conn, w.id)))
+        for w in gate
+    ]
+    minutes = [_window_active_minutes(conn, w.id) for w in gate]
+    return census_metrics.go_no_go(m_values, minutes)
+
+
+def _item_count(conn, window_id: int) -> int:
+    return conn.execute(
+        "SELECT count(*) FROM census_window_items WHERE window_id = %s",
+        (window_id,),
+    ).fetchone()[0]
+
+
+@_transaction
+def current_task(conn, now: datetime) -> Task:
+    """What to serve at `now` (plan Task 4, in priority order):
+
+    1. no block -> not_prepared;
+    2. the go/no-go failed and no override is recorded -> gate_failed;
+    3. a window in progress (status `open`) -> blind on it (F16);
+    4. a saved blind pass with precision pairs offered -> precision
+       (order_no 2's are held until the repeat is done);
+    5. the repeat, once order_no 8 is done and REPEAT_MIN_DAYS have passed
+       since order_no 2's blind pass -> blind on it;
+    6. the lowest pass-1 window not done -> blind;
+    7. only the repeat remains, not yet eligible -> waiting, with the date;
+    8. complete.
+    """
+    block = conn.execute("SELECT go_override_reason FROM census_block").fetchone()
+    if block is None:
+        return Task("not_prepared", None, 1, "the census is not prepared")
+    override = block[0]
+
+    windows = _windows(conn)
+    session_no = 1 + sum(1 for w in windows if w.done)
+
+    def blind(w: _Window) -> Task:
+        return Task("blind", w.id, session_no, f"{_item_count(conn, w.id)} items")
+
+    gate = _go_status(conn, windows)
+    if gate is not None and not gate.ok and override is None:
+        return Task("gate_failed", None, session_no, gate.reason)
+
+    for w in windows:
+        if w.status == "open":
+            return blind(w)
+
+    for w in windows:
+        if w.status == "blind_done":
+            pairs = _precision_pairs(conn, w.id)
+            if pairs:
+                return Task("precision", w.id, session_no, f"{len(pairs)} pairs")
+
+    by_order = {w.order_no: w for w in windows if w.pass_ == 1}
+    repeat = next((w for w in windows if w.pass_ == 2), None)
+    anchor = by_order.get(REPEAT_ORDER_NO)
+    eligible_at = None
+    if (
+        repeat is not None
+        and not repeat.done
+        and anchor is not None
+        and anchor.blind_done_at is not None
+    ):
+        eligible_at = anchor.blind_done_at + timedelta(days=REPEAT_MIN_DAYS)
+        after = by_order.get(REPEAT_AFTER_ORDER_NO)
+        if after is not None and after.done and now >= eligible_at:
+            return blind(repeat)
+
+    for order_no in sorted(by_order):
+        if not by_order[order_no].done:
+            return blind(by_order[order_no])
+
+    if eligible_at is not None:
+        at_utc = eligible_at.astimezone(timezone.utc)
+        return Task(
+            "waiting",
+            None,
+            session_no,
+            f"the repeat of window {REPEAT_ORDER_NO} opens {at_utc:%Y-%m-%d %H:%M} UTC",
+        )
+    return Task("complete", None, session_no, "the census is complete")
+
+
+@_transaction
+def window_items(conn, window_id: int) -> list[dict]:
+    """The window's items in capture order, from `census_window_items` only:
+    `id`, `title`, `url`, `outlet` (the outlet's name) and `created_at` (the
+    capture time the page shows)."""
+    return [
+        {
+            "id": item_id,
+            "title": title,
+            "url": url,
+            "outlet": outlet,
+            "created_at": created_at,
+        }
+        for item_id, title, url, outlet, created_at, _outlet_id in _window_item_rows(
+            conn, window_id
+        )
+    ]
+
+
+@_transaction
+def record_event(conn, window_id: int, kind: str, at: datetime) -> None:
+    """Append one timing event. `finish_blind` and `abandon` log their own
+    `finish` and `abandon` events; the labeller logs `open`, `action` and
+    `heartbeat` through here."""
+    if kind not in _EVENT_KINDS:
+        raise BadWrite(f"unknown event kind {kind!r}")
+    conn.execute(
+        "INSERT INTO census_events (window_id, kind, at) VALUES (%s, %s, %s)",
+        (window_id, kind, at),
+    )
+
+
+@_transaction
+def create_group(conn, window_id: int, at: datetime) -> int:
+    """A new, empty group in `window_id`. Refused once the blind pass is over."""
+    status, _blind_done_at, _order_no, _pass = _lock_window(conn, window_id)
+    _raise_if_closed(window_id, status)
+    return conn.execute(
+        "INSERT INTO census_groups (window_id, created_at) VALUES (%s, %s) "
+        "RETURNING id",
+        (window_id, at),
+    ).fetchone()[0]
+
+
+@_transaction
+def save_assignments(
+    conn,
+    window_id: int,
+    tab_id: str,
+    client_seq: int,
+    rows: list[tuple[int, int | None, bool]],
+    at: datetime,
+) -> None:
+    """Append one client action's rows `(item_id, group_id, unsure)` to the
+    log and mark the window `open`.
+
+    A retry of the same (tab, seq) is ignored by `ON CONFLICT ... DO
+    NOTHING`, so arrival order stays the only order (B5). The whole write is
+    refused -- nothing is logged -- if the window is closed (WindowClosed),
+    or if any item is not a member, any group belongs to another window, or
+    one item appears twice in the same action (BadWrite, F18).
+    """
+    status, blind_done_at, _order_no, _pass = _lock_window(conn, window_id)
+    _raise_if_closed(window_id, status)
+    if blind_done_at is not None:
+        raise WindowClosed(f"window {window_id} finished its blind pass")
+
+    item_ids = [item_id for item_id, _group_id, _unsure in rows]
+    if len(set(item_ids)) != len(item_ids):
+        raise BadWrite("an item appears more than once in one write")
+    if item_ids:
+        members = {
+            item_id
+            for (item_id,) in conn.execute(
+                "SELECT item_id FROM census_window_items "
+                "WHERE window_id = %s AND item_id = ANY(%s)",
+                (window_id, item_ids),
+            ).fetchall()
+        }
+        foreign = sorted(set(item_ids) - members)
+        if foreign:
+            raise BadWrite(f"items {foreign} are not in window {window_id}")
+
+    group_ids = sorted({g for _item_id, g, _unsure in rows if g is not None})
+    if group_ids:
+        own = {
+            group_id
+            for (group_id,) in conn.execute(
+                "SELECT id FROM census_groups WHERE window_id = %s AND id = ANY(%s)",
+                (window_id, group_ids),
+            ).fetchall()
+        }
+        foreign = sorted(set(group_ids) - own)
+        if foreign:
+            raise BadWrite(f"groups {foreign} do not belong to window {window_id}")
+
+    if rows:
+        with conn.cursor() as cur:
+            cur.executemany(
+                "INSERT INTO census_assignments "
+                "(window_id, item_id, group_id, unsure, tab_id, client_seq, "
+                " created_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT (window_id, tab_id, client_seq, item_id) DO NOTHING",
+                [
+                    (window_id, item_id, group_id, bool(unsure), tab_id, client_seq, at)
+                    for item_id, group_id, unsure in rows
+                ],
+            )
+    conn.execute(
+        "UPDATE census_windows SET status = 'open', "
+        "opened_at = COALESCE(opened_at, %s) WHERE id = %s",
+        (at, window_id),
+    )
+
+
+@_transaction
+def latest_assignments(conn, window_id: int) -> dict[int, tuple[int | None, bool]]:
+    """Per touched item, `(group_id, unsure)` from its latest log row (B5)."""
+    return _latest_assignments(conn, window_id)
+
+
+@_transaction
+def window_assignments(conn, window_id: int) -> list[census_metrics.Assignment]:
+    """Every member item, in capture order, as a `census_metrics.Assignment`;
+    built on the same reader as `latest_assignments`."""
+    return _window_assignments(conn, window_id)
+
+
+@_transaction
+def finish_blind(conn, window_id: int, at: datetime) -> None:
+    """Save the blind pass: log `finish`, set `blind_done` at `at`. A pass-1
+    window with no multi-outlet group has no precision sample, so it
+    completes here. Pass 2 stays `blind_done`: it has no sample (see
+    `_precision_pairs`)."""
+    status, _blind_done_at, _order_no, pass_ = _lock_window(conn, window_id)
+    _raise_if_closed(window_id, status)
+    conn.execute(
+        "INSERT INTO census_events (window_id, kind, at) VALUES (%s, 'finish', %s)",
+        (window_id, at),
+    )
+    conn.execute(
+        "UPDATE census_windows SET status = 'blind_done', blind_done_at = %s "
+        "WHERE id = %s",
+        (at, window_id),
+    )
+    if pass_ == 1 and not census_metrics.multi_outlet_groups(
+        _window_assignments(conn, window_id)
+    ):
+        conn.execute(
+            "UPDATE census_windows SET status = 'complete', completed_at = %s "
+            "WHERE id = %s",
+            (at, window_id),
+        )
+
+
+@_transaction
+def abandon(conn, window_id: int, reason: str, at: datetime) -> None:
+    """Abandon a window whose blind pass is not over, with a typed reason.
+
+    B4: abandoning order_no 2's pass 1 voids the repeat as well, since there
+    is nothing left to repeat. Abandoning the repeat itself releases order_no
+    2's held precision sample (`_precision_pairs` treats abandoned as done).
+    """
+    if not reason or not reason.strip():
+        raise BadWrite("abandon needs a reason")
+    status, _blind_done_at, order_no, pass_ = _lock_window(conn, window_id)
+    _raise_if_closed(window_id, status)
+    conn.execute(
+        "INSERT INTO census_events (window_id, kind, at) VALUES (%s, 'abandon', %s)",
+        (window_id, at),
+    )
+    conn.execute(
+        "UPDATE census_windows SET status = 'abandoned', abandon_reason = %s "
+        "WHERE id = %s",
+        (reason.strip(), window_id),
+    )
+    if pass_ == 1 and order_no == REPEAT_ORDER_NO:
+        conn.execute(
+            "UPDATE census_windows SET status = 'abandoned', abandon_reason = %s "
+            "WHERE repeat_of = %s "
+            "AND status NOT IN ('blind_done', 'complete', 'abandoned')",
+            (_REPEAT_VOID_REASON, window_id),
+        )
+
+
+@_transaction
+def precision_pairs(conn, window_id: int) -> list[tuple[int, int]]:
+    """The precision pairs offered now, each `(a, b)` with `a < b` (sec 6.4):
+    `draw_precision_sample(..., random.Random(window_id))` over the saved
+    blind pass, minus the pairs already answered."""
+    return _precision_pairs(conn, window_id)
+
+
+@_transaction
+def save_precision(
+    conn, window_id: int, item_a: int, item_b: int, decision: str, at: datetime
+) -> None:
+    """Record one precision decision for an offered pair, normalised to
+    `a < b` (F18). The window completes when no pair remains."""
+    if decision not in _DECISIONS:
+        raise BadWrite(f"decision must be one of {_DECISIONS}, not {decision!r}")
+    _lock_window(conn, window_id)
+    pair = (min(item_a, item_b), max(item_a, item_b))
+    offered = _precision_pairs(conn, window_id)
+    if pair not in offered:
+        raise BadWrite(f"pair {pair} is not offered in window {window_id}")
+    conn.execute(
+        "INSERT INTO census_adjudications "
+        "(window_id, kind, item_a, item_b, decision, created_at) "
+        "VALUES (%s, 'precision', %s, %s, %s, %s)",
+        (window_id, pair[0], pair[1], decision, at),
+    )
+    if len(offered) == 1:
+        conn.execute(
+            "UPDATE census_windows SET status = 'complete', completed_at = %s "
+            "WHERE id = %s",
+            (at, window_id),
+        )
+
+
+@_transaction
+def window_active_minutes(conn, window_id: int) -> float:
+    """Active minutes of the window's blind pass (sec 6.3, F19)."""
+    return _window_active_minutes(conn, window_id)
+
+
+@_transaction
+def go_status(conn) -> census_metrics.GoNoGo | None:
+    """Sec 4.5's go/no-go over order_no 1 and 2 (pass 1): None until both
+    are done; failed, naming the window, if either was abandoned (B4);
+    otherwise `census_metrics.go_no_go` over their multi-outlet group counts
+    and active minutes."""
+    return _go_status(conn, _windows(conn))
