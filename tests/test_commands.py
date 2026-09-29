@@ -1353,6 +1353,66 @@ def test_label_sends_progress_and_a_link(monkeypatch):
     assert minted == ["TOK123"]
 
 
+def test_label_escapes_the_base_url(monkeypatch):
+    """The message is parse_mode=HTML: a raw `&` or `"` in the base URL would
+    garble the link or break the send."""
+    sent = _capture(monkeypatch)
+    monkeypatch.setenv("LABELLER_BASE_URL", 'https://label.example.org/a&b"c/')
+    _label_db(monkeypatch, task=_task())
+
+    brief._handle_telegram_update(_update("/label"), _fb())
+
+    assert sent == [
+        "\U0001f3f7 Session 3/17\n\n"
+        "https://label.example.org/a&amp;b&quot;c/open?t=TOK123"
+    ]
+
+
+def test_label_sends_a_link_for_a_precision_task(monkeypatch):
+    sent = _capture(monkeypatch)
+    monkeypatch.setenv("LABELLER_BASE_URL", "https://label.example.org")
+    minted = _label_db(monkeypatch, task=_task("precision", 4, 1, "8 pairs"))
+
+    brief._handle_telegram_update(_update("/label"), _fb())
+
+    assert minted == ["TOK123"]
+    assert sent == [
+        "\U0001f3f7 Session 1/17\n\nhttps://label.example.org/open?t=TOK123"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("kind", "detail", "expected"),
+    [
+        (
+            "waiting",
+            "the repeat of window 2 opens 2026-10-08 09:00 UTC",
+            "\U0001f3f7 Nothing to label yet: "
+            "the repeat of window 2 opens 2026-10-08 09:00 UTC",
+        ),
+        (
+            "complete",
+            "the census is complete",
+            "\U0001f3f7 The census is complete. the census is complete",
+        ),
+        (
+            "not_prepared",
+            "the census is not prepared",
+            "\U0001f3f7 The census is not prepared yet. the census is not prepared",
+        ),
+    ],
+)
+def test_label_texts_when_there_is_nothing_to_link(monkeypatch, kind, detail, expected):
+    sent = _capture(monkeypatch)
+    monkeypatch.setenv("LABELLER_BASE_URL", "https://label.example.org")
+    minted = _label_db(monkeypatch, task=_task(kind, None, 2, detail))
+
+    brief._handle_telegram_update(_update("/label"), _fb())
+
+    assert minted == []
+    assert sent == [expected]
+
+
 def test_label_message_hides_the_item_count(monkeypatch):
     """The count would fingerprint the repeat window (ruling F23)."""
     sent = _capture(monkeypatch)
@@ -1415,8 +1475,7 @@ def test_label_reset_revokes(monkeypatch):
 
     brief._handle_telegram_update(_update("/label reset"), _fb())
 
-    assert len(sent) == 1
-    assert "3" in sent[0]
+    assert sent == ["\U0001f3f7 Revoked 3 labelling link(s) and session(s)."]
 
 
 def test_nudge_sends_one_line_when_ready_and_nothing_otherwise(monkeypatch):

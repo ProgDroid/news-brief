@@ -3532,7 +3532,9 @@ def _label_render() -> None:
         telegram_send(
             f"🏷 Session {task.session_no}/{census.TOTAL_SESSIONS}"
             # No item count: it would fingerprint the repeat window (F23).
-            f"\n\n{base}/open?t={token}"
+            # The message is parse_mode=HTML, so the operator-set base URL
+            # is escaped; the token is URL-safe base64 already.
+            f"\n\n{html.escape(base, quote=True)}/open?t={token}"
         )
     elif task.kind == "gate_failed":
         telegram_send(f"🏷 The census is stopped at the go/no-go: {detail}")
