@@ -114,6 +114,7 @@ def _request(
     host=HOST,
     origin=BASE,
     raw_body=None,
+    cookie_header=None,
 ):
     port = (
         srv_or_port if isinstance(srv_or_port, int) else srv_or_port.server_address[1]
@@ -124,6 +125,8 @@ def _request(
         headers["Origin"] = origin
     if cookie is not None:
         headers["Cookie"] = f"census_session={cookie}"
+    if cookie_header is not None:
+        headers["Cookie"] = cookie_header
     data = raw_body
     if body is not None:
         data = json.dumps(body).encode("utf-8")
@@ -761,3 +764,120 @@ def test_static_paths_are_exact(kb, labeller_server):
         r = _request(labeller_server, "GET", path)
         assert r.status == 404, path
         assert b"census" not in r.body or b"import" not in r.body
+
+
+# ── Fix round 1 (review I1, M2-M5) ──────────────────────────────────────────
+
+
+def test_session_cookie_survives_malformed_neighbours(kb, labeller_server):
+    """I1: `http.cookies.SimpleCookie` silently stops at the first cookie it
+    cannot tokenise, so a cookie another LAN service set on the same host
+    would lock the operator out. The session must be found wherever it sits.
+    """
+    token = _login(kb, labeller_server)
+    authenticating = (
+        f"theme=dark mode; census_session={token}",
+        f'a={{"x":1}}; census_session={token}',
+        f"a=1; b; census_session={token}",
+        f'census_session={token}; theme=dark mode; a={{"x":1}}; b',
+    )
+    for header in authenticating:
+        r = _request(labeller_server, "GET", "/", cookie_header=header)
+        assert r.status == 200, header
+    refused = (
+        'theme=dark mode; a={"x":1}; b',
+        f"census_sessionx={token}",
+        "census_session=",
+    )
+    for header in refused:
+        r = _request(labeller_server, "GET", "/", cookie_header=header)
+        assert r.status == 403, header
+
+
+def test_assign_is_204_when_only_its_action_event_is_refused(
+    kb, labeller_server, monkeypatch
+):
+    """M2 (ruling R13): a Finish from another tab commits between the saved
+    assignment and its `action` event. The labels were saved, so 204."""
+    cf.prepared(kb)
+    cookie = _login(kb, labeller_server)
+    w1 = cf.window_id(kb, 1)
+    item = census.window_items(kb, w1)[0]["id"]
+    real = census.record_event
+
+    def finish_first(conn, window_id, kind, at):
+        if kind == "action":
+            census.finish_blind(conn, window_id, at)  # the other tab's Finish
+        return real(conn, window_id, kind, at)
+
+    monkeypatch.setattr(census, "record_event", finish_first)
+    body = {
+        "window_id": w1,
+        "tab_id": "t1",
+        "client_seq": 1,
+        "rows": [{"item_id": item, "group_id": None, "unsure": True}],
+    }
+    r = _request(labeller_server, "POST", "/api/assign", body, cookie=cookie)
+    assert r.status == 204, r.body
+    assert census.latest_assignments(kb, w1) == {item: (None, True)}
+    # Control: the event really was refused (the window closed first).
+    assert _events(kb, w1) == ["finish"]
+
+
+def test_out_of_range_integers_are_400(kb, labeller_server):
+    """M4: a value that cannot fit its column is the client's error. As a
+    DB error it would be a 503, which the client retries forever."""
+    cf.prepared(kb)
+    cookie = _login(kb, labeller_server)
+    w1 = cf.window_id(kb, 1)
+    item = census.window_items(kb, w1)[0]["id"]
+
+    def assign(window_id, seq):
+        body = {
+            "window_id": window_id,
+            "tab_id": "t",
+            "client_seq": seq,
+            "rows": [{"item_id": item, "group_id": None, "unsure": False}],
+        }
+        return _request(labeller_server, "POST", "/api/assign", body, cookie=cookie)
+
+    assert assign(w1, 2**31).status == 400  # client_seq is INTEGER
+    assert assign(2**63, 1).status == 400  # window_id is BIGINT
+    assert census.latest_assignments(kb, w1) == {}
+    # Control: the largest INTEGER is accepted.
+    assert assign(w1, 2**31 - 1).status == 204
+
+
+def test_no_cookie_is_refused_before_any_database_connection(
+    kb, labeller_server, monkeypatch
+):
+    """M5: an unauthenticated request must not cost a DB connection."""
+
+    def no_db(*args, **kwargs):
+        raise AssertionError("the labeller opened a DB connection")
+
+    monkeypatch.setattr(db, "connect", no_db)
+    assert _request(labeller_server, "GET", "/").status == 403
+    assert (
+        _request(labeller_server, "POST", "/api/heartbeat", {"window_id": 1}).status
+        == 403
+    )
+    assert (
+        _request(labeller_server, "GET", "/", cookie_header="theme=dark").status == 403
+    )
+    # Control: with a cookie present the server does reach db.connect, and
+    # the patched failure surfaces as the retryable 503.
+    assert _request(labeller_server, "GET", "/", cookie="anything").status == 503
+
+
+def test_a_stalled_client_is_dropped(kb, labeller_server, monkeypatch):
+    """M3: a client that sends a partial request and stops must not hold a
+    handler thread forever."""
+    assert labeller._Handler.timeout == labeller.SOCKET_TIMEOUT_SECONDS == 30
+    monkeypatch.setattr(labeller._Handler, "timeout", 0.5)
+    port = labeller_server.server_address[1]
+    with socket.create_connection(("127.0.0.1", port), timeout=10) as s:
+        s.sendall(b"GET / HTTP/1.1\r\nHost: " + HOST.encode())  # never finished
+        started = time.monotonic()
+        assert s.recv(1024) == b""  # the server closed the connection
+        assert time.monotonic() - started < 5

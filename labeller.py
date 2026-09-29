@@ -8,7 +8,9 @@ sample). Plan: docs/superpowers/plans/2026-09-28-event-census.md, Task 6.
 Runs as its own compose service under the `census_labeller` role, so it
 imports only `db`, `common`, `census` and the standard library -- never
 `brief`, `comprehend` or `config` -- and it must never read a settings knob:
-that role cannot read `settings` (tests/test_labeller.py enforces both).
+that role cannot read `settings`. tests/test_labeller.py enforces the knob
+rule (test_labeller_never_reads_a_knob); the import rule is enforced by
+review only.
 
 Environment (plain variables, not knobs):
   LABELLER_BASE_URL  required; the URL the operator's phone uses. `Host` must
@@ -34,7 +36,6 @@ import json
 import os
 import sys
 from datetime import datetime, timezone
-from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -49,6 +50,8 @@ HEARTBEAT_SECONDS = 60
 COOKIE_NAME = "census_session"
 COOKIE_MAX_AGE = int(census.SESSION_TTL.total_seconds())
 MAX_BODY_BYTES = 256 * 1024
+# A stalled or slow-loris client may hold a handler thread only this long.
+SOCKET_TIMEOUT_SECONDS = 30
 STATIC_DIR = Path(__file__).resolve().parent / "labeller_static"
 # Exact paths only: nothing under /static/ is resolved against the filesystem.
 STATIC_FILES = {
@@ -241,10 +244,16 @@ def _page_data(conn, now: datetime) -> dict:
 # ── Request body validation ──────────────────────────────────────────────────
 
 
-def _int(body: dict, key: str) -> int:
+def _int(body: dict, key: str, bits: int = 64) -> int:
+    """A JSON integer that fits its column: BIGINT (64) for ids, INTEGER (32)
+    for `client_seq`. Out of range is the client's error (400), not a DB
+    error the client would retry forever as a 503."""
     value = body.get(key)
     if isinstance(value, bool) or not isinstance(value, int):
         raise _BadRequest(f"{key} must be an integer")
+    limit = 1 << (bits - 1)
+    if not -limit <= value < limit:
+        raise _BadRequest(f"{key} is outside the {bits}-bit integer range")
     return value
 
 
@@ -286,10 +295,17 @@ def _api_assign(conn, body, now):
     tab_id = _str(body, "tab_id", max_len=64)
     if not tab_id:
         raise _BadRequest("tab_id is empty")
-    client_seq = _int(body, "client_seq")
+    client_seq = _int(body, "client_seq", bits=32)
     census.save_assignments(conn, window_id, tab_id, client_seq, _rows(body), now)
     # save_assignments does not log; the route does, after a successful save.
-    census.record_event(conn, window_id, "action", now)
+    # The two are separate transactions, so a Finish from another tab can
+    # commit in between and make record_event refuse the event (BadWrite).
+    # The labels ARE saved, so the answer is still 204 (ruling R13): a 400
+    # would tell the operator "not saved" about a write that landed.
+    try:
+        census.record_event(conn, window_id, "action", now)
+    except census.BadWrite as exc:
+        log.info(f"labeller: assignment saved but its action event refused: {exc}")
     return 204, None
 
 
@@ -341,6 +357,8 @@ class _Handler(BaseHTTPRequestHandler):
     expected_origin = ""
 
     server_version = "census-labeller"
+    # StreamRequestHandler applies this to the socket (M3).
+    timeout = SOCKET_TIMEOUT_SECONDS
     sys_version = ""
 
     # ── Response plumbing ────────────────────────────────────────────────────
@@ -388,14 +406,18 @@ class _Handler(BaseHTTPRequestHandler):
         return (self.headers.get("Origin") or "").lower() == self.expected_origin
 
     def _session_token(self) -> str | None:
-        raw = self.headers.get("Cookie")
-        if not raw:
-            return None
-        try:
-            morsel = SimpleCookie(raw).get(COOKIE_NAME)
-        except CookieError:
-            return None
-        return morsel.value if morsel is not None and morsel.value else None
+        """The first `census_session=` pair of the Cookie header, parsed by
+        hand. Not `http.cookies.SimpleCookie`: it silently stops at the first
+        cookie it cannot tokenise (`theme=dark mode`, `a={"x":1}`, a
+        name-only `b`), so another service on the same LAN host could lock
+        the operator out (review I1). Tokens are `token_urlsafe`: no quoting
+        to undo."""
+        for raw in self.headers.get_all("Cookie") or ():
+            for part in raw.split(";"):
+                name, sep, value = part.strip().partition("=")
+                if sep and name.strip() == COOKIE_NAME and value.strip():
+                    return value.strip()
+        return None
 
     def _with_db(self, fn):
         """Run `fn(conn)` on this request's own connection (F21), closed
@@ -427,6 +449,9 @@ class _Handler(BaseHTTPRequestHandler):
             return self._open(parts.query)
         if path.startswith("/static/"):
             return self._static(path)
+        # No cookie: refuse before opening a DB connection (M5).
+        if self._session_token() is None:
+            return self._forbidden()
         now = _now()
 
         def page(conn):
@@ -480,6 +505,10 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if not self._host_ok() or not self._origin_ok():
+            return self._forbidden()
+        # No cookie: refuse before reading the body or opening a DB
+        # connection (M5).
+        if self._session_token() is None:
             return self._forbidden()
         path = urlsplit(self.path).path
         try:

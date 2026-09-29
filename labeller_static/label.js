@@ -10,6 +10,8 @@
 //   failure or 5xx shows "not saved" and retries in order every 3 s; a 400,
 //   403 or 409 stops the queue and the heartbeat for good.
 // - The heartbeat is posted only on the blind page, only while it is visible.
+//   A heartbeat 400 (the window was closed elsewhere) stops it quietly; a 403
+//   or 409 stops everything with its banner.
 // - Every POST is a fetch() in its default "cors" mode. That is load-bearing:
 //   the page is served with Referrer-Policy: no-referrer, and for a request
 //   whose mode is NOT "cors" (a form post, or fetch with mode "same-origin")
@@ -80,8 +82,7 @@
   function stop(text) {
     stopped = true;
     queue.length = 0;
-    if (heartbeatTimer !== null) clearInterval(heartbeatTimer);
-    heartbeatTimer = null;
+    stopHeartbeat();
     document.body.classList.add("stopped");
     showBanner(text, "fatal");
   }
@@ -161,13 +162,24 @@
     setTimeout(pump, RETRY_MS);
   }
 
+  function stopHeartbeat() {
+    if (heartbeatTimer !== null) clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
+
   function startHeartbeat() {
     var every = (data.heartbeat_seconds || 60) * 1000;
     heartbeatTimer = setInterval(function () {
       if (stopped || document.visibilityState !== "visible") return;
       post("/api/heartbeat", { window_id: data.window_id }).then(
         function (result) {
-          if (result.status === 400 || result.status === 403 || result.status === 409) {
+          if (result.status === 400) {
+            // record_event refuses a heartbeat once the window is closed --
+            // usually by a Finish in another tab. Nothing was lost, so no
+            // "not saved" banner: just stop heartbeating. The next queued
+            // action, if any, gets the 409 and says "window closed".
+            stopHeartbeat();
+          } else if (result.status === 403 || result.status === 409) {
             stopFor(result.status);
           }
         },
