@@ -334,24 +334,109 @@ def test_a_script_run_as_a_path_can_import_the_root_modules(script):
 # ── The labeller (event census, spec 2026-09-28 §6.1) ─────────────────────────
 
 
-def _labeller_block() -> list[str]:
-    """The `labeller:` service's lines, by indentation (the anchor technique)."""
-    lines = COMPOSE.read_text(encoding="utf-8").splitlines()
-    start = next(
-        (i for i, line in enumerate(lines) if re.match(r"  labeller:\s*$", line)),
-        None,
-    )
-    assert start is not None, "docker-compose.yml has no `labeller:` service"
+def _is_content(line: str) -> bool:
+    """A line that carries YAML: not blank and not a comment. Only these can
+    end a block -- a comment's indentation says nothing about structure."""
+    stripped = line.strip()
+    return bool(stripped) and not stripped.startswith("#")
+
+
+def _indent(line: str) -> int:
+    return len(line) - len(line.lstrip())
+
+
+def _sub_block(lines: list[str], start: int) -> list[str]:
+    """The lines nested under `lines[start]`: up to the next content line
+    indented no deeper than it. Blank and comment lines never end it."""
+    depth = _indent(lines[start])
     after = lines[start + 1 :]
     end = next(
-        (
-            i
-            for i, line in enumerate(after)
-            if line.strip() and len(line) - len(line.lstrip()) <= 2
-        ),
+        (i for i, ln in enumerate(after) if _is_content(ln) and _indent(ln) <= depth),
         len(after),
     )
     return after[:end]
+
+
+def _service_block(text: str, name: str) -> list[str]:
+    """A compose service's lines, by indentation (the anchor technique)."""
+    lines = text.splitlines()
+    start = next(
+        (i for i, ln in enumerate(lines) if re.match(rf"  {name}:\s*$", ln)),
+        None,
+    )
+    assert start is not None, f"the compose text has no `{name}:` service"
+    return _sub_block(lines, start)
+
+
+def _block_env(block: list[str]) -> dict[str, str]:
+    """The service's `environment:`, as NAME -> value (the text after `=` or
+    `:`, empty when there is none), in either compose form: the list
+    `- NAME=value` or the mapping `NAME: value`."""
+    start = next(
+        (i for i, ln in enumerate(block) if re.match(r"\s*environment:\s*$", ln)),
+        None,
+    )
+    if start is None:
+        return {}
+    env = {}
+    for line in _sub_block(block, start):
+        if not _is_content(line):
+            continue
+        m = re.match(r"\s*-\s*([A-Z0-9_]+)(?:=(.*))?\s*$", line) or re.match(
+            r"\s*([A-Z0-9_]+):(?:\s+(.*))?\s*$", line
+        )
+        if m:
+            env[m.group(1)] = (m.group(2) or "").strip()
+    return env
+
+
+def _labeller_block() -> list[str]:
+    return _service_block(COMPOSE.read_text(encoding="utf-8"), "labeller")
+
+
+_SYNTHETIC_COMPOSE = """\
+services:
+  labeller:
+    image: example
+# a column-0 comment inside the block
+
+  # a comment at the service's own indentation
+    environment:
+      - LIST_NAME=one
+      # a comment inside the list
+
+      - LIST_BARE
+    restart: unless-stopped
+  mapped:
+    environment:
+      MAP_NAME: two
+      # a comment inside the mapping
+      MAP_EMPTY:
+      MAP_URL: http://h:80
+    labels:
+      NOT_ENV: x
+  after:
+    image: other
+"""
+
+
+def test_the_block_parser_is_not_ended_by_comments_or_blank_lines():
+    block = _service_block(_SYNTHETIC_COMPOSE, "labeller")
+    text = "\n".join(block)
+    assert "restart: unless-stopped" in text  # past both comments and the blank
+    assert "mapped:" not in text and "MAP_NAME" not in text  # ends at the next
+
+
+def test_the_env_parser_reads_list_and_mapping_forms():
+    assert _block_env(_service_block(_SYNTHETIC_COMPOSE, "labeller")) == {
+        "LIST_NAME": "one",
+        "LIST_BARE": "",
+    }
+    assert _block_env(_service_block(_SYNTHETIC_COMPOSE, "mapped")) == {
+        "MAP_NAME": "two",
+        "MAP_EMPTY": "",
+        "MAP_URL": "http://h:80",
+    }
 
 
 def test_labeller_static_ships_in_the_image():
@@ -379,9 +464,7 @@ def test_labeller_static_triggers_a_rebuild():
 def test_labeller_service_holds_no_secret_but_its_own():
     block = _labeller_block()
     text = "\n".join(block)
-    env = {
-        m.group(1) for line in block if (m := re.match(r"\s*-\s*([A-Z0-9_]+)=", line))
-    }
+    env = set(_block_env(block))
     assert env == {
         "POSTGRES_HOST",
         "POSTGRES_PORT",
@@ -406,6 +489,19 @@ def test_labeller_service_restarts_unless_stopped():
     down silently (final review m4)."""
     text = chr(10).join(_labeller_block())
     assert re.search(r"^\s*restart:\s*unless-stopped\s*$", text, re.M)
+
+
+def test_labeller_service_pins_its_safe_defaults():
+    """Unset on the host, the page is published on loopback only, and the
+    password is EMPTY -- which labeller.main refuses by name -- rather than
+    some default a second host would share."""
+    block = _labeller_block()
+    ports = _sub_block(
+        block, next(i for i, ln in enumerate(block) if ln.strip() == "ports:")
+    )
+    published = [ln.strip() for ln in ports if _is_content(ln)]
+    assert published == ['- "${LABELLER_BIND:-127.0.0.1}:${LABELLER_PORT:-8765}:8765"']
+    assert _block_env(block)["POSTGRES_PASSWORD"] == "${CENSUS_LABELLER_PASSWORD:-}"
 
 
 def test_census_runbook_scripts_ship_in_the_image():
