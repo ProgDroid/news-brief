@@ -1,0 +1,290 @@
+/* Event census labelling page. Phone first; served as a separate file so the
+   CSP can stay style-src 'self' with no inline styles. */
+
+:root {
+  --bg: #fbfbfa;
+  --fg: #1d1d1b;
+  --muted: #6b6b66;
+  --line: #e2e1dc;
+  --row: #ffffff;
+  --selected: #fff4cc;
+  --accent: #1f5fbf;
+  --danger: #a4262c;
+  --banner: #b3261e;
+  --chip-l: 88%;
+  --chip-fg: #1d1d1b;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161615;
+    --fg: #ecebe7;
+    --muted: #a09f99;
+    --line: #2e2d2a;
+    --row: #1e1e1c;
+    --selected: #4a3f14;
+    --accent: #7eaaf0;
+    --danger: #f08b8f;
+    --banner: #d9534f;
+    --chip-l: 30%;
+    --chip-fg: #ecebe7;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 0 0 9rem;
+  background: var(--bg);
+  color: var(--fg);
+  font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+header#top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.75rem 1rem 0.5rem;
+  border-bottom: 1px solid var(--line);
+}
+
+h1#session {
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+
+details#guideline {
+  flex: 1 1 100%;
+  font-size: 0.92rem;
+}
+
+details#guideline summary {
+  cursor: pointer;
+  color: var(--accent);
+}
+
+details#guideline p,
+details#guideline ol {
+  margin: 0.5rem 0;
+}
+
+#unsaved {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  padding: 0.6rem 1rem;
+  background: var(--banner);
+  color: #fff;
+  font-weight: 600;
+}
+
+#unsaved[hidden] {
+  display: none;
+}
+
+.tools {
+  padding: 0.5rem 1rem;
+}
+
+.filter {
+  width: 100%;
+  padding: 0.5rem 0.6rem;
+  font: inherit;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--row);
+  color: var(--fg);
+}
+
+ol.items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 1.4rem 3rem auto 1fr auto;
+  grid-template-areas:
+    "mark time outlet chip link"
+    "mark title title title link";
+  align-items: baseline;
+  column-gap: 0.5rem;
+  padding: 0.6rem 1rem;
+  border-bottom: 1px solid var(--line);
+  background: var(--row);
+  cursor: pointer;
+  user-select: none;
+}
+
+.row[hidden] {
+  display: none;
+}
+
+.row.selected {
+  background: var(--selected);
+}
+
+.row .mark {
+  grid-area: mark;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.row.selected .mark {
+  color: var(--accent);
+}
+
+.row.unsure .mark {
+  color: var(--danger);
+}
+
+.row .time {
+  grid-area: time;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.row .outlet {
+  grid-area: outlet;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.row .chip {
+  grid-area: chip;
+  justify-self: start;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0 0.45rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  background: hsl(var(--hue, 210) 60% var(--chip-l));
+  color: var(--chip-fg);
+}
+
+.row .chip[hidden] {
+  display: none;
+}
+
+.row .title {
+  grid-area: title;
+  overflow-wrap: anywhere;
+}
+
+.link {
+  grid-area: link;
+  text-decoration: none;
+  padding: 0.25rem;
+}
+
+.bar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 2;
+  padding: 0.5rem 0.75rem calc(0.5rem + env(safe-area-inset-bottom));
+  background: var(--bg);
+  border-top: 1px solid var(--line);
+}
+
+.line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0.25rem 0;
+}
+
+.bar .line:last-child {
+  justify-content: space-between;
+}
+
+.count {
+  min-width: 6.5rem;
+  color: var(--muted);
+}
+
+button,
+select {
+  font: inherit;
+  min-height: 2.5rem;
+  padding: 0.35rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--row);
+  color: var(--fg);
+}
+
+select.addto {
+  max-width: 12rem;
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+button.quiet {
+  background: transparent;
+}
+
+button.danger {
+  color: var(--danger);
+}
+
+button:disabled,
+select:disabled {
+  opacity: 0.45;
+}
+
+body.stopped .bar {
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.precision,
+.status {
+  max-width: 40rem;
+  margin: 0 auto;
+  padding: 1rem;
+}
+
+.card {
+  margin: 0.75rem 0;
+  padding: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--row);
+}
+
+.card .meta {
+  display: flex;
+  gap: 0.5rem;
+  color: var(--muted);
+}
+
+.card .outlet {
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.card .title {
+  margin-top: 0.35rem;
+  overflow-wrap: anywhere;
+}
+
+.note {
+  color: var(--muted);
+}

@@ -21,6 +21,8 @@ on:
       - 'backup.py'
       - 'census.py'
       - 'census_metrics.py'
+      - 'labeller.py'
+      - 'labeller_static/**'
       - 'migrations/**'
       - 'enrichment/**'
       - 'scripts/**'
@@ -73,8 +75,8 @@ jobs:
 
       - name: Lint
         run: |
-          ruff check brief.py capture.py comprehend.py brief_memory.py claim_store.py claim_verify.py retention.py common.py config.py trading.py validation.py db.py scheduler.py supervisor.py backup.py census.py census_metrics.py enrichment scripts tests
-          ruff format --check brief.py capture.py comprehend.py brief_memory.py claim_store.py claim_verify.py retention.py common.py config.py trading.py validation.py db.py scheduler.py supervisor.py backup.py census.py census_metrics.py enrichment scripts tests
+          ruff check brief.py capture.py comprehend.py brief_memory.py claim_store.py claim_verify.py retention.py common.py config.py trading.py validation.py db.py scheduler.py supervisor.py backup.py census.py census_metrics.py labeller.py enrichment scripts tests
+          ruff format --check brief.py capture.py comprehend.py brief_memory.py claim_store.py claim_verify.py retention.py common.py config.py trading.py validation.py db.py scheduler.py supervisor.py backup.py census.py census_metrics.py labeller.py enrichment scripts tests
 
       - name: Test
         env:
