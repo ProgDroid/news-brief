@@ -13,9 +13,14 @@ both `census_prepare` (a `brief.py` mode) and the later `labeller.py`
 """
 
 import functools
+import hashlib
+import hmac
 import random
+import secrets
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+
+from psycopg import sql
 
 import census_metrics
 import common
@@ -954,3 +959,235 @@ def go_status(conn) -> census_metrics.GoNoGo | None:
     otherwise `census_metrics.go_no_go` over their multi-outlet group counts
     and active minutes."""
     return _go_status(conn, _windows(conn))
+
+
+# ── One-time links, login sessions and the labeller role (plan Task 5) ──────
+#
+# `/label` (the Telegram daemon, main role) mints a link; the labeller opens
+# it and receives a 30-day session. Only sha256 hashes are stored (spec 6.2).
+# Every function takes `now` and compares against it, never SQL now().
+
+LINK_TTL = timedelta(minutes=10)
+SESSION_TTL = timedelta(days=30)
+LABELLER_ROLE = "census_labeller"
+
+
+def _sha256(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+@_transaction
+def mint_link(conn, now: datetime) -> str:
+    """A one-time link token, valid for `LINK_TTL`; returns the plaintext."""
+    token = secrets.token_urlsafe(32)
+    conn.execute(
+        "INSERT INTO census_sessions (kind, token_sha256, expires_at) "
+        "VALUES ('link', %s, %s)",
+        (_sha256(token), now + LINK_TTL),
+    )
+    return token
+
+
+@_transaction
+def open_session(conn, link_token: str, now: datetime) -> str | None:
+    """Consume a link atomically (spec 6.2) and return a fresh session token,
+    or None when the token is not an unconsumed, unrevoked, unexpired LINK
+    (F12: a session token cannot open a session; F13: `now`, not SQL now())."""
+    row = conn.execute(
+        "UPDATE census_sessions SET consumed_at = %(now)s "
+        "WHERE token_sha256 = %(hash)s AND kind = 'link' "
+        "AND consumed_at IS NULL AND revoked_at IS NULL "
+        "AND expires_at > %(now)s RETURNING id",
+        {"now": now, "hash": _sha256(link_token)},
+    ).fetchone()
+    if row is None:
+        return None
+    token = secrets.token_urlsafe(32)
+    conn.execute(
+        "INSERT INTO census_sessions (kind, token_sha256, expires_at) "
+        "VALUES ('session', %s, %s)",
+        (_sha256(token), now + SESSION_TTL),
+    )
+    return token
+
+
+@_transaction
+def session_valid(conn, session_token: str, now: datetime) -> bool:
+    """Whether the token is a live SESSION (not a link, F12)."""
+    digest = _sha256(session_token)
+    row = conn.execute(
+        "SELECT token_sha256 FROM census_sessions "
+        "WHERE token_sha256 = %s AND kind = 'session' "
+        "AND revoked_at IS NULL AND expires_at > %s",
+        (digest, now),
+    ).fetchone()
+    return row is not None and hmac.compare_digest(row[0], digest)
+
+
+@_transaction
+def revoke_all(conn, now: datetime) -> int:
+    """`/label reset`: revoke every live session and every unspent link.
+    Returns how many rows were revoked. Runs as the main role."""
+    return conn.execute(
+        "UPDATE census_sessions SET revoked_at = %s "
+        "WHERE revoked_at IS NULL AND expires_at > %s "
+        "AND NOT (kind = 'link' AND consumed_at IS NOT NULL)",
+        (now, now),
+    ).rowcount
+
+
+@dataclass(frozen=True)
+class Grant:
+    kind: str  # 'schema' | 'table' | 'column' | 'sequence'
+    obj: str
+    privilege: str
+    column: str | None = None
+
+
+_CENSUS_TABLES = (
+    "census_block",
+    "census_window_order",
+    "census_skipped_windows",
+    "census_windows",
+    "census_window_items",
+    "census_groups",
+    "census_assignments",
+    "census_adjudications",
+    "census_sessions",
+    "census_events",
+)
+_INSERT_TABLES = (
+    "census_groups",
+    "census_assignments",
+    "census_events",
+    "census_adjudications",
+    "census_sessions",
+)
+_WINDOW_UPDATE_COLUMNS = (
+    "status",
+    "abandon_reason",
+    "opened_at",
+    "blind_done_at",
+    "completed_at",
+)
+
+# Derived from what census.py's labeller-side functions execute, not copied
+# from spec 6.1: schema USAGE first (B1); UPDATE on census_windows columns
+# doubles as the privilege `SELECT ... FOR UPDATE` needs; sessions need only
+# consumed_at, since revoke_all runs as the main role.
+LABELLER_GRANTS: tuple[Grant, ...] = (
+    Grant("schema", "public", "USAGE"),
+    *(Grant("table", t, "SELECT") for t in ("items", "outlets", *_CENSUS_TABLES)),
+    *(Grant("table", t, "INSERT") for t in _INSERT_TABLES),
+    *(Grant("column", "census_windows", "UPDATE", c) for c in _WINDOW_UPDATE_COLUMNS),
+    Grant("column", "census_sessions", "UPDATE", "consumed_at"),
+    *(Grant("sequence", t, "USAGE") for t in _INSERT_TABLES),
+)
+
+_SERIAL_SEQUENCE = (
+    "SELECT s.oid, s.relname FROM pg_class s "
+    "JOIN pg_depend d ON d.objid = s.oid AND d.deptype = 'a' "
+    "JOIN pg_class t ON t.oid = d.refobjid "
+    "JOIN pg_namespace n ON n.oid = t.relnamespace "
+    "WHERE s.relkind = 'S' AND n.nspname = 'public' AND t.relname = %s"
+)
+_TABLE_OID = (
+    "SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+    "WHERE n.nspname = 'public' AND c.relname = %s AND c.relkind = 'r'"
+)
+
+
+def _sequence_of(conn, table: str) -> tuple[int, str]:
+    rows = conn.execute(_SERIAL_SEQUENCE, (table,)).fetchall()
+    if len(rows) != 1:
+        raise RuntimeError(f"expected one serial sequence for {table}: {rows}")
+    return rows[0]
+
+
+def _grant_statement(conn, g: Grant, role: sql.Identifier) -> sql.Composed:
+    priv = sql.SQL(g.privilege)
+    public = sql.Identifier("public")
+    if g.kind == "schema":
+        return sql.SQL("GRANT {p} ON SCHEMA {o} TO {r}").format(
+            p=priv, o=sql.Identifier(g.obj), r=role
+        )
+    if g.kind == "table":
+        return sql.SQL("GRANT {p} ON {s}.{o} TO {r}").format(
+            p=priv, s=public, o=sql.Identifier(g.obj), r=role
+        )
+    if g.kind == "column":
+        return sql.SQL("GRANT {p} ({c}) ON {s}.{o} TO {r}").format(
+            p=priv,
+            c=sql.Identifier(g.column),
+            s=public,
+            o=sql.Identifier(g.obj),
+            r=role,
+        )
+    _, seq = _sequence_of(conn, g.obj)
+    return sql.SQL("GRANT {p} ON SEQUENCE {s}.{o} TO {r}").format(
+        p=priv, s=public, o=sql.Identifier(seq), r=role
+    )
+
+
+@_transaction
+def apply_labeller_grants(conn, password: str) -> None:
+    """Create the role if absent, set its password, apply every grant.
+    Idempotent: roles are cluster-global and outlive DROP SCHEMA."""
+    role = sql.Identifier(LABELLER_ROLE)
+    conn.execute(
+        sql.SQL(
+            "DO $$ BEGIN IF NOT EXISTS "
+            "(SELECT 1 FROM pg_roles WHERE rolname = {name}) THEN "
+            "CREATE ROLE {role} LOGIN; END IF; END $$"
+        ).format(name=sql.Literal(LABELLER_ROLE), role=role)
+    )
+    conn.execute(
+        sql.SQL("ALTER ROLE {role} LOGIN PASSWORD {pw}").format(
+            role=role, pw=sql.Literal(password)
+        )
+    )
+    for g in LABELLER_GRANTS:
+        conn.execute(_grant_statement(conn, g, role))
+
+
+@_transaction
+def missing_privileges(conn) -> list[str]:
+    """Every LABELLER_GRANTS entry the CURRENT role lacks, as readable
+    strings. Objects are resolved through the catalogs by oid, so a missing
+    schema USAGE is named alongside the rest instead of raising."""
+    missing: list[str] = []
+    schema_ok = conn.execute(
+        "SELECT has_schema_privilege(current_user, 'public', 'USAGE')"
+    ).fetchone()[0]
+    if not schema_ok:
+        missing.append("USAGE on schema public")
+    for g in LABELLER_GRANTS:
+        if g.kind == "schema":
+            continue
+        if g.kind == "sequence":
+            oid, seq = _sequence_of(conn, g.obj)
+            ok = conn.execute(
+                "SELECT has_sequence_privilege(current_user, %s, %s)",
+                (oid, g.privilege),
+            ).fetchone()[0]
+            name = f"{g.privilege} on sequence {seq}"
+        else:
+            row = conn.execute(_TABLE_OID, (g.obj,)).fetchone()
+            if row is None:
+                missing.append(f"{g.privilege} on {g.obj} (table not found)")
+                continue
+            if g.kind == "column":
+                ok = conn.execute(
+                    "SELECT has_column_privilege(current_user, %s, %s, %s)",
+                    (row[0], g.column, g.privilege),
+                ).fetchone()[0]
+                name = f"{g.privilege}({g.column}) on {g.obj}"
+            else:
+                ok = conn.execute(
+                    "SELECT has_table_privilege(current_user, %s, %s)",
+                    (row[0], g.privilege),
+                ).fetchone()[0]
+                name = f"{g.privilege} on {g.obj}"
+        if not ok:
+            missing.append(name)
+    return missing
