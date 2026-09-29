@@ -3,6 +3,12 @@
 `label` and `answer_precision` drive Task 4's session-state functions (plan
 ruling R1), so a test that needs a later window can reach it through the
 same public API the labeller uses rather than by writing status columns.
+
+Every writer refuses a window the census is not serving (D1, the write
+guard; there is no switch to turn it off). So a test reaches a state by
+walking the served order -- `advance_to`, or `pass_gate`/`finish_empty`,
+which follow it -- or, when it needs only an end state the served order
+cannot produce, by seeding it in SQL and saying so.
 """
 
 import uuid
@@ -201,3 +207,69 @@ def finish_empty(conn, order_nos, now: datetime) -> None:
     item a singleton, so no precision sample and the window completes."""
     for order_no in order_nos:
         label(conn, window_id(conn, order_no), [], now)
+
+
+def _order_and_pass(conn, window_id: int) -> tuple[int, int]:
+    row = conn.execute(
+        "SELECT order_no, pass FROM census_windows WHERE id = %s", (window_id,)
+    ).fetchone()
+    conn.commit()
+    return row
+
+
+def _repeat_eligible_at(conn) -> datetime | None:
+    row = conn.execute(
+        "SELECT blind_done_at FROM census_windows WHERE order_no = %s AND pass = 1",
+        (census.REPEAT_ORDER_NO,),
+    ).fetchone()
+    conn.commit()
+    if row is None or row[0] is None:
+        return None
+    return row[0] + timedelta(days=census.REPEAT_MIN_DAYS)
+
+
+def advance_to(conn, order_no: int, now: datetime, pass_: int = 1) -> datetime:
+    """Walk the SERVED order (D1: every writer refuses a window the census is
+    not serving) until the census serves blind on (`order_no`, `pass_`).
+
+    On the way, every blind window served is finished with nothing grouped
+    and every precision sample offered is answered `same`, all at `now`. For
+    the repeat (`pass_=2`), `now` is moved forward to its eligibility once
+    the walk would otherwise pass it (a pass-1 window after order_no
+    REPEAT_AFTER_ORDER_NO is served, or the census is waiting). Returns the
+    `now` at which the target is served. Raises AssertionError on anything
+    else -- a gate failure, a complete census, or a walk past the target --
+    so a test never silently starts from the wrong state.
+    """
+    target = window_id(conn, order_no, pass_)
+    for _ in range(3 * census.TOTAL_SESSIONS):
+        task = census.current_task(conn, now)
+        if task.kind == "blind" and task.window_id == target:
+            return now
+        served = (
+            _order_and_pass(conn, task.window_id)
+            if task.window_id is not None
+            else None
+        )
+        past_the_repeat = task.kind == "waiting" or (
+            task.kind == "blind"
+            and served[1] == 1
+            and served[0] > census.REPEAT_AFTER_ORDER_NO
+        )
+        if pass_ == 2 and past_the_repeat:
+            eligible = _repeat_eligible_at(conn)
+            if eligible is None or now >= eligible:
+                raise AssertionError(f"the repeat is not reachable at {now}: {task}")
+            now = eligible
+            continue
+        if task.kind == "blind":
+            if pass_ == 1 and served[1] == 1 and served[0] > order_no:
+                raise AssertionError(f"walked past window {order_no}: {task}")
+            label(conn, task.window_id, [], now)
+        elif task.kind == "precision":
+            answer_precision(conn, task.window_id, now)
+        else:
+            raise AssertionError(
+                f"cannot reach window {order_no} (pass {pass_}): {task}"
+            )
+    raise AssertionError(f"window {order_no} (pass {pass_}) was never served")

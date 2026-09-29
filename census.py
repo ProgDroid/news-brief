@@ -514,6 +514,32 @@ def _raise_if_closed(window_id: int, status: str) -> None:
         raise WindowClosed(f"window {window_id} is {status}")
 
 
+def _require_served(conn, window_id: int, kind: str, at: datetime) -> None:
+    """D1, the write guard: a write is accepted only for the task the census
+    serves at `at` -- `blind` writes (groups, assignments, events, Finish,
+    Abandon) for the blind window, `precision` answers for the precision
+    window. Anything else is BadWrite (400); label.js's text for a 400 says
+    reload.
+
+    Every writer calls this AFTER `_lock_window` and AFTER its closed-window
+    check, so a write to a finished window is still WindowClosed (409). It
+    calls the undecorated `_current_task`, never the public `current_task`:
+    that one commits, which would release the F17 row lock mid-write. There
+    is deliberately no way to switch it off.
+    """
+    task = _current_task(conn, at)
+    if (task.kind, task.window_id) != (kind, window_id):
+        served = (
+            task.kind
+            if task.window_id is None
+            else (f"{task.kind} on window {task.window_id}")
+        )
+        raise BadWrite(
+            f"window {window_id} is not served for {kind} (the census serves "
+            f"{served}); reload"
+        )
+
+
 def _window_item_rows(conn, window_id: int) -> list[tuple]:
     """The window's frozen membership (F6), in capture order: only
     `census_window_items` decides who is in, never a re-run of the
@@ -815,14 +841,17 @@ def record_event(conn, window_id: int, kind: str, at: datetime) -> None:
     status, _blind_done_at, _order_no, _pass = _lock_window(conn, window_id)
     if status in _DONE:
         raise BadWrite(f"window {window_id} is {status}; no {kind} event")
+    _require_served(conn, window_id, "blind", at)
     _insert_event(conn, window_id, kind, at)
 
 
 @_transaction
 def create_group(conn, window_id: int, at: datetime) -> int:
-    """A new, empty group in `window_id`. Refused once the blind pass is over."""
+    """A new, empty group in `window_id`. Refused once the blind pass is over
+    (WindowClosed) and for a window not served blind (BadWrite, D1)."""
     status, _blind_done_at, _order_no, _pass = _lock_window(conn, window_id)
     _raise_if_closed(window_id, status)
+    _require_served(conn, window_id, "blind", at)
     return conn.execute(
         "INSERT INTO census_groups (window_id, created_at) VALUES (%s, %s) "
         "RETURNING id",
@@ -845,13 +874,15 @@ def save_assignments(
     A retry of the same (tab, seq) is ignored by `ON CONFLICT ... DO
     NOTHING`, so arrival order stays the only order (B5). The whole write is
     refused -- nothing is logged -- if the window is closed (WindowClosed),
-    or if any item is not a member, any group belongs to another window, or
-    one item appears twice in the same action (BadWrite, F18).
+    or not served blind (D1), or if any item is not a member, any group
+    belongs to another window, or one item appears twice in the same action
+    (BadWrite, F18).
     """
     status, blind_done_at, _order_no, _pass = _lock_window(conn, window_id)
     _raise_if_closed(window_id, status)
     if blind_done_at is not None:
         raise WindowClosed(f"window {window_id} finished its blind pass")
+    _require_served(conn, window_id, "blind", at)
 
     item_ids = [item_id for item_id, _group_id, _unsure in rows]
     if len(set(item_ids)) != len(item_ids):
@@ -923,6 +954,7 @@ def finish_blind(conn, window_id: int, at: datetime) -> None:
     `_precision_pairs`)."""
     status, _blind_done_at, _order_no, pass_ = _lock_window(conn, window_id)
     _raise_if_closed(window_id, status)
+    _require_served(conn, window_id, "blind", at)
     _insert_event(conn, window_id, "finish", at)
     conn.execute(
         "UPDATE census_windows SET status = 'blind_done', blind_done_at = %s "
@@ -951,6 +983,7 @@ def abandon(conn, window_id: int, reason: str, at: datetime) -> None:
         raise BadWrite("abandon needs a reason")
     status, _blind_done_at, order_no, pass_ = _lock_window(conn, window_id)
     _raise_if_closed(window_id, status)
+    _require_served(conn, window_id, "blind", at)
     _insert_event(conn, window_id, "abandon", at)
     conn.execute(
         "UPDATE census_windows SET status = 'abandoned', abandon_reason = %s "
@@ -979,10 +1012,13 @@ def save_precision(
     conn, window_id: int, item_a: int, item_b: int, decision: str, at: datetime
 ) -> None:
     """Record one precision decision for an offered pair, normalised to
-    `a < b` (F18). The window completes when no pair remains."""
+    `a < b` (F18). The window completes when no pair remains. BadWrite for
+    a window not served for precision (D1). It has no closed-window check of
+    its own: a window whose sample is answered offers no pair."""
     if decision not in _DECISIONS:
         raise BadWrite(f"decision must be one of {_DECISIONS}, not {decision!r}")
     _lock_window(conn, window_id)
+    _require_served(conn, window_id, "precision", at)
     pair = (min(item_a, item_b), max(item_a, item_b))
     offered = _precision_pairs(conn, window_id)
     if pair not in offered:

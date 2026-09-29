@@ -148,16 +148,21 @@ def test_labeller_can_run_the_session_code(kb):
         session = census.open_session(conn, link, NOW)
         assert census.session_valid(conn, session, NOW) is True
         assert census.current_task(conn, NOW).kind == "blind"
-        items = census.window_items(conn, w1)
+        census.window_items(conn, w1)
         assert census.serve_page(conn, NOW).window_id == w1
+        census.record_event(conn, w1, "heartbeat", NOW)
         group = census.create_group(conn, w1, NOW)
+        [pair] = cf.cross_outlet_groups(kb, w1, 1)
         census.save_assignments(
-            conn, w1, "c", 1, [(i["id"], group, False) for i in items[:2]], NOW
+            conn, w1, "c", 1, [(i, group, False) for i in pair], NOW
         )
         census.finish_blind(conn, w1, NOW)
-        census.precision_pairs(conn, w1)
+        # D1: every write goes to the served window, so window 1's one-pair
+        # sample is answered (serving window 2) before window 2 is abandoned.
+        [(a, b)] = census.precision_pairs(conn, w1)
+        census.save_precision(conn, w1, a, b, "same", NOW)
         census.go_status(conn)
-        census.abandon(conn, cf.window_id(kb, 3), "test", NOW)
+        census.abandon(conn, cf.window_id(kb, 2), "test", NOW)
         assert census.missing_privileges(conn) == []
     finally:
         conn.close()

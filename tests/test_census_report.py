@@ -62,7 +62,9 @@ def test_report_prints_mde_at_current_k_before_the_end(ready):
 
 
 def test_report_final_mde_matches_metrics(ready):
+    # In the served order (D1): advance_to answers each precision sample.
     for order_no in range(1, 17):
+        cf.advance_to(ready, order_no, NOW)
         w = cf.window_id(ready, order_no)
         cf.label(ready, w, cf.cross_outlet_groups(ready, w, 8), NOW)
     text = census_report.render(ready, NOW)
@@ -76,10 +78,27 @@ def test_report_final_mde_matches_metrics(ready):
     assert "rho=0.20" not in line
 
 
+def _seed_repeat_done(conn, at) -> int:
+    """The repeat's blind pass saved with nothing grouped, seeded in SQL:
+    the served order reaches it only after window 8 and seven days, which
+    would change the K these tests pin (D1 refuses a write out of order)."""
+    repeat = cf.window_id(conn, 2, pass_=2)
+    conn.execute(
+        "UPDATE census_windows SET status = 'blind_done', blind_done_at = %s "
+        "WHERE id = %s",
+        (at, repeat),
+    )
+    conn.execute(
+        "INSERT INTO census_events (window_id, kind, at) VALUES (%s, 'finish', %s)",
+        (repeat, at),
+    )
+    conn.commit()
+    return repeat
+
+
 def test_report_scores_window_two_pass_one(ready):
     cf.pass_gate(ready, NOW)
-    repeat = cf.window_id(ready, 2, pass_=2)
-    cf.label(ready, repeat, [], NOW)  # the repeat groups nothing at all
+    _seed_repeat_done(ready, NOW)  # the repeat groups nothing at all
     text = census_report.render(ready, NOW)
     assert "[8, 8]" in text  # the gate still reads window 2's pass 1
     assert "current K = 2" in text  # the repeat is not a third window
@@ -89,8 +108,9 @@ def test_report_scores_window_two_pass_one(ready):
 
 def test_report_marks_an_abandoned_repeat_void(ready):
     cf.pass_gate(ready, NOW)
-    census.abandon(ready, cf.window_id(ready, 2, pass_=2), "test", NOW)
-    assert "consistency unavailable: repeat void" in census_report.render(ready, NOW)
+    at = cf.advance_to(ready, 2, NOW, pass_=2)
+    census.abandon(ready, cf.window_id(ready, 2, pass_=2), "test", at)
+    assert "consistency unavailable: repeat void" in census_report.render(ready, at)
 
 
 def test_report_prints_gap_deciles_and_c439ade(ready):
@@ -168,8 +188,9 @@ def test_report_blind_precision_counts_only_complete_pass_one_windows(ready):
     assert "0/2" not in text
 
     # the repeat done releases window 2's sample; answering it completes it
-    repeat = cf.window_id(ready, 2, pass_=2)
-    cf.label(ready, repeat, cf.cross_outlet_groups(ready, repeat, 8), NOW)
+    # (window 2 is served before window 3's rest: it comes first in order)
+    _seed_repeat_done(ready, NOW)
+    assert census.current_task(ready, NOW).window_id == w2
     cf.answer_precision(ready, w2, NOW)
     text = census_report.render(ready, NOW)
     assert "= 14/16 pairs over 2 complete windows" in text
@@ -177,6 +198,7 @@ def test_report_blind_precision_counts_only_complete_pass_one_windows(ready):
 
 def test_report_consistency_point_values(ready):
     cf.pass_gate(ready, NOW)
+    at = cf.advance_to(ready, 2, NOW, pass_=2)  # D1: write the served repeat
     w2 = cf.window_id(ready, 2)
     repeat = cf.window_id(ready, 2, pass_=2)
     pass1 = cf.cross_outlet_groups(ready, w2, 8)
@@ -196,13 +218,13 @@ def test_report_consistency_point_values(ready):
     ]
     groups2[0].append((u, True))
     for seq, members in enumerate(groups2, start=1):
-        gid = census.create_group(ready, repeat, NOW)
+        gid = census.create_group(ready, repeat, at)
         census.save_assignments(
-            ready, repeat, "fixture", seq, [(i, gid, un) for i, un in members], NOW
+            ready, repeat, "fixture", seq, [(i, gid, un) for i, un in members], at
         )
-    census.finish_blind(ready, repeat, NOW)
+    census.finish_blind(ready, repeat, at)
 
-    text = census_report.render(ready, NOW)
+    text = census_report.render(ready, at)
     # tp 6, fp 1, fn 2  ->  P 6/7, R 6/8, F1 0.8 (a swap of the passes gives
     # P 0.75 and R 0.86 instead)
     assert "pairwise precision 0.86 (" in text

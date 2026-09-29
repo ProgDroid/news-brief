@@ -163,7 +163,9 @@ def test_assignments_after_finish_are_rejected(ready):
     assert census.latest_assignments(ready, w1) == before
     assert _log_rows(ready, w1, x) == 1
 
-    # An abandoned window is closed too.
+    # An abandoned window is closed too. Window 2 is served once window 1's
+    # precision sample is answered (D1: abandon only the served window).
+    cf.answer_precision(ready, w1, NOW)
     w2 = cf.window_id(ready, 2)
     census.abandon(ready, w2, "ran out of time", NOW)
     y = census.window_items(ready, w2)[0]["id"]
@@ -178,7 +180,13 @@ def test_foreign_item_or_group_is_rejected(ready):
     own = census.window_items(ready, w1)[0]["id"]
     foreign_item = census.window_items(ready, w2)[0]["id"]
     own_group = census.create_group(ready, w1, NOW)
-    foreign_group = census.create_group(ready, w2, NOW)
+    # Seeded: D1 refuses create_group on window 2, which is not served.
+    foreign_group = ready.execute(
+        "INSERT INTO census_groups (window_id, created_at) VALUES (%s, %s) "
+        "RETURNING id",
+        (w2, NOW),
+    ).fetchone()[0]
+    ready.commit()
 
     with pytest.raises(census.BadWrite):
         census.save_assignments(
@@ -627,8 +635,11 @@ def test_a_served_window_is_not_preempted_by_the_repeat(ready):
     task = census.serve_page(ready, eligible - timedelta(minutes=5))
     assert (task.kind, task.window_id) == ("blind", w9)
 
-    task = census.current_task(ready, eligible + timedelta(minutes=1))
+    first_action = eligible + timedelta(minutes=1)
+    task = census.current_task(ready, first_action)
     assert (task.kind, task.window_id) == ("blind", w9)
+    # ...so the operator's first action is accepted by the write guard (D1).
+    assert census.create_group(ready, w9, first_action) > 0
 
 
 def test_without_an_open_event_the_repeat_is_served(ready):
@@ -638,6 +649,9 @@ def test_without_an_open_event_the_repeat_is_served(ready):
     task = census.current_task(ready, eligible + timedelta(minutes=1))
     assert (task.kind, task.window_id) == ("blind", repeat)
     assert _events(ready, w9) == []
+    # Unclaimed, window 9 is not served, so the guard refuses a write to it.
+    with pytest.raises(census.BadWrite):
+        census.create_group(ready, w9, eligible + timedelta(minutes=1))
 
 
 def test_the_reload_after_the_claimed_window_completes_serves_the_repeat(ready):
@@ -847,3 +861,203 @@ def test_every_function_leaves_no_transaction_open(ready):
         with pytest.raises(exc):
             call()
         assert ready.info.transaction_status == IDLE, call
+
+
+# ── The write guard (D1) ────────────────────────────────────────────────────
+
+
+def _row_counts(conn) -> tuple:
+    row = conn.execute(
+        "SELECT (SELECT count(*) FROM census_groups),"
+        " (SELECT count(*) FROM census_assignments),"
+        " (SELECT count(*) FROM census_events),"
+        " (SELECT count(*) FROM census_adjudications),"
+        " (SELECT array_agg(status ORDER BY id) FROM census_windows)"
+    ).fetchone()
+    conn.commit()
+    return row
+
+
+def _write_to_window_two(conn, writer: str):
+    """One write per blind writer to window 2 while window 1 is served blind.
+    Window 2 is `prepared`, so only the guard can refuse it."""
+    w2 = cf.window_id(conn, 2)
+    item = census.window_items(conn, w2)[0]["id"]
+    return {
+        "create_group": lambda: census.create_group(conn, w2, NOW),
+        "save_assignments": lambda: census.save_assignments(
+            conn, w2, "t", 1, [(item, None, False)], NOW
+        ),
+        "record_event": lambda: census.record_event(conn, w2, "heartbeat", NOW),
+        "finish_blind": lambda: census.finish_blind(conn, w2, NOW),
+        "abandon": lambda: census.abandon(conn, w2, "not served", NOW),
+    }[writer]
+
+
+@pytest.mark.parametrize(
+    "writer",
+    ["create_group", "save_assignments", "record_event", "finish_blind", "abandon"],
+)
+def test_a_blind_write_to_a_window_not_served_is_refused(ready, writer):
+    assert census.current_task(ready, NOW).window_id == cf.window_id(ready, 1)
+    before = _row_counts(ready)
+    with pytest.raises(census.BadWrite, match="not served"):
+        _write_to_window_two(ready, writer)()
+    assert ready.info.transaction_status == IDLE
+    assert _row_counts(ready) == before
+
+
+def test_a_precision_answer_to_a_window_not_served_is_refused(ready):
+    """The pair IS offered, so only the guard can refuse it: a window in
+    progress (step 3) outranks window 1's precision sample."""
+    w1 = cf.window_id(ready, 1)
+    cf.label(ready, w1, cf.cross_outlet_groups(ready, w1, 3), NOW)
+    offered = census.precision_pairs(ready, w1)
+    assert offered  # control: the pair below is on offer
+    # Seeded: the guard itself refuses every write that could open window 2.
+    ready.execute(
+        "UPDATE census_windows SET status = 'open', opened_at = %s WHERE id = %s",
+        (NOW, cf.window_id(ready, 2)),
+    )
+    ready.commit()
+    assert census.current_task(ready, NOW).window_id == cf.window_id(ready, 2)
+
+    before = _row_counts(ready)
+    with pytest.raises(census.BadWrite, match="not served"):
+        census.save_precision(ready, w1, *offered[0], "same", NOW)
+    assert ready.info.transaction_status == IDLE
+    assert _row_counts(ready) == before
+
+
+def test_the_guard_keeps_the_transaction_and_the_row_lock(ready, monkeypatch):
+    """The guard runs after `_lock_window`, inside the writer's transaction.
+    Calling the committing public `current_task` there would end the
+    transaction and release the F17 row lock mid-write. Checked in every
+    writer, right after the guard returns, from a second connection."""
+    real = census._require_served
+    seen = []
+
+    def spy(conn, window_id, kind, at):
+        real(conn, window_id, kind, at)
+        status = conn.info.transaction_status
+        with db.connect() as other:
+            try:
+                other.execute(
+                    "SELECT 1 FROM census_windows WHERE id = %s FOR UPDATE NOWAIT",
+                    (window_id,),
+                )
+                locked = False
+            except psycopg.errors.LockNotAvailable:
+                locked = True
+            other.rollback()
+        seen.append((kind, window_id, status, locked))
+
+    monkeypatch.setattr(census, "_require_served", spy)
+    w1 = cf.window_id(ready, 1)
+    w2 = cf.window_id(ready, 2)
+    [pair] = cf.cross_outlet_groups(ready, w1, 1)
+    census.record_event(ready, w1, "heartbeat", NOW)
+    gid = census.create_group(ready, w1, NOW)
+    census.save_assignments(ready, w1, "t", 1, [(i, gid, False) for i in pair], NOW)
+    census.finish_blind(ready, w1, NOW)
+    [(a, b)] = census.precision_pairs(ready, w1)
+    census.save_precision(ready, w1, a, b, "same", NOW)
+    census.abandon(ready, w2, "stopped", NOW)
+
+    held = (psycopg.pq.TransactionStatus.INTRANS, True)
+    assert seen == [
+        ("blind", w1, *held),
+        ("blind", w1, *held),
+        ("blind", w1, *held),
+        ("blind", w1, *held),
+        ("precision", w1, *held),
+        ("blind", w2, *held),
+    ]
+
+
+def test_save_assignments_waits_for_the_window_row_lock(ready):
+    """F17: `_lock_window` takes FOR UPDATE on the window row. The other
+    connection holds FOR KEY SHARE, which conflicts with FOR UPDATE but not
+    with save_assignments' foreign-key checks or its plain UPDATE of the
+    status -- so only the FOR UPDATE can make this save wait."""
+    w1 = cf.window_id(ready, 1)
+    x = census.window_items(ready, w1)[0]["id"]
+    ready.execute("SET lock_timeout = '500ms'")
+    ready.commit()
+    with db.connect() as holder:
+        holder.execute(
+            "SELECT 1 FROM census_windows WHERE id = %s FOR KEY SHARE", (w1,)
+        )
+        try:
+            with pytest.raises(psycopg.errors.LockNotAvailable):
+                census.save_assignments(ready, w1, "p", 1, [(x, None, False)], NOW)
+        finally:
+            holder.rollback()
+    assert ready.info.transaction_status == IDLE
+    assert census.latest_assignments(ready, w1) == {}
+
+    # Control: released, the same save goes through.
+    census.save_assignments(ready, w1, "p", 1, [(x, None, False)], NOW)
+    ready.execute("RESET lock_timeout")
+    ready.commit()
+    assert census.latest_assignments(ready, w1) == {x: (None, False)}
+
+
+# ── current_task's priority boundaries ──────────────────────────────────────
+
+
+def test_a_failed_gate_outranks_an_open_window(ready):
+    """Step 2 before step 3."""
+    cf.pass_gate(ready, NOW, groups=3)
+    w3 = cf.window_id(ready, 3)
+    # Seeded: with the gate failed, the guard refuses the write that would
+    # open window 3.
+    ready.execute(
+        "UPDATE census_windows SET status = 'open', opened_at = %s WHERE id = %s",
+        (NOW, w3),
+    )
+    ready.commit()
+    assert census.current_task(ready, NOW).kind == "gate_failed"
+
+    # Control: the override lifts the gate and the open window is served.
+    ready.execute("UPDATE census_block SET go_override_reason = 'ruling'")
+    ready.commit()
+    task = census.current_task(ready, NOW)
+    assert (task.kind, task.window_id) == ("blind", w3)
+
+
+def test_precision_outranks_an_eligible_repeat(ready):
+    """Step 4 before step 5."""
+    cf.pass_gate(ready, NOW)
+    cf.finish_empty(ready, range(3, 8), NOW)
+    w8 = cf.window_id(ready, 8)
+    cf.label(ready, w8, cf.cross_outlet_groups(ready, w8, 8), NOW)
+    repeat_at = NOW + timedelta(days=census.REPEAT_MIN_DAYS)
+
+    task = census.current_task(ready, repeat_at)
+    assert (task.kind, task.window_id) == ("precision", w8)
+
+    # Control: with window 8's sample answered, the eligible repeat is served.
+    cf.answer_precision(ready, w8, repeat_at)
+    task = census.current_task(ready, repeat_at)
+    assert (task.kind, task.window_id) == (
+        "blind",
+        cf.window_id(ready, census.REPEAT_ORDER_NO, pass_=2),
+    )
+
+
+# Positions (in the window's 12 cross-outlet groups) of the pairs
+# `random.Random(1)` draws for window 1, in draw order.
+PINNED_SAMPLE_WINDOW_1 = [2, 9, 1, 4, 10, 3, 6, 5, 8, 0]
+
+
+def test_precision_sample_is_seeded_by_the_window_id(ready):
+    """`precision_pairs` draws with `random.Random(window_id)`: a known window
+    id gives a known sample."""
+    w1 = cf.window_id(ready, 1)
+    assert w1 == 1  # a fresh schema: the first census_windows row
+    groups = cf.cross_outlet_groups(ready, w1, 12)
+    cf.label(ready, w1, groups, NOW)
+    position = {frozenset(g): n for n, g in enumerate(groups)}
+    drawn = [position[frozenset(p)] for p in census.precision_pairs(ready, w1)]
+    assert drawn == PINNED_SAMPLE_WINDOW_1

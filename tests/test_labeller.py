@@ -720,6 +720,40 @@ def test_assign_after_finish_is_409(kb, labeller_server):
     )
 
 
+def test_a_write_to_a_window_not_served_is_400(kb, labeller_server):
+    """D1: writes are accepted only for the task the census serves. label.js
+    shows its generic 400 text, which already says reload (no JS change), so
+    the status is what is asserted, not a body string."""
+    cf.prepared(kb)
+    cookie = _login(kb, labeller_server)
+    w2 = cf.window_id(kb, 2)  # window 1 is the one served
+    item = census.window_items(kb, w2)[0]["id"]
+
+    def post(path, body):
+        return _request(labeller_server, "POST", path, body, cookie=cookie).status
+
+    assert post("/api/groups", {"window_id": w2}) == 400
+    assign = {
+        "window_id": w2,
+        "tab_id": "t",
+        "client_seq": 1,
+        "rows": [{"item_id": item, "group_id": None, "unsure": False}],
+    }
+    assert post("/api/assign", assign) == 400
+    assert post("/api/heartbeat", {"window_id": w2}) == 400
+    assert post("/api/finish", {"window_id": w2}) == 400
+    assert post("/api/abandon", {"window_id": w2, "reason": "not mine"}) == 400
+    assert census.latest_assignments(kb, w2) == {}
+    assert _events(kb, w2) == []
+    status = kb.execute(
+        "SELECT status FROM census_windows WHERE id = %s", (w2,)
+    ).fetchone()[0]
+    kb.commit()
+    assert status == "prepared"
+    # Control: the served window accepts the same kind of write.
+    assert post("/api/heartbeat", {"window_id": cf.window_id(kb, 1)}) == 204
+
+
 def test_bad_writes_are_400(kb, labeller_server):
     cf.prepared(kb)
     cookie = _login(kb, labeller_server)
