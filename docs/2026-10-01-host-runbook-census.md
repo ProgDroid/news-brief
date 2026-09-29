@@ -80,7 +80,9 @@ writes the `census_block` row.
 
 `c439ade` (the Reuters proxy move, committed 2026-09-25) may have reached the host inside the
 census block. `census_prepare` records its deploy date so the readout can print a table by
-block half (spec §4.2 item 3). No field records a deploy, so you confirm one timestamp from the
+block half (spec §4.2 item 3). The table splits at that recorded deploy time when it falls
+inside the block, else at the block midpoint (the readout says which it used), and a window is
+classified by its start. No field records a deploy, so you confirm one timestamp from the
 evidence below.
 
 **a. Which local images contain `c439ade`.** For each local image, print its revision and its
@@ -195,7 +197,14 @@ docker compose run --rm -e CENSUS_LABELLER_PASSWORD --entrypoint sh newsbrief -c
 ```
 
 Expected: `REAL_EXIT=0`. If it prints `REAL_EXIT=1`, the variable did not reach the container:
-`export CENSUS_LABELLER_PASSWORD=<the .env value>` in this shell and re-run the check.
+load `.env` into this shell and re-run the check:
+
+```sh
+set -a; . ./.env; set +a
+```
+
+This loads the value without it ever appearing on a command line (a typed
+`export CENSUS_LABELLER_PASSWORD=...` lands in shell history).
 
 Then create the role and apply its grants:
 
@@ -205,6 +214,11 @@ docker compose run --rm -e CENSUS_LABELLER_PASSWORD --entrypoint python newsbrie
 
 Expected: `grants applied`, `REAL_EXIT=0`. `CENSUS_LABELLER_PASSWORD is empty` (exit 2) means
 the check above was skipped or failed.
+
+**An external database** (the host sets `DATABASE_URL`): the script runs as the main role
+(`db.connect()`), and it creates `census_labeller` and sets its password, so that role needs
+`CREATEROLE`. Without it the script fails at `CREATE ROLE`; have a superuser create the role or
+grant `CREATEROLE` to the main role first.
 
 The script is idempotent: it creates `census_labeller` if absent, sets its password (a SCRAM
 verifier computed client-side, so the plaintext never appears in SQL), and applies every grant
@@ -226,9 +240,30 @@ labeller checks every grant on its own connection before it binds:
 |---|---|---|
 | `missing grant: <grant>` (one line each) | 3 | step 5 did not run, or ran against another database |
 | `database unreachable: …` | 3 | wrong host, port, database or password (step 4) |
+| `surplus privilege: <what>` (one line each) | 3 | the role holds more than `census.LABELLER_GRANTS`; see "Surplus privileges" below |
 | `CENSUS_LABELLER_PASSWORD is unset` | 3 | step 4's password did not reach the service |
 | `LABELLER_BASE_URL is required` | 2 | step 4's variable did not reach the service |
 | a bind error from `up` | — | `LABELLER_BIND` is not an address this host owns |
+
+**Surplus privileges.** The labeller refuses to start (exit 3) while `census_labeller` holds
+anything beyond its grants. The refusal appears in the labeller container's log
+(`docker compose logs labeller`), one `surplus privilege:` line per item, before it binds.
+Stale grants on `public` objects (a table, column, sequence or `CREATE` on the schema) are
+cleared by re-running step 5's grants script, provided the grant was made by the role running
+it. **Role attributes and role memberships are not touched by the script**; a superuser removes
+them in `<psql>` (an external database: connect as its superuser):
+
+| the line reads | remedy, as a superuser |
+|---|---|
+| `role attribute SUPERUSER` | `ALTER ROLE census_labeller NOSUPERUSER;` |
+| `role attribute CREATEROLE` | `ALTER ROLE census_labeller NOCREATEROLE;` |
+| `role attribute CREATEDB` | `ALTER ROLE census_labeller NOCREATEDB;` |
+| `role attribute BYPASSRLS` | `ALTER ROLE census_labeller NOBYPASSRLS;` |
+| `role attribute REPLICATION` | `ALTER ROLE census_labeller NOREPLICATION;` |
+| `member of role X` | `REVOKE X FROM census_labeller;` |
+
+Then restart the service (`docker compose --profile census up -d labeller`) and read the log
+again.
 
 `restart: unless-stopped` brings the labeller back after a host or Docker restart, and a
 crash-loop (a missing grant, say) shows in `docker compose --profile census ps -a labeller`
@@ -252,6 +287,10 @@ shows a banner such as "blocked: page address does not match LABELLER_BASE_URL",
 is gone after reload), **stop and report it; do not start window 1.** Check
 `LABELLER_BASE_URL` against the address the phone types (step 4); if it matches and the
 banner persists, the phone's browser is not sending the expected `Origin`.
+
+A `/label` tap or the morning nudge does not claim a window; only loading the page does. A
+window already loaded is never pre-empted by the repeat, so the repeat may run one window after
+window 8 (D1a) rather than immediately after it.
 
 Other replies: `not prepared yet` (step 3 has not
 run), `stopped at the go/no-go` (step 9), `Nothing to label yet: the repeat of window 2 opens
@@ -333,6 +372,9 @@ sub-projects 1 and 2 no longer need the block's items:
 -- in <psql>
 DELETE FROM census_block;
 ```
+
+**After this delete, `census_prepare` would prepare a NEW block** (it prints `already prepared`
+only while the `census_block` row exists). Do not re-run it unless a new census is intended.
 
 This lifts the **time-based** hold: the delete trigger and the truncate trigger both stop
 refusing. **It does not free everything,** by design:
