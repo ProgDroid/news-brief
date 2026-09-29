@@ -9,6 +9,7 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 
 import census
+import census_metrics
 import comprehend
 
 
@@ -142,3 +143,28 @@ def test_draw_order_matches_the_golden_sequence_for_seed():
     ]
     got = [(w.stratum, w.start.isoformat()) for w in order]
     assert got == expected
+
+
+def test_session_constants_are_the_plan_pinned_values():
+    assert (
+        census.GO_MIN_MEAN_GROUPS,
+        census.GO_MAX_MEDIAN_MINUTES,
+        census.PRECISION_PAIRS,
+        census.IDLE_CAP_MINUTES,
+        census.REPEAT_AFTER_ORDER_NO,
+        census.REPEAT_MIN_DAYS,
+        census.TOTAL_SESSIONS,
+    ) == (8, 80, 10, 5, 8, 7, 17)
+
+
+def test_go_thresholds_match_census_metrics():
+    """`census_metrics.go_no_go` takes no threshold parameters, so pin
+    census's named thresholds to it at both boundaries: exactly on each
+    passes, one step past either fails."""
+    at_floor = [census.GO_MIN_MEAN_GROUPS] * 2
+    at_ceiling = [float(census.GO_MAX_MEDIAN_MINUTES)] * 2
+    assert census_metrics.go_no_go(at_floor, at_ceiling).ok is True
+    below = [census.GO_MIN_MEAN_GROUPS, census.GO_MIN_MEAN_GROUPS - 1]
+    assert census_metrics.go_no_go(below, at_ceiling).ok is False
+    over = [census.GO_MAX_MEDIAN_MINUTES + 0.01] * 2
+    assert census_metrics.go_no_go(at_floor, over).ok is False

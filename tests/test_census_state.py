@@ -84,6 +84,7 @@ def test_no_block_is_not_prepared(kb):
     task = census.current_task(kb, NOW)
     assert task.kind == "not_prepared"
     assert task.window_id is None
+    assert task.session_no == 0
     assert kb.info.transaction_status == IDLE
 
 
@@ -269,6 +270,8 @@ def test_precision_follows_finish_and_completes_the_window(ready):
 
     task = census.current_task(ready, finish_at)
     assert (task.kind, task.window_id) == ("precision", w1)
+    # R11: window 1's precision is still session 1.
+    assert task.session_no == 1
 
     pairs = census.precision_pairs(ready, w1)
     assert len(pairs) == census.PRECISION_PAIRS
@@ -392,6 +395,7 @@ def test_gate_blocks_after_two_thin_windows(ready):
     task = census.current_task(ready, NOW)
     assert task.kind == "gate_failed"
     assert task.window_id is None
+    assert task.session_no == 2
     assert "mean" in task.detail
     assert task.detail == status.reason
 
@@ -441,6 +445,23 @@ def test_abandoned_gate_window_blocks(ready):
     assert "abandoned" in task.detail
 
 
+def test_abandoned_window_two_blocks_the_gate(ready):
+    w1 = cf.window_id(ready, 1)
+    cf.label(ready, w1, cf.cross_outlet_groups(ready, w1, 8), NOW)
+    cf.answer_precision(ready, w1, NOW)
+    census.abandon(ready, cf.window_id(ready, 2), "interrupted", NOW)
+
+    status = census.go_status(ready)
+    assert status.ok is False
+    assert status.reason == "window 2 abandoned; the gate cannot be evaluated"
+
+    task = census.current_task(ready, NOW)
+    assert task.kind == "gate_failed"
+    assert task.window_id is None
+    assert "abandoned" in task.detail
+    assert task.detail == status.reason
+
+
 # ── The repeat (sec 4.6, B4, F15, F16) ──────────────────────────────────────
 
 
@@ -457,7 +478,9 @@ def test_abandoning_window_two_voids_the_repeat(ready):
     )
 
     # An abandoned gate window fails the gate; the operator overrides.
-    assert census.current_task(ready, NOW).kind == "gate_failed"
+    task = census.current_task(ready, NOW)
+    assert task.kind == "gate_failed"
+    assert "window 2 abandoned" in task.detail
     ready.execute("UPDATE census_block SET go_override_reason = 'ruling'")
     ready.commit()
 
@@ -465,6 +488,7 @@ def test_abandoning_window_two_voids_the_repeat(ready):
     task = census.current_task(ready, NOW)
     assert task.kind == "complete"
     assert task.window_id is None
+    assert task.session_no == census.TOTAL_SESSIONS
 
 
 def test_abandoned_window_eight_still_releases_the_repeat(ready):
@@ -542,7 +566,7 @@ def test_waiting_when_only_the_repeat_remains_early(ready):
     assert task.kind == "waiting"
     assert task.window_id is None
     assert "2026-10-08" in task.detail
-    assert task.session_no == 17
+    assert task.session_no == 16
 
     task = census.current_task(ready, NOW + timedelta(days=7))
     assert (task.kind, task.window_id) == (
@@ -551,7 +575,72 @@ def test_waiting_when_only_the_repeat_remains_early(ready):
     )
 
 
+def test_complete_census_is_session_seventeen(ready):
+    """R11: with all 16 pass-1 windows and the repeat done, the census is
+    complete and reports TOTAL_SESSIONS, never TOTAL_SESSIONS + 1."""
+    cf.pass_gate(ready, NOW)
+    cf.finish_empty(ready, range(3, 17), NOW)
+    repeat_at = NOW + timedelta(days=census.REPEAT_MIN_DAYS)
+    pass2 = cf.window_id(ready, census.REPEAT_ORDER_NO, pass_=2)
+    cf.label(ready, pass2, cf.cross_outlet_groups(ready, pass2, 8), repeat_at)
+
+    task = census.current_task(ready, repeat_at)
+    assert (task.kind, task.window_id) == ("precision", cf.window_id(ready, 2))
+    assert task.session_no == census.TOTAL_SESSIONS
+
+    cf.answer_precision(ready, cf.window_id(ready, 2), repeat_at)
+    task = census.current_task(ready, repeat_at)
+    assert task.kind == "complete"
+    assert task.session_no == census.TOTAL_SESSIONS == 17
+
+
 # ── Timing (sec 6.3, F19) ───────────────────────────────────────────────────
+
+
+def _event_count(conn, window_id: int) -> int:
+    n = conn.execute(
+        "SELECT count(*) FROM census_events WHERE window_id = %s", (window_id,)
+    ).fetchone()[0]
+    conn.commit()
+    return n
+
+
+def test_record_event_refuses_finish_and_abandon(ready):
+    """m1: only finish_blind and abandon write those kinds -- a stray
+    abandon event would cap a live window's active minutes."""
+    w1 = cf.window_id(ready, 1)
+    for kind in ("abandon", "finish", "bogus"):
+        with pytest.raises(census.BadWrite):
+            census.record_event(ready, w1, kind, NOW)
+        assert ready.info.transaction_status == IDLE
+    assert _event_count(ready, w1) == 0
+    assert _status(ready, w1)[0] == "prepared"
+
+
+def test_record_event_refuses_unknown_and_closed_windows(ready):
+    """m2: a BadWrite, never a psycopg error, for an unknown window; and no
+    blind-pass event on a window whose blind pass is over."""
+    unknown = cf.window_id(ready, 1) + 10_000
+    with pytest.raises(census.BadWrite):
+        census.record_event(ready, unknown, "heartbeat", NOW)
+    assert ready.info.transaction_status == IDLE
+
+    w1 = cf.window_id(ready, 1)
+    cf.label(ready, w1, cf.cross_outlet_groups(ready, w1, 3), NOW)
+    w3 = cf.window_id(ready, 3)
+    census.abandon(ready, w3, "stopped", NOW)
+    before = {w: _event_count(ready, w) for w in (w1, w3)}
+
+    for window in (w1, w3):
+        for kind in ("action", "heartbeat"):
+            with pytest.raises(census.BadWrite):
+                census.record_event(ready, window, kind, NOW + timedelta(minutes=1))
+            assert ready.info.transaction_status == IDLE
+    assert {w: _event_count(ready, w) for w in (w1, w3)} == before
+
+    # `open` is still accepted after Finish: the precision page opens then.
+    census.record_event(ready, w1, "open", NOW + timedelta(minutes=2))
+    assert _event_count(ready, w1) == before[w1] + 1
 
 
 def test_active_minutes_stop_at_blind_done(ready):
@@ -563,8 +652,9 @@ def test_active_minutes_stop_at_blind_done(ready):
     census.record_event(ready, w1, "heartbeat", NOW + 8 * m)
     census.record_event(ready, w1, "action", NOW + 10 * m)
     census.finish_blind(ready, w1, NOW + 12 * m)
-    # After blind_done_at: the precision page and a stale tab's heartbeats.
-    census.record_event(ready, w1, "heartbeat", NOW + 13 * m)
+    # After blind_done_at: the precision page is opened, twice. Each would
+    # add minutes (gaps of 1 and 1) if the cap were missing.
+    census.record_event(ready, w1, "open", NOW + 13 * m)
     census.record_event(ready, w1, "open", NOW + 14 * m)
 
     assert census.window_active_minutes(ready, w1) == pytest.approx(12.0)
@@ -576,8 +666,8 @@ def test_active_minutes_of_an_abandoned_window_count_to_the_end(ready):
     census.record_event(ready, w1, "open", NOW)
     census.record_event(ready, w1, "action", NOW + 3 * m)
     census.abandon(ready, w1, "stopped", NOW + 5 * m)
-    # A tab left open after the abandon keeps heartbeating; it adds nothing.
-    census.record_event(ready, w1, "heartbeat", NOW + 6 * m)
+    # A page opened after the abandon adds nothing.
+    census.record_event(ready, w1, "open", NOW + 6 * m)
     assert census.window_active_minutes(ready, w1) == pytest.approx(5.0)
 
 

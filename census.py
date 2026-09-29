@@ -40,8 +40,12 @@ WINDOWS_PER_STRATUM = 4
 SEED = 20260928
 REPEAT_ORDER_NO = 2
 
-# Session state (plan Task 4). The go/no-go thresholds themselves (8 groups,
-# 80 minutes) live in census_metrics.go_no_go and are not repeated here.
+# Session state (plan Task 4). GO_MIN_MEAN_GROUPS and GO_MAX_MEDIAN_MINUTES
+# name the thresholds `census_metrics.go_no_go` applies; that function takes
+# no threshold parameters, so tests/test_census_rules.py pins the two equal
+# at their boundaries (test_go_thresholds_match_census_metrics).
+GO_MIN_MEAN_GROUPS = 8
+GO_MAX_MEDIAN_MINUTES = 80
 REPEAT_AFTER_ORDER_NO = 8
 REPEAT_MIN_DAYS = 7
 TOTAL_SESSIONS = 17
@@ -422,8 +426,11 @@ class Task:
 
     `kind` is one of 'blind', 'precision', 'gate_failed', 'waiting',
     'complete', 'not_prepared'. `window_id` is set only for 'blind' and
-    'precision'. `session_no` is 1 + the number of done windows, pass 1 and
-    pass 2 together.
+    'precision'. `session_no` (ruling R11) counts done windows, pass 1 and
+    pass 2 together: the count + 1 for 'blind' (the session about to be
+    labelled), the count itself for every other kind -- so window 1's
+    precision is session 1, the gate after windows 1-2 is 2, a complete
+    census is TOTAL_SESSIONS and an unprepared one is 0.
     """
 
     kind: str
@@ -445,7 +452,13 @@ class _Window:
         return self.status in _DONE
 
 
-_EVENT_KINDS = ("open", "action", "heartbeat", "finish", "abandon")
+# What callers may log through `record_event`. `finish` and `abandon` are
+# written only by `finish_blind` and `abandon` (review m1): a stray abandon
+# event would cap a live window's active minutes (`_window_active_minutes`).
+_CALLER_EVENT_KINDS = ("open", "action", "heartbeat")
+# Kinds that are part of the blind pass itself, refused once it is over.
+# `open` is not: the precision page is opened after Finish.
+_BLIND_EVENT_KINDS = ("action", "heartbeat")
 _DECISIONS = ("same", "different")
 _GATE_ORDER_NOS = (1, 2)
 
@@ -646,18 +659,18 @@ def current_task(conn, now: datetime) -> Task:
     """
     block = conn.execute("SELECT go_override_reason FROM census_block").fetchone()
     if block is None:
-        return Task("not_prepared", None, 1, "the census is not prepared")
+        return Task("not_prepared", None, 0, "the census is not prepared")
     override = block[0]
 
     windows = _windows(conn)
-    session_no = 1 + sum(1 for w in windows if w.done)
+    done = sum(1 for w in windows if w.done)
 
     def blind(w: _Window) -> Task:
-        return Task("blind", w.id, session_no, f"{_item_count(conn, w.id)} items")
+        return Task("blind", w.id, done + 1, f"{_item_count(conn, w.id)} items")
 
     gate = _go_status(conn, windows)
     if gate is not None and not gate.ok and override is None:
-        return Task("gate_failed", None, session_no, gate.reason)
+        return Task("gate_failed", None, done, gate.reason)
 
     for w in windows:
         if w.status == "open":
@@ -667,7 +680,7 @@ def current_task(conn, now: datetime) -> Task:
         if w.status == "blind_done":
             pairs = _precision_pairs(conn, w.id)
             if pairs:
-                return Task("precision", w.id, session_no, f"{len(pairs)} pairs")
+                return Task("precision", w.id, done, f"{len(pairs)} pairs")
 
     by_order = {w.order_no: w for w in windows if w.pass_ == 1}
     repeat = next((w for w in windows if w.pass_ == 2), None)
@@ -693,10 +706,10 @@ def current_task(conn, now: datetime) -> Task:
         return Task(
             "waiting",
             None,
-            session_no,
+            done,
             f"the repeat of window {REPEAT_ORDER_NO} opens {at_utc:%Y-%m-%d %H:%M} UTC",
         )
-    return Task("complete", None, session_no, "the census is complete")
+    return Task("complete", None, done, "the census is complete")
 
 
 @_transaction
@@ -718,17 +731,31 @@ def window_items(conn, window_id: int) -> list[dict]:
     ]
 
 
-@_transaction
-def record_event(conn, window_id: int, kind: str, at: datetime) -> None:
-    """Append one timing event. `finish_blind` and `abandon` log their own
-    `finish` and `abandon` events; the labeller logs `open`, `action` and
-    `heartbeat` through here."""
-    if kind not in _EVENT_KINDS:
-        raise BadWrite(f"unknown event kind {kind!r}")
+def _insert_event(conn, window_id: int, kind: str, at: datetime) -> None:
+    """The one writer of `census_events`; callers have already validated."""
     conn.execute(
         "INSERT INTO census_events (window_id, kind, at) VALUES (%s, %s, %s)",
         (window_id, kind, at),
     )
+
+
+@_transaction
+def record_event(conn, window_id: int, kind: str, at: datetime) -> None:
+    """Append one caller timing event: `open`, `action` or `heartbeat`.
+
+    BadWrite (never a psycopg error, review m2) for any other kind --
+    `finish` and `abandon` are written only by `finish_blind` and `abandon`
+    (m1) -- for a window that does not exist, and for an `action` or
+    `heartbeat` on a window whose blind pass is over. `open` is accepted on
+    any existing window: the precision page is opened after Finish, and
+    `_window_active_minutes` ignores events after `blind_done_at`.
+    """
+    if kind not in _CALLER_EVENT_KINDS:
+        raise BadWrite(f"event kind {kind!r} cannot be recorded by a caller")
+    status, _blind_done_at, _order_no, _pass = _lock_window(conn, window_id)
+    if kind in _BLIND_EVENT_KINDS and status in _DONE:
+        raise BadWrite(f"window {window_id} is {status}; no {kind} event")
+    _insert_event(conn, window_id, kind, at)
 
 
 @_transaction
@@ -836,10 +863,7 @@ def finish_blind(conn, window_id: int, at: datetime) -> None:
     `_precision_pairs`)."""
     status, _blind_done_at, _order_no, pass_ = _lock_window(conn, window_id)
     _raise_if_closed(window_id, status)
-    conn.execute(
-        "INSERT INTO census_events (window_id, kind, at) VALUES (%s, 'finish', %s)",
-        (window_id, at),
-    )
+    _insert_event(conn, window_id, "finish", at)
     conn.execute(
         "UPDATE census_windows SET status = 'blind_done', blind_done_at = %s "
         "WHERE id = %s",
@@ -867,10 +891,7 @@ def abandon(conn, window_id: int, reason: str, at: datetime) -> None:
         raise BadWrite("abandon needs a reason")
     status, _blind_done_at, order_no, pass_ = _lock_window(conn, window_id)
     _raise_if_closed(window_id, status)
-    conn.execute(
-        "INSERT INTO census_events (window_id, kind, at) VALUES (%s, 'abandon', %s)",
-        (window_id, at),
-    )
+    _insert_event(conn, window_id, "abandon", at)
     conn.execute(
         "UPDATE census_windows SET status = 'abandoned', abandon_reason = %s "
         "WHERE id = %s",
