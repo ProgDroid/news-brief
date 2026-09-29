@@ -303,26 +303,43 @@ def _percentile(ordered: list[float], pct: float) -> float:
     return ordered[f] * (c - k) + ordered[c] * (k - f)
 
 
+MIN_BOOTSTRAP_REPLICATES = 100
+
+
 def item_bootstrap_interval(
     stat,
     a: dict,
     b: dict,
     reps: int = 2000,
     seed: int = SEED_BOOT,
-) -> tuple[float, float]:
+) -> tuple[float | None, float | None, int]:
     """Resample items with replacement, recompute `stat(a_sub, b_sub)` each
-    time, and return the 2.5th and 97.5th percentiles."""
+    time, and return `(lo, hi, n_dropped)`: the 2.5th and 97.5th percentiles
+    of the defined replicates, and how many were NaN and dropped.
+
+    A NaN replicate (a resample with no same-cluster pair to score) cannot be
+    ordered, so leaving it in `sort()` scrambles the whole list and the
+    percentiles come out wrong. Fewer than `MIN_BOOTSTRAP_REPLICATES`
+    survivors gives `(None, None, n_dropped)`.
+    """
     items = sorted(set(a) & set(b))
     n = len(items)
     rng = random.Random(seed)
     values: list[float] = []
+    dropped = 0
     for _ in range(reps):
         sample = [items[rng.randrange(n)] for _ in range(n)]
         a_sub = {idx: a[item] for idx, item in enumerate(sample)}
         b_sub = {idx: b[item] for idx, item in enumerate(sample)}
-        values.append(stat(a_sub, b_sub))
+        v = stat(a_sub, b_sub)
+        if math.isnan(v):
+            dropped += 1
+        else:
+            values.append(v)
+    if len(values) < min(MIN_BOOTSTRAP_REPLICATES, reps):
+        return None, None, dropped
     values.sort()
-    return _percentile(values, 2.5), _percentile(values, 97.5)
+    return _percentile(values, 2.5), _percentile(values, 97.5), dropped
 
 
 def mde(m_values: list[int], rho: float, d: float = 0.5) -> float:

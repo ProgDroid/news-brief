@@ -329,12 +329,42 @@ def test_item_bootstrap_interval_varies_and_is_seed_stable():
     other = {i: (i // 2) % 3 for i in range(20)}
 
     point = adjusted_rand_index(ref, other)
-    lo, hi = item_bootstrap_interval(adjusted_rand_index, ref, other, reps=300, seed=7)
+    lo, hi, dropped = item_bootstrap_interval(
+        adjusted_rand_index, ref, other, reps=300, seed=7
+    )
 
     assert lo < hi
     assert lo - 1e-9 <= point <= hi + 1e-9
 
-    lo2, hi2 = item_bootstrap_interval(
+    lo2, hi2, dropped2 = item_bootstrap_interval(
         adjusted_rand_index, ref, other, reps=300, seed=7
     )
-    assert (lo2, hi2) == (lo, hi)
+    assert (lo2, hi2, dropped2) == (lo, hi, dropped)
+
+
+def test_item_bootstrap_interval_drops_nan_replicates():
+    # 30 items, pass 1 has 3 two-item groups and pass 2 agrees on 2 and adds
+    # one: some resamples contain no same-cluster pair in pass 2, so pairwise
+    # precision is NaN there. Sorting those in used to scramble the interval.
+    ref = {i: (i // 2 if i < 6 else None) for i in range(30)}
+    other = {
+        i: (i // 2 if i < 4 else (7 if i in (10, 11) else None)) for i in range(30)
+    }
+
+    def precision(x, y):
+        return pairwise_agreement(x, y)[0]
+
+    point = precision(ref, other)
+    lo, hi, dropped = item_bootstrap_interval(precision, ref, other, reps=2000)
+    assert dropped > 0
+    assert lo <= hi
+    assert lo - 1e-9 <= point <= hi + 1e-9
+
+
+def test_item_bootstrap_interval_gives_up_when_too_few_replicates_survive():
+    ref = {i: None for i in range(10)}  # all singletons: recall is always NaN
+
+    def recall(x, y):
+        return pairwise_agreement(x, y)[1]
+
+    assert item_bootstrap_interval(recall, ref, ref, reps=200) == (None, None, 200)

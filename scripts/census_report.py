@@ -26,7 +26,8 @@ import census  # noqa: E402  (path shim above must run first)
 import census_metrics  # noqa: E402
 import db  # noqa: E402
 
-RHOS = (0.05, 0.10, 0.20)
+RHOS = (0.05, 0.10, 0.30)  # spec 4.4
+BOOTSTRAP_REPS = 2000
 _BLIND_DONE = ("blind_done", "complete")
 _TOTAL_PASS1 = 16
 
@@ -105,7 +106,7 @@ def _stats(conn, window_id: int) -> dict:
 
 
 def _window_lines(conn, windows: list[tuple], stats: dict[int, dict]) -> list[str]:
-    lines = ["== Windows (session order) =="]
+    lines = ["== Windows (planned order) =="]
     for (
         wid,
         order_no,
@@ -160,13 +161,20 @@ def _mde_lines(windows: list[tuple], stats: dict[int, dict]) -> list[str]:
     if k < 2:
         return []
     m_values = [stats[w[0]]["multi"] for w in done]
+    head = "== Achieved detectable difference (spec 4.5) =="
+    if statistics.mean(m_values) == 0:
+        # Ruling R14: mde divides by the mean; a no-group state is a NO-GO
+        # the operator must still see, not a crash.
+        return [head, "detectable difference: undefined (no multi-outlet groups)"]
     label = " (final)" if k >= _TOTAL_PASS1 else ""
+    m_bar = statistics.mean(m_values)
+    cv = statistics.pstdev(m_values) / m_bar
     values = ", ".join(
         f"rho={rho:.2f}: {census_metrics.mde(m_values, rho):.1f} points" for rho in RHOS
     )
     return [
-        "== Achieved detectable difference (spec 4.5) ==",
-        f"at current K = {k}{label}: {values}",
+        head,
+        f"at current K = {k}{label}, m-bar {m_bar:.2f}, CV {cv:.2f}: {values}",
     ]
 
 
@@ -215,9 +223,17 @@ def _consistency_lines(conn, windows: list[tuple]) -> list[str]:
     ]
     for name, fn in stats:
         value = fn(a, b)
-        lo, hi = census_metrics.item_bootstrap_interval(fn, a, b)
+        lo, hi, dropped = census_metrics.item_bootstrap_interval(
+            fn, a, b, reps=BOOTSTRAP_REPS
+        )
+        span = (
+            f"95% item-bootstrap {_fmt(lo)} to {_fmt(hi)}"
+            if lo is not None
+            else "interval unavailable"
+        )
         lines.append(
-            f"{name} {_fmt(value)} (95% item-bootstrap {_fmt(lo)} to {_fmt(hi)})"
+            f"{name} {_fmt(value)} ({span}; "
+            f"{dropped} of {BOOTSTRAP_REPS} resamples undefined)"
         )
     return lines
 
@@ -266,9 +282,9 @@ def _half_lines(
         ("first half", lambda t: t < mid),
         ("second half", lambda t: t >= mid),
     ):
-        done = [w for w in windows if w[2] == 1 and w[3] in _BLIND_DONE and pick(w[4])]
+        done = [w for w in windows if w[2] == 1 and w[3] == "complete" and pick(w[4])]
         if not done:
-            lines.append(f"{name}: no windows done")
+            lines.append(f"{name}: no complete windows")
             continue
         mean_multi = statistics.mean(stats[w[0]]["multi"] for w in done)
         mean_items = statistics.mean(stats[w[0]]["items"] for w in done)
