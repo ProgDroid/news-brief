@@ -563,19 +563,22 @@ def make_server(base_url: str, bind: str, port: int) -> ThreadingHTTPServer:
 
 
 def _self_check() -> int:
-    """Spec 6.1: verify every grant up front, on the labeller's OWN connection
-    (missing_privileges checks current_user), naming each one missing."""
+    """Spec 6.1: verify the role up front, on the labeller's OWN connection
+    (both checks read current_user): every grant it needs, naming each one
+    missing, and nothing beyond them, naming each surplus -- an
+    over-privileged role is refused as firmly as an under-privileged one."""
     try:
         with db.connect(connect_timeout=10) as conn:
             missing = census.missing_privileges(conn)
+            surplus = census.privilege_surplus(conn)
     except Exception as exc:
         print(f"database unreachable: {exc}", file=sys.stderr, flush=True)
         return 3
-    if missing:
-        for grant in missing:
-            print(f"missing grant: {grant}", file=sys.stderr, flush=True)
-        return 3
-    return 0
+    for grant in missing:
+        print(f"missing grant: {grant}", file=sys.stderr, flush=True)
+    for extra in surplus:
+        print(f"surplus privilege: {extra}", file=sys.stderr, flush=True)
+    return 3 if missing or surplus else 0
 
 
 def main() -> int:

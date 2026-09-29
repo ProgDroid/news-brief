@@ -266,23 +266,37 @@ def test_labeller_holds_exactly_the_expected_privileges(kb):
     assert _actual_grants(kb) == _expected_grants(kb)
 
 
-def test_exact_grant_comparison_catches_a_surplus_grant(kb):
-    for surplus in (
+def test_reapplying_the_grants_clears_every_stale_privilege(kb):
+    """apply_labeller_grants revokes everything the role holds in schema
+    public first, so the result is exactly LABELLER_GRANTS: a stale table,
+    column, sequence and schema grant are all gone after one re-apply."""
+    stale = (
         "GRANT DELETE ON public.census_events TO census_labeller",
         "GRANT UPDATE ON public.census_windows TO census_labeller",
+        "GRANT SELECT ON public.settings TO census_labeller",
         "GRANT UPDATE (revoked_at) ON public.census_sessions TO census_labeller",
-    ):
-        kb.execute(surplus)
-        kb.commit()
-        assert _actual_grants(kb) != _expected_grants(kb), surplus
-        census.apply_labeller_grants(kb, PASSWORD)  # grants only add
-        kb.execute("REVOKE ALL ON ALL TABLES IN SCHEMA public FROM census_labeller")
-        kb.execute(
-            "REVOKE ALL (revoked_at) ON public.census_sessions FROM census_labeller"
-        )
-        kb.commit()
-        census.apply_labeller_grants(kb, PASSWORD)
-        assert _actual_grants(kb) == _expected_grants(kb)
+        "GRANT INSERT (title) ON public.items TO census_labeller",
+        "GRANT UPDATE ON SEQUENCE public.census_groups_id_seq TO census_labeller",
+        "GRANT USAGE ON SEQUENCE public.items_id_seq TO census_labeller",
+        "GRANT CREATE ON SCHEMA public TO census_labeller",
+    )
+    for statement in stale:
+        kb.execute(statement)
+    kb.commit()
+    before = _actual_grants(kb) - _expected_grants(kb)
+    assert before == {  # control: each stale grant is really there
+        ("table", "census_events", None, "DELETE"),
+        ("table", "census_windows", None, "UPDATE"),
+        ("table", "settings", None, "SELECT"),
+        ("column", "census_sessions", "revoked_at", "UPDATE"),
+        ("column", "items", "title", "INSERT"),
+        ("sequence", "census_groups_id_seq", None, "UPDATE"),
+        ("sequence", "items_id_seq", None, "USAGE"),
+        ("schema", "public", None, "CREATE"),
+    }
+
+    census.apply_labeller_grants(kb, PASSWORD)
+    assert _actual_grants(kb) == _expected_grants(kb)
 
 
 def test_password_is_stored_as_a_scram_verifier(kb):
@@ -325,3 +339,167 @@ def test_labeller_role_can_render_the_readout_read_only(kb):
     finally:
         conn.rollback()
         conn.close()
+
+
+# ── Surplus privileges (the labeller refuses to start over-privileged) ──────
+
+
+def _surplus_as_labeller() -> list[str]:
+    conn = _labeller()
+    try:
+        return census.privilege_surplus(conn)
+    finally:
+        conn.close()
+
+
+def test_no_surplus_after_the_grants(kb):
+    assert _surplus_as_labeller() == []
+
+
+def test_privilege_surplus_names_each_stale_grant(kb):
+    for statement in (
+        "GRANT DELETE ON public.census_events TO census_labeller",
+        "GRANT SELECT ON public.settings TO census_labeller",
+        "GRANT UPDATE (revoked_at) ON public.census_sessions TO census_labeller",
+        "GRANT UPDATE ON SEQUENCE public.census_groups_id_seq TO census_labeller",
+        "GRANT CREATE ON SCHEMA public TO census_labeller",
+    ):
+        kb.execute(statement)
+    kb.commit()
+    assert _surplus_as_labeller() == [
+        "CREATE on schema public",
+        "DELETE on census_events",
+        "SELECT on settings",
+        "UPDATE on sequence census_groups_id_seq",
+        "UPDATE(revoked_at) on census_sessions",
+    ]
+    # ...and the grants script clears exactly what was named.
+    census.apply_labeller_grants(kb, PASSWORD)
+    assert _surplus_as_labeller() == []
+
+
+def test_privilege_surplus_sees_every_privilege_type_the_server_has(kb):
+    """No hard-coded privilege list: MAINTAIN (PG 17+) is seen when the
+    server has it. The control asks the server which types it knows."""
+    known = {
+        p
+        for (p,) in kb.execute(
+            "SELECT privilege_type FROM aclexplode(acldefault('r', 10::oid))"
+        ).fetchall()
+    }
+    kb.commit()
+    assert "MAINTAIN" in known  # the test database is PostgreSQL 17 or later
+    kb.execute("GRANT MAINTAIN ON public.census_events TO census_labeller")
+    kb.commit()
+    assert _surplus_as_labeller() == ["MAINTAIN on census_events"]
+
+
+def test_privilege_surplus_names_a_role_attribute(kb):
+    """Attributes are cluster-global: restored in `finally`, or every later
+    test's labeller would start over-privileged."""
+    kb.execute("ALTER ROLE census_labeller CREATEDB")
+    kb.commit()
+    try:
+        assert _surplus_as_labeller() == ["role attribute CREATEDB"]
+    finally:
+        kb.execute("ALTER ROLE census_labeller NOCREATEDB")
+        kb.commit()
+    assert _surplus_as_labeller() == []
+
+
+def test_census_tables_constant_matches_the_catalog(kb):
+    """`_CENSUS_TABLES` is hand-written on purpose: deriving it from the
+    catalog would silently widen the labeller's SELECT to every future
+    `census_*` table. So a new census table fails here until someone
+    decides its grant."""
+    rows = kb.execute(
+        "SELECT c.relname FROM pg_class c "
+        "JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'v', 'm', 'f') "
+        "AND c.relname LIKE %s",
+        ("census\\_%",),
+    ).fetchall()
+    kb.commit()
+    in_catalog = {name for (name,) in rows}
+    assert "census_windows" in in_catalog  # control: the pattern matches
+    assert len(set(census._CENSUS_TABLES)) == len(census._CENSUS_TABLES)
+    assert set(census._CENSUS_TABLES) == in_catalog
+
+
+# ── Links and the /label reset race ─────────────────────────────────────────
+
+
+def test_revoke_all_leaves_an_expired_link_alone(kb):
+    """An expired, unconsumed link is neither counted nor updated."""
+    expired = census.mint_link(kb, NOW - census.LINK_TTL - timedelta(minutes=1))
+    live = census.mint_link(kb, NOW)
+    assert census.revoke_all(kb, NOW) == 1
+    revoked = dict(
+        kb.execute("SELECT token_sha256, revoked_at FROM census_sessions").fetchall()
+    )
+    kb.commit()
+    assert revoked == {census._sha256(expired): None, census._sha256(live): NOW}
+
+
+def test_open_session_and_revoke_all_serialise_on_one_lock(kb):
+    """/label reset must not interleave with a link being opened: under READ
+    COMMITTED, revoke_all's UPDATE would miss a session row committed after
+    its snapshot. Both take one transaction-scoped advisory lock; while
+    another connection holds it, each waits."""
+    link = census.mint_link(kb, NOW)
+    kb.execute("SET lock_timeout = '500ms'")
+    kb.commit()
+    try:
+        with db.connect() as other:
+            other.execute(
+                "SELECT pg_advisory_xact_lock(%s)", (census._SESSIONS_LOCK_KEY,)
+            )
+            try:
+                with pytest.raises(errors.LockNotAvailable):
+                    census.open_session(kb, link, NOW)
+                assert kb.info.transaction_status == psycopg.pq.TransactionStatus.IDLE
+                with pytest.raises(errors.LockNotAvailable):
+                    census.revoke_all(kb, NOW)
+            finally:
+                other.rollback()
+    finally:
+        kb.execute("RESET lock_timeout")
+        kb.commit()
+    # Released: nothing was consumed or revoked while it waited.
+    assert census.open_session(kb, link, NOW) is not None
+
+
+def test_open_session_compares_the_digest_with_compare_digest(kb, monkeypatch):
+    """Spec 6.2: a constant-time comparison gates the consumption."""
+    link = census.mint_link(kb, NOW)
+    calls = []
+    monkeypatch.setattr(
+        census.hmac, "compare_digest", lambda a, b: calls.append((a, b)) or False
+    )
+    assert census.open_session(kb, link, NOW) is None
+    digest = census._sha256(link)
+    assert calls == [(digest, digest)]
+    # A refused comparison consumed nothing: the link still opens.
+    monkeypatch.undo()
+    assert census.open_session(kb, link, NOW) is not None
+
+
+# ── scripts/census_grants.py ────────────────────────────────────────────────
+
+
+def test_census_grants_reports_a_missing_password_on_stderr(monkeypatch, capsys):
+    from scripts import census_grants
+
+    monkeypatch.delenv(census_grants.PASSWORD_VAR, raising=False)
+    assert census_grants.main() == 2
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert census_grants.PASSWORD_VAR in err
+
+
+def test_census_grants_docstring_keeps_the_password_off_the_command_line():
+    from scripts import census_grants
+
+    doc = census_grants.__doc__
+    assert "CENSUS_LABELLER_PASSWORD=..." not in doc
+    assert ". ./.env" in doc

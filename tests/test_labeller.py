@@ -290,6 +290,40 @@ def test_service_exits_when_the_database_is_unreachable(kb, tmp_path):
     assert "database unreachable" in err, err
 
 
+def _exit_and_stderr(tmp_path) -> tuple[int, str]:
+    proc = _spawn(_labeller_env(_free_port(), tmp_path))
+    try:
+        code = proc.wait(timeout=10)
+        _out, err = proc.communicate(timeout=10)
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            proc.wait(timeout=10)
+    return code, err
+
+
+def test_service_exits_naming_a_surplus_grant(kb, tmp_path):
+    kb.execute("GRANT DELETE ON public.census_events TO census_labeller")
+    kb.commit()
+    code, err = _exit_and_stderr(tmp_path)
+    assert code == 3, err
+    assert "surplus privilege: DELETE on census_events" in err, err
+
+
+def test_service_exits_naming_a_surplus_role_attribute(kb, tmp_path):
+    # Cluster-global: restored in `finally`, or every later labeller test
+    # would start over-privileged.
+    kb.execute("ALTER ROLE census_labeller CREATEDB")
+    kb.commit()
+    try:
+        code, err = _exit_and_stderr(tmp_path)
+    finally:
+        kb.execute("ALTER ROLE census_labeller NOCREATEDB")
+        kb.commit()
+    assert code == 3, err
+    assert "surplus privilege: role attribute CREATEDB" in err, err
+
+
 # ── No knob reads (spec 6.1, 10) ────────────────────────────────────────────
 
 

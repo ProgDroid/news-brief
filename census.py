@@ -1067,6 +1067,22 @@ def _sha256(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
+# The /label reset race: `open_session` and `revoke_all` serialise on this one
+# transaction-scoped advisory lock. Under READ COMMITTED, revoke_all's UPDATE
+# works from a snapshot taken when it starts, so a session row committed by a
+# concurrent open_session after that would survive the reset. Same key scheme
+# as `db._lock_key`, computed here because census.py does not import db.
+_SESSIONS_LOCK_KEY = int.from_bytes(
+    hashlib.sha256(b"census_sessions").digest()[:8], "big", signed=True
+)
+
+
+def _lock_sessions(conn) -> None:
+    """Take the sessions lock; released by the transaction's commit or
+    rollback (`_transaction`), never held across requests."""
+    conn.execute("SELECT pg_advisory_xact_lock(%s)", (_SESSIONS_LOCK_KEY,))
+
+
 @_transaction
 def mint_link(conn, now: datetime) -> str:
     """A one-time link token, valid for `LINK_TTL`; returns the plaintext."""
@@ -1083,16 +1099,25 @@ def mint_link(conn, now: datetime) -> str:
 def open_session(conn, link_token: str, now: datetime) -> str | None:
     """Consume a link atomically (spec 6.2) and return a fresh session token,
     or None when the token is not an unconsumed, unrevoked, unexpired LINK
-    (F12: a session token cannot open a session; F13: `now`, not SQL now())."""
+    (F12: a session token cannot open a session; F13: `now`, not SQL now()).
+
+    Serialised with `revoke_all` on the sessions lock, and the stored hash is
+    compared with `hmac.compare_digest` before the link is consumed (spec
+    6.2, as `session_valid` does)."""
+    _lock_sessions(conn)
+    digest = _sha256(link_token)
     row = conn.execute(
-        "UPDATE census_sessions SET consumed_at = %(now)s "
+        "SELECT id, token_sha256 FROM census_sessions "
         "WHERE token_sha256 = %(hash)s AND kind = 'link' "
         "AND consumed_at IS NULL AND revoked_at IS NULL "
-        "AND expires_at > %(now)s RETURNING id",
-        {"now": now, "hash": _sha256(link_token)},
+        "AND expires_at > %(now)s FOR UPDATE",
+        {"now": now, "hash": digest},
     ).fetchone()
-    if row is None:
+    if row is None or not hmac.compare_digest(row[1], digest):
         return None
+    conn.execute(
+        "UPDATE census_sessions SET consumed_at = %s WHERE id = %s", (now, row[0])
+    )
     token = secrets.token_urlsafe(32)
     conn.execute(
         "INSERT INTO census_sessions (kind, token_sha256, expires_at) "
@@ -1118,7 +1143,10 @@ def session_valid(conn, session_token: str, now: datetime) -> bool:
 @_transaction
 def revoke_all(conn, now: datetime) -> int:
     """`/label reset`: revoke every live session and every unspent link.
-    Returns how many rows were revoked. Runs as the main role."""
+    Returns how many rows were revoked. Runs as the main role. Holds the
+    sessions lock, so no link can be opened between its read and its update.
+    An expired link or session is left alone and not counted."""
+    _lock_sessions(conn)
     return conn.execute(
         "UPDATE census_sessions SET revoked_at = %s "
         "WHERE revoked_at IS NULL AND expires_at > %s "
@@ -1222,8 +1250,17 @@ def _grant_statement(conn, g: Grant, role: sql.Identifier) -> sql.Composed:
 
 @_transaction
 def apply_labeller_grants(conn, password: str) -> None:
-    """Create the role if absent, set its password, apply every grant.
-    Idempotent: roles are cluster-global and outlive DROP SCHEMA."""
+    """Create the role if absent, set its password, then make its privileges
+    in schema public EXACTLY LABELLER_GRANTS: first revoke everything it
+    holds on every table (views included) and sequence there -- a table-level
+    REVOKE ALL also clears column privileges, verified on PG 18.6 -- and on
+    the schema itself (CREATE with it), then grant the list. One
+    transaction, so the role is never seen half-granted. Idempotent: roles
+    are cluster-global and outlive DROP SCHEMA.
+
+    That revoke scope is exactly what `privilege_surplus` checks, so every
+    surplus it names is one a re-run clears. Role attributes are not
+    touched: they need a superuser's ALTER ROLE."""
     role = sql.Identifier(LABELLER_ROLE)
     conn.execute(
         sql.SQL(
@@ -1242,6 +1279,13 @@ def apply_labeller_grants(conn, password: str) -> None:
             role=role, pw=sql.Literal(verifier)
         )
     )
+    public = sql.Identifier("public")
+    for revoke in (
+        "REVOKE ALL ON ALL TABLES IN SCHEMA {s} FROM {r}",
+        "REVOKE ALL ON ALL SEQUENCES IN SCHEMA {s} FROM {r}",
+        "REVOKE ALL ON SCHEMA {s} FROM {r}",
+    ):
+        conn.execute(sql.SQL(revoke).format(s=public, r=role))
     for g in LABELLER_GRANTS:
         conn.execute(_grant_statement(conn, g, role))
 
@@ -1291,3 +1335,78 @@ def missing_privileges(conn) -> list[str]:
         if not ok:
             missing.append(name)
     return missing
+
+
+# Everything `apply_labeller_grants` revokes and `privilege_surplus` reads:
+# the ACL entries whose grantee is the role, on schema public itself and on
+# every relation (tables, views, sequences, ...) and column in it.
+_ROLE_ACL = """
+SELECT 'schema', n.nspname, NULL, a.privilege_type
+  FROM pg_namespace n, aclexplode(n.nspacl) a
+ WHERE n.nspname = 'public' AND a.grantee = %(role)s
+UNION ALL
+SELECT CASE c.relkind WHEN 'S' THEN 'sequence' ELSE 'table' END,
+       c.relname, NULL, a.privilege_type
+  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace,
+       aclexplode(c.relacl) a
+ WHERE n.nspname = 'public' AND a.grantee = %(role)s
+UNION ALL
+SELECT 'column', c.relname, t.attname, a.privilege_type
+  FROM pg_attribute t JOIN pg_class c ON c.oid = t.attrelid
+       JOIN pg_namespace n ON n.oid = c.relnamespace,
+       aclexplode(t.attacl) a
+ WHERE n.nspname = 'public' AND a.grantee = %(role)s
+"""
+_ROLE_ATTRIBUTES = ("SUPERUSER", "CREATEROLE", "CREATEDB", "BYPASSRLS")
+
+
+def _describe(kind: str, obj: str, column: str | None, privilege: str) -> str:
+    if kind == "schema":
+        return f"{privilege} on schema {obj}"
+    if kind == "sequence":
+        return f"{privilege} on sequence {obj}"
+    if kind == "column":
+        return f"{privilege}({column}) on {obj}"
+    return f"{privilege} on {obj}"
+
+
+@_transaction
+def privilege_surplus(conn) -> list[str]:
+    """Everything the CURRENT role holds beyond LABELLER_GRANTS, as readable
+    strings, sorted; empty when it holds exactly that set.
+
+    Scope -- exactly what `apply_labeller_grants` revokes, so every surplus
+    named here is one the grants script clears: the role's own ACL entries on
+    schema public itself (e.g. CREATE), and on every table, view, sequence and
+    column in it. Every privilege type the server records is compared, read
+    from the ACLs rather than from a list, so PG 17+'s MAINTAIN is included.
+    Plus the role attributes SUPERUSER, CREATEROLE, CREATEDB and BYPASSRLS,
+    which the script does NOT clear (an operator's `ALTER ROLE` does).
+
+    Out of scope: functions (PUBLIC holds EXECUTE by default), privileges
+    reached through PUBLIC or through membership of another role, and
+    objects outside schema public.
+    """
+    row = conn.execute(
+        "SELECT oid, rolsuper, rolcreaterole, rolcreatedb, rolbypassrls "
+        "FROM pg_roles WHERE rolname = current_user"
+    ).fetchone()
+    role_oid, *attributes = row
+    held = {tuple(r) for r in conn.execute(_ROLE_ACL, {"role": role_oid}).fetchall()}
+    expected = set()
+    for g in LABELLER_GRANTS:
+        if g.kind == "sequence":
+            try:
+                _oid, seq = _sequence_of(conn, g.obj)
+            except RuntimeError:
+                continue  # missing_privileges names it
+            expected.add(("sequence", seq, None, g.privilege))
+        else:
+            expected.add((g.kind, g.obj, g.column, g.privilege))
+    surplus = sorted(_describe(*entry) for entry in held - expected)
+    surplus += [
+        f"role attribute {name}"
+        for name, has in zip(_ROLE_ATTRIBUTES, attributes, strict=True)
+        if has
+    ]
+    return surplus
