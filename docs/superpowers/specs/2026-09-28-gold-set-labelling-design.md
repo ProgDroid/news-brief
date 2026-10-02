@@ -545,6 +545,15 @@ The plan pre-registers the failure count for each.
     decomposition's total above, so the ruling was applied to the pair set it was made on.
     `c439ade` deploy confirmed as 2026-09-30T15:30:00+00:00, after the block's end, so the block
     does not straddle it.
+  - **Correction, 2026-10-02 (same day; the line above is kept as recorded): the block DOES
+    straddle `c439ade`.** The code was running on the host by **2026-09-26 10:30:12Z**, four days
+    earlier than the confirmed value. Evidence: `feed_polls`, a row the changed code writes
+    itself (`c439ade` renamed the feed). The last `Reuters Markets` poll was 2026-09-26
+    10:00:16.887954Z; the first `Reuters Business` poll was 10:30:12.116618Z. The last stored
+    quote pages carry that same 10:00:16.887954 timestamp. The step-2 method (image creation
+    time plus the first following `job_runs` row) dated a later image, not the first image that
+    carried the commit. Effect: only the readout's "block straddles it" line and the descriptive
+    by-block-half split read this value. The headline, the go/no-go and the page do not.
 - **Go/no-go (§4.5):** *(after window 2)*
 - **Achieved detectable difference (§4.4):** *(after window 16)*
 

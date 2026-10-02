@@ -21,7 +21,7 @@ happens in this repo until the operator runs the steps below, in this order, on 
 
 | step | state |
 |---|---|
-| 1 — deploy with `COMPREHEND_ENABLED` still false | image deployed (carried by the census deploys of 2026-09-30 and 2026-10-02); the by-effect checks are outstanding |
+| 1 — deploy with `COMPREHEND_ENABLED` still false | **passed by effect, 2026-10-02.** The phase-1 code was running by 2026-09-26 10:30:12Z (first `Reuters Business` poll), and the newest stored quote page is 2026-09-26 10:00:16Z (control: matching rows exist up to then; none since 2026-09-29). Still owed: the `quote pages dropped` log line, which tells the filter's work apart from the feed change's |
 | 2 — run the OLD gate (not before 2026-09-30 00:13:37Z) | outstanding — **do this before step 3** |
 | 3 — set `NEWSBRIEF_TRIAGE_MODEL` | outstanding |
 | 4 — run the §4.6 recovery SQL | outstanding |
@@ -69,9 +69,9 @@ Checked against `main` on 2026-10-02, while the event census was frozen and labe
 6. **The `COMPREHEND_ENABLED: env asks 1, in effect False (row says false)` warning** that
    `census_prepare` printed on 2026-10-02 is this runbook's intended state, not a fault. The
    host compose sets 1, the settings row says false, and the row wins. Step 5 flips the row.
-7. **Step 1's `<deploy time>`:** phase 1 has been in every image since 2026-09-25, so the
-   confirmed 2026-09-30 census deploy is a safe (late) lower bound for the quote-page query.
-   Its positive control (2026-09-20 to 2026-09-21) is unchanged.
+7. **Step 1's `<deploy time>` is 2026-09-26 10:30:12Z, measured, not the census's
+   2026-09-30.** `feed_polls` dates it: the first `Reuters Business` poll (a feed the phase-1
+   code introduced). See step 1's status row.
 
 ---
 

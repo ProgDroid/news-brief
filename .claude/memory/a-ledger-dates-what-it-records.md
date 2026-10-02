@@ -80,3 +80,4 @@ have seen, and filter by a birth time you have checked means what you need.**
   **Tell: a birth derived through a join that the write path also appends to later.**
   Ask which writes can attach a row to OLDER history.
 
+**Second instance, 2026-10-02 (census `c439ade` date):** image `Created` + the first following `job_runs` row dated a LATER image, four days after the commit was actually running. The instrument that worked: a row the CHANGED CODE ITSELF writes. `c439ade` renamed a feed, so the first `feed_polls` row under the new name dates it to the half-hour. **To date a deploy, find something only the new code writes.**

@@ -111,6 +111,16 @@ host pulled late, the old image can have run it.
 `2026-09-26T09:00:00+00:00`. If the old image has been pruned, say so in the step-3 record and
 confirm from the `job_runs` evidence alone.
 
+**2026-10-02: this method came out four days late.** It returned 2026-09-30T15:30, but the code
+was running by 2026-09-26 10:30Z (spec §11, correction). Image creation times and `job_runs`
+date images and jobs, not the commit. **Date a code change by a row the changed code itself
+writes.** `c439ade` renamed the feed, so this answers it directly:
+
+```sql
+SELECT source_name, min(polled_at), max(polled_at) FROM feed_polls
+ WHERE source_name IN ('Reuters Markets', 'Reuters Business') GROUP BY 1;
+```
+
 ## Step 3: `census_prepare`, on or after 2026-10-01
 
 **2026-10-02: the gap check stopped at 67.1%, and the operator ruled to proceed under the
