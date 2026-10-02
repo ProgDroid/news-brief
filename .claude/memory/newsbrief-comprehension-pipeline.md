@@ -374,4 +374,4 @@ label), `bqa.11` still blocked, and the separator is STILL an arbitrary 0.35 —
 needs pairs 5+ days apart and the KB is younger. Re-run the calibration once it spans five days.
 
 
-**From the index (moved 2026-10-02):** `bqa.11` is blocked on the `yxd` decision: `docs/2026-09-14-corroboration-gate-decision.md`.
+**From the index (moved 2026-10-02, corrected same day):** `yxd` is CLOSED — decided 2026-09-14, option (3), recorded in `docs/2026-09-14-corroboration-gate-decision.md`. The gate run itself (`bqa.11`) is step 2 of `docs/2026-09-25-host-runbook-cost-redesign-phase-1.md`; the index had carried "blocked on yxd" past its closure.

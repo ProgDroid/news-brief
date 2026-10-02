@@ -21,13 +21,57 @@ happens in this repo until the operator runs the steps below, in this order, on 
 
 | step | state |
 |---|---|
-| 1 — deploy with `COMPREHEND_ENABLED` still false | outstanding |
+| 1 — deploy with `COMPREHEND_ENABLED` still false | image deployed (carried by the census deploys of 2026-09-30 and 2026-10-02); the by-effect checks are outstanding |
 | 2 — run the OLD gate (not before 2026-09-30 00:13:37Z) | outstanding — **do this before step 3** |
 | 3 — set `NEWSBRIEF_TRIAGE_MODEL` | outstanding |
 | 4 — run the §4.6 recovery SQL | outstanding |
 | 5 — flip `COMPREHEND_ENABLED` | outstanding |
 | 6 — deliberate exhaustion check | outstanding |
 | 7 — after 7 days, record and compare | outstanding |
+
+## Pre-flight check, 2026-10-02 (read before resuming)
+
+Checked against `main` on 2026-10-02, while the event census was frozen and labelling.
+
+1. **No drift in anything this runbook names.** Since its last revision (2026-09-26), only
+   census commits have touched `comprehend.py`, `common.py`, `brief.py`, `capture.py` or
+   `scheduler.py`. These were all re-verified in the source: the three model knobs' env names;
+   the budget defaults (1.50, 3.0) and `COMPREHEND_MAX_LINK_DEFERS` (10); the
+   `PRICES_PER_MTOK` keys; `COMPREHEND_BUDGET_ALERT_KEY`; every `Tally` field step 5 names;
+   capture's `quote_pages_dropped`; `comprehend` and `monitor` as independent 60-minute
+   intervals; and the hardcoded Haiku `RECONCILE_MODEL`. Step 5's expected log line is built
+   from a template (`Comprehend: {label} call took …s (timeout=…s) stop_reason=…`, with
+   `label="triage"`), so it will not be found as one literal string in the code.
+2. **The census is not affected, so steps 2–7 may run during its freeze.** The census block
+   (2026-09-18 to 2026-09-29) lies inside comprehension's 14-day horizon, so the flip will
+   integrate block items. That changes no census input:
+   - the only census reader of `assertions`/`events` is `census.gap_check`, which runs on a
+     first `census_prepare` only;
+   - the page and the readout never read comprehension's tables;
+   - comprehension never deletes or updates `items` (its `UPDATE`s all target
+     `item_triage`), so the retention hold is never tripped.
+3. **Step 2 on the host uses Docker, not `py`.** The old runbook prints a local `py` line. On
+   the host, run the form `Dockerfile` documents:
+
+   ```sh
+   docker compose run --rm --entrypoint python newsbrief scripts/score_comprehension.py \
+       --cutover '2026-09-22T18:13:37.571434Z' --horizon-hours 6 ; echo REAL_EXIT=$?
+   ```
+
+4. **Nothing blocks step 2.** `news-brief-yxd` was decided on 2026-09-14 (option 3,
+   `docs/2026-09-14-corroboration-gate-decision.md`). The gate this step fires is
+   `news-brief-bqa.11`.
+5. **Expected outcome of step 2, written down before it runs:** comprehension has been off
+   since the cost stop, so the newest event predates the cohort's end by days. The gate should
+   refuse with "the corpus is FROZEN" (NOT MEASURABLE), and its header should name the last
+   event and the largest gap. Per this runbook, that refusal is the recorded result, not a
+   reason to re-run.
+6. **The `COMPREHEND_ENABLED: env asks 1, in effect False (row says false)` warning** that
+   `census_prepare` printed on 2026-10-02 is this runbook's intended state, not a fault. The
+   host compose sets 1, the settings row says false, and the row wins. Step 5 flips the row.
+7. **Step 1's `<deploy time>`:** phase 1 has been in every image since 2026-09-25, so the
+   confirmed 2026-09-30 census deploy is a safe (late) lower bound for the quote-page query.
+   Its positive control (2026-09-20 to 2026-09-21) is unchanged.
 
 ---
 
