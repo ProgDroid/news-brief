@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: 3643de5b-dee7-49f4-8b2e-34e984499482
-  modified: 2026-10-02T15:34:38.845Z
+  modified: 2026-10-02T15:54:12.754Z
 ---
 
 **State as of 2026-09-30.** Built and pushed (code through `3428111`, main at `608cbae`,
@@ -23,6 +23,9 @@ Do not re-run the decomposition — it is recorded. **RULED same day: keep 6h, h
 to within-6h** (spec §11, §14 item 12). Built, committed and pushed 2026-10-02:
 `CENSUS_GAP_RULING=within_6h_only` on `census_prepare`; host must deploy + repin
 `LABELLER_IMAGE` BEFORE step 3 (runbook step 3 preamble). Don't reopen the window length.
+**STEP 3 DONE 2026-10-02** (redeployed + repinned first): block 2026-09-18 → 2026-09-29, 16 windows
++ repeat, 3 skipped, `within_6h_only by operator ruling` (2549 pairs, 52 windows); `vd9.13` closed.
+**The FREEZE IS NOW IN FORCE** and the retention hold is armed. Next: step 7 (`/label`).
 
 **Why this matters to any future session:**
 - **FREEZE: from runbook step 3 to step 10, no semantic change to `census.py`,

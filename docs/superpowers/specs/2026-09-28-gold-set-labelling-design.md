@@ -539,6 +539,12 @@ The plan pre-registers the failure count for each.
     merge pairs a window keeps together. Downstream consequence carried by §14 item 12, not by
     another revision here. Mechanism: `CENSUS_GAP_RULING=within_6h_only` on `census_prepare`
     (refused when the gap check did not stop); the readout marks the band "by operator ruling".
+  - **Prepared, 2026-10-02** (runbook step 3, after redeploying and repinning the labeller):
+    `prepared block 2026-09-18 to 2026-09-29: 16 windows drawn plus the repeat, 3 skipped, gap
+    band within_6h_only by operator ruling (2549 pairs, 52 windows)`. The 2,549 pairs equal the
+    decomposition's total above, so the ruling was applied to the pair set it was made on.
+    `c439ade` deploy confirmed as 2026-09-30T15:30:00+00:00, after the block's end, so the block
+    does not straddle it.
 - **Go/no-go (§4.5):** *(after window 2)*
 - **Achieved detectable difference (§4.4):** *(after window 16)*
 
