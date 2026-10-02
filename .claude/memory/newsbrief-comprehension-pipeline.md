@@ -373,3 +373,5 @@ A/B a ranking change at this corpus size — ~3.2pp resolvable against +0.25pp a
 label), `bqa.11` still blocked, and the separator is STILL an arbitrary 0.35 — the negative class
 needs pairs 5+ days apart and the KB is younger. Re-run the calibration once it spans five days.
 
+
+**From the index (moved 2026-10-02):** `bqa.11` is blocked on the `yxd` decision: `docs/2026-09-14-corroboration-gate-decision.md`.

@@ -50,3 +50,5 @@ pause left a backlog that was drained oldest-first, on Sonnet, with no budget.
   - `7gp` (select_sampled session TZ).
 
 Related: [[newsbrief-comprehend-cost]], [[newsbrief-comprehension-pipeline]], [[snapshot-config-per-unit-of-work]].
+
+**From the index (moved 2026-10-02):** Phase 2 status as carried by the index: spike + M1 RAN (grouping fails; RT goes blind at low density). M2 `y1x` RAN: HAIKU QUALIFIES by the rule, but on link decisions it agrees with Sonnet only 55% vs Sonnet's self-agreement of 77%; which way it departs is unmeasured (`sse`). `jwm` done (prompt v4), `li9` done (gate refuses mid-cohort holes).

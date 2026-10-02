@@ -160,3 +160,6 @@ suite runs well past 10 minutes, and Claude Code killed the background run at ~9
 machine was low on memory while the session sat idle. That is neither a pass nor a failure:
 read the log's `RUFF_*_EXIT=` / `REAL_EXIT=` lines -- a missing `REAL_EXIT` is UNKNOWN -- and
 do not restart it unasked; CI's run is the authority after a push.
+
+
+**From the index (moved 2026-10-02):** CI has no pandas: place a test by what it NEEDS, not what it's ABOUT.

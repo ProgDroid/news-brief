@@ -162,3 +162,5 @@ keys, because sharing one would let whichever was seen first silence the other.
 
 Built in `c12db23`: `capture.failing_feeds`, `capture.item_drought`, `brief.capture_quality_alert`
 in `mode_monitor`. 11 tests; 4 pre-registered mutations each failing exactly one test.
+
+**From the index (moved 2026-10-02):** Open follow-up: `b42.5` (per-feed intervals).

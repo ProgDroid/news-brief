@@ -244,3 +244,5 @@ found by running mutations or traces; none by the two plan red-teams.
   the pattern matches EXACTLY once and report `BROKEN MUTANT` otherwise -- and match CRLF too:
   some working-tree files here are CRLF (autocrlf), so a `\n` pattern silently counts 0
   (2026-10-02; harness: copy, mutate, run all three files, restore in `finally`, assert bytes).
+
+**From the index (moved 2026-10-02):** A task's own change can blind its order test; a relocation to block-end is a non-mutation; check report tables for skipped required rows.
