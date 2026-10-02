@@ -25,9 +25,9 @@ happens in this repo until the operator runs the steps below, in this order, on 
 | 2 — run the OLD gate (not before 2026-09-30 00:13:37Z) | **DONE 2026-10-02: GATE NOT RESOLVED, corpus FROZEN** (as pre-registered). Output verbatim: `docs/2026-10-02-amendment-2-gate-output.md` |
 | 3 — set `NEWSBRIEF_TRIAGE_MODEL` | **DONE 2026-10-02 17:34:03.684026Z** (`RETURNING`: `NEWSBRIEF_TRIAGE_MODEL \| claude-haiku-4-5`) |
 | 4 — run the §4.6 recovery SQL | **DONE 2026-10-02**: 305 rows (integrate counters reset), 12 rows (failed triage attempts reset) |
-| 5 — flip `COMPREHEND_ENABLED` | pre-flight PASSED 2026-10-02: only `NEWSBRIEF_TRIAGE_MODEL` (`claude-haiku-4-5`) is set; the other two model keys have no row and fall back to Sonnet. Flip outstanding |
+| 5 — flip `COMPREHEND_ENABLED` | **DONE, verified by effect.** Pre-flight passed (only `NEWSBRIEF_TRIAGE_MODEL` = `claude-haiku-4-5` is set; the other two fall back to Sonnet). **`<flip>` = 2026-10-02 17:48:04.78043Z** (`settings.updated_at`). `comprehend_spend` triage rows: `claude-haiku-4-5` × 12, no other model. First Haiku triage call: `triage call took 2.8s (timeout=90s) stop_reason=tool_use in=2753 out=410` at 19:04:22Z, so `thinking: disabled` is now OBSERVED accepted by Haiku 4.5, not only documented |
 | 6 — deliberate exhaustion check | outstanding |
-| 7 — after 7 days, record and compare | outstanding |
+| 7 — after 7 days, record and compare | due on/after **2026-10-09 17:48Z** (`<flip>` + 7d) |
 
 ## Pre-flight check, 2026-10-02 (read before resuming)
 
