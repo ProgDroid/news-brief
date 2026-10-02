@@ -554,6 +554,8 @@ The plan pre-registers the failure count for each.
     time plus the first following `job_runs` row) dated a later image, not the first image that
     carried the commit. Effect: only the readout's "block straddles it" line and the descriptive
     by-block-half split read this value. The headline, the go/no-go and the page do not.
+    **The stored value was corrected the same day by the operator:** `census_block.c439ade_deployed_at`
+    = 2026-09-26 10:30:12.116618+00 (`RETURNING` confirmed, block 2026-09-18 to 2026-09-29).
 - **Go/no-go (§4.5):** *(after window 2)*
 - **Achieved detectable difference (§4.4):** *(after window 16)*
 

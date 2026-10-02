@@ -23,9 +23,9 @@ happens in this repo until the operator runs the steps below, in this order, on 
 |---|---|
 | 1 — deploy with `COMPREHEND_ENABLED` still false | **passed by effect, 2026-10-02.** The phase-1 code was running by 2026-09-26 10:30:12Z (first `Reuters Business` poll), and the newest stored quote page is 2026-09-26 10:00:16Z (control: matching rows exist up to then; none since 2026-09-29). Log check: `quote pages dropped` was 0 in every line checked, so the feed move stopped the flood and the filter has had nothing to drop. **DONE** |
 | 2 — run the OLD gate (not before 2026-09-30 00:13:37Z) | **DONE 2026-10-02: GATE NOT RESOLVED, corpus FROZEN** (as pre-registered). Output verbatim: `docs/2026-10-02-amendment-2-gate-output.md` |
-| 3 — set `NEWSBRIEF_TRIAGE_MODEL` | outstanding |
-| 4 — run the §4.6 recovery SQL | outstanding |
-| 5 — flip `COMPREHEND_ENABLED` | outstanding |
+| 3 — set `NEWSBRIEF_TRIAGE_MODEL` | **DONE 2026-10-02 17:34:03.684026Z** (`RETURNING`: `NEWSBRIEF_TRIAGE_MODEL \| claude-haiku-4-5`) |
+| 4 — run the §4.6 recovery SQL | **DONE 2026-10-02**: 305 rows (integrate counters reset), 12 rows (failed triage attempts reset) |
+| 5 — flip `COMPREHEND_ENABLED` | pre-flight PASSED 2026-10-02: only `NEWSBRIEF_TRIAGE_MODEL` (`claude-haiku-4-5`) is set; the other two model keys have no row and fall back to Sonnet. Flip outstanding |
 | 6 — deliberate exhaustion check | outstanding |
 | 7 — after 7 days, record and compare | outstanding |
 

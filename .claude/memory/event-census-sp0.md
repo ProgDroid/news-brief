@@ -26,7 +26,7 @@ to within-6h** (spec §11, §14 item 12). Built, committed and pushed 2026-10-02
 **STEP 3 DONE 2026-10-02** (redeployed + repinned first): block 2026-09-18 → 2026-09-29, 16 windows
 + repeat, 3 skipped, `within_6h_only by operator ruling` (2549 pairs, 52 windows); `vd9.13` closed.
 **The FREEZE IS NOW IN FORCE** and the retention hold is armed. Next: step 7 (`/label`).
-**`c439ade` date CORRECTED 2026-10-02:** recorded 2026-09-30T15:30, but `feed_polls` shows the code running by 2026-09-26 10:30:12Z, so the block DOES straddle it (spec §11 correction). Only the readout's straddle line and by-half split read it. Fixing the stored `census_block.c439ade_deployed_at` is the operator's call (data, not code).
+**`c439ade` date CORRECTED 2026-10-02:** recorded 2026-09-30T15:30, but `feed_polls` shows the code running by 2026-09-26 10:30:12Z, so the block DOES straddle it (spec §11 correction). Only the readout's straddle line and by-half split read it. The stored `census_block.c439ade_deployed_at` was CORRECTED by the operator the same day.
 
 **Why this matters to any future session:**
 - **FREEZE: from runbook step 3 to step 10, no semantic change to `census.py`,
