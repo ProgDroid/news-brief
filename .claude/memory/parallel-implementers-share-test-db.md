@@ -13,3 +13,7 @@ metadata:
 **Why:** disjoint files is not independence. The test DB on :5432 is shared mutable state, and every DB-backed fixture destroys the schema. A collision can fail either run, or — worse — let a run pass against a schema the other agent just built.
 
 **How to apply:** in subagent-driven runs here, overlap an implementer only with READ-ONLY reviewers (tell reviewers not to run pytest while an implementer is live). Never run two implementers, or an implementer and a controller gate run, at once. If it happened, treat both runs' results as UNKNOWN and re-run one at a time. Related: [[subagent-review-stalls]], [[brief-local-run]].
+
+**Confirmed safe overlaps (2026-09-29, census minors, 0 collisions):** an implementer running
+pytest alongside (a) a docs-only agent told not to run pytest and (b) read-only reviewers told the
+same. The browser-verification run was given the DB exclusively, since its setup resets the schema.

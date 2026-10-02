@@ -202,3 +202,17 @@ background gate run exactly as recorded above. From Task 3 on, the line was in e
 and there were 0 parks in 4 tasks. The rule was already in this file. The index line carried
 only the cure ("nudge"), so it was not in view at dispatch time. **Put the prevention in the
 shared context file before the first dispatch.**
+
+## 2026-09-29 (census minors, 5 tasks + final wave): three additions
+
+- **The `task-brief` script only finds `### Task N` headings.** A plan written with "Batch N"
+  headings fails with `task N not found`. Name plan sections "Task N" from the start.
+- **Make every agent list the claims it did NOT execute, and route those to a reviewer told to
+  RUN them.** The docs agent flagged two runbook claims as "inferred, not run"; the final
+  reviewer, pointed at exactly those, ran probe scripts on the test DB and found both false
+  (`census_prepare` after a release crashed with a traceback instead of preparing; a
+  superuser-made role breaks the grants script). The plan red team and two task reviews had read
+  past them. Reading reviews saturate; an executed probe does not.
+- **A mutation count ABOVE prediction by one can be benign.** Twice a new test also covered a
+  neighbouring function (the bootstrap pin covered ARI and F1). Report it, then explain it; do not
+  adjust the prediction.

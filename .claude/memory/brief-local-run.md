@@ -154,3 +154,9 @@ disk only -- the `.vhdx` does not shrink on its own, so follow with `wsl --shutd
 
 **Tell:** `docker system df` showing Local Volumes far larger than Images, with a high RECLAIMABLE
 percentage. Check it before concluding Docker needs moving to another drive.
+
+**A backgrounded full suite can be REAPED, not failed** (2026-10-02): with the DB configured the
+suite runs well past 10 minutes, and Claude Code killed the background run at ~91% because the
+machine was low on memory while the session sat idle. That is neither a pass nor a failure:
+read the log's `RUFF_*_EXIT=` / `REAL_EXIT=` lines -- a missing `REAL_EXIT` is UNKNOWN -- and
+do not restart it unasked; CI's run is the authority after a push.

@@ -239,3 +239,8 @@ found by running mutations or traces; none by the two plan red-teams.
   crashed every test that touched it. Fix the mutant and re-run before believing that the tests
   are "very sensitive". A mutant that fails to execute is not a mutation.
 
+- **A ZERO can also mean the mutant never applied.** A scripted exact-string mutant whose pattern
+  matches nothing leaves the source untouched, and "0 failed" then reads as a test gap. Assert
+  the pattern matches EXACTLY once and report `BROKEN MUTANT` otherwise -- and match CRLF too:
+  some working-tree files here are CRLF (autocrlf), so a `\n` pattern silently counts 0
+  (2026-10-02; harness: copy, mutate, run all three files, restore in `finally`, assert bytes).
