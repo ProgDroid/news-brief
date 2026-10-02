@@ -4022,6 +4022,10 @@ def mode_census_prepare():
         print(f"CENSUS_C439ADE_DEPLOYED_AT has no timezone offset: {raw!r}")
         sys.exit(2)
 
+    # The operator's ruling over a gap-check stop (spec sec 11); empty means
+    # none. `census.prepare` alone validates it.
+    gap_ruling = os.environ.get("CENSUS_GAP_RULING", "") or None
+
     now = datetime.now(timezone.utc)
     with db.connect() as conn:
         with db.advisory_lock(conn, "census_prepare") as acquired:
@@ -4029,7 +4033,9 @@ def mode_census_prepare():
                 print("census_prepare is already running")
                 sys.exit(2)
             try:
-                result = census.prepare(conn, now.date(), c439ade_deployed_at, now)
+                result = census.prepare(
+                    conn, now.date(), c439ade_deployed_at, now, gap_ruling=gap_ruling
+                )
             except census.CensusRefusal as e:
                 print(str(e))
                 sys.exit(2)

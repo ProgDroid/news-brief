@@ -323,6 +323,66 @@ def test_prepare_refuses_when_gap_share_exceeds_half(kb):
     assert all(n == 0 for n in _census_row_counts(kb).values())
 
 
+def test_prepare_with_a_within_6h_ruling_proceeds_over_a_stop(kb):
+    """Spec 11, 2026-10-02: the operator ruled that a gap-check stop may
+    proceed with the headline narrowed to within-6h confirmation. The stored
+    share stays the measured one (above 50%); only the band is ruled."""
+    today = date(2026, 10, 1)
+    block = census.compute_block(today)
+    days = (block.end - block.start).days
+    cf.seed_corpus(kb, block.start, days=days, per_window=45, outlets=3)
+    cf.seed_gap_pairs(kb, block.start, n=5, gap_minutes=12 * 60)
+    kb.commit()
+
+    result = census.prepare(
+        kb, today, cf.DEPLOYED_AT, cf.NOW, gap_ruling="within_6h_only"
+    )
+    assert "prepared" in result
+    assert "operator ruling" in result
+
+    share, band = kb.execute(
+        "SELECT gap_split_share, gap_band FROM census_block"
+    ).fetchone()
+    assert share > 0.5
+    assert band == "within_6h_only"
+
+
+def test_prepare_refuses_a_ruling_the_gap_check_does_not_need(kb):
+    """A ruling given when the gap check passes means the operator is acting
+    on a picture that is no longer true; refuse rather than ignore it."""
+    today = date(2026, 10, 1)
+    block = census.compute_block(today)
+    days = (block.end - block.start).days
+    cf.seed_corpus(kb, block.start, days=days, per_window=45, outlets=3)
+    cf.seed_gap_pairs(kb, block.start, n=5, gap_minutes=20)
+    kb.commit()
+
+    with pytest.raises(census.CensusRefusal, match="did not stop"):
+        census.prepare(kb, today, cf.DEPLOYED_AT, cf.NOW, gap_ruling="within_6h_only")
+
+    # IDLE first: counting rows opens a transaction of its own.
+    assert kb.info.transaction_status == psycopg.pq.TransactionStatus.IDLE
+    assert all(n == 0 for n in _census_row_counts(kb).values())
+
+
+def test_prepare_refuses_an_unknown_ruling(kb):
+    """Only `within_6h_only` is a ruling: `proceed` would turn a stop into an
+    unqualified pass."""
+    today = date(2026, 10, 1)
+    block = census.compute_block(today)
+    days = (block.end - block.start).days
+    cf.seed_corpus(kb, block.start, days=days, per_window=45, outlets=3)
+    cf.seed_gap_pairs(kb, block.start, n=5, gap_minutes=12 * 60)
+    kb.commit()
+
+    with pytest.raises(census.CensusRefusal, match="unknown gap ruling"):
+        census.prepare(kb, today, cf.DEPLOYED_AT, cf.NOW, gap_ruling="proceed")
+
+    # IDLE first: counting rows opens a transaction of its own.
+    assert kb.info.transaction_status == psycopg.pq.TransactionStatus.IDLE
+    assert all(n == 0 for n in _census_row_counts(kb).values())
+
+
 def test_prepare_records_within_6h_band(kb):
     today = date(2026, 10, 1)
     block = census.compute_block(today)

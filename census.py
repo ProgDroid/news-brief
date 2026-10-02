@@ -17,7 +17,7 @@ import hashlib
 import hmac
 import random
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 
 from psycopg import sql
@@ -50,6 +50,11 @@ BACKLOG_HOURS = 24
 WINDOWS_PER_STRATUM = 4
 SEED = 20260928
 REPEAT_ORDER_NO = 2
+
+# The one ruling `prepare` accepts over a gap-check stop (spec sec 11,
+# 2026-10-02): proceed with the headline narrowed to within-6h confirmation.
+# `proceed` is deliberately not a ruling -- it would make a stop a clean pass.
+GAP_RULINGS = ("within_6h_only",)
 
 # Session state (plan Task 4). The four thresholds below are DEFINED in
 # census_metrics (the functions take them as defaults) and re-exported here so
@@ -288,10 +293,21 @@ def gap_check(conn) -> GapCheck:
     )
 
 
-def prepare(conn, today: date, c439ade_deployed_at: datetime, now: datetime) -> str:
+def prepare(
+    conn,
+    today: date,
+    c439ade_deployed_at: datetime,
+    now: datetime,
+    gap_ruling: str | None = None,
+) -> str:
     """Freeze the block and the 16-window order (plus the pass-2 repeat), in
     one transaction. Idempotent: a second call is a no-op that reports the
     existing block (spec sec 6.1, "it does, in one run").
+
+    `gap_ruling` is the operator's ruling over a gap-check stop (spec sec 11):
+    with `within_6h_only` a stop proceeds under that band, storing the
+    measured share unchanged. A ruling the gap check did not need is refused,
+    not ignored -- the operator is acting on a picture that is no longer true.
 
     Every early return or raise below rolls back first (M5/F21): the
     "already prepared" read and the gap check both leave the session in an
@@ -322,17 +338,34 @@ def prepare(conn, today: date, c439ade_deployed_at: datetime, now: datetime) -> 
             "prepare will not start a new census over them"
         )
 
+    if gap_ruling is not None and gap_ruling not in GAP_RULINGS:
+        conn.rollback()
+        raise CensusRefusal(
+            f"unknown gap ruling {gap_ruling!r}; the only ruling is "
+            f"{', '.join(GAP_RULINGS)}"
+        )
+
     try:
         gap = gap_check(conn)
     except CensusRefusal:
         conn.rollback()
         raise
 
+    ruled = False
     if gap.band == "stop":
+        if gap_ruling is None:
+            conn.rollback()
+            raise CensusRefusal(
+                f"gap split share {gap.split_share:.1%} exceeds 50%; refusing to "
+                f"prepare the census -- bring the window length back to the operator"
+            )
+        gap = replace(gap, band=gap_ruling)
+        ruled = True
+    elif gap_ruling is not None:
         conn.rollback()
         raise CensusRefusal(
-            f"gap split share {gap.split_share:.1%} exceeds 50%; refusing to "
-            f"prepare the census -- bring the window length back to the operator"
+            f"gap ruling {gap_ruling!r} given, but the gap check did not stop "
+            f"(split share {gap.split_share:.1%}, band {gap.band}); unset it"
         )
 
     try:
@@ -419,7 +452,9 @@ def prepare(conn, today: date, c439ade_deployed_at: datetime, now: datetime) -> 
     return (
         f"prepared block {block.start.date()} to {block.end.date()}: "
         f"{len(order)} windows drawn plus the repeat, {len(skipped)} skipped, "
-        f"gap band {gap.band} ({gap.pairs} pairs, {gap.windows} windows)"
+        f"gap band {gap.band}"
+        + (" by operator ruling" if ruled else "")
+        + f" ({gap.pairs} pairs, {gap.windows} windows)"
     )
 
 

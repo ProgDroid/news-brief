@@ -119,7 +119,8 @@ capture, not of ranking, and no recorded field dates the ranking change.
 **The check is biased toward passing.** Pairs production failed to merge are missing from it, and
 comprehension ran only around 9–10 Sep and 22–25 Sep, so gaps across the pause between cannot
 appear. Pre-registered:
-- **above 50%:** stop, and bring the window length back to the operator;
+- **above 50%:** stop, and bring the window length back to the operator (2026-10-02: it stopped
+  at 67.1%, and the operator ruled to proceed under the within-6h label; §11);
 - **40–50%:** proceed, and the headline is labelled everywhere as covering confirmation
   **within 6 hours only**;
 - **below 40%:** proceed.
@@ -504,7 +505,40 @@ The plan pre-registers the failure count for each.
 
 ## 11. Recorded values (filled in by the process, never edited after)
 
-- **Gap check (§4.3):** *(before window 1)*
+- **Gap check (§4.3):** **STOP, 2026-10-02.** `census_prepare` against the production database
+  refused with expected split share **67.1%** under 6-hour windows (band `stop`, above 50%);
+  nothing was written. Breakdown of the merged cross-outlet pairs (2,549, the same pair set as
+  `census.gap_check`; the buckets' points sum to 67.1, which is the control):
+
+  | capture gap | pairs | % of pairs | points of the 67.1 |
+  |---|---|---|---|
+  | < 1 h | 417 | 16.4 | 1.0 |
+  | 1–6 h | 906 | 35.5 | 18.1 |
+  | 6–24 h | 750 | 29.4 | 29.4 |
+  | 1–3 d | 312 | 12.2 | 12.2 |
+  | > 3 d | 164 | 6.4 | 6.4 |
+
+  - **No event dominates:** the ten largest events hold 379 pairs (15%), the largest 72 (2.8%).
+    Pairs straddling the 11–21 Sep comprehension pause (a later item can join an older event)
+    contribute at most the 6.4 points above 3 days.
+  - **Robust to the most favourable cut:** dropping every pair over 24 h still leaves 59.7%
+    (48.5 points over 81.3% of pairs), so no reading of the pair set passes at 6 hours.
+  - **Other window lengths, computed after the 6-hour result was seen** (same pair set,
+    `E[min(g/W, 1)]`, the 6-hour row reproducing 67.1): **12 h 53.7%, 24 h 39.6%.** 24 h is 0.4
+    points under the 40% line, and the check is biased toward passing.
+  - **24 h is not feasible as designed:** the block floor is 2026-09-18, so a block prepared on
+    2026-10-02 holds 11 days (16 needs `BLOCK_DAYS` ≥ 16 and preparation on or after
+    2026-10-07, with no draw left); the time-of-day strata disappear; and labelling grows about
+    4× against §12's ~19 h.
+  - **Operator ruling, 2026-10-02: keep 6-hour windows and proceed with the headline narrowed
+    to confirmation within 6 hours** (the `within_6h_only` band, here over a share above 50%).
+    Reasons: it reuses the design as built, the 40–50% band's label and §13's assignment of
+    cross-window joining to sub-project 2; 24 h fails on feasibility above; neighbouring-window
+    links in the labeller need new UI, and machine-proposed candidates risk inheriting
+    production's ranking blind spots. Cost: the headline speaks only to the roughly one-third of
+    merge pairs a window keeps together. Downstream consequence carried by §14 item 12, not by
+    another revision here. Mechanism: `CENSUS_GAP_RULING=within_6h_only` on `census_prepare`
+    (refused when the gap check did not stop); the readout marks the band "by operator ruling".
 - **Go/no-go (§4.5):** *(after window 2)*
 - **Achieved detectable difference (§4.4):** *(after window 16)*
 
@@ -566,3 +600,8 @@ Each item needs a pre-registered answer; "not applicable, because…" is an answ
     block), and never tune on the 16 windows.
 11. **Replay from capture day one** (2026-09-04), so entity state matches production. About
     $40–60 per system per run, so about $160–240 per two-arm comparison. Budget it.
+12. **The headline covers within-6-hour confirmation only** (§11, gap-check ruling of
+    2026-10-02). Two-thirds of production's cross-outlet merge pairs are split by a 6-hour
+    window, and long-gap confirmation, which asks a ranking to find an older event in a growing
+    corpus, may be exactly where systems differ. State what a within-window result licenses
+    about cross-window matching, and what it does not, before scoring.

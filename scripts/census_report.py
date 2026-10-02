@@ -68,10 +68,14 @@ def _pct(num: int, den: int) -> str:
 
 def _gap_section(block: tuple) -> list[str]:
     share, pairs, windows, deciles, band = block[4:9]
+    # gap_band() stops above 50%, so a stored band over such a share can only
+    # have come from the operator's ruling (spec 11, 2026-10-02).
+    ruled = share > 0.5
     return [
         "== Gap check (spec 4.3) ==",
         f"split share {100 * share:.1f}% over {pairs} pairs in {windows} windows; "
-        f"band {band}",
+        f"band {band}"
+        + (" by operator ruling: share above the 50% stop (spec 11)" if ruled else ""),
         "deciles of gap (hours): " + ", ".join(f"{d:.2f}" for d in deciles),
         "biased toward passing (spec 4.3)",
     ]

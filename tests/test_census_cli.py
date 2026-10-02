@@ -75,7 +75,7 @@ def test_lock_not_acquired_exits_2(monkeypatch, capsys):
 def test_census_refusal_exits_2(monkeypatch, capsys):
     monkeypatch.setenv("CENSUS_C439ADE_DEPLOYED_AT", "2026-09-25T12:00:00+00:00")
 
-    def _refuse(conn, today, c439ade_deployed_at, now):
+    def _refuse(conn, today, c439ade_deployed_at, now, gap_ruling=None):
         raise census.CensusRefusal("synthetic refusal for the CLI test")
 
     monkeypatch.setattr(census, "prepare", _refuse)
@@ -85,3 +85,29 @@ def test_census_refusal_exits_2(monkeypatch, capsys):
 
     assert exc.value.code == 2
     assert "synthetic refusal for the CLI test" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("env_value", "expected"),
+    [(None, None), ("", None), ("within_6h_only", "within_6h_only")],
+)
+def test_gap_ruling_env_reaches_prepare(monkeypatch, capsys, env_value, expected):
+    """CENSUS_GAP_RULING is passed through verbatim (empty means none);
+    `census.prepare` alone decides whether the value is a valid ruling."""
+    monkeypatch.setenv("CENSUS_C439ADE_DEPLOYED_AT", "2026-09-25T12:00:00+00:00")
+    if env_value is None:
+        monkeypatch.delenv("CENSUS_GAP_RULING", raising=False)
+    else:
+        monkeypatch.setenv("CENSUS_GAP_RULING", env_value)
+    seen = {}
+
+    def _capture(conn, today, c439ade_deployed_at, now, gap_ruling=None):
+        seen["gap_ruling"] = gap_ruling
+        return "captured"
+
+    monkeypatch.setattr(census, "prepare", _capture)
+
+    brief.mode_census_prepare()
+
+    assert seen == {"gap_ruling": expected}
+    assert "captured" in capsys.readouterr().out

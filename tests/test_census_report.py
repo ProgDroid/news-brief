@@ -1,6 +1,6 @@
 """`scripts/census_report.py`: the read-only readout (plan Task 9)."""
 
-from datetime import timedelta, timezone
+from datetime import date, timedelta, timezone
 
 import psycopg
 import pytest
@@ -35,6 +35,24 @@ def kb():
 def ready(kb):
     cf.prepared(kb)
     return kb
+
+
+def test_report_names_a_ruled_gap_band(kb):
+    """A band of within_6h_only over a share above 50% exists only by the
+    operator's ruling (spec 11); the readout must say so beside the number."""
+    today = date(2026, 10, 1)
+    block = census.compute_block(today)
+    days = (block.end - block.start).days
+    cf.seed_corpus(kb, block.start, days=days, per_window=45, outlets=3)
+    cf.seed_gap_pairs(kb, block.start, n=5, gap_minutes=12 * 60)
+    kb.commit()
+    census.prepare(kb, today, cf.DEPLOYED_AT, NOW, gap_ruling="within_6h_only")
+
+    assert "by operator ruling" in census_report.render(kb, NOW)
+
+
+def test_report_does_not_claim_a_ruling_for_a_measured_band(ready):
+    assert "by operator ruling" not in census_report.render(ready, NOW)
 
 
 def test_report_without_census_says_so(kb, capsys):

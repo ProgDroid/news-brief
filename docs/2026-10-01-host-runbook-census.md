@@ -113,11 +113,23 @@ confirm from the `job_runs` evidence alone.
 
 ## Step 3: `census_prepare`, on or after 2026-10-01
 
+**2026-10-02: the gap check stopped at 67.1%, and the operator ruled to proceed under the
+within-6h label** (spec §11). The ruling is code that shipped after step 1's deploy, so before
+running step 3:
+
+1. Deploy the image that contains `CENSUS_GAP_RULING` and recreate the daemon:
+   `docker compose pull newsbrief && docker compose up -d newsbrief`.
+2. **Repin the labeller to that image** (`LABELLER_IMAGE` in `.env`, taken as in step 4), then
+   `docker compose --profile census up -d labeller` and read its log as in step 6. The change
+   does not touch anything the page runs, but repinning now, before the freeze starts, keeps
+   one `census.py` everywhere, and gives the readout its "by operator ruling" line.
+
 ```sh
-docker compose run --rm -e CENSUS_C439ADE_DEPLOYED_AT=<confirmed> newsbrief census_prepare ; echo REAL_EXIT=$?
+docker compose run --rm -e CENSUS_C439ADE_DEPLOYED_AT=<confirmed> -e CENSUS_GAP_RULING=within_6h_only newsbrief census_prepare ; echo REAL_EXIT=$?
 ```
 
-Success prints one line and exits 0:
+Success prints one line and exits 0 (with the ruling, the band reads
+`within_6h_only by operator ruling`):
 
 ```
 prepared block <start> to <end>: 16 windows drawn plus the repeat, <n> skipped, gap band <band> (<pairs> pairs, <windows> windows)
@@ -145,6 +157,11 @@ decides what happens next (spec §4.3):
 - `stratum <s> has only <n> eligible windows (needs 4)`: the pool is too thin to draw the
   order. Bring it to the operator.
 - `census_prepare is already running`: another run holds the advisory lock.
+- `unknown gap ruling '<value>'`: `CENSUS_GAP_RULING` is set to anything but
+  `within_6h_only`. There is no other ruling; `proceed` is refused on purpose.
+- `gap ruling 'within_6h_only' given, but the gap check did not stop`: the share has fallen
+  to 50% or below since the ruling. Drop `-e CENSUS_GAP_RULING=…` and record the band it
+  prints instead.
 
 **Re-running is safe.** Once prepared, it prints `already prepared: block <start> to <end>` and
 changes nothing. From this moment the retention hold is armed: any delete of an item captured
