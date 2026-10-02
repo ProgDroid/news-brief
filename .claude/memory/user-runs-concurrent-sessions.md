@@ -1,6 +1,7 @@
 ---
 name: user-runs-concurrent-sessions
 description: "The user runs multiple Claude sessions against this repo at once — unexplained working-tree changes are usually his, not cruft. Flag, never revert."
+promoted_to: plugin
 metadata: 
   node_type: memory
   type: user
