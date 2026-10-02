@@ -75,6 +75,16 @@ Checked against `main` on 2026-10-02, while the event census was frozen and labe
 
 ---
 
+## Daily watch log (step 5, `news-brief-6kr`)
+
+| day | source | spent / balance | triage | link watch | other |
+|---|---|---|---|---|---|
+| 2026-10-02 (flip day) | `Comprehend: Tally` at 19:12:41Z | $0.7625 / $0.7375. A fresh bucket opens at $1.50 and the two sum to it | 300 seen, 298 by model, material 199 / immaterial 99 (66%), sampled 20, stale 2, quote_pages 0, failed_triage 0 | `events_linked_in_request` 2, `new_label_fallback` 0, `unmapped_candidate` 0, `deferred_neighbour` 0, `defer_cap_hit` 0; no `defer_capped:*` or `validate:new_label_*` keys | `aged_out` 1524 (backlog past the 14-day horizon), `failed_integration` 1 (`validate:event_shape`), `items_json_string` 4 and `items_double_wrapped` 4 (recovered), `candidate_cap_hit` 27, `commitment_omitted` 154, events created 218 / matched 32 |
+
+Step 6 status at that pass: `comprehend_budget_alert` had no row. With $0.74 left after a $0.76
+pass, a natural exhaustion on 2026-10-02 is expected, which would verify the alert path without
+the deliberate $0.01 check.
+
 ## Step 1 — deploy phase 1, with `COMPREHEND_ENABLED` still false
 
 Capture's changes (the Reuters quote-page filter, the per-outlet surge alert) take
