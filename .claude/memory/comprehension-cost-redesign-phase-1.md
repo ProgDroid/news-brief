@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: 9ddd2146-00b2-42bb-a88a-0f15d3efd634
-  modified: 2026-09-26T18:14:31.815Z
+  modified: 2026-10-10T15:08:00.599Z
 ---
 
 **Why it exists:** after re-enabling comprehension, the operator was topping up the Anthropic account by
@@ -54,3 +54,5 @@ Related: [[newsbrief-comprehend-cost]], [[newsbrief-comprehension-pipeline]], [[
 **From the index (moved 2026-10-02):** Phase 2 status as carried by the index: spike + M1 RAN (grouping fails; RT goes blind at low density). M2 `y1x` RAN: HAIKU QUALIFIES by the rule, but on link decisions it agrees with Sonnet only 55% vs Sonnet's self-agreement of 77%; which way it departs is unmeasured (`sse`). `jwm` done (prompt v4), `li9` done (gate refuses mid-cohort holes).
 
 **2026-10-02: the host runbook RAN through step 5.** Step 1 passed by effect (no quote page stored since 2026-09-26 10:00:16Z; 0 dropped in logs, so the c439ade feed move stopped the flood). Step 2: GATE NOT RESOLVED, corpus FROZEN, as pre-registered (`docs/2026-10-02-amendment-2-gate-output.md`). Steps 3-4 done (305 + 12 rows reset). Step 5: `COMPREHEND_ENABLED` flipped on 2026-10-02; operator reports it running as expected. VERIFIED: flip 2026-10-02 17:48:04.78043Z; triage spend rows all `claude-haiku-4-5` (12); first call `stop_reason=tool_use`, so Haiku 4.5 ACCEPTS `thinking: disabled` (observed, no longer only documented). Step 7 due 2026-10-09 17:48Z. **The 'stays OFF' instruction above is SUPERSEDED.**
+
+**2026-10-10, `c5k`: Haiku 5.5 ($0.10/$0.50 for prompts ≤100K, 10x below 4.5) is PRICED in code, but triage still runs 4.5** until the operator runs runbook **step 8** (flip the row). The operator chose to record step 7 first: its queries have no upper bound, so flipping earlier would blend the two models into the baseline. Reconcile is hardcoded and moves to 5.5 when the image deploys. `thinking: disabled` on Haiku 5.5 is documented, not yet observed. The 10x price drop is NEW evidence for the D1 phase-2 route (Haiku-for-integration); it was raised once and the call is the operator's.

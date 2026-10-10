@@ -276,6 +276,47 @@ def test_messages_call_budget_fits_full_ledger(monkeypatch):
     assert captured["json"]["max_tokens"] >= 4096
 
 
+def test_messages_call_sets_thinking_explicitly_off(monkeypatch):
+    """news-brief-c5k. Haiku 5.5 runs ADAPTIVE thinking when the field is
+    omitted (Haiku 4.5 did not), which spends the ledger's output budget and
+    changes the behaviour the PROMPT_VERSION rubric was calibrated against.
+    `disabled` is only accepted at effort high or below, so no effort above
+    the default may ride along."""
+    captured = {}
+
+    def fake_post(*a, **k):
+        captured["json"] = k["json"]
+        return _FakeResp(
+            {"stop_reason": "end_turn", "content": [{"type": "text", "text": "[]"}]}
+        )
+
+    monkeypatch.setattr(bm.requests, "post", fake_post)
+    bm._messages_call("sys", "user")
+    assert captured["json"]["model"] == "claude-haiku-5-5"
+    assert captured["json"]["thinking"] == {"type": "disabled"}
+    effort = captured["json"].get("output_config", {}).get("effort")
+    assert effort not in ("xhigh", "max")
+
+
+def test_messages_call_reads_text_past_a_leading_thinking_block(monkeypatch):
+    """Haiku 5.5 can open with a thinking block (empty text by default); the
+    answer must still come from the text blocks only."""
+
+    def fake_post(*a, **k):
+        return _FakeResp(
+            {
+                "stop_reason": "end_turn",
+                "content": [
+                    {"type": "thinking", "thinking": "", "signature": "s"},
+                    {"type": "text", "text": "[]"},
+                ],
+            }
+        )
+
+    monkeypatch.setattr(bm.requests, "post", fake_post)
+    assert bm._messages_call("sys", "user") == "[]"
+
+
 def test_messages_call_timeout_is_sized_against_its_own_token_budget(monkeypatch):
     """news-brief-0p3. The read timeout was a bare 30 -- the only timeout in
     this module, and never revisited when RECONCILE_MAX_TOKENS went to 8192.
@@ -296,7 +337,7 @@ def test_messages_call_timeout_is_sized_against_its_own_token_budget(monkeypatch
 
     monkeypatch.setattr(bm.requests, "post", fake_post)
     bm._messages_call("sys", "user")
-    # Haiku 4.5 sustains well over 100 output tok/s, but a slow or contended
+    # Haiku sustains well over 100 output tok/s, but a slow or contended
     # generation is exactly the case a timeout exists for. One second per 100
     # budgeted tokens is the floor this call must clear.
     assert captured["timeout"] >= bm.RECONCILE_MAX_TOKENS / 100

@@ -1,4 +1,12 @@
-"""M2: does Haiku 4.5 integrate like Sonnet? (news-brief-y1x)
+"""M2: does Haiku integrate like Sonnet? (news-brief-y1x)
+
+HISTORY. The recorded M2 run (2026-09-27, $5.53) used Haiku 4.5 and is
+written up in docs/2026-09-26-clustering-recall-spike-result.md: HAIKU
+QUALIFIES by the rule below, but agrees with Sonnet on only 55.1% of LINK
+decisions. Since news-brief-c5k (2026-10-10) HAIKU names Haiku 5.5, so a new
+run measures a DIFFERENT model and does not replace that result. Haiku 5.5's
+request shape is unchanged here: `thinking: disabled` is accepted at its
+default effort (medium), and forced tool_choice is accepted.
 
 Phase 2's route choice (news-brief-vlg) waits on two measurements. M1, the
 density sweep, is free and done. This is M2, pre-registered in
@@ -43,7 +51,7 @@ bias the verdict toward "qualifies".
     ranking as live.
 The request is built ONCE per batch by build_integration_request and sent
 three times, differing only in `model`: Sonnet (A), Sonnet again (A'), and
-Haiku 4.5 (H). parse_integration_response reads every response.
+Haiku (H). parse_integration_response reads every response.
 
 THE METRIC, fixed before any run:
   - An item's DECISION in one run is the SET of things it linked to:
@@ -114,7 +122,7 @@ from scripts.probe_clustering import (  # noqa: E402
     paired_ci,
 )
 
-HAIKU = "claude-haiku-4-5"
+HAIKU = "claude-haiku-5-5"
 PAIR_BATCHES = 100
 RANDOM_BATCHES = 50
 BATCH_SIZE = 5  # the pre-registration's; also COMPREHEND_INTEGRATE_BATCH's default
@@ -290,8 +298,8 @@ def decide(agree_aa, agree_ah, drop_a, drop_h, n_batches) -> str:
 def worst_case_usd(model: str, request: dict) -> float:
     """An UPPER bound on ONE attempt, for the spend guard: every input
     character a third of a token, and the whole output budget used."""
-    pin, pout = comprehend.price_of(model)
     tokens_in = len(json.dumps(request)) / CHARS_PER_TOKEN_WORST
+    pin, pout = comprehend.price_of(model, tokens_in)
     return (tokens_in * pin + comprehend.INTEGRATE_MAX_TOKENS * pout) / 1_000_000
 
 
@@ -645,7 +653,7 @@ def _run(conn, args, models) -> int:
             )
             projected = 0.0
             for r in RUNS:
-                pin, pout = comprehend.price_of(models[r])
+                pin, pout = comprehend.price_of(models[r], mean_in)
                 projected += len(built) * (mean_in * pin + mean_out * pout) / 1_000_000
             print(
                 f"projected spend at the historical mean: ${projected:.2f} "

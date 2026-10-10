@@ -28,6 +28,7 @@ happens in this repo until the operator runs the steps below, in this order, on 
 | 5 — flip `COMPREHEND_ENABLED` | **DONE, verified by effect.** Pre-flight passed (only `NEWSBRIEF_TRIAGE_MODEL` = `claude-haiku-4-5` is set; the other two fall back to Sonnet). **`<flip>` = 2026-10-02 17:48:04.78043Z** (`settings.updated_at`). `comprehend_spend` triage rows: `claude-haiku-4-5` × 12, no other model. First Haiku triage call: `triage call took 2.8s (timeout=90s) stop_reason=tool_use in=2753 out=410` at 19:04:22Z, so `thinking: disabled` is now OBSERVED accepted by Haiku 4.5, not only documented |
 | 6 — deliberate exhaustion check | outstanding |
 | 7 — after 7 days, record and compare | due on/after **2026-10-09 17:48Z** (`<flip>` + 7d) |
+| 8 — triage to Haiku 5.5 (`c5k`) | outstanding; **only after step 7 is recorded** and the `c5k` image is running |
 
 ## Pre-flight check, 2026-10-02 (read before resuming)
 
@@ -222,7 +223,7 @@ declares `MODEL` with `env="NEWSBRIEF_MODEL"`, `INTEGRATE_MODEL` with
 — `Knob.key` reads and writes exactly that env name, the same trap step 3 already warns
 about for the triage row.) Every `value` returned must be one of the keys in
 `comprehend.PRICES_PER_MTOK` — currently `claude-sonnet-5`, `claude-haiku-4-5`, and
-`claude-haiku-4-5-20251001`. A row naming anything else means the pass aborts on
+`claude-haiku-4-5-20251001` (plus `claude-haiku-5-5` since `c5k`, 2026-10-10). A row naming anything else means the pass aborts on
 `unpriced_model` the moment it flips on (spec 4.3) — better caught here than on the
 first `comprehend_abort_alert`. A row absent from the result is fine: an unset knob
 falls back to `MODEL` (Sonnet), which is always priced.
@@ -402,7 +403,8 @@ comprehension's triage stage from everything else on the account once that daily
 subtracted.
 
 **The exception, also found by that grep, named here so it isn't re-discovered:** `brief_memory.py`'s daily standing-claim reconcile call
-(`reconcile_ledger`) hardcodes `RECONCILE_MODEL = "claude-haiku-4-5-20251001"` — a real,
+(`reconcile_ledger`) hardcodes `RECONCILE_MODEL = "claude-haiku-4-5-20251001"` (`claude-haiku-5-5`
+from the `c5k` deploy onward; see step 8, so subtract it only from days before that) — a real,
 paid Haiku call, independent of any settings row, that also never reaches
 `comprehend_spend`. It runs once a day (alongside the daily brief), against triage's many
 batches an hour, so it is a small, near-constant offset rather than a growing one — but a
@@ -474,6 +476,59 @@ FROM (SELECT e.id, count(DISTINCT i.outlet_id) AS outlets
   `similarity(title, title) >= 0.5` alongside as a proxy for same-event.
 - `linked_pairs == 0` with high-similarity co-batched pairs present means the links are
   not happening. Report it.
+
+## Step 8 — move triage to Haiku 5.5 (`news-brief-c5k`, added 2026-10-10)
+
+Haiku 5.5 is $0.10 / $0.50 per MTok for prompts ≤ 100K tokens, against Haiku 4.5's
+$1 / $5 (live pricing page, checked 2026-10-10). Triage prompts are ~3k tokens, so
+they stay on the low rate card.
+
+**Preconditions, in order:**
+
+1. **Step 7 is recorded.** Its queries read `created_at > <flip>` with no upper bound, so
+   a switch first would blend Haiku 5.5 verdicts and spend into the 4.5 baseline. A
+   different model can also move the material rate, which is the number step 7 exists to
+   measure.
+2. **The `c5k` image is running.** `PRICES_PER_MTOK` refuses a model it has no price for,
+   so a row naming `claude-haiku-5-5` on an older image aborts every pass. Check that
+   the image has it:
+
+   ```sh
+   docker compose run --rm --entrypoint python newsbrief -c \
+     "import comprehend; print(comprehend.price_of('claude-haiku-5-5'))"
+   ```
+
+   It must print `(0.1, 0.5)`. `UnpricedModel` means the image is old: don't flip.
+
+**Note on deploy:** the same image moves reconcile (`brief_memory.RECONCILE_MODEL`,
+hardcoded, NOT a settings row) to Haiku 5.5 as soon as it runs. That takes the reconcile
+offset out of step 7's console comparison for Haiku 4.5 from the deploy date onward.
+
+**The flip:**
+
+```sql
+INSERT INTO settings (key, user_id, value)
+VALUES ('NEWSBRIEF_TRIAGE_MODEL', NULL, 'claude-haiku-5-5')
+ON CONFLICT (key) WHERE user_id IS NULL
+DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+RETURNING key, value, now() AS cutover;
+```
+
+Record `cutover` here. Every later readout splits by model at that timestamp.
+
+**Verify by effect, after the first pass:**
+
+```sql
+SELECT model, count(*), sum(usd) FROM comprehend_spend
+WHERE stage = 'triage' AND at > '<cutover>' GROUP BY 1;
+```
+
+This must show only `claude-haiku-5-5`. Then check the log for the first triage
+`stop_reason=tool_use`. The request keeps `thinking: disabled` with no `effort`. Haiku 5.5
+accepts that at its default effort (medium), but **this is documented, not observed**. A
+400 is a 4xx, and a 4xx charges items, so watch the first pass.
+
+**Revert:** rerun the flip with `'claude-haiku-4-5'`. Haiku 4.5 is still priced.
 
 ---
 

@@ -27,8 +27,10 @@ def parse_score(text: str) -> float:
 def score_window(client, ticker: str, window_label: str, headlines: list[str]) -> float:
     # client: an anthropic.Anthropic() instance (reuse the brief's client/config).
     resp = client.messages.create(
-        model="claude-haiku-4-5-20251001",
+        model="claude-haiku-5-5",
         max_tokens=16,
+        # Haiku 5.5 thinks by default; 16 tokens leave no room for it.
+        thinking={"type": "disabled"},
         messages=[
             {
                 "role": "user",
@@ -36,4 +38,4 @@ def score_window(client, ticker: str, window_label: str, headlines: list[str]) -
             }
         ],
     )
-    return parse_score(resp.content[0].text)
+    return parse_score("".join(b.text for b in resp.content if b.type == "text"))

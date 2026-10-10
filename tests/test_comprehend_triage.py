@@ -286,15 +286,19 @@ def test_the_triage_request_forces_the_tool_and_disables_thinking():
     )
 
 
-def test_a_haiku_triage_request_keeps_thinking_disabled(monkeypatch):
-    """Triage moves to Haiku 4.5 through a settings row (spec 4.5).
-    `{"type": "disabled"}` is documented as a 400 only on Fable 5/5.1, Opus
-    5.5, and Opus 5 at xhigh/max -- Haiku 4.5 is a pre-4.6 model and is not on
-    that list, so the same request shape is expected to keep working."""
-    monkeypatch.setattr(comprehend.common, "TRIAGE_MODEL", "claude-haiku-4-5")
+@pytest.mark.parametrize("model", ["claude-haiku-4-5", "claude-haiku-5-5"])
+def test_a_haiku_triage_request_keeps_thinking_disabled(monkeypatch, model):
+    """Triage runs on Haiku through a settings row (spec 4.5). Haiku 4.5
+    accepted `{"type": "disabled"}` (observed 2026-10-02). Haiku 5.5 accepts
+    it only at effort high or below (news-brief-c5k), and its default is
+    medium -- so the request must not carry xhigh/max, and must be priced
+    before a row can name it."""
+    monkeypatch.setattr(comprehend.common, "TRIAGE_MODEL", model)
     req = comprehend.build_triage_request([{"id": 1, "title": "t"}])
-    assert req["model"] == "claude-haiku-4-5"
+    assert req["model"] == model
     assert req["thinking"] == {"type": "disabled"}
+    assert req.get("output_config", {}).get("effort") not in ("xhigh", "max")
+    comprehend.price_of(model)  # an unpriced row would abort every pass
 
 
 def test_a_truncated_response_raises_rather_than_being_parsed():

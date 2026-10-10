@@ -94,7 +94,7 @@ _DEDUP_STOPWORDS = frozenset(
 )
 _NUMBER_RE = re.compile(r"\d[\d.,]*")
 _WORD_RE = re.compile(r"[a-z0-9]+")
-RECONCILE_MODEL = "claude-haiku-4-5-20251001"
+RECONCILE_MODEL = "claude-haiku-5-5"
 # BUMP THIS whenever _RECONCILE_TEMPLATE changes in a way that could move the
 # boundary the model draws on any field. Rows carry it so a later audit can tell
 # which prompt produced a verdict; without it a prompt change is indistinguishable
@@ -773,6 +773,11 @@ def _messages_call(system: str, user: str) -> str:
         json={
             "model": RECONCILE_MODEL,
             "max_tokens": RECONCILE_MAX_TOKENS,
+            # Explicit, never omitted: Haiku 5.5 runs ADAPTIVE thinking when the
+            # field is absent, which spends max_tokens and departs from the
+            # no-thinking behaviour PROMPT_VERSION was calibrated on. `disabled`
+            # is accepted at effort high or below (default medium).
+            "thinking": {"type": "disabled"},
             "system": system,
             "messages": [{"role": "user", "content": user}],
         },

@@ -42,6 +42,31 @@ def test_the_batch_rate_is_half():
     )
 
 
+def test_haiku_5_5_short_prompts_use_the_low_rate_card():
+    usd = comprehend.cost_usd(
+        "claude-haiku-5-5", {"input_tokens": 100_000, "output_tokens": 1_000_000}
+    )
+    assert usd == pytest.approx(100_000 * 0.10 / 1e6 + 0.50)
+
+
+def test_haiku_5_5_prompts_over_100k_use_the_long_rate_card_for_every_token():
+    """The tier is chosen by the WHOLE prompt, cache reads and writes included,
+    and then applies to output too. A flat table would under-price this call
+    5x and the budget would let five times the spend through."""
+    usage = {
+        "input_tokens": 60_000,
+        "cache_read_input_tokens": 30_000,
+        "cache_creation_input_tokens": 10_001,
+        "output_tokens": 1_000_000,
+    }
+    want = (60_000 * 0.50 + 30_000 * 0.50 * 0.10 + 10_001 * 0.50 * 1.25) / 1e6 + 2.50
+    assert comprehend.cost_usd("claude-haiku-5-5", usage) == pytest.approx(want)
+
+
+def test_a_flat_priced_model_ignores_prompt_length():
+    assert comprehend.price_of("claude-sonnet-5", 900_000) == (2.00, 10.00)
+
+
 def test_an_unpriced_model_is_refused_not_priced_at_zero():
     """A silent $0 would make the budget accepted-and-inert."""
     with pytest.raises(comprehend.UnpricedModel):
