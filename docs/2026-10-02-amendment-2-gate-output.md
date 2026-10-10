@@ -22,6 +22,11 @@ every log line the operator checked. With no quote page stored since 2026-09-26 
 flood was stopped by `c439ade`'s feed move (Markets → Business), not by the filter, which has
 had nothing to drop.
 
+*Correction, 2026-10-10 (`news-brief-d89`), the paragraph above kept as recorded:* "no quote page
+stored" was measured with the two title shapes `is_quote_page` knew then. Reuters company pages
+of two other shapes (`About … (S060.H) - Reuters`, `DFTKn.H - Reuters`) were stored on 2026-09-27
+or later. The feed move stopped the FLOOD, but not every quote page.
+
 ## Output, verbatim
 
 ```

@@ -277,7 +277,7 @@ def capture_sources() -> list[dict]:
     its ABSENCE means feed.
 
     A feed may carry `capture_url`, a narrower window than the brief's
-    (news-brief-b42.4). Four Google News proxies return exactly 100 entries per
+    (news-brief-b42.4). Some Google News proxies return exactly 100 entries per
     poll — the cap — because `when:2d` offers Google ~370 candidates for 100
     relevance-ranked slots, and ranking is not chronological, so an item never
     in the top 100 at any poll instant is lost unobservably. A shorter window
@@ -335,8 +335,7 @@ def rank_ordered(feed: dict) -> bool:
 
     Derived from the URL rather than a list of names, which would be one new
     proxy away from being silently wrong. NOT the same set as "carries a
-    capture_url": eight feeds are Google News proxies, only four have an
-    override.
+    capture_url": most Google News proxies have no override.
     """
     return common.feed_host(feed) == "news.google.com"
 

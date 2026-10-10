@@ -5,6 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: 3138e02c-0d04-4ac8-812a-7bbe4a0da34e
+  modified: 2026-10-10T17:05:57.492Z
 ---
 
 The "brief is same-y + news priced-in" thread the user flagged 2026-06-13. **SHIPPED
@@ -24,7 +25,8 @@ on main (`4710a0f`..`6dbf116`), 178 tests green.
 2. **Sources** — every `RSS_FEEDS`/`WEB_SOURCES` entry tagged `kind` (wire|analyst|regional|
    primary); `fetch_rss` renders `[KIND]`. Added 8 region-native/forward feeds: Al Jazeera +
    SCMP (native RSS), Kyiv Independent, ISW, Yonhap, 38 North, NHK World, BOJ (Google News
-   `site:` proxy — native dead for Kyiv & 38 North). Generic extra wires deliberately NOT
+   `site:` proxy — native dead for Kyiv & 38 North; **Kyiv corrected 2026-10-10: native works at
+   `/news-archive/rss/`, now used (`d89`), see [[google-news-rss-recipe]]**). Generic extra wires deliberately NOT
    added (user rates them poorly).
 3. **Market pulse** ("what moved & why") — `trading.py`: `fetch_daily_move` (open→last %, one
    fetch; Stooq Open=col3/Close=col6, Kraken o vs c[0]); `MARKET_SPINE` (^spx, dx.f, xauusd,

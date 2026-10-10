@@ -163,3 +163,9 @@ do not restart it unasked; CI's run is the authority after a push.
 
 
 **From the index (moved 2026-10-02):** CI has no pandas: place a test by what it NEEDS, not what it's ABOUT.
+
+**An edit made while the background gate runs makes that run stale (2026-10-10).** pytest imports
+every module at collection, so a run started before an edit tests the OLD code, even if it then
+reports green. Freeze the change set before starting the ~10-minute gate. If you must edit, stop it
+(TaskStop), confirm no `pytest` process or test-DB session survived (Get-CimInstance command line,
+`pg_stat_activity`), then restart it. Two runs on one test DB corrupt each other.

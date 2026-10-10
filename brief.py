@@ -255,16 +255,14 @@ RSS_FEEDS = [
     },
     {
         "name": "Kyiv Independent",
-        # Native feed returns 0; proxy verified 56 entries 2026-06-14
-        # Capped: when:2d returns exactly 100 (the Google News cap) with ~370
-        # candidates for 100 RELEVANCE-ranked slots, so an item never in the top
-        # 100 at any poll instant is lost unobservably. Capture polls a 6h window
-        # (measured 61 items, 2026-09-08) where nothing can be ranked out. The
-        # brief keeps 2d: it takes the newest 25 at brief time, and 6h at 06:00
-        # would be the overnight hours only. The narrow window REQUIRES frequent
-        # polling -- do not slow these feeds without widening it (b42.4/b42.5).
-        "url": "https://news.google.com/rss/search?q=when:2d+site%3Akyivindependent.com&hl=en-US&gl=US&ceid=US%3Aen",
-        "capture_url": "https://news.google.com/rss/search?q=when:6h+site%3Akyivindependent.com&hl=en-US&gl=US&ceid=US%3Aen",
+        # NATIVE since 2026-10-10 (news-brief-d89). The Google News proxy
+        # (site:kyivindependent.com) indexed the whole site: author pages, tag
+        # pages ("Trade news - Page 4"), help-centre pages -- 26 of 61 items in
+        # one fetch, and they took capped slots from real articles. This feed is
+        # articles only, with real URLs: 15 items (~21h on 2026-10-10), every
+        # article the proxy listed over that span, and no second page (/rss/2/
+        # 404s). The 2026-06-14 "native returns 0" tested /feed, which 404s.
+        "url": "https://kyivindependent.com/news-archive/rss/",
         "category": "ukraine",
         "kind": "regional",
         "perspective": "UKRAINIAN",
@@ -542,8 +540,8 @@ def outlet_for(feed: dict) -> str:
     """The publisher behind a feed. Declared per feed, never derived from the URL.
 
     Most feed names ARE publisher names — including the Google News proxies,
-    which are named for the publisher they proxy (`Kyiv Independent`, `NHK
-    World`) rather than for Google. Those that are not carry an explicit
+    which are named for the publisher they proxy (`NHK World`) rather than for
+    Google. Those that are not carry an explicit
     `outlet`.
 
     No count here on purpose: this docstring said "seven" while the code had

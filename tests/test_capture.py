@@ -482,11 +482,11 @@ def test_a_capture_url_points_at_the_same_source_through_a_shorter_window():
     # The feeds measured as capping (100 entries every poll) on 2026-09-08,
     # except Reuters Business, which replaced the /markets proxy on 2026-09-25
     # and measured 34 per 6h window: it keeps the narrow capture window because
-    # its when:2d window exceeds the cap at ~136/day.
+    # its when:2d window exceeds the cap at ~136/day. Kyiv Independent left the
+    # set on 2026-10-10 for its native feed (news-brief-d89): no Google window.
     assert {f["name"] for f in brief.RSS_FEEDS if f.get("capture_url")} == {
         "Reuters Business",
         "Reuters World",
-        "Kyiv Independent",
         "Yonhap (English)",
     }
 

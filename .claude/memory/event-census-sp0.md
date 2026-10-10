@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: 3643de5b-dee7-49f4-8b2e-34e984499482
-  modified: 2026-10-10T16:40:23.037Z
+  modified: 2026-10-10T17:17:09.997Z
 ---
 
 **State as of 2026-09-30.** Built and pushed (code through `3428111`, main at `608cbae`,
@@ -38,6 +38,11 @@ FLOOR, and the verdict hinged on it. Lesson for any labelling gate: **put a mini
 validity floor beside a count threshold**, or a fast pass reads as "nothing there". Also
 measured: production has NO assertions for those windows' items (its zero is uninformative);
 single-item groups (the operator's habit) equal singletons in `census_metrics.groups`.
+**Design point for any redesign:** the page asks for RECALL across 85–448 items, i.e. "does
+this headline match one from five minutes ago?", which is the operator's documented failure
+mode. The filter-titles box is its only recall aid. The frozen windows also carry non-article
+noise (Kyiv Independent author/tag pages, Reuters company pages, fixed going forward by `d89`),
+which inflates item counts and the ≥ 10 s/item validity floor.
 
 **Why this matters to any future session:**
 - **FREEZE: from runbook step 3 to step 10, no semantic change to `census.py`,

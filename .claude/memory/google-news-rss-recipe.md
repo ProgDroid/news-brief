@@ -5,6 +5,7 @@ metadata:
   node_type: memory
   type: reference
   originSessionId: 11654da7-d94c-4b83-a76e-7bbaac27f89b
+  modified: 2026-10-10T17:05:47.231Z
 ---
 
 Reuters (and many outlets) killed public RSS — Reuters in June 2020. Synthesize a feed via Google News search RSS:
@@ -24,6 +25,10 @@ The news-brief `fetch_rss` swallows nothing now — it logs `parsed.status`/`boz
 **Deep section paths can be stale-only — toggle `when:` to detect it (2026-06-26).** A NARROW sub-path indexes very differently from a top-level section. `site:reuters.com/markets/commodities` returned only **1** item with `when:2d` AND `when:7d`, **6** with `when:30d`, but **100** with NO `when:` filter. That gap is the tell: Google News has ~100 OLD items under that path but almost nothing dated recently → the no-`when:` volume is STALE and defeats the freshness guardrail. Two bad ways to force volume: drop `when:` (stale) or switch to a loose keyword query (`commodities site:reuters.com`=100 fresh but matches the WORD anywhere on the domain, not the section). **Diagnostic rule: if `no-when ≫ when:2d`, the path lacks recent items — don't rescue it, go to a NATIVE feed instead** (here: Mining.com `mining.com/feed/`, 36 native entries, replaced the dead Reuters proxy). Contrast the top-level `/markets` path, which genuinely has 100 fresh items at `when:2d`.
 
 **Region-native feed verification (2026-06-14 sources redesign).** Verified entry counts when adding region-native outlets: native RSS WORKS for Al Jazeera (`aljazeera.com/xml/rss/all.xml`, 25) and SCMP (`scmp.com/rss/91/feed`, 50). Native RSS is DEAD (0 entries) for Kyiv Independent (`kyivindependent.com/feed`) and 38 North (`38north.org/feed/`) → both served via the `site:` proxy instead. **Low-frequency publishers need a wider window:** 38 North and BOJ statements only yielded entries with `when:7d` (not `when:2d`) — a daily-cadence window starves a weekly-cadence source. ISW/Yonhap/NHK use the proxy with `when:2d`. Re-verify with the snippet above if any break.
+
+**CORRECTED 2026-10-10 (`d89`): Kyiv Independent's native feed is NOT dead. The test used the wrong path.** `/feed` 404s, and so does `/rss/`. **`kyivindependent.com/news-archive/rss/` works**: 15 articles with real URLs, and no second page. Kyiv Independent is native since `d89`. **Two lessons:**
+- **"Native returns 0" is a claim about one PATH, not about the publisher.** Ghost and other CMSs put feeds at section paths, so try the site's own `<link rel="alternate">` or section `/rss/` before falling back to a proxy.
+- **A `site:<domain>` proxy over a whole domain indexes NON-ARTICLES.** It picked up author pages, tag pages ("Trade news - Page 4") and help-centre pages: 26 of 61 items. They also eat the 100-slot cap. A section-path proxy (`site:reuters.com/world`) did not show this. Before trusting a proxy, list ALL its titles, rather than grepping for a junk pattern you already expect.
 
 ## 2026-09-08 — THE VERIFICATION SNIPPET ABOVE IS BROKEN, and it fails silently
 

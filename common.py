@@ -738,8 +738,21 @@ def split_html_message(text: str, max_len: int = TELEGRAM_MAX_LEN) -> list[str]:
 # shapes: a bare instrument code ("MSTS.DE - Reuters") and the page-title
 # phrase. The bare-code rule is uppercase/digits/.^=- only, so any headline with
 # a space or a lowercase word -- every real one measured -- cannot match.
+# A third shape, the company profile page, was seen in the census labeller on
+# 2026-10-10 (news-brief-d89): "About Silver Viper Minerals Corp (S060.H) -
+# Reuters". It is anchored at both ends and needs the code's dotted exchange
+# suffix, so a headline opening "About 100 killed" or ending "(SNCF)" survives.
+# Codes can also carry a lowercase letter ("DFTKn.H - Reuters", same day), so
+# the bare rule has a second branch: lowercase is allowed only together with
+# that dotted suffix, which a one-word headline ("Breakingviews") lacks.
 _QUOTE_PAGE_PHRASE = "stock price & latest news"
-_BARE_INSTRUMENT_TITLE = re.compile(r"^[A-Z0-9^=][A-Z0-9.^=\-]*\s+-\s+Reuters$")
+_BARE_INSTRUMENT_TITLE = re.compile(
+    r"^(?:[A-Z0-9^=][A-Z0-9.^=\-]*|[A-Za-z0-9^=][A-Za-z0-9^=\-]*\.[A-Z]{1,3})"
+    r"\s+-\s+Reuters$"
+)
+_PROFILE_PAGE_TITLE = re.compile(
+    r"^About .+ \([A-Za-z0-9^=][A-Za-z0-9^=\-]*\.[A-Z0-9]+\)\s+-\s+Reuters$"
+)
 
 
 def is_quote_page(title: str | None) -> bool:
@@ -748,6 +761,8 @@ def is_quote_page(title: str | None) -> bool:
     if not text:
         return False
     if _QUOTE_PAGE_PHRASE in text.lower():
+        return True
+    if _PROFILE_PAGE_TITLE.match(text) is not None:
         return True
     return _BARE_INSTRUMENT_TITLE.match(text) is not None
 
