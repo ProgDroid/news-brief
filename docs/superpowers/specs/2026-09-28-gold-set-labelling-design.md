@@ -556,7 +556,47 @@ The plan pre-registers the failure count for each.
     by-block-half split read this value. The headline, the go/no-go and the page do not.
     **The stored value was corrected the same day by the operator:** `census_block.c439ade_deployed_at`
     = 2026-09-26 10:30:12.116618+00 (`RETURNING` confirmed, block 2026-09-18 to 2026-09-29).
-- **Go/no-go (§4.5):** *(after window 2)*
+- **Go/no-go (§4.5): NO-GO, 2026-10-10** (readout as of 16:37 UTC). Multi-outlet groups in windows 1
+  and 2 = **[4, 0], mean 2.00 < 8**; median active minutes **11.5** ≤ 80 (passes).
+
+  | window | span (UTC) | items | groups | multi-outlet | unsure | active min | s / item |
+  |---|---|---|---|---|---|---|---|
+  | 1 | 2026-09-27 00–06 | 85 | 8 | 4 | 12% | 15.8 | ~11 |
+  | 2 | 2026-09-18 18–24 | 267 | 0 | 0 | 9% | 7.1 | ~1.6 |
+
+  Blind precision 4/4 (window 1 only). The readout's achieved difference at K = 2 (534–686
+  points) is an artefact of two windows, not information.
+  - **Checks before the ruling (read-only, 2026-10-10).** A hand query reproduced the counts
+    (4 + 0), so the 2.00 is not a counting fault. No outlet dominates: window 2 has 17 outlets,
+    the largest Reuters at 34.5%; window 1 has 11, the largest 16.5%. (Predicted beforehand: one
+    outlet above 60% in window 2. Wrong.) Production has **no** `assertions` row for any item of
+    either window, so its zero cross-outlet events there says nothing. The operator put standalone
+    items into single-item groups (58 in window 1, 50 in window 2); `census_metrics.groups` treats
+    a single-item group exactly as a singleton, so no metric moves.
+  - **Pace.** Window 2 got 7.1 active minutes for 267 items, about 1.6 s an item, against about
+    11 s in window 1 and §12's 65–80 minutes per window. The operator reports reading all 267.
+    At that pace, a match that needs a headline from minutes earlier is likely missed, so
+    **window 2's 0 is a floor.** At window 1's rate (4 in 85), window 2 would hold about 12–13
+    and the mean about 8.3: the verdict hinges on the fast pass. The page's recall aid within a
+    window is the **filter titles** box.
+  - **Operator ruling, 2026-10-10: override, and re-gate on windows 3 and 4.** Written here
+    before window 3 is opened:
+    - **When:** from the readout, once windows 3 and 4 (pass 1) are both complete, and before
+      window 5 is opened.
+    - **GO** if the mean multi-outlet groups over windows 3 and 4 is ≥ 8 **and** their median
+      active minutes is ≤ 80, the §4.5 thresholds. Windows 1 and 2 do not enter it.
+    - **Validity:** each of windows 3 and 4 needs ≥ 10 s of active time per item (window 3, 272
+      items: ≥ 45.3 min; window 4, 293 items: ≥ 48.8 min), anchored on window 1's measured pace.
+      Below that, the check is **unreadable**: it returns to the operator and neither passes nor
+      fails.
+    - **NO-GO** stops the census and returns it to the operator. This ruling does not
+      pre-authorise another override.
+    - **Not enforced in code** (the census freeze): `/label` serves window 5 after window 4, so
+      the check is a manual readout run (runbook step 9, status table).
+    - **Carried consequences:** windows 1 and 2 stay in the census as recorded; a blind pass is
+      never redone. Window 2's repeat (pass 2) will be compared with a 7-minute pass 1, so its
+      consistency figure partly measures the change of pace and is reported with that label.
+    - **Mechanism:** `census_block.go_override_reason`, set on the host by the operator.
 - **Achieved detectable difference (§4.4):** *(after window 16)*
 
 ## 12. Success criteria

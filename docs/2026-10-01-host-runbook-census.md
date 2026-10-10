@@ -20,15 +20,16 @@ defined in "Before you start".
 
 | step | state |
 |---|---|
-| 1. Deploy; confirm `0017_census` is applied | outstanding |
-| 2. Confirm the `c439ade` deploy date | outstanding |
-| 3. `census_prepare`, on or after 2026-10-01; record the gap band | outstanding |
-| 4. `.env` and the host compose file | outstanding |
-| 5. Check the password reaches the container; apply the grants | outstanding |
-| 6. Recreate `newsbrief`; start `labeller`; read its log | outstanding |
-| 7. `/label` from Telegram | outstanding |
+| 1. Deploy; confirm `0017_census` is applied | done 2026-09-30 |
+| 2. Confirm the `c439ade` deploy date | done 2026-09-30; value corrected 2026-10-02 (spec §11) |
+| 3. `census_prepare`, on or after 2026-10-01; record the gap band | done 2026-10-02 (`within_6h_only` by operator ruling) |
+| 4. `.env` and the host compose file | done (windows 1 and 2 were labelled) |
+| 5. Check the password reaches the container; apply the grants | done (as above) |
+| 6. Recreate `newsbrief`; start `labeller`; read its log | done (as above) |
+| 7. `/label` from Telegram | done (as above) |
 | 8. The readout (repeat after every window) | ongoing |
-| 9. Go/no-go after windows 1 and 2 | outstanding |
+| 9. Go/no-go after windows 1 and 2 | **NO-GO 2026-10-10 (2.00 < 8), overridden by operator ruling** |
+| 9a. **Re-gate after windows 3 and 4, BEFORE opening window 5** (spec §11: mean ≥ 8, median ≤ 80 min, ≥ 10 s active per item) | outstanding (bead `news-brief-vd9.14`) |
 | 10. After the census: stop and remove `labeller` | outstanding |
 | 11. Release the hold (only when sub-projects 1 and 2 are done with the census) | outstanding |
 

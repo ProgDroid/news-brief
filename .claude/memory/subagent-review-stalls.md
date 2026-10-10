@@ -2,6 +2,7 @@
 name: subagent-review-stalls
 description: "Subagent-driven development on this setup — reviewer stalls are RARE (24/24 subagents completed on 2026-09-02; 4/4 on 2026-07-19). Default to dispatching. Plus the dispatch practices that make SDD runs work here, including the ones that produced 9 tasks with zero fix rounds."
 metadata: 
+  promoted_to: plugin
   node_type: memory
   type: feedback
   originSessionId: 16477d45-1807-43f8-9742-e61da567fe06

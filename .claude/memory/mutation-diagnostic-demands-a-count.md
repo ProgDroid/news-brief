@@ -2,6 +2,7 @@
 name: mutation-diagnostic-demands-a-count
 description: "Require a subagent to break the code and report HOW MANY tests failed, not whether one did — it audits the tests, and it caught the controller's own mistakes four times"
 metadata: 
+  promoted_to: plugin
   node_type: memory
   type: feedback
   originSessionId: 19b68250-ca61-4936-834b-18d6a595831c

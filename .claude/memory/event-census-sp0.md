@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: 3643de5b-dee7-49f4-8b2e-34e984499482
-  modified: 2026-10-02T15:54:12.754Z
+  modified: 2026-10-10T16:40:23.037Z
 ---
 
 **State as of 2026-09-30.** Built and pushed (code through `3428111`, main at `608cbae`,
@@ -27,6 +27,17 @@ to within-6h** (spec §11, §14 item 12). Built, committed and pushed 2026-10-02
 + repeat, 3 skipped, `within_6h_only by operator ruling` (2549 pairs, 52 windows); `vd9.13` closed.
 **The FREEZE IS NOW IN FORCE** and the retention hold is armed. Next: step 7 (`/label`).
 **`c439ade` date CORRECTED 2026-10-02:** recorded 2026-09-30T15:30, but `feed_polls` shows the code running by 2026-09-26 10:30:12Z, so the block DOES straddle it (spec §11 correction). Only the readout's straddle line and by-half split read it. The stored `census_block.c439ade_deployed_at` was CORRECTED by the operator the same day.
+
+**2026-10-10: go/no-go NO-GO (windows 1,2 = [4,0], mean 2.00 < 8), OVERRIDDEN by operator ruling
+with a RE-GATE on windows 3 and 4** (spec §11; bead `vd9.14`: run the readout BEFORE window 5 is
+opened; mean ≥ 8, median ≤ 80 min, and ≥ 10 s active per item or the check is UNREADABLE).
+Not enforced in code (freeze), so `/label` will serve window 5 regardless: that reminder is
+the agent's job. **What decided it was PACE, not counts:** window 2 got 7.1 active min for
+267 items (~1.6 s/item vs ~11 s in window 1 and the design's 65–80 min/window). Its 0 is a
+FLOOR, and the verdict hinged on it. Lesson for any labelling gate: **put a minimum-effort
+validity floor beside a count threshold**, or a fast pass reads as "nothing there". Also
+measured: production has NO assertions for those windows' items (its zero is uninformative);
+single-item groups (the operator's habit) equal singletons in `census_metrics.groups`.
 
 **Why this matters to any future session:**
 - **FREEZE: from runbook step 3 to step 10, no semantic change to `census.py`,

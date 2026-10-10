@@ -2,6 +2,7 @@
 name: parallel-implementers-share-test-db
 description: Two SDD implementers running DB tests at once collide on the single test Postgres — every DB fixture DROPs the public schema — producing spurious failures/errors; never overlap implementers that run DB tests
 metadata:
+  promoted_to: plugin
   node_type: memory
   type: feedback
   originSessionId: 3643de5b-dee7-49f4-8b2e-34e984499482
