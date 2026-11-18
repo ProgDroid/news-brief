@@ -1,12 +1,14 @@
 ---
 name: comprehension-cost-redesign-phase-1
-description: "Comprehension cost redesign phase 1 (epic news-brief-2r5) is BUILT AND PUSHED 2026-09-25; the host runbook is NOT run, and COMPREHEND_ENABLED must stay off until the old gate runs on/after 2026-09-30 00:13:37Z"
+description: "Comprehension cost redesign phase 1 (epic news-brief-2r5). COMPREHENSION OFF AGAIN since 2026-11-18 (user decision: may not be worth it); 2r5 + bqa.11 deferred to 2026-12-16. Do not re-enable without asking."
 metadata:
   node_type: memory
   type: project
   originSessionId: 9ddd2146-00b2-42bb-a88a-0f15d3efd634
   modified: 2026-10-10T17:16:41.670Z
 ---
+
+**STATUS 2026-11-18: comprehension is OFF.** The user set the `COMPREHEND_ENABLED` settings row to `false` on the host, having decided comprehension *may not be worth it*, and wants time to think. `news-brief-2r5` and `news-brief-bqa.11` are deferred to 2026-12-16. The flip's effect was NOT verified by an agent: check the log for `Comprehend: disabled by COMPREHEND_ENABLED` and that `max(item_triage.created_at)` stopped moving. Capture stays ON (the watch-trigger job `8lp` reads captured items). Don't re-enable or resume steps 6–7 without asking. Everything below is the history up to that point.
 
 **Why it exists:** after re-enabling comprehension, the operator was topping up the Anthropic account by
 ~£15/day. The cause: Google News began indexing Reuters **instrument quote pages** (`MSTS.DE - Reuters`,
