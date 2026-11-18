@@ -143,6 +143,8 @@ NITTER_BASE_URL = (
 )
 
 THESIS_FILE = DATA_DIR / "theses.json"
+# Pushed by the operator from a private repo; never committed here (news-brief-ajf).
+PORTFOLIO_THESIS_FILE = DATA_DIR / "theses_portfolio.json"
 
 # ── Feed sources ──────────────────────────────────────────────────────────────
 RSS_FEEDS = [
@@ -1365,7 +1367,7 @@ def _handle_telegram_update(update: dict, fb: dict) -> dict:
         body = text[8:].strip()
         if "=" in body:
             key, val = body.split("=", 1)
-            theses = load_theses()
+            theses = load_local_theses()
             theses[key.strip()] = val.strip()
             save_theses(theses)
             telegram_send(
@@ -2107,9 +2109,56 @@ def build_chroma_context(fb: dict) -> str:
 # ── Trading212 portfolio ──────────────────────────────────────────────────────
 
 
-def load_theses() -> dict:
-    """Manual thesis annotations, keyed by ticker or free-text cluster name."""
+def load_local_theses() -> dict:
+    """The /thesis-written annotations only — the file /thesis writes back.
+
+    Kept apart from load_theses() so a /thesis edit never copies pushed lines
+    into theses.json."""
     return _load_json_or(THESIS_FILE, {})
+
+
+def load_portfolio_theses() -> tuple[dict, str | None]:
+    """The operator-pushed theses file: (theses, problem).
+
+    A missing file is a problem too ({}, "missing"): a push that never lands
+    must not drop the pushed theses silently (user decision 2026-11-18). Any
+    malformed content returns ({}, reason): the whole file is rejected, since a
+    generator bug is likelier than one bad line, and the file is left in place
+    so the next push replaces it. Not _load_json_or: that renames a corrupt file
+    aside, and this one belongs to the operator's push.
+    """
+    path = PORTFOLIO_THESIS_FILE
+    if not path.exists():
+        return {}, "missing — the push has not landed in DATA_DIR"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
+        return {}, f"unreadable: {e}"
+    if not isinstance(data, dict):
+        return {}, "top level is not an object"
+    if data.get("version") != 1:
+        return {}, f"unknown version {data.get('version')!r}"
+    theses = data.get("theses")
+    if not isinstance(theses, dict):
+        return {}, "'theses' is missing or not an object"
+    bad = [k for k, v in theses.items() if not isinstance(v, str) or not v.strip()]
+    if bad:
+        return {}, f"non-text thesis for {', '.join(map(str, bad[:5]))}"
+    return theses, None
+
+
+def load_theses() -> dict:
+    """Thesis annotations, keyed by ticker or 'cluster:<name>': theses.json
+    merged with the pushed theses_portfolio.json. The pushed line wins a key
+    clash. A malformed push is reported to Telegram and ignored, never fatal."""
+    pushed, problem = load_portfolio_theses()
+    if problem:
+        log.error(f"{PORTFOLIO_THESIS_FILE.name} ignored: {problem}")
+        telegram_send(
+            f"⚠️ <b>{PORTFOLIO_THESIS_FILE.name}</b> ignored — "
+            f"{html.escape(problem)}. Using theses.json only; re-push to fix."
+        )
+    return {**load_local_theses(), **pushed}
 
 
 def save_theses(theses: dict):
@@ -2167,13 +2216,15 @@ def fetch_portfolio_weights() -> str:
     lines = []
     for e in enriched:
         weight = 100.0 * e["value"] / total_value
-        if weight < 0.5:  # skip dust positions
+        thesis = theses.get(e["ticker"], "")
+        # Skip dust positions — unless the operator wrote a thesis for the line,
+        # which says it matters whatever its weight (news-brief-ajf).
+        if weight < 0.5 and not thesis:
             continue
         # P/L direction only — not the amount
         pl_dir = ""
         if e["pl"] is not None:
             pl_dir = " ▲" if e["pl"] > 0 else (" ▼" if e["pl"] < 0 else "")
-        thesis = theses.get(e["ticker"], "")
         thesis_str = f" — {thesis}" if thesis else ""
         lines.append(
             f"- {e['ticker']} ({e['name']}): {weight:.1f}%{pl_dir}{thesis_str}"
