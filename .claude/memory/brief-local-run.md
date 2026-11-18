@@ -169,3 +169,17 @@ every module at collection, so a run started before an edit tests the OLD code, 
 reports green. Freeze the change set before starting the ~10-minute gate. If you must edit, stop it
 (TaskStop), confirm no `pytest` process or test-DB session survived (Get-CimInstance command line,
 `pg_stat_activity`), then restart it. Two runs on one test DB corrupt each other.
+
+## 2026-11-18: Docker down, a private port, an 11-minute suite
+
+- **`failed to connect to the docker API at npipe:////./pipe/dockerDesktopLinuxEngine`** means
+  Docker Desktop is not running. Launching it is **denied by the auto-mode classifier**, so ask the
+  user to start it and keep working on the pure tests. The DB-backed ones stay NOT run until then.
+- **Start the test Postgres on a private port** (`-p 5439:5432 --name nb-<topic>-test`), not 5432.
+  Concurrent sessions share 5432, and every DB fixture DROPs the schema
+  ([[parallel-implementers-share-test-db]]).
+- **The full suite with `DATABASE_URL` takes ~11 min** (2295 tests), longer than the Bash tool's
+  600 s cap. Run it with `run_in_background` and a terminal marker (`echo GATE_DONE` last).
+  Without a DB it takes ~45 s.
+- **`docker compose config` exits 1 locally** on the required `POSTGRES_PASSWORD`, and committed
+  HEAD fails the same way. Check with `POSTGRES_PASSWORD=x docker compose config`.

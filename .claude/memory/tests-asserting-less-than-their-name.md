@@ -101,6 +101,10 @@ where the two DIVERGE can.
   state, including the debited balance. So the debit-persistence test must be a pass that does NOT
   exhaust, otherwise deleting `debit`'s own write is covered by the other one.
 
+- **An environment axis held the answer (2026-11-18, watch).** "A naive `as_of` is UTC" passed with
+  the conversion deleted, because the test Postgres session timezone is UTC and supplied it.
+  Fix: `SET TIME ZONE '+05'` in the test. Do the same for any tz test: run it where UTC is NOT the default.
+
 **How to apply:** before trusting a test, ask *what would this fixture look like if the bug were
 present?* If the answer is "the same", the test is decorative. The pre-registered mutation count
 ([[mutation-diagnostic-demands-a-count]]) is what surfaces this. All four were predicted-N,

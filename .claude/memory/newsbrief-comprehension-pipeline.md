@@ -1,6 +1,6 @@
 ---
 name: newsbrief-comprehension-pipeline
-description: "bqa.4b — comprehend.py and its pre-registered gate: LIVE, every failure class fixed (failures={}), candidates now ranked by shared entities — but spec 8.2's REAL floor metric is 6.6% and FAILING, and bqa.11 is blocked on it"
+description: "bqa.4b — comprehend.py and its pre-registered gate: DISABLED again 2026-11-18 (see comprehension-cost-redesign-phase-1); was LIVE, every failure class fixed (failures={}), candidates now ranked by shared entities — but spec 8.2's REAL floor metric is 6.6% and FAILING, and bqa.11 is blocked on it"
 metadata: 
   node_type: memory
   type: project
