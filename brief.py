@@ -145,6 +145,8 @@ NITTER_BASE_URL = (
 THESIS_FILE = DATA_DIR / "theses.json"
 # Pushed by the operator from a private repo; never committed here (news-brief-ajf).
 PORTFOLIO_THESIS_FILE = DATA_DIR / "theses_portfolio.json"
+# Pushed by the operator from a private repo; never committed here (news-brief-8lp).
+WATCH_FILE = DATA_DIR / "watch.json"
 
 # ── Feed sources ──────────────────────────────────────────────────────────────
 RSS_FEEDS = [
@@ -4020,6 +4022,91 @@ def mode_monitor():
         telegram_send_long("🔔 <b>Volume alerts</b>\n\n" + "\n".join(alerts))
 
 
+# The watch judge runs inside a job with no user waiting, but it is not free
+# latency the way signals is: size these from the first measured call
+# (spec "Left to the builder"). Not the signals defaults -- memory
+# shared-helper-carries-first-callers-tuning.
+WATCH_TIMEOUT = 180
+WATCH_MAX_ATTEMPTS = 2
+WATCH_CEILING_ALERT_KEY = "watch.input_ceiling"
+
+
+def _watch_model() -> str:
+    """WATCH_MODEL, or the brief's MODEL when unset. Read at call time."""
+    return common.WATCH_MODEL or common.MODEL
+
+
+def _watch_post(payload: dict) -> dict:
+    return _post_messages(
+        payload, timeout=WATCH_TIMEOUT, max_attempts=WATCH_MAX_ATTEMPTS
+    )
+
+
+def mode_watch(*, as_of: datetime | None = None, post=None) -> None:
+    """Judge the pushed watch file's event rows; alert once per row.
+
+    Design: docs/superpowers/specs/2026-11-18-watch-event-triggers-design.md.
+    A WatchFileError (bad file, empty window) propagates on purpose: run_job
+    turns it into a red /jobs row and a Telegram alert naming the reason.
+    Takes no positional arguments: run_job calls fn() with none.
+    """
+    import watch
+
+    wf = watch.load_watch(WATCH_FILE)
+    failed: list[str] = []
+
+    def _send(text: str, who: str) -> bool:
+        if telegram_send_long(text):
+            return True
+        failed.append(who)
+        return False
+
+    verdicts: list = []
+    if wf.events:
+        when = as_of or datetime.now(timezone.utc)
+        with db.connect() as conn:
+            ji, verdicts = watch.judge_watch(
+                conn, wf.events, when, post=post or _watch_post, model=_watch_model()
+            )
+        state = load_state()
+        over = ji.n_titles > watch.INPUT_CEILING
+        _alert_once(
+            WATCH_CEILING_ALERT_KEY,
+            (
+                "over",
+                f"watch input ceiling passed: {ji.n_titles} titles in "
+                f"{watch.WINDOW_HOURS} h (> {watch.INPUT_CEILING}). Still judged in "
+                "one call; time to revisit that design.",
+            )
+            if over
+            else None,
+            state,
+            "⚠️",
+        )
+        alerts, stale = watch.plan_alerts(wf.events, verdicts, state)
+        for alert in alerts:
+            # Send BEFORE storing: a failed send stores nothing, so the next
+            # night (whose 48 h window still holds the items) sends it again.
+            if _send(watch.format_alert(alert), alert.row.id):
+                save_state({alert.key: alert.value})
+        log.info(
+            f"Watch: {len(wf.events)} event rows, {ji.n_titles} titles, "
+            f"{len(alerts)} alerts, {len(wf.skipped)} skipped"
+        )
+    else:
+        # No event rows: nothing to judge, but rows that left the file still
+        # lose their keys, or a row re-added later stays silenced for ever.
+        _, stale = watch.plan_alerts([], [], load_state())
+    if stale:
+        config.clear_runtime_state(stale)
+    invalid = [v for v in verdicts if v.verdict == "invalid"]
+    problems = watch.format_problems(wf.skipped, invalid)
+    if problems:
+        _send(problems, "problems report")
+    if failed:
+        raise RuntimeError(f"watch: Telegram send failed for {', '.join(failed)}")
+
+
 def mode_capture():
     """Poll every feed source into the knowledge base. Reads nothing back.
 
@@ -4105,6 +4192,7 @@ MODES = {
     "capture": mode_capture,
     "comprehend": mode_comprehend,
     "census_prepare": mode_census_prepare,
+    "watch": mode_watch,
 }
 
 
@@ -4116,7 +4204,16 @@ MODES = {
 # `paper` is NOT here — see the note above; the book is already guarded
 # by file_lock at the resource level, which is the right grain for it.
 JOB_MODES = frozenset(
-    {"submit", "collect", "weekly", "monitor", "backup", "capture", "comprehend"}
+    {
+        "submit",
+        "collect",
+        "weekly",
+        "monitor",
+        "backup",
+        "capture",
+        "comprehend",
+        "watch",
+    }
 )
 
 # EX_ALREADY_RUNNING is imported from common (see Step 3a): the supervisor needs
@@ -4254,7 +4351,7 @@ if __name__ == "__main__":
         print(
             "Usage: brief.py "
             "[serve|submit|collect|weekly|paper|commands|monitor|backup|capture|"
-            "census_prepare]"
+            "census_prepare|watch]"
         )
         sys.exit(1)
 

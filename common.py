@@ -221,6 +221,8 @@ KNOBS: dict[str, Knob] = {
     # bump, with nothing to say so. Set one only to pin it deliberately.
     "SIGNALS_MODEL": Knob(str, "", env="NEWSBRIEF_SIGNALS_MODEL"),
     "CLAIM_VERIFY_MODEL": Knob(str, "", env="NEWSBRIEF_CLAIM_VERIFY_MODEL"),
+    # The watch job's event judge (news-brief-8lp); same "" = follow MODEL rule.
+    "WATCH_MODEL": Knob(str, "", env="NEWSBRIEF_WATCH_MODEL"),
     # Read timeout for the brief-memory reconcile call (news-brief-0p3). It was
     # a bare 30 inline in brief_memory.py -- the only timeout in that module --
     # and it fired in production on 2026-09-10, wiping a day of ledger memory.
