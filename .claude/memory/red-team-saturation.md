@@ -1,6 +1,7 @@
 ---
 name: red-team-saturation
 description: "When to stop spec red-team rounds — objections that migrate to a downstream consumer's concerns mean the spec has absorbed another sub-project's scope; cut scope, don't revise again"
+promoted_to: core
 metadata:
   node_type: memory
   type: feedback

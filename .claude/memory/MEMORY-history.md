@@ -18,3 +18,5 @@ Archived from `MEMORY.md` to keep the always-loaded index lean. These are "work 
 ## Shipped milestones
 
 - [Multi-asset trading build (2026-06-14)](multi-asset-trading-build.md) — equity/crypto/prediction paper→live; ALL phases 1–5 DONE + pushed 2026-06-14 (modules + unified book.json + crypto/Kraken + PolyGram prediction + validation.py/go-live gate + volume monitor cron + /watch /unwatch /positions /performance cmds); build COMPLETE → [[brief-sources-and-edge-latency-thread]] is next
+- [T212 401 diagnosis (2026-06-01)](t212-401-diagnosis.md) — RESOLVED; auth is HTTP Basic base64(KEY_ID:KEY); root cause was literal-placeholder bug
+- [Brief claim-memory build (2026-06-24)](brief-claim-memory-build.md) — BUILT 2026-06-24: repetition is CLAIM-level, not topic-level; standing-claim ledger live since 2026-06-25 via a separate, fail-safe reconcile call.

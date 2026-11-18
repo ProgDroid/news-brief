@@ -1,16 +1,19 @@
 ---
 name: telegram-commands-text-parsed
-description: Telegram commands work via text parsing (no setMyCommands); BotFather /setcommands is autocomplete-only
+description: "Telegram commands work via text parsing; setMyCommands only drives the autocomplete menu, and since 2026-06-19 the bot self-syncs it on daemon start"
 metadata: 
   node_type: memory
   type: project
   originSessionId: e9ab7554-6727-4032-aa2a-7d1b7ecb73a5
 ---
 
-The bot has **no `setMyCommands` call anywhere** (grep confirms). Commands are handled
+Commands are handled
 purely by parsing incoming message text in `_handle_telegram_update` (`text.startswith("/pin ")`,
 `text == "/positions"`, …). So a command executes the moment its handler branch exists —
-**registration with Telegram is NOT required for it to function**.
+**registration with Telegram is NOT required for it to function**. (This note originally said
+"no `setMyCommands` call anywhere"; superseded by the 2026-06-19 update below, re-verified
+2026-11-04: `common.py:641` `telegram_set_my_commands`, called at `brief.py:3616` inside
+`register_bot_commands_if_changed` (def `brief.py:3608`), invoked at `brief.py:3701`.)
 
 BotFather `/setcommands` (and the `setMyCommands` Bot API) only populate the **autocomplete
 menu** that pops up when you type `/` in the chat. Pure UX/discoverability; zero effect on whether

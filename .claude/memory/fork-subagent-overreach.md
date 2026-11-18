@@ -1,6 +1,7 @@
 ---
 name: fork-subagent-overreach
 description: "subagent_type:'fork' inherits full context and will run the whole plan, not your narrow prompt — and may misreport scope; use fresh agents for scoped tasks + verify git before trusting"
+promoted_to: core
 metadata: 
   node_type: memory
   type: feedback
