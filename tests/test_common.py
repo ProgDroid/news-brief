@@ -110,6 +110,43 @@ def test_telegram_send_long_reports_failure(monkeypatch):
     assert common.telegram_send_long("hello") is False
 
 
+def _capture_post(monkeypatch):
+    payloads = []
+
+    class _Ok:
+        ok = True
+
+    def _post(url, json, timeout):
+        payloads.append(json)
+        return _Ok()
+
+    monkeypatch.setattr(common.requests, "post", _post)
+    return payloads
+
+
+def test_telegram_send_is_silent_by_default(monkeypatch):
+    payloads = _capture_post(monkeypatch)
+    assert common.telegram_send("hi") is True
+    assert payloads[0]["disable_notification"] is True
+
+
+def test_telegram_send_notify_rings(monkeypatch):
+    """A watch TRIGGERED alert must make a sound (user, 2026-11-19)."""
+    payloads = _capture_post(monkeypatch)
+    assert common.telegram_send("hi", notify=True) is True
+    assert payloads[0]["disable_notification"] is False
+
+
+def test_telegram_send_long_passes_notify_through(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        common, "telegram_send", lambda chunk, **kw: calls.append(kw) or True
+    )
+    monkeypatch.setattr(common.time, "sleep", lambda _s: None)
+    assert common.telegram_send_long("hello", notify=True) is True
+    assert calls == [{"notify": True}]
+
+
 def test_log_handlers_include_rotating_file_handler():
     # newsbrief.log must rotate, not grow unbounded for the life of the container.
     from logging.handlers import RotatingFileHandler

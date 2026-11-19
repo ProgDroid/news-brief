@@ -515,14 +515,17 @@ def _redact(text: str) -> str:
     )
 
 
-def telegram_send(text: str) -> bool:
+def telegram_send(text: str, *, notify: bool = False) -> bool:
+    """Send an HTML message. Silent by default: it arrives with no sound, which
+    suits the brief and routine updates. `notify=True` rings, for the rare
+    message that asks the reader to act now (a watch TRIGGERED alert)."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": _chat_id(),
         "text": text,
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
-        "disable_notification": True,
+        "disable_notification": not notify,
     }
     try:
         resp = requests.post(url, json=payload, timeout=15)
@@ -535,7 +538,7 @@ def telegram_send(text: str) -> bool:
         return False
 
 
-def telegram_send_long(text: str) -> bool:
+def telegram_send_long(text: str, *, notify: bool = False) -> bool:
     """Send an HTML message, splitting it across multiple messages when it exceeds
     Telegram's length cap. Returns True only if every chunk sent.
 
@@ -543,11 +546,15 @@ def telegram_send_long(text: str) -> bool:
     data (performance/positions reports, trade updates, alert lists) — a single
     telegram_send on such content 400s with "message is too long" once the book or
     watchlist gets big enough. Short messages send as one, unchanged.
+    `notify` passes through to every chunk (see telegram_send).
     """
     chunks = split_html_message(text)
     ok = True
     for i, chunk in enumerate(chunks):
-        if not telegram_send(chunk):
+        # Only pass `notify` when set: many tests stub telegram_send with a
+        # one-argument fake, and the silent default must keep working with them.
+        sent = telegram_send(chunk, notify=True) if notify else telegram_send(chunk)
+        if not sent:
             log.error(f"telegram_send_long: chunk {i + 1}/{len(chunks)} failed")
             ok = False
         elif len(chunks) > 1:

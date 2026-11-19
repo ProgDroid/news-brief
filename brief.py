@@ -4055,8 +4055,13 @@ def mode_watch(*, as_of: datetime | None = None, post=None) -> None:
     wf = watch.load_watch(WATCH_FILE)
     failed: list[str] = []
 
-    def _send(text: str, who: str) -> bool:
-        if telegram_send_long(text):
+    def _send(text: str, who: str, *, notify: bool = False) -> bool:
+        sent = (
+            telegram_send_long(text, notify=True)
+            if notify
+            else telegram_send_long(text)
+        )
+        if sent:
             return True
         failed.append(who)
         return False
@@ -4087,7 +4092,10 @@ def mode_watch(*, as_of: datetime | None = None, post=None) -> None:
         for alert in alerts:
             # Send BEFORE storing: a failed send stores nothing, so the next
             # night (whose 48 h window still holds the items) sends it again.
-            if _send(watch.format_alert(alert), alert.row.id):
+            # TRIGGERED rings (user, 2026-11-19): it fires once per row, so a
+            # silent one can be missed for good. UNCLEAR stays silent.
+            rings = alert.verdict.verdict == "triggered"
+            if _send(watch.format_alert(alert), alert.row.id, notify=rings):
                 save_state({alert.key: alert.value})
         log.info(
             f"Watch: {len(wf.events)} event rows, {ji.n_titles} titles, "

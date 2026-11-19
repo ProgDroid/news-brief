@@ -59,10 +59,13 @@ def env(monkeypatch, tmp_path):
     )
 
     sent: list[str] = []
+    rang: list[str] = []  # messages sent with notify=True
     ok = {"value": True}
 
-    def _send(text):
+    def _send(text, notify=False):
         sent.append(text)
+        if notify:
+            rang.append(text)
         return ok["value"]
 
     for mod, name in [
@@ -101,6 +104,8 @@ def env(monkeypatch, tmp_path):
         post,
     )
 
+    e.rang = rang
+
     def write(rows):
         path.write_text(json.dumps({"version": 1, "rows": rows}), encoding="utf-8")
 
@@ -114,6 +119,23 @@ def test_trigger_sends_once_and_stores_state(env):
     assert len(env.sent) == 1 and "Watch e1" in env.sent[0]
     assert "https://example.com/1" in env.sent[0]
     assert env.state["watch.alerted.e1"]["strength"] == 2
+
+
+def test_triggered_rings_but_unclear_and_problems_stay_silent(env):
+    """User 2026-11-19: a TRIGGERED alert makes a sound; UNCLEAR and the
+    rows-not-judged report are 'look sometime' and stay silent."""
+    env.write([E1, {"id": "x", "kind": "telepathy", "name": "n"}])
+    brief.mode_watch(post=env.post)
+    assert len(env.rang) == 1 and "TRIGGERED" in env.rang[0]
+
+    e2 = dict(E1, id="e2")
+    env.write([e2])
+    env.reply["value"] = _resp(
+        [{"row_id": "e2", "verdict": "unclear", "evidence": ["I1"], "reason": "maybe"}]
+    )
+    brief.mode_watch(post=env.post)
+    assert any("UNCLEAR" in m for m in env.sent)
+    assert len(env.rang) == 1  # nothing new rang
 
 
 def test_second_run_same_verdict_sends_nothing(env):

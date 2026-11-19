@@ -1,6 +1,6 @@
 ---
 name: watch-and-pushed-files
-description: "Operator-pushed private files (watch.json, theses_portfolio.json, both ON the host since 2026-11-19 via portfolio oaq) and the 8lp watch job: SCHEDULED 06:30 PROVISIONALLY 2026-11-19, ahead of gate 8lp.1 (deferred to 2026-12-03); replay needs --entrypoint python; open question: should TRIGGERED alerts ring"
+description: "Operator-pushed private files (watch.json, theses_portfolio.json, both ON the host since 2026-11-19 via portfolio oaq) and the 8lp watch job: SCHEDULED 06:30 PROVISIONALLY 2026-11-19, ahead of gate 8lp.1 (deferred to 2026-12-03); replay needs --entrypoint python; TRIGGERED alerts RING (notify=True), everything else stays silent"
 metadata:
   node_type: memory
   type: project
@@ -35,7 +35,8 @@ or a stronger verdict). It uses a fixed 48 h window, because job_runs marks cras
 `finished`. A bad row is skipped while the rest are judged.
 
 **How to apply:** before changing watch behaviour, read the spec's "Calls made by the agent"
-list: those are open to revision, and the user decisions above are not. **Open question for the
-user:** news-brief sends with `disable_notification`, so a once-only TRIGGERED alert is
-silent and can be missed. Ask before changing it. Deferred review minors are in
+list: those are open to revision, and the user decisions above are not. **Decided 2026-11-19:** TRIGGERED alerts **ring**
+(`telegram_send(..., notify=True)`; it fires once per row, so a silent one can be missed
+for good). UNCLEAR and the rows-not-judged report stay silent, like every other message,
+which is the default. Deferred review minors are in
 `news-brief-r1w`. Related: [[live-state-on-deploy-host]], [[telegram-send-long-convention]].
