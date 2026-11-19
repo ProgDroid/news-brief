@@ -1,4 +1,4 @@
-feedparser==6.0.11
+feedparser==6.0.14
 requests==2.34.2
 psycopg[binary]==3.3.4
 # The watch price stage dates Yahoo bars in the exchange's timezone (zoneinfo);
