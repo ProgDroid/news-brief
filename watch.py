@@ -18,7 +18,7 @@ import html
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 log = logging.getLogger("newsbrief")
@@ -398,13 +398,26 @@ class Alert:
     value: dict
 
 
+def keep_ids(wf: WatchFile) -> set[str]:
+    """Row ids still present in the file: every parsed row, plus rows the
+    loader SKIPPED as malformed that carry an id. A skipped row keeps its alert
+    state, so fixing a typo does not re-ring an old alert (red-team,
+    2026-11-19). Positional skips ("#3") have no id to keep."""
+    ids = {r.id for r in wf.events} | {r.id for r in wf.prices}
+    return ids | {who for who, _ in wf.skipped if not who.startswith("#")}
+
+
 def plan_alerts(
-    rows: list[EventRow], verdicts: list[Verdict], state: dict
+    rows: list[EventRow],
+    verdicts: list[Verdict],
+    state: dict,
+    keep_ids: set[str] | None = None,
 ) -> tuple[list[Alert], list[str]]:
     """(alerts to send, stale keys to clear). User decision 2026-11-18: a row
     alerts the first time it reaches a strength and stays quiet until its
     trigger text changes or the verdict gets stronger. A weaker verdict sends
-    nothing and keeps the stored strength."""
+    nothing and keeps the stored strength. A key is stale only when its id is
+    not in `keep_ids` (default: the ids of `rows`)."""
     by_id = {v.row_id: v for v in verdicts}
     alerts: list[Alert] = []
     for row in rows:
@@ -418,7 +431,8 @@ def plan_alerts(
         if seen.get("hash") == h and level <= seen.get("strength", 0):
             continue
         alerts.append(Alert(row, v, key, {"hash": h, "strength": level}))
-    live = {STATE_PREFIX + r.id for r in rows}
+    ids = keep_ids if keep_ids is not None else {r.id for r in rows}
+    live = {STATE_PREFIX + i for i in ids}
     stale = sorted(k for k in state if k.startswith(STATE_PREFIX) and k not in live)
     return alerts, stale
 
@@ -439,14 +453,216 @@ def format_alert(a: Alert) -> str:
 
 
 def format_problems(
-    skipped: list[tuple[str, str]], invalid: list[Verdict]
+    skipped: list[tuple[str, str]], invalid: list[Verdict], unknown=()
 ) -> str | None:
     """One message for everything the job could not judge this run, or None.
-    Sent every run, deliberately not once-per-row: the file needs fixing."""
-    if not skipped and not invalid:
+    Sent every run, deliberately not once-per-row: the file needs fixing.
+    `unknown` holds price verdicts in state "unknown" (PriceVerdict)."""
+    if not skipped and not invalid and not unknown:
         return None
     e = html.escape
     lines = ["⚠️ <b>Watch: rows not judged this run</b>"]
     lines += [f"• skipped {e(who)}: {e(why)}" for who, why in skipped]
     lines += [f"• couldn't judge {e(v.row_id)}: {e(v.reason)}" for v in invalid]
+    lines += [f"• price unknown {e(v.row_id)}: {e(v.detail)}" for v in unknown]
     return "\n".join(lines)
+
+
+# ── Price rows (news-brief-vap): judged by code, never the model ─────────────
+# The rules are the portfolio repo's watch_check.py, so a level that fires on
+# the operator's PC fires here on the same day. Design:
+# docs/superpowers/specs/2026-11-19-watch-price-triggers-design.md.
+
+MA_WINDOW = 200
+# A last completed bar older than this is a stale or delisted symbol: UNKNOWN,
+# never "not fired". Five days covers a weekend plus a holiday.
+STALE_DAYS = 5
+
+
+@dataclass(frozen=True)
+class PriceVerdict:
+    row_id: str
+    state: str  # "fired" | "not" | "unknown"
+    detail: str
+
+
+def _as_utc(when: datetime) -> datetime:
+    return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+
+
+def completed_bars(
+    bars: list[tuple[date, float]], as_of: datetime
+) -> list[tuple[date, float]]:
+    """Bars dated before as_of's UTC date, oldest first. A bar dated on the run
+    day may still be forming (futures and FX trade overnight; yfinance also
+    appends a live same-day row), so it is never judged."""
+    today = _as_utc(as_of).astimezone(timezone.utc).date()
+    return sorted(b for b in bars if b[0] < today)
+
+
+def evaluate_price(
+    row: PriceRow, bars: list[tuple[date, float]] | None, as_of: datetime
+) -> PriceVerdict:
+    """One price row against its symbol's bars (None = the fetch failed)."""
+    if bars is None:
+        return PriceVerdict(row.id, "unknown", f"{row.signal}: fetch failed")
+    done = completed_bars(bars, as_of)
+    if not done:
+        return PriceVerdict(row.id, "unknown", f"{row.signal}: no completed closes")
+    last_day, last = done[-1]
+    age = (_as_utc(as_of).astimezone(timezone.utc).date() - last_day).days
+    if age > STALE_DAYS:
+        return PriceVerdict(
+            row.id,
+            "unknown",
+            f"{row.signal}: stale, last close {last_day} ({age} days)",
+        )
+    if row.condition == "above_ma200":
+        if len(done) < MA_WINDOW:
+            return PriceVerdict(
+                row.id, "unknown", f"{row.signal}: only {len(done)} closes"
+            )
+        ma = sum(v for _, v in done[-MA_WINDOW:]) / MA_WINDOW
+        detail = (
+            f"{row.signal} {last:.2f} vs 200dma {ma:.2f} "
+            f"({100 * (last / ma - 1):+.1f}%) @ {last_day}"
+        )
+        return PriceVerdict(row.id, "fired" if last > ma else "not", detail)
+    level = float(row.level)
+    fired = last < level if row.condition == "below" else last > level
+    detail = (
+        f"{row.signal} {last:.2f} vs {row.condition} {level:g} "
+        f"({100 * (last / level - 1):+.1f}%) @ {last_day}"
+    )
+    return PriceVerdict(row.id, "fired" if fired else "not", detail)
+
+
+# ── Price alerts: on crossing, re-arm when the row stops firing ──────────────
+
+# One runtime_state key per price row: {"hash": price_hash, "fired": bool}.
+PRICE_STATE_PREFIX = "watch.price."
+
+
+def price_hash(row: PriceRow) -> str:
+    """Identity of what a price row watches; an edit re-arms the row."""
+    ident = f"{row.signal}|{row.condition}|{row.level}"
+    return hashlib.sha256(ident.encode("utf-8")).hexdigest()[:16]
+
+
+@dataclass(frozen=True)
+class PriceAlert:
+    row: PriceRow
+    verdict: PriceVerdict
+    key: str
+    value: dict
+
+
+def plan_price_alerts(
+    rows: list[PriceRow],
+    verdicts: list[PriceVerdict],
+    state: dict,
+    keep_ids: set[str],
+) -> tuple[list[PriceAlert], dict, list[str]]:
+    """(alerts to send, re-arm updates to store, stale keys to clear).
+
+    User decision 2026-11-19: alert the day a row starts firing, stay quiet
+    while it stays fired, re-arm when it stops. An edited row re-arms. UNKNOWN
+    touches nothing: a data gap neither re-arms nor fires.
+    """
+    by_id = {v.row_id: v for v in verdicts}
+    alerts: list[PriceAlert] = []
+    updates: dict = {}
+    for row in rows:
+        v = by_id.get(row.id)
+        if v is None or v.state == "unknown":
+            continue
+        key = PRICE_STATE_PREFIX + row.id
+        seen = state.get(key) if isinstance(state.get(key), dict) else {}
+        h = price_hash(row)
+        armed = seen.get("hash") != h or not seen.get("fired")
+        if v.state == "fired":
+            if armed:
+                alerts.append(PriceAlert(row, v, key, {"hash": h, "fired": True}))
+        elif not armed:
+            updates[key] = {"hash": h, "fired": False}
+        elif seen and seen.get("hash") != h:
+            updates[key] = {"hash": h, "fired": False}
+    live = {PRICE_STATE_PREFIX + i for i in keep_ids}
+    stale = sorted(
+        k for k in state if k.startswith(PRICE_STATE_PREFIX) and k not in live
+    )
+    return alerts, updates, stale
+
+
+def format_price_alert(a: PriceAlert) -> str:
+    """Telegram HTML for one FIRED price row. Every field is escaped."""
+    e = html.escape
+    return (
+        f"📈 <b>Watch {e(a.row.id)}: {e(a.row.name)}</b>. FIRED\n{e(a.verdict.detail)}"
+    )
+
+
+# ── The fetcher: Yahoo v8 chart, cleaned the way yfinance cleans it ──────────
+
+YAHOO_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+
+
+def _exchange_tz(meta: dict):
+    """The listing's own timezone, which is how yfinance dates daily bars.
+
+    Probed on Yahoo 2026-11-19: FX bars are stamped at London midnight, i.e.
+    23:00 UTC under BST, so a UTC date puts every summer FX bar a day early
+    (review I1). US futures are stamped at New York midnight. Falls back to
+    UTC only when Yahoo names no timezone; a named zone that cannot load is
+    an error, never a silent UTC (the image carries tzdata for this).
+    """
+    name = meta.get("exchangeTimezoneName")
+    if not name:
+        return timezone.utc
+    from zoneinfo import ZoneInfo
+
+    return ZoneInfo(name)
+
+
+_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+
+
+def fetch_adj_closes(symbol: str, *, get=None) -> list[tuple[date, float]]:
+    """A year of daily adjusted closes, oldest first, in native units.
+
+    Reproduces what yfinance's auto_adjust=True hands watch_check.py:
+    `adjclose`, falling back to `close` per bar where it is missing; None bars
+    dropped; one bar per UTC date (the last wins); and NO unit conversion, so a
+    GBp listing stays in pence, as the operator's levels are. Raises
+    ValueError on any HTTP or shape failure. `get` defaults to requests.get
+    (imported lazily) and is injectable, so tests never touch the network.
+    """
+    if get is None:
+        import requests
+
+        get = requests.get
+    try:
+        resp = get(
+            _CHART_URL.format(symbol=symbol),
+            params={"interval": "1d", "range": "1y"},
+            headers=YAHOO_HEADERS,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        node = resp.json()["chart"]["result"][0]
+        stamps = node.get("timestamp") or []
+        ind = node["indicators"]
+        closes = ind["quote"][0]["close"]
+        adj = (ind.get("adjclose") or [{}])[0].get("adjclose") or [None] * len(stamps)
+        tz = _exchange_tz(node.get("meta") or {})
+    except Exception as e:
+        raise ValueError(f"{symbol}: Yahoo chart unusable: {e}") from e
+    if not (len(stamps) == len(closes) == len(adj)):
+        raise ValueError(f"{symbol}: Yahoo chart arrays differ in length")
+    by_day: dict[date, float] = {}
+    for ts, c, a in zip(stamps, closes, adj):
+        value = a if a is not None else c
+        if value is None:
+            continue
+        by_day[datetime.fromtimestamp(ts, tz=tz).date()] = float(value)
+    return sorted(by_day.items())

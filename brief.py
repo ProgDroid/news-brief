@@ -4042,33 +4042,13 @@ def _watch_post(payload: dict) -> dict:
     )
 
 
-def mode_watch(*, as_of: datetime | None = None, post=None) -> None:
-    """Judge the pushed watch file's event rows; alert once per row.
+PRICE_FAIL_LIMIT = 0.25  # more than this share of symbols failing = stage failed
 
-    Design: docs/superpowers/specs/2026-11-18-watch-event-triggers-design.md.
-    A WatchFileError (bad file, empty window) propagates on purpose: run_job
-    turns it into a red /jobs row and a Telegram alert naming the reason.
-    Takes no positional arguments: run_job calls fn() with none.
-    """
-    import watch
 
-    wf = watch.load_watch(WATCH_FILE)
-    failed: list[str] = []
-
-    def _send(text: str, who: str, *, notify: bool = False) -> bool:
-        sent = (
-            telegram_send_long(text, notify=True)
-            if notify
-            else telegram_send_long(text)
-        )
-        if sent:
-            return True
-        failed.append(who)
-        return False
-
+def _watch_event_stage(watch, wf, when, post, keep, send) -> list:
+    """Judge the event rows; returns the `invalid` verdicts to report."""
     verdicts: list = []
     if wf.events:
-        when = as_of or datetime.now(timezone.utc)
         with db.connect() as conn:
             ji, verdicts = watch.judge_watch(
                 conn, wf.events, when, post=post or _watch_post, model=_watch_model()
@@ -4088,31 +4068,133 @@ def mode_watch(*, as_of: datetime | None = None, post=None) -> None:
             state,
             "⚠️",
         )
-        alerts, stale = watch.plan_alerts(wf.events, verdicts, state)
+        alerts, stale = watch.plan_alerts(wf.events, verdicts, state, keep_ids=keep)
         for alert in alerts:
             # Send BEFORE storing: a failed send stores nothing, so the next
             # night (whose 48 h window still holds the items) sends it again.
             # TRIGGERED rings (user, 2026-11-19): it fires once per row, so a
             # silent one can be missed for good. UNCLEAR stays silent.
             rings = alert.verdict.verdict == "triggered"
-            if _send(watch.format_alert(alert), alert.row.id, notify=rings):
+            if send(watch.format_alert(alert), alert.row.id, notify=rings):
                 save_state({alert.key: alert.value})
         log.info(
-            f"Watch: {len(wf.events)} event rows, {ji.n_titles} titles, "
+            f"Watch events: {len(wf.events)} rows, {ji.n_titles} titles, "
             f"{len(alerts)} alerts, {len(wf.skipped)} skipped"
         )
     else:
         # No event rows: nothing to judge, but rows that left the file still
         # lose their keys, or a row re-added later stays silenced for ever.
-        _, stale = watch.plan_alerts([], [], load_state())
+        _, stale = watch.plan_alerts([], [], load_state(), keep_ids=keep)
     if stale:
         config.clear_runtime_state(stale)
-    invalid = [v for v in verdicts if v.verdict == "invalid"]
-    problems = watch.format_problems(wf.skipped, invalid)
+    return [v for v in verdicts if v.verdict == "invalid"]
+
+
+def _watch_price_stage(watch, wf, when, keep, send, fetch) -> tuple[list, str | None]:
+    """Judge the price rows by code (news-brief-vap). Returns (UNKNOWN verdicts
+    to report, a failure reason or None). Alerts on crossing and rings; a row
+    re-arms when it stops firing (user, 2026-11-19)."""
+    state = load_state()
+    unknown: list = []
+    failure = None
+    if wf.prices:
+        symbols = sorted({r.signal for r in wf.prices})
+        bars: dict = {}
+        for symbol in symbols:  # once per symbol, however many rows share it
+            try:
+                bars[symbol] = fetch(symbol)
+            except Exception as e:
+                log.warning(f"Watch prices: fetch failed for {symbol}: {e}")
+                bars[symbol] = None
+        verdicts = []
+        for r in wf.prices:
+            # One bad row (e.g. level 0) must not blind the rest (review M4).
+            try:
+                verdicts.append(watch.evaluate_price(r, bars[r.signal], when))
+            except Exception as e:
+                log.warning(f"Watch prices: row {r.id} crashed: {e}")
+                verdicts.append(
+                    watch.PriceVerdict(r.id, "unknown", f"crashed: {type(e).__name__}")
+                )
+        alerts, updates, stale = watch.plan_price_alerts(
+            wf.prices, verdicts, state, keep
+        )
+        for alert in alerts:
+            if send(watch.format_price_alert(alert), alert.row.id, notify=True):
+                save_state({alert.key: alert.value})
+        if updates:
+            save_state(updates)
+        unknown = [v for v in verdicts if v.state == "unknown"]
+        n_failed = sum(1 for s in symbols if bars[s] is None)
+        log.info(
+            f"Watch prices: {len(wf.prices)} rows, {len(symbols)} symbols, "
+            f"{n_failed} fetch failures, {len(alerts)} alerts, {len(unknown)} unknown"
+        )
+        if n_failed > PRICE_FAIL_LIMIT * len(symbols):
+            failure = (
+                f"prices: {n_failed} of {len(symbols)} symbols failed to fetch "
+                f"(> {PRICE_FAIL_LIMIT:.0%})"
+            )
+    else:
+        _, _, stale = watch.plan_price_alerts([], [], state, keep)
+    if stale:
+        config.clear_runtime_state(stale)
+    return unknown, failure
+
+
+def mode_watch(*, as_of: datetime | None = None, post=None, fetch=None) -> None:
+    """Judge the pushed watch file: event rows by the model, price rows by code.
+
+    Designs: docs/superpowers/specs/2026-11-18-watch-event-triggers-design.md
+    and 2026-11-19-watch-price-triggers-design.md. A broken file raises at once
+    (run_job makes it a red /jobs row plus a Telegram alert). The two stages
+    are isolated: one failing never stops the other, and the job raises at the
+    end naming every failed stage and send. Takes no positional arguments:
+    run_job calls fn() with none.
+    """
+    import watch
+
+    wf = watch.load_watch(WATCH_FILE)
+    when = as_of or datetime.now(timezone.utc)
+    keep = watch.keep_ids(wf)
+    failed_sends: list[str] = []
+    stage_errors: list[str] = []
+
+    def _send(text: str, who: str, *, notify: bool = False) -> bool:
+        sent = (
+            telegram_send_long(text, notify=True)
+            if notify
+            else telegram_send_long(text)
+        )
+        if sent:
+            return True
+        failed_sends.append(who)
+        return False
+
+    invalid: list = []
+    unknown: list = []
+    try:
+        invalid = _watch_event_stage(watch, wf, when, post, keep, _send)
+    except Exception as e:
+        log.exception("Watch: event stage failed")
+        stage_errors.append(f"events: {type(e).__name__}: {e}")
+    try:
+        unknown, failure = _watch_price_stage(
+            watch, wf, when, keep, _send, fetch or watch.fetch_adj_closes
+        )
+        if failure:
+            stage_errors.append(failure)
+    except Exception as e:
+        log.exception("Watch: price stage failed")
+        stage_errors.append(f"prices: {type(e).__name__}: {e}")
+
+    problems = watch.format_problems(wf.skipped, invalid, unknown)
     if problems:
         _send(problems, "problems report")
-    if failed:
-        raise RuntimeError(f"watch: Telegram send failed for {', '.join(failed)}")
+    if failed_sends:
+        stage_errors.append(f"Telegram send failed for {', '.join(failed_sends)}")
+    if stage_errors:
+        raise RuntimeError("watch: " + "; ".join(stage_errors))
 
 
 def mode_capture():

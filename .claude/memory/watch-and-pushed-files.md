@@ -26,8 +26,13 @@ or a real row, and never log a trigger's text: this repo is public.**
   The image's ENTRYPOINT is `python brief.py`, so without `--entrypoint python` you get
   brief.py's usage line and exit 1. The plan, the spec and the docstring all shipped that bug
   first, and the final review caught it. Bead 115 must keep `scripts/` in the image until the gate passes.
-- **`vap` (price rows)** depends on 8lp. The loader already validates price rows, as
-  `watch.PriceRow`.
+- **`vap` (price rows): BUILT 2026-11-19 as stage 2 of the same 06:30 job** (no separate job:
+  red-team, user agreed). Code, not the model; same rules as the portfolio `watch_check.py`.
+  Parity measured 29/29 agree on real data (`scripts/watch_price_parity.py`, run under the
+  portfolio venv). It alerts on crossing, rings, and re-arms when a row stops firing. **Bars are
+  dated in the exchange's timezone:** Yahoo stamps FX bars at London midnight, 23:00Z in
+  summer, so UTC dating judged forming bars. That needs `tzdata` (pinned) because
+  python:3.12-slim has no zone database; the Dockerfile smoke-checks it.
 
 **Why:** these are the user's decisions from 2026-11-18. The judge reads captured items, not
 the brief, so its links are real. It alerts once per row (re-alerting only on an edited trigger

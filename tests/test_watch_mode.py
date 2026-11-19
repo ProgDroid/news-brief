@@ -7,6 +7,7 @@ the wiring, the once-per-row rule and the failure paths are what is tested.
 
 import contextlib
 import json
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -163,7 +164,11 @@ def test_missing_file_raises_watch_file_error(env):
 def test_zero_items_raises_capture_may_be_down(env):
     env.write([E1])
     env.items["value"] = []
-    with pytest.raises(WatchFileError, match="capture may be down"):
+    # The event stage fails; the job still raises, naming the reason, so /jobs
+    # goes red and run_job's Telegram alert carries "capture may be down".
+    with pytest.raises(
+        RuntimeError, match="events: WatchFileError.*capture may be down"
+    ):
         brief.mode_watch(post=env.post)
     assert env.calls == []
 
@@ -236,3 +241,165 @@ def test_watch_is_scheduled_daily_at_0630():
     (spec,) = [s for s in scheduler.SCHEDULES if s.job == "watch"]
     assert (spec.kind, spec.at) == ("daily", "06:30")
     assert spec.grace_minutes == 180
+
+
+def test_a_skipped_event_row_keeps_its_key_through_mode_watch(env):
+    env.write([E1])
+    brief.mode_watch(post=env.post)
+    broken = dict(E1)
+    del broken["trigger"]  # now malformed: skipped, but still in the file
+    env.write([broken])
+    brief.mode_watch(post=env.post)
+    assert "watch.alerted.e1" in env.state
+
+
+# ── Price stage (news-brief-vap) ─────────────────────────────────────────────
+
+PRICE_AS_OF = datetime(2026, 11, 19, 6, 30, tzinfo=timezone.utc)
+
+
+def _price(rid, signal, level=400.0, condition="below"):
+    return {
+        "id": rid,
+        "kind": "price",
+        "action": "add",
+        "name": f"Example {rid}",
+        "signal": signal,
+        "condition": condition,
+        "level": level,
+    }
+
+
+def _fetcher(closes: dict, calls: list | None = None):
+    """symbol -> last close (a one-bar history ending yesterday), or an
+    Exception to raise for that symbol."""
+
+    def fetch(symbol):
+        if calls is not None:
+            calls.append(symbol)
+        value = closes[symbol]
+        if isinstance(value, Exception):
+            raise value
+        return [(date(2026, 11, 18), value)]
+
+    return fetch
+
+
+def _run(env, fetch):
+    brief.mode_watch(post=env.post, fetch=fetch, as_of=PRICE_AS_OF)
+
+
+def test_price_fired_rings_and_stores(env):
+    env.write([_price("p1", "QQQ")])
+    _run(env, _fetcher({"QQQ": 390.0}))
+    assert len(env.rang) == 1 and "Watch p1" in env.rang[0] and "FIRED" in env.rang[0]
+    assert env.state["watch.price.p1"]["fired"] is True
+    assert env.calls == []  # no event rows: no model call
+
+
+def test_price_stays_silent_while_fired_then_rearms(env):
+    env.write([_price("p1", "QQQ")])
+    _run(env, _fetcher({"QQQ": 390.0}))
+    _run(env, _fetcher({"QQQ": 391.0}))
+    assert len(env.rang) == 1
+    _run(env, _fetcher({"QQQ": 410.0}))  # back above: re-arm
+    assert env.state["watch.price.p1"]["fired"] is False
+    _run(env, _fetcher({"QQQ": 395.0}))  # crosses again
+    assert len(env.rang) == 2
+
+
+def test_shared_symbol_fetched_once(env):
+    calls = []
+    env.write([_price("p1", "QQQ"), _price("p2", "QQQ", level=380.0)])
+    _run(env, _fetcher({"QQQ": 390.0}, calls))
+    assert calls == ["QQQ"]
+
+
+def test_price_fetch_failure_still_sends_event_alerts_and_exits_nonzero(env):
+    env.write([E1, _price("p1", "QQQ")])
+    with pytest.raises(RuntimeError, match="prices: 1 of 1 symbols"):
+        _run(env, _fetcher({"QQQ": ValueError("down")}))
+    assert any("Watch e1" in m for m in env.sent)  # event stage unaffected
+    assert any("price unknown p1" in m for m in env.sent)
+
+
+def test_quarter_or_fewer_failures_report_silently_and_exit_zero(env):
+    env.write([_price(f"p{i}", s) for i, s in enumerate(["AAA", "BBB", "CCC", "DDD"])])
+    _run(
+        env,
+        _fetcher({"AAA": 410.0, "BBB": 410.0, "CCC": 410.0, "DDD": ValueError("x")}),
+    )
+    problems = [m for m in env.sent if "not judged" in m]
+    assert len(problems) == 1 and "price unknown p3" in problems[0]
+    assert env.rang == []
+
+
+def test_shared_symbol_failure_counts_once_toward_the_limit(env):
+    # 2 rows on BAD, 2 symbols OK: 1 of 3 symbols failed (33% > 25%) -> red.
+    # Counting rows instead (2 of 4 = 50%) would also be red, so pin the
+    # message: it must say "1 of 3 symbols".
+    env.write(
+        [
+            _price("p1", "BAD"),
+            _price("p2", "BAD", level=300.0),
+            _price("p3", "OK1"),
+            _price("p4", "OK2"),
+        ]
+    )
+    with pytest.raises(RuntimeError, match="1 of 3 symbols"):
+        _run(env, _fetcher({"BAD": ValueError("x"), "OK1": 410.0, "OK2": 410.0}))
+
+
+def test_no_price_rows_makes_no_fetch(env):
+    calls = []
+    env.write([E1])
+    _run(env, _fetcher({}, calls))
+    assert calls == []
+
+
+def test_unknown_price_rows_appear_in_the_problems_report(env):
+    env.write([_price("p1", "OLD")])
+
+    def stale(symbol):
+        return [(PRICE_AS_OF.date() - timedelta(days=9), 390.0)]
+
+    _run(env, stale)
+    assert any("price unknown p1" in m and "stale" in m for m in env.sent)
+    assert env.rang == []
+
+
+def test_a_crashing_price_stage_still_sends_event_alerts(env, monkeypatch):
+    def boom(*a, **k):
+        raise KeyError("bug")
+
+    monkeypatch.setattr(watch, "plan_price_alerts", boom)
+    env.write([E1, _price("p1", "QQQ")])
+    with pytest.raises(RuntimeError, match="prices: KeyError"):
+        _run(env, _fetcher({"QQQ": 390.0}))
+    assert any("Watch e1" in m for m in env.sent)
+
+
+def test_a_failing_event_stage_still_sends_price_alerts(env):
+    env.write([E1, _price("p1", "QQQ")])
+    env.items["value"] = []  # capture down: the event stage raises
+    with pytest.raises(RuntimeError, match="events: WatchFileError"):
+        _run(env, _fetcher({"QQQ": 390.0}))
+    assert len(env.rang) == 1 and "Watch p1" in env.rang[0]
+
+
+def test_a_failed_price_send_stores_nothing_and_fails_the_job(env):
+    """Review I2: the spec's 'a failed send stores nothing' had no test."""
+    env.write([_price("p1", "QQQ")])
+    env.ok["value"] = False
+    with pytest.raises(RuntimeError, match="p1"):
+        _run(env, _fetcher({"QQQ": 390.0}))
+    assert "watch.price.p1" not in env.state
+
+
+def test_one_crashing_price_row_does_not_blind_the_others(env):
+    """Review M4 (re-graded Important): level 0 made evaluate_price raise
+    ZeroDivisionError and aborted the whole stage."""
+    env.write([_price("p0", "ZZZ", level=0.0), _price("p1", "QQQ")])
+    _run(env, _fetcher({"ZZZ": 5.0, "QQQ": 390.0}))
+    assert len(env.rang) == 1 and "Watch p1" in env.rang[0]
+    assert any("price unknown p0" in m and "crashed" in m for m in env.sent)

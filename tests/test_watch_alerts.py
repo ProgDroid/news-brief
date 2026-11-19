@@ -100,3 +100,13 @@ def test_format_problems_lists_skipped_rows_and_invalid_verdicts():
     )
     assert "p9" in msg and "unknown kind" in msg
     assert "e2" in msg and "I9" in msg
+
+
+def test_skipped_event_row_keeps_its_key():
+    """A row the loader skipped as malformed is still in the file: fixing the
+    typo must not re-ring an old trigger (red-team, 2026-11-19)."""
+    state = {**_state(2), "watch.alerted.typo": {"hash": "x", "strength": 2}}
+    _, stale = plan_alerts(
+        [E1], [_v("not", evidence=())], state, keep_ids={"e1", "typo"}
+    )
+    assert stale == []

@@ -31,6 +31,8 @@ RUN . /etc/os-release \
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+# Fail the BUILD, not a 06:30 run, if the zone database is missing (watch.py).
+RUN python -c "import zoneinfo; zoneinfo.ZoneInfo('Europe/London'); zoneinfo.ZoneInfo('America/New_York')"
 
 # This list is an allowlist: a module absent from it does not exist inside the
 # image, however present it is in the repo. tests/test_packaging.py walks the
