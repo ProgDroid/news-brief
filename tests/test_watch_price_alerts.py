@@ -93,3 +93,11 @@ def test_format_problems_lists_unknown_prices():
     msg = format_problems([], [], [_v("unknown", detail="QQQ: fetch failed")])
     assert "p1" in msg and "QQQ: fetch failed" in msg
     assert format_problems([], [], []) is None
+
+
+def test_int_and_float_levels_hash_the_same():
+    """r1w (M3): price_hash stringified the level, so a re-saved 400 vs 400.0
+    would re-arm a fired row."""
+    as_int = PriceRow("p1", "n", "add", "QQQ", "below", 400)
+    as_float = PriceRow("p1", "n", "add", "QQQ", "below", 400.0)
+    assert price_hash(as_int) == price_hash(as_float)

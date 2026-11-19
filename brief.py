@@ -1372,9 +1372,16 @@ def _handle_telegram_update(update: dict, fb: dict) -> dict:
             theses = load_local_theses()
             theses[key.strip()] = val.strip()
             save_theses(theses)
+            # The pushed file wins a clash in the brief, so say so (r1w).
+            pushed, _ = load_portfolio_theses()
+            note = (
+                " (overridden by theses_portfolio.json)"
+                if key.strip() in pushed
+                else ""
+            )
             telegram_send(
                 f"📌 Thesis set: <b>{html.escape(key.strip())}</b> — "
-                f"{html.escape(val.strip())}"
+                f"{html.escape(val.strip())}{note}"
             )
         else:
             telegram_send("Format: <code>/thesis TICKER = your thesis</code>")
@@ -4125,14 +4132,16 @@ def _watch_price_stage(watch, wf, when, keep, send, fetch) -> tuple[list, str | 
         if updates:
             save_state(updates)
         unknown = [v for v in verdicts if v.state == "unknown"]
-        n_failed = sum(1 for s in symbols if bars[s] is None)
+        # A symbol with no fresh completed bar is as dead as a failed fetch
+        # (r1w/M5): both count toward the limit.
+        n_failed = sum(1 for s in symbols if not watch.symbol_usable(bars[s], when))
         log.info(
             f"Watch prices: {len(wf.prices)} rows, {len(symbols)} symbols, "
-            f"{n_failed} fetch failures, {len(alerts)} alerts, {len(unknown)} unknown"
+            f"{n_failed} unusable, {len(alerts)} alerts, {len(unknown)} unknown"
         )
         if n_failed > PRICE_FAIL_LIMIT * len(symbols):
             failure = (
-                f"prices: {n_failed} of {len(symbols)} symbols failed to fetch "
+                f"prices: {n_failed} of {len(symbols)} symbols unusable "
                 f"(> {PRICE_FAIL_LIMIT:.0%})"
             )
     else:
@@ -4175,6 +4184,9 @@ def mode_watch(*, as_of: datetime | None = None, post=None, fetch=None) -> None:
     unknown: list = []
     try:
         invalid = _watch_event_stage(watch, wf, when, post, keep, _send)
+        if wf.events and len(invalid) == len(wf.events):
+            # Judged nothing usable: a quiet night must be a JUDGED night (r1w).
+            stage_errors.append(f"events: every row invalid ({len(invalid)})")
     except Exception as e:
         log.exception("Watch: event stage failed")
         stage_errors.append(f"events: {type(e).__name__}: {e}")

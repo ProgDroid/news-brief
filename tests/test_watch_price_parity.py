@@ -30,3 +30,53 @@ def test_unknown_on_either_side_never_counts_as_agree():
 def test_a_row_missing_on_one_side_is_a_disagreement():
     out = compare({"p1": "fired"}, {}, set())
     assert out["disagree"] == ["p1"]
+
+
+def test_rows_from_watch_file_match_the_csv_shape(tmp_path):
+    """r1w (M6): parity can read the pushed watch.json the host reads, not
+    only the portfolio CSV. Rows are made up."""
+    import json
+
+    from scripts.watch_price_parity import rows_from_watch_file
+
+    path = tmp_path / "watch.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "rows": [
+                    {"id": "e1", "kind": "event", "name": "n", "trigger": "t"},
+                    {
+                        "id": "p1",
+                        "kind": "price",
+                        "action": "add",
+                        "name": "n",
+                        "signal": "QQQ",
+                        "condition": "below",
+                        "level": 400,
+                    },
+                    {
+                        "id": "p2",
+                        "kind": "price",
+                        "action": "rebuy",
+                        "name": "n",
+                        "signal": "SPY",
+                        "condition": "above_ma200",
+                        "level": None,
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    rows = rows_from_watch_file(path)
+    assert [r["id"] for r in rows] == ["p1", "p2"]
+    assert rows[0] | {} == {
+        "id": "p1",
+        "action": "add",
+        "signal": "QQQ",
+        "condition": "below",
+        "level": "400.0",
+        "status": "open",
+    }
+    assert rows[1]["level"] == ""

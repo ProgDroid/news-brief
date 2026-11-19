@@ -103,3 +103,31 @@ def test_evidence_is_capped_at_three_links():
     ji = build_judge_input([E1], syndicated + ITEMS)
     out = validate_verdicts(_resp([_v("e1", "triggered", ["I1", "I2"])]), [E1], ji)
     assert len(out[0].evidence) == MAX_LINKS == 3
+
+
+def test_non_string_row_id_or_label_never_raises():
+    """r1w: an unhashable row_id or label from the model raised TypeError and
+    crashed the job instead of reporting a per-row invalid."""
+    resp = _resp(
+        [
+            {"row_id": {"x": 1}, "verdict": "triggered", "evidence": [], "reason": "r"},
+            _v("e1", "triggered", [["I1"]]),
+            _v("e2"),
+        ]
+    )
+    out = validate_verdicts(resp, [E1, E2], JI)
+    assert out[0].verdict == "invalid" and out[1].verdict == "not"
+
+
+def test_evidence_dedupes_links_and_shares_slots_across_labels():
+    """r1w: ["I1","I1"] repeated links, and syndicated copies of the first
+    cited headline filled all 3 slots before a second cited headline."""
+    syndicated = [Item("Same", f"https://example.com/s{n}", "W") for n in range(5)]
+    other = Item("Other", "https://example.com/o", "W")
+    ji = build_judge_input([E1], syndicated + [other])
+    out = validate_verdicts(
+        _resp([_v("e1", "triggered", ["I1", "I1", "I2"])]), [E1], ji
+    )
+    urls = [i.url for i in out[0].evidence]
+    assert len(urls) == len(set(urls)) == 3
+    assert "https://example.com/o" in urls

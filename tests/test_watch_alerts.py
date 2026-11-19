@@ -110,3 +110,17 @@ def test_skipped_event_row_keeps_its_key():
         [E1], [_v("not", evidence=())], state, keep_ids={"e1", "typo"}
     )
     assert stale == []
+
+
+def test_format_alert_escapes_the_outlet():
+    item = Item("t", "https://example.com/", "W&W")
+    (alert,), _ = plan_alerts([E1], [Verdict("e1", "triggered", [item], "r")], {})
+    assert "W&amp;W" in format_alert(alert)
+
+
+def test_format_problems_escapes_every_field():
+    msg = format_problems(
+        [("<id>", "bad & worse")], [Verdict("e<2>", "invalid", [], "x<y")]
+    )
+    assert "&lt;id&gt;" in msg and "bad &amp; worse" in msg
+    assert "e&lt;2&gt;" in msg and "x&lt;y" in msg

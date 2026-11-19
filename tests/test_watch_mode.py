@@ -176,11 +176,14 @@ def test_zero_items_raises_capture_may_be_down(env):
 def test_skipped_rows_and_invalid_verdicts_reported_every_run(env):
     env.write([E1, {"id": "x", "kind": "telepathy", "name": "n"}])
     env.reply["value"] = _resp([])  # no verdict for e1 -> invalid
-    brief.mode_watch(post=env.post)
-    brief.mode_watch(post=env.post)
+    # Every event row invalid also turns the job red (r1w); the report must
+    # still go out on each run.
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="every row invalid"):
+            brief.mode_watch(post=env.post)
     problems = [m for m in env.sent if "not judged" in m]
     assert len(problems) == 2
-    assert "x" in problems[0] and "e1" in problems[0]
+    assert "skipped x:" in problems[0] and "e1" in problems[0]
 
 
 def test_over_ceiling_warns_once_and_still_judges(env, monkeypatch):
@@ -363,7 +366,10 @@ def test_unknown_price_rows_appear_in_the_problems_report(env):
     def stale(symbol):
         return [(PRICE_AS_OF.date() - timedelta(days=9), 390.0)]
 
-    _run(env, stale)
+    # Its only symbol is stale, so 1 of 1 is unusable: red (r1w/M5), and the
+    # row is still named in the report.
+    with pytest.raises(RuntimeError, match="1 of 1 symbols unusable"):
+        _run(env, stale)
     assert any("price unknown p1" in m and "stale" in m for m in env.sent)
     assert env.rang == []
 
@@ -403,3 +409,39 @@ def test_one_crashing_price_row_does_not_blind_the_others(env):
     _run(env, _fetcher({"ZZZ": 5.0, "QQQ": 390.0}))
     assert len(env.rang) == 1 and "Watch p1" in env.rang[0]
     assert any("price unknown p0" in m and "crashed" in m for m in env.sent)
+
+
+def test_a_night_where_every_event_row_is_invalid_turns_the_job_red(env):
+    """r1w: a run that judged nothing usable (e.g. max_tokens every night)
+    recorded green; the spec says a quiet night must be a judged night."""
+    env.write([E1])
+    env.reply["value"] = {"stop_reason": "max_tokens", "content": []}
+    with pytest.raises(RuntimeError, match="events: every row invalid"):
+        brief.mode_watch(post=env.post)
+    assert any("couldn't judge e1" in m for m in env.sent)  # report still sent
+
+
+def test_a_skipped_price_row_keeps_its_key_through_mode_watch(env):
+    """r1w (M2): the price stage must pass keep_ids too."""
+    env.write([_price("p1", "QQQ")])
+    _run(env, _fetcher({"QQQ": 390.0}))
+    broken = _price("p1", "QQQ")
+    del broken["level"]  # malformed now: skipped, still in the file
+    # A second, valid row keeps the stage on its main branch: with no valid
+    # price rows it takes the empty-file branch, and a keep_ids bug in the
+    # main call would go unseen (it did, at first).
+    env.write([broken, _price("p2", "OK", level=300.0)])
+    _run(env, _fetcher({"OK": 310.0}))
+    assert "watch.price.p1" in env.state
+
+
+def test_an_empty_or_stale_series_counts_toward_the_failure_limit(env):
+    """r1w (M5): a symbol answering with no usable bars is as dead as one
+    that fails to fetch, and must count toward the 25%."""
+    env.write([_price("p1", "EMPTY"), _price("p2", "OK", level=300.0)])
+
+    def fetch(symbol):
+        return [] if symbol == "EMPTY" else [(date(2026, 11, 18), 310.0)]
+
+    with pytest.raises(RuntimeError, match="1 of 2 symbols"):
+        _run(env, fetch)

@@ -51,21 +51,46 @@ def compare(ours: dict[str, str], theirs: dict[str, str], straddle: set[str]) ->
     return out
 
 
+def rows_from_watch_file(path: Path) -> list[dict]:
+    """The pushed watch.json's price rows, in the portfolio CSV's row shape,
+    so watch_check.evaluate can judge exactly what the host reads."""
+    wf = watch.load_watch(path)
+    return [
+        {
+            "id": r.id,
+            "action": r.action,
+            "signal": r.signal,
+            "condition": r.condition,
+            "level": "" if r.level is None else str(r.level),
+            "status": "open",
+        }
+        for r in wf.prices
+    ]
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--portfolio", required=True, type=Path)
+    ap.add_argument(
+        "--watch-file",
+        type=Path,
+        help="judge this pushed watch.json instead of the portfolio CSV",
+    )
     args = ap.parse_args(argv)
 
     sys.path.insert(0, str(args.portfolio))
     import watch_check  # the portfolio repo's own rule (needs yfinance)
 
-    rows = [
-        r
-        for r in csv.DictReader(
-            (args.portfolio / "data" / "watchlist.csv").open(encoding="utf-8")
-        )
-        if r.get("status") == "open" and r.get("condition") != "event"
-    ]
+    if args.watch_file:
+        rows = rows_from_watch_file(args.watch_file)
+    else:
+        rows = [
+            r
+            for r in csv.DictReader(
+                (args.portfolio / "data" / "watchlist.csv").open(encoding="utf-8")
+            )
+            if r.get("status") == "open" and r.get("condition") != "event"
+        ]
     now = datetime.now(timezone.utc)
     bars: dict = {}
     ours: dict[str, str] = {}

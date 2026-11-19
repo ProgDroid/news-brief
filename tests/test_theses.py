@@ -138,3 +138,19 @@ def test_small_line_with_a_thesis_reaches_the_prompt(monkeypatch, files, sent):
     assert "BIG_US_EQ" in out
     assert "TINY_US_EQ (tiny_us_eq): 0.4% — tiny thesis" in out
     assert "DUST_US_EQ" not in out
+
+
+def test_thesis_ack_says_when_the_pushed_file_overrides_it(files, sent):
+    """r1w: /thesis on a key the pushed file also holds replied 'set' though
+    the pushed line wins in the brief."""
+    local, pushed = files
+    _push(pushed, {"SHEL": "pushed shel"})
+    update = {
+        "message": {"text": "/thesis SHEL = mine", "chat": {"id": config.chat_id()}}
+    }
+    brief._handle_telegram_update(update, {"focus": [], "mute": [], "notes": []})
+    assert any("overridden by theses_portfolio.json" in m for m in sent)
+    sent.clear()
+    update["message"]["text"] = "/thesis BP = mine"
+    brief._handle_telegram_update(update, {"focus": [], "mute": [], "notes": []})
+    assert not any("overridden" in m for m in sent)

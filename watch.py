@@ -191,7 +191,8 @@ def build_judge_input(rows: list[EventRow], items: list[Item]) -> JudgeInput:
     by_title: dict[str, str] = {}
     lines: list[str] = []
     for item in items:
-        title = item.title.strip()
+        # Collapse all whitespace: an embedded newline could forge a label line.
+        title = " ".join(item.title.split())
         if not title:
             continue
         key = title.casefold()
@@ -290,6 +291,21 @@ def build_judge_request(rows: list[EventRow], ji: JudgeInput, *, model: str) -> 
     }
 
 
+def _pick_evidence(groups: list[list[Item]]) -> list[Item]:
+    """Up to MAX_LINKS distinct URLs, one per cited headline per round, so the
+    syndicated copies of the first headline cannot crowd out a second one."""
+    picked: list[Item] = []
+    seen: set[str] = set()
+    for depth in range(max((len(g) for g in groups), default=0)):
+        for group in groups:
+            if depth < len(group) and group[depth].url not in seen:
+                seen.add(group[depth].url)
+                picked.append(group[depth])
+                if len(picked) == MAX_LINKS:
+                    return picked
+    return picked
+
+
 def _check_one(raw: dict, ji: JudgeInput) -> Verdict:
     row_id = raw["row_id"]
     verdict = raw.get("verdict")
@@ -299,13 +315,14 @@ def _check_one(raw: dict, ji: JudgeInput) -> Verdict:
     labels = raw.get("evidence") or []
     if not isinstance(labels, list):
         return Verdict(row_id, "invalid", [], "evidence is not a list")
-    unknown = [lb for lb in labels if lb not in ji.labels]
+    # isinstance first: an unhashable label would raise on the dict lookup.
+    unknown = [lb for lb in labels if not isinstance(lb, str) or lb not in ji.labels]
     if unknown:
         # Never drop an unknown label and carry on: a row whose evidence the
         # model invented is not a row we judged (memory
         # never-give-a-model-raw-database-ids).
         return Verdict(row_id, "invalid", [], f"cited unknown labels {unknown}")
-    evidence = [item for lb in labels for item in ji.labels[lb]][:MAX_LINKS]
+    evidence = _pick_evidence([ji.labels[lb] for lb in dict.fromkeys(labels)])
     if verdict == "triggered" and not evidence:
         verdict = "unclear"
     return Verdict(row_id, verdict, evidence, reason)
@@ -332,7 +349,7 @@ def validate_verdicts(
         if not isinstance(entry, dict):
             continue
         row_id = entry.get("row_id")
-        if row_id not in wanted or row_id in found:
+        if not isinstance(row_id, str) or row_id not in wanted or row_id in found:
             continue  # unknown row ids are ignored; the first verdict wins
         found[row_id] = _check_one(entry, ji)
     return [
@@ -453,7 +470,9 @@ def format_alert(a: Alert) -> str:
 
 
 def format_problems(
-    skipped: list[tuple[str, str]], invalid: list[Verdict], unknown=()
+    skipped: list[tuple[str, str]],
+    invalid: list[Verdict],
+    unknown: "list[PriceVerdict] | tuple" = (),
 ) -> str | None:
     """One message for everything the job could not judge this run, or None.
     Sent every run, deliberately not once-per-row: the file needs fixing.
@@ -498,6 +517,15 @@ def completed_bars(
     appends a live same-day row), so it is never judged."""
     today = _as_utc(as_of).astimezone(timezone.utc).date()
     return sorted(b for b in bars if b[0] < today)
+
+
+def symbol_usable(bars: list[tuple[date, float]] | None, as_of: datetime) -> bool:
+    """A fetched series with a completed bar no older than STALE_DAYS."""
+    if not bars:
+        return False
+    done = completed_bars(bars, as_of)
+    today = _as_utc(as_of).astimezone(timezone.utc).date()
+    return bool(done) and (today - done[-1][0]).days <= STALE_DAYS
 
 
 def evaluate_price(
@@ -545,7 +573,8 @@ PRICE_STATE_PREFIX = "watch.price."
 
 def price_hash(row: PriceRow) -> str:
     """Identity of what a price row watches; an edit re-arms the row."""
-    ident = f"{row.signal}|{row.condition}|{row.level}"
+    level = "" if row.level is None else repr(float(row.level))
+    ident = f"{row.signal}|{row.condition}|{level}"
     return hashlib.sha256(ident.encode("utf-8")).hexdigest()[:16]
 
 
