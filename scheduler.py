@@ -66,6 +66,11 @@ class Decision:
 # widest window of all, because a late backup is still a good backup — it is the
 # most lateness-tolerant job here — but it stays bounded so a catch-up cannot
 # surface at an arbitrary hour with no schedule to explain it.
+# `watch` (news-brief-8lp) runs at 06:30, after the 06:00 collect, so an alert
+# lands with the morning brief; it does not depend on collect. Its 48 h window
+# means a run caught up hours late still sees the same items. Scheduled
+# provisionally on 2026-11-19, before its replay gate (8lp.1) — user decision:
+# an unvalidated watcher beats none, but a quiet night is not yet proof.
 SCHEDULES: tuple[Schedule, ...] = (
     Schedule("submit", "daily", "20:00", None, grace_minutes=60),
     Schedule("collect", "daily", "06:00", None, grace_minutes=120),
@@ -74,6 +79,7 @@ SCHEDULES: tuple[Schedule, ...] = (
     Schedule("monitor", "interval", None, 60, grace_minutes=15),
     Schedule("capture", "interval", None, 30, grace_minutes=10),
     Schedule("comprehend", "interval", None, 60, grace_minutes=15),
+    Schedule("watch", "daily", "06:30", None, grace_minutes=180),
 )
 
 

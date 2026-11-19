@@ -207,6 +207,10 @@ def test_watch_model_knob_is_declared_and_in_the_compose_anchor():
     assert "NEWSBRIEF_WATCH_MODEL=${NEWSBRIEF_WATCH_MODEL:-}" in compose
 
 
-def test_watch_is_a_job_mode_but_not_scheduled():
+def test_watch_is_scheduled_daily_at_0630():
+    """Scheduled provisionally 2026-11-19 by user decision, ahead of the replay
+    gate news-brief-8lp.1 (still open): an unvalidated watcher beats none."""
     assert "watch" in brief.MODES and "watch" in brief.JOB_MODES
-    assert all(s.job != "watch" for s in scheduler.SCHEDULES)
+    (spec,) = [s for s in scheduler.SCHEDULES if s.job == "watch"]
+    assert (spec.kind, spec.at) == ("daily", "06:30")
+    assert spec.grace_minutes == 180

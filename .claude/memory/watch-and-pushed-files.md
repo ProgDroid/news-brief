@@ -1,6 +1,6 @@
 ---
 name: watch-and-pushed-files
-description: "Operator-pushed private files (watch.json, theses_portfolio.json) and the 8lp watch job: BUILT + PUSHED 2026-11-18 but UNSCHEDULED until gate 8lp.1 passes; replay needs --entrypoint python; open question: should TRIGGERED alerts ring"
+description: "Operator-pushed private files (watch.json, theses_portfolio.json, both ON the host since 2026-11-19 via portfolio oaq) and the 8lp watch job: SCHEDULED 06:30 PROVISIONALLY 2026-11-19, ahead of gate 8lp.1 (deferred to 2026-12-03); replay needs --entrypoint python; open question: should TRIGGERED alerts ring"
 metadata:
   node_type: memory
   type: project
@@ -16,10 +16,11 @@ or a real row, and never log a trigger's text: this repo is public.**
 - **`theses_portfolio.json` (ajf, closed 2026-11-18).** It's merged over `/thesis`'s
   `theses.json`, and the pushed line wins a clash. A **missing** file warns on Telegram on every
   `submit`. That's the user's explicit choice: a push that never lands must not go quiet.
-- **`watch.json` → the `watch` job (8lp, open).** It's in `MODES`/`JOB_MODES` but **deliberately
-  not in `SCHEDULES`**. The schedule (06:30 daily) lands only after the hands-on replay gate
-  `news-brief-8lp.1` passes, as its own commit, and is verified by the next morning's `/jobs` row.
-  Don't schedule it early.
+- **`watch.json` → the `watch` job (8lp, open).** **Scheduled 06:30 daily on 2026-11-19,
+  PROVISIONALLY, before its replay gate** `news-brief-8lp.1`, by user decision: an unvalidated
+  watcher beats none. Until the gate passes, a quiet night means "probably nothing", NOT
+  verified. When the gate is picked up, the user pastes headlines and the agent writes the rows
+  and expected verdicts (the user only confirms events). Close 8lp only after the gate passes.
 - **Replay on the host:**
   `docker compose run --rm --entrypoint python newsbrief scripts/watch_replay.py --as-of <ISO UTC> --rows /app/logs/<rows>.json`.
   The image's ENTRYPOINT is `python brief.py`, so without `--entrypoint python` you get

@@ -345,7 +345,7 @@ The `/app/logs` volume holds all state and archives, so it must persist across r
 committed `docker-compose.yml` pulls that published image, so deploying a change is `git push` →
 CI rebuilds → `docker compose pull && docker compose up -d`, with no edits to the compose file.
 
-A deploy stops the supervisor. That is about a second in practice, and bounded at ~43s in the
+A deploy stops the supervisor. That is about a second in practice, and bounded at ~47s in the
 worst case — it gives its children the shutdown budget to exit and then closes their `job_runs`
 rows, so an ordinary redeploy leaves no run looking orphaned. The 60s `stop_grace_period` sits
 above that deliberately, as cover for the parts that cannot be bounded at all; the runbook has

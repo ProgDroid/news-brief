@@ -2,7 +2,10 @@
 
 Date: 2026-11-18. Status: draft for approval, revised after one red-team round
 (`docs/superpowers/reviews/2026-11-18-watch-event-triggers-redteam.md`; the user
-chose to fold its fixes in and skip a second round). Step 2 (price rows) is
+chose to fold its fixes in and skip a second round). **2026-11-19: scheduled
+provisionally BEFORE the validation gate, by user decision** (an unvalidated
+watcher beats none; until `news-brief-8lp.1` passes, a quiet night means
+"probably nothing", not "verified nothing"). Step 2 (price rows) is
 news-brief-vap and is out of scope here except where the file loader is shared.
 
 ## Intent
