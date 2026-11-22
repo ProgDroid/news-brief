@@ -319,3 +319,17 @@ def test_post_messages_logs_its_label_and_the_error_body(monkeypatch, caplog):
         pass
     assert "Realtime brief API attempt 1 failed" in caplog.text
     assert "overloaded_error" in caplog.text
+
+
+# ── Final review fixes ───────────────────────────────────────────────────────
+
+
+def test_realtime_continuation_keeps_the_container():
+    """Server tools docs: send the paused response's container id back, or the
+    continuation runs in a new container and loses the turn's earlier work."""
+    sent = []
+    first = {**_resp("pause_turn", "a"), "container": {"id": "container_1"}}
+    call = _answers(first, _resp("end_turn", "b"), sent=sent)
+    assert brief.run_brief_realtime(PARAMS, timeout=5, call=call) == "ab"
+    assert "container" not in sent[0]
+    assert sent[1]["container"] == "container_1"

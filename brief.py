@@ -3057,6 +3057,7 @@ def run_brief_realtime(params: dict, *, timeout: int, call=None) -> str | None:
 
     content: list = []
     texts: list[str] = []
+    container_id = None
     try:
         for _ in range(REALTIME_MAX_CONTINUATIONS + 1):
             payload = dict(params)
@@ -3065,6 +3066,11 @@ def run_brief_realtime(params: dict, *, timeout: int, call=None) -> str | None:
                     *params["messages"],
                     {"role": "assistant", "content": content},
                 ]
+            if container_id:
+                # web_search_20260209 filters in a code-execution container; a
+                # continuation without its id starts a new one and loses the
+                # turn's earlier work (Anthropic "Server tools" docs).
+                payload["container"] = container_id
             started = time.time()
             resp = _realtime_call_with_retry(call, payload, timeout)
             usage = resp.get("usage") or {}
@@ -3081,6 +3087,7 @@ def run_brief_realtime(params: dict, *, timeout: int, call=None) -> str | None:
             texts.append(_message_text(resp))
             if stop == "pause_turn":
                 content = [*content, *resp.get("content", [])]
+                container_id = (resp.get("container") or {}).get("id") or container_id
                 continue
             text = "".join(texts)
             if stop == "end_turn" and text.strip():

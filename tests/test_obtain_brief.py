@@ -166,3 +166,21 @@ def test_submit_runs_at_0430_before_the_0600_collect():
     collect = next(s for s in scheduler.SCHEDULES if s.job == "collect")
     assert (submit.at, submit.grace_minutes) == ("04:30", 60)
     assert collect.at == "06:00"
+
+
+def test_the_resume_wait_subtracts_the_time_already_spent(rig, monkeypatch):
+    """Without the subtraction, a resume after a 30-minute first wait would run
+    past the job limit and the supervisor would kill collect mid-delivery."""
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(brief.time, "time", lambda: clock["t"])
+    rig["realtime_ret"] = None
+
+    def _poll(batch_id, max_wait_secs=43200):
+        rig["polls"].append((batch_id, max_wait_secs))
+        clock["t"] += 1800  # the first wait used its whole 30 minutes
+        return None
+
+    monkeypatch.setattr(brief, "poll_batch", _poll)
+    brief.obtain_brief("b1", DAY, now=AT_0600)
+    budget = (common.JOB_MAX_RUNTIME_MINUTES - brief.RESUME_MARGIN_MINUTES) * 60
+    assert rig["polls"][1] == ("b1", budget - 1800)
