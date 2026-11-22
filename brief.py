@@ -2864,6 +2864,7 @@ def _record_thesis_evidence(brief_text: str, submit_day: str) -> None:
         if dated_memory.has_brief_evidence(conn, submit_day):
             log.info(f"Evidence: already recorded for {submit_day}")
             return
+        model = common.EVIDENCE_MODEL  # once: the rows must name who answered
         keys, push_problem = _thesis_keys_quiet()
         result = dated_memory.extract_thesis_evidence(
             brief_text,
@@ -2871,12 +2872,12 @@ def _record_thesis_evidence(brief_text: str, submit_day: str) -> None:
             post=lambda payload: _post_messages(
                 payload, timeout=EVIDENCE_TIMEOUT, max_attempts=2, label="Evidence"
             ),
-            model=common.EVIDENCE_MODEL,
+            model=model,
         )
         written = 0
         if result.rows:
             written = dated_memory.save_brief_evidence(
-                conn, submit_day, result.rows, model=common.EVIDENCE_MODEL
+                conn, submit_day, result.rows, model=model
             )
             conn.commit()
     push = "ok" if push_problem is None else push_problem
@@ -3389,10 +3390,14 @@ def mode_submit():
         except Exception as e:
             log.warning(f"Dated window skipped (brief unaffected): {e}")
 
+    if dated_window:
+        weekly_state = "replaced by dated window"
+    else:
+        weekly_state = "yes" if weekly_summary else "no"
     log.info(
         f"Chroma: {len(chroma_context)} chars | "
         f"Yesterday: {'yes' if yesterday_brief else 'no'} | "
-        f"Weekly: {'yes' if weekly_summary else 'no'}"
+        f"Weekly: {weekly_state}"
     )
 
     portfolio = fetch_portfolio_weights()

@@ -84,6 +84,7 @@ and neither should you start one by hand. Its command menu auto-registers with T
 | `/removesource <name>` | Remove a temporary source by name (the `/sources` button does the same) |
 | `/positions` | Open positions with live marks |
 | `/performance` | Performance report + go-live gate status |
+| `/evidence` | Thesis evidence log, last 30 days (`/evidence KEY since:YYYY-MM-DD` for longer) |
 | `/jobs` | Scheduler status: each job's last run, exit code and next due time |
 | `/run <job>` | Run a job now, out of schedule (`collect`, `submit`, `weekly`, `monitor`) |
 

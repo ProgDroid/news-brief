@@ -371,3 +371,37 @@ def test_knob_defaults():
     ev = common.KNOBS["EVIDENCE_MODEL"]
     assert ev.default == "claude-haiku-5-5"
     assert ev.env == "NEWSBRIEF_EVIDENCE_MODEL"
+
+
+def _weekly_log_line(caplog):
+    return next(m for m in caplog.messages if m.startswith("Chroma: "))
+
+
+def test_submit_log_says_weekly_yes_when_the_dated_knob_is_off(
+    monkeypatch, rig, caplog
+):
+    _dated(monkeypatch, False)
+    with caplog.at_level("INFO"):
+        brief.mode_submit()
+    assert _weekly_log_line(caplog).endswith("| Weekly: yes")
+
+
+def test_submit_log_says_the_window_replaced_the_weekly_slice(monkeypatch, rig, caplog):
+    _dated(monkeypatch, True)
+    with caplog.at_level("INFO"):
+        brief.mode_submit()
+    assert _weekly_log_line(caplog).endswith("| Weekly: replaced by dated window")
+
+
+def test_submit_log_says_weekly_yes_when_the_window_is_empty(monkeypatch, rig, caplog):
+    _dated(monkeypatch, True)
+    monkeypatch.setattr(
+        brief.dated_memory,
+        "build_window",
+        lambda briefs, today: dated_memory.WindowResult(
+            block="", days=0, lines=0, chars=0
+        ),
+    )
+    with caplog.at_level("INFO"):
+        brief.mode_submit()
+    assert _weekly_log_line(caplog).endswith("| Weekly: yes")

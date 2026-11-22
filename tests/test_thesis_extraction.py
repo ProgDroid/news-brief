@@ -375,3 +375,25 @@ def test_record_is_callable_directly(monkeypatch, tmp_path, has):
     rec = _rig(monkeypatch, tmp_path, has=has, rows=[ROW])
     brief._record_thesis_evidence(SECTION_BRIEF, SUBMIT_DAY)
     assert bool(rec["extract"]) is (not has)
+
+
+def test_the_model_is_read_once_so_rows_name_the_model_that_answered(
+    monkeypatch, tmp_path
+):
+    rec = _rig(monkeypatch, tmp_path, rows=[ROW])
+
+    class _FlippingCommon:
+        """Each read of EVIDENCE_MODEL returns a different value, as a settings
+        row refreshed between two reads would."""
+
+        reads = 0
+
+        @property
+        def EVIDENCE_MODEL(self):
+            type(self).reads += 1
+            return f"model-read-{type(self).reads}"
+
+    monkeypatch.setattr(brief, "common", _FlippingCommon())
+    brief._record_thesis_evidence(SECTION_BRIEF, SUBMIT_DAY)
+    assert rec["extract"][0][2] == rec["saved"][0][2]
+    assert _FlippingCommon.reads == 1
