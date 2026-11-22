@@ -188,3 +188,134 @@ def test_message_text_joins_without_a_separator():
         ]
     }
     assert brief._message_text(msg) == "a, b"
+
+
+# ── Task 3: cancel and the real-time call ───────────────────────────────────
+
+PARAMS = {
+    "model": "m",
+    "max_tokens": 10,
+    "messages": [{"role": "user", "content": "PROMPT"}],
+}
+
+
+def _resp(stop_reason, text):
+    return {
+        "stop_reason": stop_reason,
+        "content": [{"type": "text", "text": text}],
+        "usage": {"input_tokens": 1, "output_tokens": 1},
+    }
+
+
+def _http_error(status):
+    return brief.requests.HTTPError(
+        f"{status} Error", response=_FakeResp(status=status, text=f"body {status}")
+    )
+
+
+def _answers(*items, sent=None):
+    seq = list(items)
+
+    def _call(payload, **kw):
+        if sent is not None:
+            sent.append(payload)
+        item = seq.pop(0)
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+    return _call
+
+
+def test_realtime_returns_the_text_of_a_finished_turn():
+    call = _answers(_resp("end_turn", "Brief."))
+    assert brief.run_brief_realtime(PARAMS, timeout=5, call=call) == "Brief."
+
+
+def test_realtime_continues_on_pause_turn_with_the_content_so_far():
+    sent = []
+    first = _resp("pause_turn", "Part one ")
+    call = _answers(first, _resp("end_turn", "part two."), sent=sent)
+    assert (
+        brief.run_brief_realtime(PARAMS, timeout=5, call=call) == "Part one part two."
+    )
+    second = sent[1]["messages"]
+    assert second[:-1] == PARAMS["messages"]
+    assert second[-1] == {"role": "assistant", "content": first["content"]}
+
+
+def test_realtime_gives_up_after_the_continuation_limit():
+    call = _answers(*[_resp("pause_turn", "x")] * 4)
+    assert brief.run_brief_realtime(PARAMS, timeout=5, call=call) is None
+
+
+def test_realtime_http_failure_returns_none():
+    call = _answers(brief.requests.ConnectionError("down"))
+    assert brief.run_brief_realtime(PARAMS, timeout=5, call=call) is None
+
+
+def test_realtime_max_tokens_is_not_a_brief():
+    call = _answers(_resp("max_tokens", "cut"))
+    assert brief.run_brief_realtime(PARAMS, timeout=5, call=call) is None
+
+
+def test_realtime_retries_an_overloaded_reply(monkeypatch):
+    monkeypatch.setattr(brief.time, "sleep", lambda s: None)
+    call = _answers(_http_error(529), _resp("end_turn", "Brief."))
+    assert brief.run_brief_realtime(PARAMS, timeout=5, call=call) == "Brief."
+
+
+def test_realtime_gives_up_after_three_overloaded_replies(monkeypatch):
+    monkeypatch.setattr(brief.time, "sleep", lambda s: None)
+    call = _answers(*[_http_error(529)] * 3, _resp("end_turn", "never reached"))
+    assert brief.run_brief_realtime(PARAMS, timeout=5, call=call) is None
+
+
+def test_realtime_never_retries_a_timeout():
+    sent = []
+    call = _answers(
+        brief.requests.ReadTimeout("slow"), _resp("end_turn", "x"), sent=sent
+    )
+    assert brief.run_brief_realtime(PARAMS, timeout=5, call=call) is None
+    assert len(sent) == 1
+
+
+def test_realtime_does_not_retry_a_bad_request(monkeypatch):
+    sent = []
+    monkeypatch.setattr(brief.time, "sleep", lambda s: None)
+    call = _answers(_http_error(400), _resp("end_turn", "x"), sent=sent)
+    assert brief.run_brief_realtime(PARAMS, timeout=5, call=call) is None
+    assert len(sent) == 1
+
+
+def test_cancel_batch_swallows_an_http_error(monkeypatch):
+    def _post(url, **kw):
+        return _FakeResp(status=409, text='{"error":"already ended"}')
+
+    monkeypatch.setattr(brief.requests, "post", _post)
+    brief.cancel_batch("b1")  # must not raise
+
+
+def test_cancel_batch_posts_to_the_cancel_endpoint(monkeypatch):
+    urls = []
+
+    def _post(url, **kw):
+        urls.append(url)
+        return _FakeResp({"processing_status": "canceling"})
+
+    monkeypatch.setattr(brief.requests, "post", _post)
+    brief.cancel_batch("b1")
+    assert urls == ["https://api.anthropic.com/v1/messages/batches/b1/cancel"]
+
+
+def test_post_messages_logs_its_label_and_the_error_body(monkeypatch, caplog):
+    def _post(url, **kw):
+        return _FakeResp(status=529, text="overloaded_error")
+
+    monkeypatch.setattr(brief.requests, "post", _post)
+    try:
+        brief._post_messages({}, timeout=1, max_attempts=1, label="Realtime brief")
+    except brief.requests.HTTPError:
+        pass
+    assert "Realtime brief API attempt 1 failed" in caplog.text
+    assert "overloaded_error" in caplog.text

@@ -2768,6 +2768,7 @@ def _post_messages(
     *,
     timeout: int = SIGNALS_TIMEOUT,
     max_attempts: int = SIGNALS_MAX_ATTEMPTS,
+    label: str = "Signals",
 ) -> dict:
     """Raw Anthropic Messages API call with one retry on transient failures.
 
@@ -2796,7 +2797,9 @@ def _post_messages(
             return resp.json()
         except requests.RequestException as e:
             last_err = e
-            log.warning(f"Signals API attempt {attempt} failed: {e}")
+            log.warning(
+                f"{label} API attempt {attempt} failed: {e}{_http_error_detail(e)}"
+            )
     raise last_err
 
 
@@ -2998,6 +3001,99 @@ def poll_batch(batch_id: str, max_wait_secs: int = 43200) -> str | None:
 
     log.error(f"Batch {batch_id} timed out")
     return None
+
+
+def cancel_batch(batch_id: str) -> None:
+    """Ask Anthropic to cancel a batch. Never raises: collect calls this only
+    after a real-time brief is in hand, and a failed cancel costs money, not
+    the brief (news-brief-qap)."""
+    url = f"https://api.anthropic.com/v1/messages/batches/{batch_id}/cancel"
+    try:
+        resp = requests.post(url, headers=ANTHROPIC_HEADERS, timeout=15)
+        resp.raise_for_status()
+        log.info(f"Batch {batch_id} cancel requested")
+    except requests.RequestException as e:
+        log.warning(f"Batch {batch_id} cancel failed: {e}{_http_error_detail(e)}")
+
+
+# Real-time brief (news-brief-qap, storylines spec §6.1). Server tools pause a
+# long turn with stop_reason "pause_turn"; it is resumed by resending the turn so
+# far, never with an added "continue" message.
+REALTIME_MAX_CONTINUATIONS = 3
+# Rejected or failed before billable work, so a retry cannot pay twice. A read
+# timeout is NOT here: that request may have finished and been billed.
+REALTIME_RETRY_STATUSES = frozenset({429, 500, 502, 503, 529})
+REALTIME_RETRY_DELAYS = (30, 60)  # seconds before attempts 2 and 3
+
+
+def _realtime_call_with_retry(call, payload: dict, timeout: int) -> dict:
+    """One Messages call under the retry rule above. Raises on final failure."""
+    for attempt, delay in enumerate((*REALTIME_RETRY_DELAYS, None), start=1):
+        try:
+            return call(payload, timeout=timeout)
+        except requests.HTTPError as e:
+            status = getattr(e.response, "status_code", None)
+            if delay is None or status not in REALTIME_RETRY_STATUSES:
+                raise
+            log.warning(
+                f"Realtime brief attempt {attempt} got {status}; retry in {delay}s"
+            )
+            time.sleep(delay)
+    raise AssertionError("unreachable")
+
+
+def run_brief_realtime(params: dict, *, timeout: int, call=None) -> str | None:
+    """Run the persisted brief request in real time; the brief text, or None.
+
+    None on any failure, a truncated turn or more than REALTIME_MAX_CONTINUATIONS
+    pauses: a half-brief is never returned. Never raises.
+    """
+    if call is None:
+
+        def call(payload, *, timeout):
+            return _post_messages(
+                payload, timeout=timeout, max_attempts=1, label="Realtime brief"
+            )
+
+    content: list = []
+    texts: list[str] = []
+    try:
+        for _ in range(REALTIME_MAX_CONTINUATIONS + 1):
+            payload = dict(params)
+            if content:
+                payload["messages"] = [
+                    *params["messages"],
+                    {"role": "assistant", "content": content},
+                ]
+            started = time.time()
+            resp = _realtime_call_with_retry(call, payload, timeout)
+            usage = resp.get("usage") or {}
+            searches = (usage.get("server_tool_use") or {}).get(
+                "web_search_requests", 0
+            )
+            stop = resp.get("stop_reason")
+            log.info(
+                f"Realtime brief: stop_reason={stop} "
+                f"elapsed={time.time() - started:.0f}s "
+                f"usage(in={usage.get('input_tokens')} "
+                f"out={usage.get('output_tokens')} searches={searches})"
+            )
+            texts.append(_message_text(resp))
+            if stop == "pause_turn":
+                content = [*content, *resp.get("content", [])]
+                continue
+            text = "".join(texts)
+            if stop == "end_turn" and text.strip():
+                return text
+            log.error(f"Realtime brief unusable: stop_reason={stop} chars={len(text)}")
+            return None
+        log.error(
+            f"Realtime brief still paused after {REALTIME_MAX_CONTINUATIONS} continuations"
+        )
+        return None
+    except Exception as e:
+        log.error(f"Realtime brief failed: {e}{_http_error_detail(e)}")
+        return None
 
 
 def _dump_raw_batch_result(result: dict, joined_text: str) -> None:
