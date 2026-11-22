@@ -3184,6 +3184,12 @@ def mode_collect():
         return
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    # Files submit persisted for collect (enrichment, source index, claim evidence)
+    # are keyed by SUBMIT's date. Since the 2026-09-01 scheduler cutover submit runs
+    # at 20:00 and collect at 06:00 the next UTC day, so keying them by `today`
+    # silently loaded nothing (news-brief-hw8). `today` stays the delivery date for
+    # the archive, signals and the ledger.
+    submit_day = state.get("date") or today
     raw = poll_batch(batch_id)
     if raw:
         brief = raw.strip()
@@ -3197,7 +3203,7 @@ def mode_collect():
         if dropped or status != "ok":
             log.warning(f"Signals: status={status}, dropped={dropped}")
         try:
-            enr_path = DATA_DIR / "enrichment" / f"enrichment-{today}.json"
+            enr_path = DATA_DIR / "enrichment" / f"enrichment-{submit_day}.json"
             if enr_path.exists():
                 enr_raw = json.loads(enr_path.read_text(encoding="utf-8"))
                 signals = annotate_signals(signals, bundles_from_dict(enr_raw))
@@ -3213,7 +3219,7 @@ def mode_collect():
                         before,
                         brief,
                         today,
-                        source_index=load_source_index(today),
+                        source_index=load_source_index(submit_day),
                         next_num=claim_store.next_ledger_num(ledger_conn),
                     )
                     written, retired, skipped = claim_store.save_ledger(
@@ -3227,7 +3233,7 @@ def mode_collect():
                 log.error(f"Brief-memory reconcile skipped (brief unaffected): {e}")
         if claim_verify_enabled():
             try:
-                run_verification(brief, today)
+                run_verification(brief, submit_day)
             except Exception as e:
                 log.error(f"Claim verification skipped (brief unaffected): {e}")
         clear_batch_state()
