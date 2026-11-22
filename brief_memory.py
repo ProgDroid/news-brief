@@ -5,7 +5,7 @@ the brief unaffected and the prior ledger intact)."""
 
 import json
 import re
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import requests
 
@@ -85,6 +85,9 @@ _DEFAULT_KIND = "claim"
 # comes back as (severity: `high` 25/25). There is deliberately NO code-side
 # default — a numeric default would make the field degenerate by construction,
 # and an absent horizon is the honest reading.
+# 2026-11-22 (news-brief-al7.1): dated mode renders first_seen only. The operator
+# decided resolution_date stays quarantined, overriding the storylines spec's
+# "resolves 12-01" cue, so render_established_block never reads it.
 _MAX_HORIZON_DAYS = 3650
 # Wording overlap at which two claims count as the same fact. See _is_duplicate_claim.
 DEDUP_SIMILARITY = 0.85
@@ -522,7 +525,41 @@ def _corroboration_cue(source_count) -> str:
     return ""
 
 
-def render_established_block(ledger: dict) -> str:
+def _parse_day(value) -> date | None:
+    """A date or a YYYY-MM-DD string as a date; anything else is None."""
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _since_cue(first_seen, today: date) -> str:
+    """`since MM-DD` within today's year, `since YYYY-MM-DD` otherwise, "" when
+    first_seen is missing or unparseable (the row is kept, only the cue drops)."""
+    day = _parse_day(first_seen)
+    if day is None:
+        return ""
+    shown = day.strftime("%m-%d") if day.year == today.year else day.isoformat()
+    return f"since {shown}"
+
+
+def render_established_block(
+    ledger: dict, *, dated: bool = False, today: str | None = None
+) -> str:
+    """The "background already reported" block. `dated=True` (needs `today`,
+    YYYY-MM-DD) leads each row's parenthetical with its first_seen date and
+    rewrites the header's last sentence to say so; `dated=False` is unchanged."""
+    today_day = None
+    if dated:
+        today_day = _parse_day(today)
+        if today_day is None:
+            raise ValueError(f"dated mode needs today as YYYY-MM-DD, got {today!r}")
     claims = select_working_set(ledger)
     if not claims:
         return ""
@@ -533,6 +570,10 @@ def render_established_block(ledger: dict) -> str:
         # jx9.2 found harmful was a BARE marker standing in place of an
         # explanation, not a cue attached to one.
         cues = []
+        if today_day is not None:
+            since = _since_cue(c.get("first_seen"), today_day)
+            if since:
+                cues.append(since)
         if (_coerce_status(c.get("status")) or _DEFAULT_STATUS) == "challenged":
             cues.append("in doubt")
         cue = _corroboration_cue(c.get("source_count"))
@@ -550,6 +591,21 @@ def render_established_block(ledger: dict) -> str:
     # explain moves — and yesterday's driver is by construction not today's news,
     # so the two directives contradicted each other. Hence the explicit
     # permission to restate a driver.
+    if dated:
+        closing = (
+            "The parenthetical starts with the date a previous brief first reported "
+            "the fact (since MM-DD). When today's news follows from one of these, "
+            'say so with that date ("follows from 11-14") rather than re-explaining '
+            "it. After the date, the parenthetical says how broadly the fact was "
+            "corroborated across outlets: lean on 'widely corroborated' facts with "
+            "confidence and treat 'single-source' ones more tentatively."
+        )
+    else:
+        closing = (
+            "The parenthetical is how broadly the fact was corroborated across "
+            "outlets: lean on 'widely corroborated' facts with confidence and treat "
+            "'single-source' ones more tentatively."
+        )
     return (
         "## BACKGROUND ALREADY REPORTED\n"
         "Previous briefs already reported these. Do not re-report them as if they "
@@ -558,10 +614,11 @@ def render_established_block(ledger: dict) -> str:
         "mentioning, write it plainly in the prose. You MAY restate the DRIVER of "
         "any of these whenever it explains something today: a mechanism that is "
         "still operating is not old news, and an unexplained move is worse than a "
-        "repeated explanation. Lead with what has CHANGED. The parenthetical is "
-        "how broadly the fact was corroborated across outlets: lean on 'widely "
-        "corroborated' facts with confidence and treat 'single-source' ones more "
-        "tentatively.\n\n" + lines + "\n"
+        "repeated explanation. Lead with what has CHANGED. "
+        + closing
+        + "\n\n"
+        + lines
+        + "\n"
     )
 
 

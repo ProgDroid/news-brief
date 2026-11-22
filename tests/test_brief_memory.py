@@ -2434,3 +2434,152 @@ def test_reconcile_passes_next_num_through_to_merge():
         next_num=77,
     )
     assert out["claims"][0]["id"] == "c-0077"
+
+
+# --- dated claims in the ledger block (news-brief-al7.1, Task 3) ---------------
+
+_DATED_LEDGER = {
+    "version": 1,
+    "claims": [
+        {
+            "id": "c-1",
+            "claim": "Widget tariff in doubt",
+            "topic": "trade",
+            "status": "challenged",
+            "source_count": 1,
+            "last_reaffirmed": "2026-11-20",
+            "first_seen": "2026-11-14",
+        },
+        {
+            "id": "c-2",
+            "claim": "Gadget supply squeeze persists",
+            "topic": "supply",
+            "source_count": 5,
+            "driver": "port closures",
+            "last_reaffirmed": "2026-11-21",
+            "first_seen": "2026-11-10",
+        },
+    ],
+}
+
+# Captured from HEAD (9a8508d) BEFORE the edit, by running the then-current
+# render_established_block on _DATED_LEDGER. Never regenerate from the edited code.
+GOLDEN_UNDATED = (
+    "## BACKGROUND ALREADY REPORTED\n"
+    "Previous briefs already reported these. Do not re-report them as if they "
+    "were today's news, and never emit a bare marker such as '(established)' "
+    "or '(as noted)' in place of an explanation \u2014 if something is worth "
+    "mentioning, write it plainly in the prose. You MAY restate the DRIVER of "
+    "any of these whenever it explains something today: a mechanism that is "
+    "still operating is not old news, and an unexplained move is worse than a "
+    "repeated explanation. Lead with what has CHANGED. The parenthetical is "
+    "how broadly the fact was corroborated across outlets: lean on 'widely "
+    "corroborated' facts with confidence and treat 'single-source' ones more "
+    "tentatively.\n\n"
+    "  \u2022 [trade] (in doubt, single-source) Widget tariff in doubt\n"
+    "  \u2022 [supply] (widely corroborated) Gadget supply squeeze persists"
+    " \u2014 driver: port closures\n"
+)
+
+
+def _one_claim(**extra):
+    row = {
+        "id": "c-1",
+        "claim": "Widget tariff in force",
+        "topic": "trade",
+        "last_reaffirmed": "2026-11-21",
+    }
+    row.update(extra)
+    return {"version": 1, "claims": [row]}
+
+
+def test_undated_block_matches_head():
+    assert bm.render_established_block(_DATED_LEDGER) == GOLDEN_UNDATED
+    assert bm.render_established_block(_DATED_LEDGER, dated=False) == GOLDEN_UNDATED
+    # today is ignored when not dated
+    assert (
+        bm.render_established_block(_DATED_LEDGER, today="2026-11-22") == GOLDEN_UNDATED
+    )
+
+
+def test_dated_header_asks_for_the_date_and_drops_the_old_meaning():
+    block = bm.render_established_block(_DATED_LEDGER, dated=True, today="2026-11-22")
+    assert "first reported the fact (since MM-DD)" in block
+    assert "follows from 11-14" in block
+    assert "The parenthetical is how broadly" not in block
+    # the shared opening is untouched
+    assert block.startswith(GOLDEN_UNDATED.split("The parenthetical")[0])
+    # the corroboration guidance survives, after the date
+    assert "After the date, the parenthetical says how broadly" in block
+
+
+def test_dated_block_puts_since_first_in_the_cue():
+    block = bm.render_established_block(_DATED_LEDGER, dated=True, today="2026-11-22")
+    assert (
+        "  \u2022 [trade] (since 11-14, in doubt, single-source) Widget tariff in doubt\n"
+        in block
+    )
+    assert (
+        "  \u2022 [supply] (since 11-10, widely corroborated) Gadget supply squeeze "
+        "persists \u2014 driver: port closures\n" in block
+    )
+
+
+def test_dated_block_row_with_no_other_cue_reads_since_only():
+    ledger = _one_claim(first_seen="2026-11-14")
+    block = bm.render_established_block(ledger, dated=True, today="2026-11-22")
+    assert "  \u2022 [trade] (since 11-14) Widget tariff in force\n" in block
+
+
+def test_dated_block_with_source_count_matches_the_brief_example():
+    ledger = _one_claim(first_seen="2026-11-14", source_count=3)
+    block = bm.render_established_block(ledger, dated=True, today="2026-11-22")
+    assert "\u2022 [trade] (since 11-14, corroborated) Widget tariff in force" in block
+
+
+def test_dated_block_uses_the_full_date_across_a_year():
+    ledger = _one_claim(first_seen="2025-12-01")
+    block = bm.render_established_block(ledger, dated=True, today="2026-11-22")
+    assert "(since 2025-12-01)" in block
+    assert "since 12-01" not in block
+
+
+def test_dated_block_accepts_a_date_object_first_seen():
+    import datetime
+
+    ledger = _one_claim(first_seen=datetime.date(2026, 11, 14))
+    block = bm.render_established_block(ledger, dated=True, today="2026-11-22")
+    assert "(since 11-14)" in block
+
+
+def test_dated_block_never_renders_resolution_date():
+    ledger = _one_claim(first_seen="2026-11-14", resolution_date="2026-12-01")
+    block = bm.render_established_block(ledger, dated=True, today="2026-11-22")
+    assert "since 11-14" in block
+    assert "resolves" not in block
+    assert "12-01" not in block
+
+
+@pytest.mark.parametrize("bad", ["not-a-date", "", "2026-13-45", 20261114])
+def test_dated_block_skips_a_malformed_first_seen(bad):
+    ledger = _one_claim(first_seen=bad, source_count=3)
+    block = bm.render_established_block(ledger, dated=True, today="2026-11-22")
+    assert "\u2022 [trade] (corroborated) Widget tariff in force" in block
+    assert "since" not in block.split("\n\n", 1)[1]
+
+
+def test_dated_block_with_a_missing_first_seen_keeps_the_row():
+    block = bm.render_established_block(_one_claim(), dated=True, today="2026-11-22")
+    assert "\u2022 [trade] Widget tariff in force\n" in block
+
+
+def test_dated_mode_requires_today():
+    with pytest.raises(ValueError):
+        bm.render_established_block(_DATED_LEDGER, dated=True)
+    with pytest.raises(ValueError):
+        bm.render_established_block(_DATED_LEDGER, dated=True, today="garbage")
+
+
+def test_dated_empty_ledger_is_still_empty():
+    empty = {"version": 1, "claims": []}
+    assert bm.render_established_block(empty, dated=True, today="2026-11-22") == ""
