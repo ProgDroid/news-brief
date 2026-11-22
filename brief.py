@@ -755,6 +755,9 @@ HELP_TEXT = """<b>newsbrief commands</b>
 
 /positions — open positions with live marks
 /performance — performance report + go-live gate
+/evidence [KEY] [since:YYYY-MM-DD]
+  A thesis's logged evidence, last 30 days. Alone: a picker.
+  e.g. <code>/evidence TESTCO since:2026-01-01</code>
 
 /jobs — scheduler status: each job's last run, exit code and next due time
 /run [job]
@@ -1174,6 +1177,20 @@ def _handle_callback_query(cb: dict, fb: dict | None = None) -> dict | None:
         _close_picker_render(msg_id)
         return fb
 
+    if data.startswith("ev:"):
+        h = data[len("ev:") :]
+        try:
+            with db.connect(connect_timeout=JOBS_DB_TIMEOUT_SECONDS) as conn:
+                key = next((k for k in _evidence_keys(conn) if _short_id(k) == h), None)
+        except Exception as e:
+            _evidence_unknown(e)
+            return fb
+        if key is None:
+            telegram_send("That thesis is no longer listed.")
+        else:
+            _evidence_render(key)
+        return fb
+
     if data.startswith("unwatch:"):
         h = data[len("unwatch:") :]
         wl = load_watchlist()
@@ -1326,6 +1343,23 @@ def _handle_telegram_update(update: dict, fb: dict) -> dict:
 
     elif text == "/jobs":
         _jobs_render()
+
+    elif text == "/evidence":
+        _evidence_picker_render()
+
+    elif text.startswith("/evidence "):
+        rest = text[len("/evidence ") :].strip()
+        m = re.fullmatch(r"(\S.*?)\s+since:(\S*)", rest)
+        key, since = (m.group(1), m.group(2)) if m else (rest, None)
+        if m or key.startswith("since:"):
+            try:
+                if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", since or ""):
+                    raise ValueError(since)
+                datetime.strptime(since, "%Y-%m-%d")
+            except ValueError:
+                telegram_send("Format: <code>/evidence KEY since:YYYY-MM-DD</code>")
+                return fb
+        _evidence_render(key, since)
 
     elif text == "/capture":
         _capture_render()
@@ -3827,6 +3861,70 @@ def _jobs_render() -> None:
     telegram_send_long(_format_jobs(latest, datetime.now(timezone.utc)))
 
 
+EVIDENCE_DAYS = 30
+
+
+def _evidence_default_since() -> str:
+    today = datetime.now(timezone.utc).date()
+    return (today - timedelta(days=EVIDENCE_DAYS)).isoformat()
+
+
+def _evidence_keys(conn) -> list[str]:
+    """Every key /evidence can show: the live theses plus any key that still has
+    rows in the default window, so a thesis removed from the file stays readable
+    until its evidence ages out."""
+    live = _thesis_keys_quiet()[0]
+    logged = dated_memory.keys_with_evidence(conn, since=_evidence_default_since())
+    return sorted(set(live) | set(logged))
+
+
+def _evidence_unknown(e: Exception) -> None:
+    log.exception("/evidence could not read the evidence log")
+    telegram_send(
+        f"<b>📒 Evidence</b>\n\nCannot read the evidence log, so this is "
+        f"UNKNOWN rather than empty: {_ledger_unreachable(e)}"
+    )
+
+
+def _evidence_picker_render(message_id: int | None = None) -> None:
+    try:
+        with db.connect(connect_timeout=JOBS_DB_TIMEOUT_SECONDS) as conn:
+            keys = _evidence_keys(conn)
+    except Exception as e:
+        _evidence_unknown(e)
+        return
+    if not keys:
+        _picker_empty("📒 No theses yet — set one with /thesis.", message_id)
+        return
+    rows = [
+        [{"text": f"📒 {k}"[:40], "callback_data": f"ev:{_short_id(k)}"}] for k in keys
+    ]
+    _picker_send("📒 <b>Evidence for which thesis?</b>", rows, message_id)
+
+
+def _evidence_render(key: str, since: str | None = None) -> None:
+    try:
+        with db.connect(connect_timeout=JOBS_DB_TIMEOUT_SECONDS) as conn:
+            rows = dated_memory.recent_evidence(
+                conn, key, since=since or _evidence_default_since()
+            )
+    except Exception as e:
+        _evidence_unknown(e)
+        return
+    k = html.escape(key)
+    if not rows:
+        telegram_send(f"No evidence logged for <b>{k}</b> in that period.")
+        return
+    span = f"since {since}" if since else f"last {EVIDENCE_DAYS} days"
+    year = str(datetime.now(timezone.utc).year)
+    lines = [f"<b>📒 Evidence — {k}</b> ({span})", ""]
+    for r in rows:
+        day = r["on_date"] if not r["on_date"].startswith(year) else r["on_date"][5:]
+        arrow = "⬆ supports" if r["direction"] == "supports" else "⬇ challenges"
+        lines.append(f"{day} {arrow} — {html.escape(r['line'])}")
+    telegram_send_long("\n".join(lines))
+
+
 def _run_request(job: str) -> None:
     """Queue an on-demand run for the supervisor to claim on its next tick."""
     import db
@@ -3958,6 +4056,7 @@ BOT_COMMANDS = [
     ("help", "Show command help"),
     ("status", "Show current overrides"),
     ("jobs", "Scheduler status: last run, exit code, next due"),
+    ("evidence", "Thesis evidence log, last 30 days"),
     ("capture", "Feed capture health: last pass, failing feeds"),
     ("label", "Event-census labelling: progress + one-time link"),
     ("run", "Run a job now (collect, submit, weekly, monitor)"),
