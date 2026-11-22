@@ -79,6 +79,17 @@ def test_prune_deletes_old_keeps_recent_undateable_and_boundary(tmp_path, monkey
     ).exists()  # not matched by signals-*.json
 
 
+def test_prune_covers_the_saved_brief_requests(tmp_path, monkeypatch):
+    """news-brief-qap: submit saves the whole brief request (~600 KB) daily."""
+    monkeypatch.setattr(rt, "DATA_DIR", tmp_path)
+    _touch(tmp_path / "brief_request-2026-01-01.json")  # old -> delete
+    _touch(tmp_path / "brief_request-2026-06-25.json")  # recent -> keep
+
+    assert rt.prune_dated_files("2026-06-26", 90) == 1
+    assert not (tmp_path / "brief_request-2026-01-01.json").exists()
+    assert (tmp_path / "brief_request-2026-06-25.json").exists()
+
+
 def test_prune_missing_dirs_no_error(tmp_path, monkeypatch):
     monkeypatch.setattr(rt, "DATA_DIR", tmp_path)  # no subdirs exist
     assert rt.prune_dated_files("2026-06-26", 90) == 0

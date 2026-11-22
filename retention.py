@@ -26,6 +26,7 @@ def _families() -> list[tuple[Path, str]]:
         (DATA_DIR / "briefs", "brief-*.md"),
         (DATA_DIR, "source_index-*.json"),
         (DATA_DIR, "claim_evidence-*.json"),
+        (DATA_DIR, "brief_request-*.json"),
         (DATA_DIR, "verification-*.json"),
         (DATA_DIR / "enrichment", "enrichment-*.json"),
         (DATA_DIR / "signals", "signals-*.json"),

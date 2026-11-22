@@ -2859,11 +2859,11 @@ def save_signals(signals: list, date_str: str, status: str = "ok", dropped: int 
 
 
 # ── Batch API ─────────────────────────────────────────────────────────────────
-def submit_batch(
-    system: str, prompt_user: str, custom_id: str, *, web_search: bool = True
-) -> str:
-    """Submit a single-request Anthropic batch job. `web_search=False` drops the
-    web_search tool (used for the weekly summary, which must not browse)."""
+def brief_request_params(
+    system: str, prompt_user: str, *, web_search: bool = True
+) -> dict:
+    """The Messages `params` the brief batch sends. One builder for the batched
+    request and the real-time replay, so the two cannot drift (news-brief-qap)."""
     params = {
         "model": common.MODEL,
         "max_tokens": MAX_TOKENS,
@@ -2876,6 +2876,15 @@ def submit_batch(
     }
     if web_search:
         params["tools"] = [{"type": "web_search_20260209", "name": "web_search"}]
+    return params
+
+
+def submit_batch(
+    system: str, prompt_user: str, custom_id: str, *, web_search: bool = True
+) -> str:
+    """Submit a single-request Anthropic batch job. `web_search=False` drops the
+    web_search tool (used for the weekly summary, which must not browse)."""
+    params = brief_request_params(system, prompt_user, web_search=web_search)
     payload = {"requests": [{"custom_id": custom_id, "params": params}]}
     resp = requests.post(
         "https://api.anthropic.com/v1/messages/batches",
@@ -2887,6 +2896,39 @@ def submit_batch(
     batch_id = resp.json()["id"]
     log.info(f"Batch submitted ({'search' if web_search else 'no-search'}): {batch_id}")
     return batch_id
+
+
+def _brief_request_path(day: str) -> Path:
+    return DATA_DIR / f"brief_request-{day}.json"
+
+
+def save_brief_request(params: dict, day: str) -> None:
+    """Persist the batched brief request, keyed by the SUBMIT day, so collect
+    (another process, hours later) can replay it in real time (news-brief-qap)."""
+    _write_json_atomic(_brief_request_path(day), params)
+
+
+def load_brief_request(day: str) -> dict | None:
+    """The request submit saved for `day`, or None if missing or unreadable."""
+    p = _brief_request_path(day)
+    if not p.exists():
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception as e:
+        log.warning(f"Brief request unreadable for {day}: {e}")
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _message_text(message: dict) -> str:
+    """The text blocks of a Messages response, joined with NO separator: the API
+    splits prose into separate text blocks at citation boundaries, so a "\\n"
+    here landed mid-sentence — usually right before a comma. It corrupted every
+    brief that cited anything (85 of 90 archived, ~4.7 breaks each)."""
+    return "".join(
+        b.get("text", "") for b in message.get("content", []) if b.get("type") == "text"
+    )
 
 
 def submit_batch_no_search(system: str, prompt_user: str, custom_id: str) -> str:
@@ -3027,12 +3069,7 @@ def fetch_batch_results(results_url: str) -> str | None:
         try:
             result = json.loads(line)
             if result.get("result", {}).get("type") == "succeeded":
-                blocks = result["result"]["message"]["content"]
-                # Joined with NO separator: the API splits prose into separate
-                # text blocks at citation boundaries, so a "\n" here landed
-                # mid-sentence — usually right before a comma. It corrupted every
-                # brief that cited anything (85 of 90 archived, ~4.7 breaks each).
-                text = "".join(b["text"] for b in blocks if b.get("type") == "text")
+                text = _message_text(result["result"]["message"])
                 _dump_raw_batch_result(result, text)
                 return text
         except json.JSONDecodeError:
@@ -3202,6 +3239,11 @@ def mode_submit():
         enrichment_block,
         established_block,
     )
+    try:
+        save_brief_request(brief_request_params(SYSTEM_PROMPT, prompt), today)
+    except Exception as e:
+        # The batch still goes out; only collect's real-time fallback is lost.
+        log.error(f"Brief request not saved; collect cannot fall back today: {e}")
     batch_id = submit_batch(SYSTEM_PROMPT, prompt, custom_id=f"newsbrief-{today}")
     save_state(
         {

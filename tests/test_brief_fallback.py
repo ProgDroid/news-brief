@@ -105,3 +105,86 @@ def test_poll_survives_a_failed_status_check(monkeypatch):
     monkeypatch.setattr(brief, "fetch_batch_results", lambda url: "B")
     assert brief.poll_batch("b1", max_wait_secs=600) == "B"
     assert len(gets) == 2
+
+
+# ── Task 2: submit persists the request it batched ──────────────────────────
+
+SUBMIT_TODAY = brief.datetime.now(brief.timezone.utc).strftime("%Y-%m-%d")
+
+
+def _stub_submit(monkeypatch, tmp_path):
+    """Run mode_submit with every input stubbed; return the captured POSTs."""
+    posted = []
+
+    def _post(url, json=None, **kw):
+        posted.append(json)
+        return _FakeResp({"id": "batch_1"})
+
+    monkeypatch.setattr(brief, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(brief, "load_state", lambda: {})
+    monkeypatch.setattr(brief, "save_state", lambda updates: None)
+    monkeypatch.setattr(brief, "load_temp_sources", lambda: [])
+    monkeypatch.setattr(brief, "fetch_feed_blocks", lambda feeds: ["FEED"])
+    monkeypatch.setattr(brief, "fetch_mauldin_twie", lambda: "")
+    monkeypatch.setattr(brief, "fetch_web_source", lambda s: "")
+    monkeypatch.setattr(brief, "brief_memory_enabled", lambda: False)
+    monkeypatch.setattr(brief, "claim_verify_enabled", lambda: False)
+    monkeypatch.setattr(brief, "load_feedback", lambda: {})
+    monkeypatch.setattr(brief, "build_chroma_context", lambda fb: "")
+    monkeypatch.setattr(brief, "load_yesterday_brief", lambda: "")
+    monkeypatch.setattr(brief, "load_last_weekly_summary", lambda: "")
+    monkeypatch.setattr(brief, "fetch_portfolio_weights", lambda: None)
+    monkeypatch.setattr(brief, "load_book", lambda: {})
+    monkeypatch.setattr(brief, "performance_prompt_block", lambda book: "")
+    monkeypatch.setattr(brief, "build_market_pulse", lambda pins: "")
+    monkeypatch.setattr(brief, "resolved_pins", lambda fb: [])
+
+    def _no_enrichment(*a, **k):
+        raise RuntimeError("enrichment stubbed off")
+
+    monkeypatch.setattr(brief, "build_universe", _no_enrichment)
+    monkeypatch.setattr(brief, "build_daily_prompt", lambda *a, **k: "PROMPT")
+    monkeypatch.setattr(brief.requests, "post", _post)
+    return posted
+
+
+def test_submit_saves_exactly_the_params_it_batched(monkeypatch, tmp_path):
+    posted = _stub_submit(monkeypatch, tmp_path)
+
+    brief.mode_submit()
+
+    assert len(posted) == 1
+    saved = brief.load_brief_request(SUBMIT_TODAY)
+    assert saved == posted[0]["requests"][0]["params"]
+    assert saved["messages"] == [{"role": "user", "content": "PROMPT"}]
+
+
+def test_a_failed_request_save_still_submits_the_batch(monkeypatch, tmp_path):
+    posted = _stub_submit(monkeypatch, tmp_path)
+
+    def _boom(params, day):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(brief, "save_brief_request", _boom)
+
+    brief.mode_submit()
+
+    assert len(posted) == 1
+
+
+def test_a_missing_or_corrupt_request_file_loads_as_none(monkeypatch, tmp_path):
+    monkeypatch.setattr(brief, "DATA_DIR", tmp_path)
+    assert brief.load_brief_request("2000-01-01") is None
+    (tmp_path / "brief_request-2000-01-01.json").write_text("{not json")
+    assert brief.load_brief_request("2000-01-01") is None
+
+
+def test_message_text_joins_without_a_separator():
+    msg = {
+        "content": [
+            {"type": "text", "text": "a"},
+            {"type": "web_search_tool_result"},
+            {"type": "text", "text": ", b"},
+        ]
+    }
+    assert brief._message_text(msg) == "a, b"
