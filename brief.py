@@ -2808,6 +2808,52 @@ def _post_messages(
     raise last_err
 
 
+# Post-delivery, like SIGNALS_TIMEOUT: latency is free once the brief has shipped.
+EVIDENCE_TIMEOUT = 90
+
+
+def _thesis_keys_quiet() -> tuple[list[str], str | None]:
+    """(sorted thesis keys, push problem). Never load_theses(): it sends a
+    Telegram warning on every call, and this runs from collect and the commands
+    daemon. The push problem is returned so the caller can log it."""
+    pushed, problem = load_portfolio_theses()
+    return sorted({**load_local_theses(), **pushed}), problem
+
+
+def _record_thesis_evidence(brief_text: str, submit_day: str) -> None:
+    """Turn the brief's POSITION SIGNALS into thesis_evidence rows dated by the
+    SUBMIT day. Raises on failure; the caller isolates it."""
+    if not db.is_configured():
+        log.info("Evidence: skipped, no database")
+        return
+    with db.connect() as conn:
+        if dated_memory.has_brief_evidence(conn, submit_day):
+            log.info(f"Evidence: already recorded for {submit_day}")
+            return
+        keys, push_problem = _thesis_keys_quiet()
+        result = dated_memory.extract_thesis_evidence(
+            brief_text,
+            keys,
+            post=lambda payload: _post_messages(
+                payload, timeout=EVIDENCE_TIMEOUT, max_attempts=2, label="Evidence"
+            ),
+            model=common.EVIDENCE_MODEL,
+        )
+        written = 0
+        if result.rows:
+            written = dated_memory.save_brief_evidence(
+                conn, submit_day, result.rows, model=common.EVIDENCE_MODEL
+            )
+            conn.commit()
+    push = "ok" if push_problem is None else push_problem
+    log.info(
+        f"Evidence: status={result.status} written={written} "
+        f"problems={len(result.problems)} push={push}"
+    )
+    for problem in result.problems:
+        log.warning(f"Evidence: {problem}")
+
+
 def extract_signals(
     brief_text: str, sources: list[dict] | None = None, *, call=None
 ) -> tuple[list, str]:
@@ -3431,6 +3477,7 @@ def obtain_brief(
 
 def mode_collect():
     log.info("=== COLLECT ===")
+    dated_on = common.BRIEF_DATED_MEMORY_ENABLED
     state = load_state() or {}
     batch_id = state.get("batch_id")
     if not batch_id:
@@ -3505,6 +3552,11 @@ def mode_collect():
         except Exception as e:
             log.error(f"Trading stage failed (brief already delivered): {e}")
             telegram_alert(f"trading stage failed after brief: {e}")
+        if dated_on:
+            try:
+                _record_thesis_evidence(brief, submit_day)
+            except Exception as e:
+                log.error(f"Evidence: crashed (brief unaffected): {e}")
         try:
             summary = run_retention(today)
             log.info(
