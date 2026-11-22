@@ -228,14 +228,21 @@ moves to 04:30 and stays a batch, at batch price.
   rebuild it.
 - **Cancel, then check.** If the cancel finds the batch already ended, collect uses the batch
   result. A brief is never delivered twice.
-- **The real-time call** has its own timeout, sized to a brief with web search (the batch
-  timeout says nothing about it).
-- **The path is recorded**: `brief_path=batch|realtime` in the collect log line and its `job_runs`
-  row, so a run of fallbacks shows up without reading logs.
-- If the real-time call also fails, collect alerts as today. The brief is late, never lost.
+- **The real-time call** has its own timeout (`BRIEF_REALTIME_TIMEOUT`), set from one measured
+  run on the host before the bead closes. An overloaded or rate-limited reply (429, 5xx, 529) is
+  retried, up to 3 attempts. A timeout is not retried, because that request may have finished
+  and been billed.
+- **No failure in this path crashes collect.** A failed status check is logged and polling
+  continues; any other error ends in "no brief" and the alert below.
+- **The path is recorded**: `brief_path=batch|realtime` in the collect log line, and a fallback
+  brief's Telegram header says "(live fallback)", so a run of fallbacks shows up without reading
+  logs. (`job_runs` has no column for it, and adding one is not worth a migration.)
+- If the real-time call also fails, collect alerts as today. The batch has been cancelled, so
+  that day's brief is lost unless it is rerun by hand.
 
 A fallback day costs that day's brief at full price instead of half: about $0.25–0.35 extra on
-§11's brief line, so about $1–1.50 a month at one fallback a week.
+§11's brief line, so about $1–1.50 a month at one fallback a week. Rarely it costs both: a
+cancelled request that finishes after collect has stopped waiting is still billed.
 
 **Cutover.** Deploy the change between 06:00 and 20:00. Deployed after a 20:00 submit and before
 its 06:00 collect, the 04:30 submit sees yesterday's date in state, submits a second batch and
@@ -474,7 +481,8 @@ pass.
 | Knob | Default | Turns on |
 |---|---|---|
 | `BRIEF_DATED_MEMORY_ENABLED` | false | phase 1 (§3) |
-| `BRIEF_FALLBACK_AT` | `06:30` | when collect stops waiting for the batch and runs the brief in real time (§6.1); empty = wait the full 12 h as today |
+| `BRIEF_FALLBACK_AT` | `06:30` | when collect stops waiting for the batch and runs the brief in real time (§6.1); `off` = wait as today (12 h, cut to 4 h by `JOB_MAX_RUNTIME_MINUTES`) |
+| `BRIEF_REALTIME_TIMEOUT` | 600 | read timeout of each real-time brief call, in seconds; retune from the host measurement (§6.1) |
 | `STORYLINES_ENABLED` | false | `attach`, `storylines`, `propose` |
 | `STORYLINE_BRIEF_ENABLED` | false | the new layout and inputs (§7); off = today's layout (with phase 1 if on) |
 | `STORYLINE_ALERTS_ENABLED` | false | `burst`, signpost and surge alerts |
