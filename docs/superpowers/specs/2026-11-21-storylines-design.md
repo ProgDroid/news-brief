@@ -5,7 +5,8 @@ Parent: `docs/superpowers/specs/2026-11-20-rethink-charter-design.md` (§3 succe
 §7 the shape, §8.1 the decisions this spec owes). Status: **revision 3**, after a builder check
 and red-team rounds 1 and 2 (`docs/superpowers/reviews/2026-11-21-storylines-redteam.md`,
 `…-redteam-r2.md`). Round 2 recommended stopping red-team rounds here: its fixes were small and
-local, and are checked again in plan review.
+local, and are checked again in plan review. Revision 4 (2026-11-22) moves the brief's batch
+from the evening to the early morning (§6.1); nothing else changed.
 
 The repo is public. Nothing in this document, its tests or its fixtures names a holding, an
 amount, or the text of an operator thesis. §13 says where that material lives instead.
@@ -22,6 +23,9 @@ Two phases, one build.
   articles attach to named storylines. Only storylines touched today get an LLM update. Each
   keeps its current state, a dated timeline, signposts, the consensus-vs-constraints pair, and
   links to other storylines and to theses. The brief, alerts and the Sunday message read from it.
+- **Before either, the brief moves to the early morning** (§6.1): submitted at 04:30 instead of
+  20:00, so the 06:00 brief covers Asia's day and the US close. It changes no layout and ships
+  first, on its own.
 
 Both answer the charter's main letdown, continuity: the brief says "this follows from the 12th"
 instead of re-surprising, stops repeating itself, and has somewhere to put second- and
@@ -44,7 +48,7 @@ Operator decisions from the brainstorm:
 | D2 | New brief layout: 🧵 threads that moved (from storylines) leads; 🌍 top stories reads the articles no storyline consumed | Chosen over "memory only" after the assistant retracted a wrong cost argument |
 | D3 | The per-topic dynamic sections are dropped; pinned topics become pinned storylines | "drop them, the layout makes sense" |
 | D4 | Each storyline carries the consensus-vs-constraints pair from the first build | "a" |
-| D5 | Haiku attaches every article on every attach pass; Sonnet confirms alerts and corrects attachments in the evening pass | "haiku attaches, sonnet checks works" |
+| D5 | Haiku attaches every article on every attach pass; Sonnet confirms alerts and corrects attachments in the nightly pass | "haiku attaches, sonnet checks works" |
 | D6 | A weekly connections pass, sent as its own Sunday message | "weekly works" |
 | D7 | Out-of-brief alerts on signpost hits, bursts and surges on known storylines, with an on-demand flash brief | Raised by the operator. The surge trigger was added while writing, after a review noted a big unforeseen development on a tracked storyline would otherwise not ring |
 | D8 | The defaults in §10 (lifecycle, inputs, seeding, commands, rollout) | "sounds good" |
@@ -54,12 +58,12 @@ Calls made by the assistant (from the builder check and red-team round 1), for t
 check:
 
 - **Workbench event triggers stay the watch job's.** They are not copied into signposts. The
-  evening update and the brief read them live (`watch.load_watch`) as context. No sync path, and
+  nightly update and the brief read them live (`watch.load_watch`) as context. No sync path, and
   no double ring for one development.
 - **`/pin` and `/unpin` retarget to storylines** (the `pinned` flag). `/focus` and `/mute` stay
   free-text reader preferences applied to the whole brief, as today.
-- **One rule for leaks:** an attached article not consumed by a landed evening update returns to
-  the unclaimed pool (§7.3). It covers the per-storyline cap, the 18:00–20:00 gap and a late batch.
+- **One rule for leaks:** an attached article not consumed by a landed nightly update returns to
+  the unclaimed pool (§7.3). It covers the per-storyline cap, the 02:30–04:30 gap and a late batch.
 - **Rollback is accepted as slightly degraded:** the old claim reconcile stops while the
   storylines brief is on; on rollback the claims block is omitted if more than 7 days stale, and
   phase 1's 7-day window carries the memory.
@@ -83,9 +87,9 @@ layout.
 3. **Thesis evidence log.** After `collect` delivers the brief, one Haiku forced-tool call reads
    the brief's 📌 POSITION SIGNALS section and the thesis keys from `load_theses()`, and writes
    `thesis_evidence` rows (thesis key, date, supports/challenges, one line; `source = 'brief'`).
-   Rows are dated by the brief's **submit** day, not the collect day: since the 2026-09-01
-   scheduler cutover, submit (20:00) and collect (06:00) fall on different dates, and keying by
-   collect-time `now()` is exactly the bug filed as `news-brief-hw8`. Phase 2's evening update
+   Rows are dated by the brief's **submit** day (`state["date"]`), not collect-time `now()`.
+   After §6.1 both run on the same UTC date, but a fallback or a manual rerun can still straddle
+   midnight, and `now()` keying is the bug fixed as `news-brief-hw8`. Phase 2's nightly update
    writes the same table with `source = 'storyline'`. **No double counting:** under the storylines
    layout the extractor also receives that day's storyline evidence rows and records only
    developments not already among them (in practice, unclaimed news that bears on a thesis).
@@ -114,15 +118,15 @@ Example (a public topic, already one of the brief's web-search topics):
 | Field | Written by | Kept |
 |---|---|---|
 | name, description | seeding, proposal, or operator; edited only by the operator | current; edits are new rows |
-| where it stands, consensus, constraints | evening update | append-only, one row per update; current = latest |
-| timeline line (date, one line, outlets with vantage tags, article refs) | evening update | append-only |
-| signposts (text, direction) | evening update, operator | until hit or retired; hits are dated |
-| links (to storyline or thesis key, reason, kind) | evening update, weekly pass | `first_seen`, `last_affirmed`, `retired_on` |
-| thesis evidence (thesis key, date, supports/challenges, line, refs, source) | phase 1 extraction, evening update | append-only |
+| where it stands, consensus, constraints | nightly update | append-only, one row per update; current = latest |
+| timeline line (date, one line, outlets with vantage tags, article refs) | nightly update | append-only |
+| signposts (text, direction) | nightly update, operator | until hit or retired; hits are dated |
+| links (to storyline or thesis key, reason, kind) | nightly update, weekly pass | `first_seen`, `last_affirmed`, `retired_on` |
+| thesis evidence (thesis key, date, supports/challenges, line, refs, source) | phase 1 extraction, nightly update | append-only |
 
 **Vantage tags travel with the news.** `outlets` holds each source's kind, perspective and
 state-funded flag (`capture.py:72-89`), and the brief's `SYSTEM_PROMPT` relies on them ("Beijing's
-read, via SCMP"). The evening update prompt, the timeline line and the brief's claimed-headline
+read, via SCMP"). The nightly update prompt, the timeline line and the brief's claimed-headline
 block (§7.2) all carry them.
 
 **Status:** `proposed` → `active` ⇄ `dormant` → `retired`; `proposed` → `rejected`; `active` →
@@ -156,7 +160,7 @@ retention is bead `uh0` and unchanged.
 says the bound is reached and offers the same. The bound is what keeps every prompt below finite.
 
 Expect the set to settle near the bound, since only the operator shrinks it. So the design is
-**priced at the bound** (§11), and the evening update has its own daily ceiling:
+**priced at the bound** (§11), and the nightly update has its own daily ceiling:
 **at most 20 storyline updates a day** (`STORYLINE_MAX_UPDATES_PER_DAY`), taken in order of
 pinned first, then most newly attached articles. A storyline skipped by the ceiling keeps its
 previous state, and its unconsumed articles go to the unclaimed pool (§7.3).
@@ -166,7 +170,7 @@ previous state, and its unconsumed articles go to the unclaimed pool (§7.3).
 | Call | Sees (ceiling) |
 |---|---|
 | Attach (per pass) | every live storyline's name, description and live signposts (≤ 60); the pass's new articles, title + body ≤ 600 chars, at most 60 per call (a bigger backlog splits into several calls) |
-| Evening update (per touched storyline) | current state, pair, the last 15 timeline lines whatever their age, live signposts, links; up to 15 newly attached articles with outlet and vantage tag; a one-line index of the other storylines; thesis keys with one line each; live watch triggers (one line each) |
+| Nightly update (per touched storyline) | current state, pair, the last 15 timeline lines whatever their age, live signposts, links; up to 15 newly attached articles with outlet and vantage tag; a one-line index of the other storylines; thesis keys with one line each; live watch triggers (one line each) |
 | Brief | moved storylines, at most 12 in full (state, pair, the last 5 timeline lines whatever their age, so earlier dates are always there to cite, plus today's lines, signpost hits, new links, thesis evidence) and the rest one line each; claimed-headline block ≤ 20k tokens; unclaimed articles ≤ 60k tokens; phase 1's 7-day window ≤ 3k tokens; existing market, portfolio, podcast, TWIE and web-search blocks |
 | Burst / surge candidates | unclaimed headlines from the last 6 h, ≤ 300; per-storyline outlet counts |
 | Confirm (signpost, burst, surge) | one storyline's state, timeline and signposts; ≤ 8 triggering articles |
@@ -189,9 +193,9 @@ decision yet; an article captured in the same tick is picked up next pass.
 |---|---|---|---|
 | `attach` (new) | every 30 min | Haiku 5.5, real time | decides every undecided article: up to 3 storylines, or none; flags suspected signpost hits |
 | `burst` (new) | every 3 h | Haiku 5.5 → Sonnet to confirm | bursts in unclaimed headlines (§9.2) and surges on known storylines (§9.3) |
-| `storylines` (new) | 18:00, batch | Sonnet 5 | evening update of every storyline with new attachments since its last landed update |
-| `submit` (existing) | 20:00 | unchanged | builds the brief (§7) |
-| `collect` (existing) | 06:00 | unchanged + Haiku | delivers the brief, then runs phase 1's evidence extraction |
+| `storylines` (new) | 02:30, batch | Sonnet 5 | nightly update of every storyline with new attachments since its last landed update |
+| `submit` (existing, moved) | 04:30, batch (was 20:00) | unchanged | builds the brief (§7) |
+| `collect` (existing) | 06:00 | unchanged + Haiku | delivers the brief, falling back to real time at 06:30 (§6.1), then runs phase 1's evidence extraction |
 | `propose` (new) | 07:00 | Sonnet 5 | proposes up to 3 storylines, or offers retirements and merges at the bound |
 | `weekly` (existing, rewritten) | Sun 21:00, batch | Sonnet 5, extended thinking | week in threads + connections (§9.6) |
 | `storylines_seed` (new, one-off) | by hand on the host | Sonnet 5 | drafts the starting storylines as proposals (§10.5) |
@@ -204,11 +208,40 @@ charges it.
 **Labels, not ids.** Every prompt refers to storylines and articles by opaque per-call labels
 (`S1`, `A1`), mapped back in code; an unknown label is an error, never a fall-through.
 
-**Batch timing.** At `submit`, a storyline whose 18:00 update has not landed is rendered from its
+**Batch timing.** At `submit`, a storyline whose 02:30 update has not landed is rendered from its
 previous state, and its unconsumed articles go to the unclaimed pool (§7.3). `STORYLINE_UPDATE_MODE`
-switches the evening update to real time if batches prove too slow.
+switches the nightly update to real time if batches prove too slow.
 
-**Correction in the evening pass.** The update may reject an attachment ("not about this
+### 6.1 Brief timing
+
+The brief was submitted at 20:00 for 10 hours of batch slack before the 06:00 delivery. That
+slack cost the brief everything published in those 10 hours: Asia's trading day (Bank of Japan
+decisions land around 03:00), and in winter the US close (21:00). Batches have in practice
+finished in minutes, so the slack is not worth that cost (operator decision, 2026-11-22). Submit
+moves to 04:30 and stays a batch, at batch price.
+
+**Fallback.** `collect` at 06:00 polls the batch as today, but only until `BRIEF_FALLBACK_AT`
+(06:30). If it has not ended by then, collect cancels it and sends the same request in real time:
+
+- **Submit persists the request** it batched (`brief_request-{submit_day}.json` on the volume,
+  keyed by `state["date"]` like its siblings), since collect runs in another process and cannot
+  rebuild it.
+- **Cancel, then check.** If the cancel finds the batch already ended, collect uses the batch
+  result. A brief is never delivered twice.
+- **The real-time call** has its own timeout, sized to a brief with web search (the batch
+  timeout says nothing about it).
+- **The path is recorded**: `brief_path=batch|realtime` in the collect log line and its `job_runs`
+  row, so a run of fallbacks shows up without reading logs.
+- If the real-time call also fails, collect alerts as today. The brief is late, never lost.
+
+A fallback day costs that day's brief at full price instead of half: about $0.25–0.35 extra on
+§11's brief line, so about $1–1.50 a month at one fallback a week.
+
+**Cutover.** Deploy the change between 06:00 and 20:00. Deployed after a 20:00 submit and before
+its 06:00 collect, the 04:30 submit sees yesterday's date in state, submits a second batch and
+overwrites the first batch's id, leaving the first one orphaned.
+
+**Correction in the nightly pass.** The update may reject an attachment ("not about this
 storyline"). A rejected article returns to the unclaimed pool unless another storyline consumed it.
 
 ## 7. The brief
@@ -233,7 +266,8 @@ Replaces the OUTPUT FORMAT block of `build_daily_prompt` when `STORYLINE_BRIEF_E
 The rule "No significant change — [one line]" and yesterday's full brief are removed in this
 layout: a quiet storyline does not appear, and the 7-day window prevents repeats.
 
-**Moved** means: the storyline has a landed state update since the previous brief's cutoff.
+**Moved** means: the storyline has a landed state update since the previous brief's submit. With
+the 02:30 update and the 04:30 submit, that is normally the update of the same night.
 
 ### 7.2 The claimed-headline block
 
@@ -248,7 +282,7 @@ update summarised.
   source (`capture.py:293-297`). Temporary sources of type `page` and the Mauldin TWIE scrape
   (`brief.py:3082`, not captured) keep their existing fetch paths and join the unclaimed input.
 - **Unclaimed** means: captured since the previous brief's cutoff, and not consumed by a landed
-  evening update. That is, decided `none`, rejected by every storyline it was attached to,
+  nightly update. That is, decided `none`, rejected by every storyline it was attached to,
   attached after its storyline's update was built, beyond the update's 15-article cap, or
   attached to a storyline whose update has not landed. Rendered as outlet, vantage tag, title,
   body ≤ 400 chars. Ceiling 60k tokens; above it, keep by number of outlets carrying the same
@@ -272,7 +306,7 @@ explicitly to disabled. Expected volume ~700–900 articles a day (recorded rang
 ### 8.2 Offline check
 
 Runs inside the build, before `STORYLINE_BRIEF_ENABLED` or `STORYLINE_ALERTS_ENABLED` go on.
-`attach` itself may run earlier, since its rows only feed the evening update.
+`attach` itself may run earlier, since its rows only feed the nightly update.
 
 1. On the host, export one past week of `items` (~5–6k articles) and the seeded storylines to the
    host data folder. Neither enters git.
@@ -332,7 +366,7 @@ attaches to it (so it is not a burst) and may match no signpost.
   `STORYLINE_SURGE_FACTOR` (3) × the storyline's own trailing 14-day average per 6 h. A storyline
   younger than 14 days needs ≥ 5 outlets in 6 h instead (cold start).
 - **Confirm (Sonnet):** is this a material new development not already in the state? Only a
-  confirmed surge alerts, and the next evening update is told to consider a signpost for it.
+  confirmed surge alerts, and the next nightly update is told to consider a signpost for it.
 - The factor is a starting value, not a measured threshold; Sonnet's confirm is the real filter.
   Candidate and confirm counts are logged so the factor can be tuned.
 - Episode key: storyline + the 6 h window's start.
@@ -347,7 +381,7 @@ retirement the same way after 60 days.
 
 ### 9.5 Merges
 
-The evening update flags two live storylines whose attachments overlap heavily (≥ 50% of either
+The nightly update flags two live storylines whose attachments overlap heavily (≥ 50% of either
 one's articles over the last 14 days share both labels), and the weekly pass may flag a merge in
 prose. Telegram offers Merge / Keep both. A merge retires one storyline with `merged_into` set
 (dated); its history stays, its future attachments go to the survivor, and the survivor's next
@@ -366,13 +400,13 @@ input and writes:
   the theses.
 
 New links it finds are stored and appear in the daily threads section from then on. Links are
-applied without approval and carry their reason. A link not re-affirmed by an evening update or a
+applied without approval and carry their reason. A link not re-affirmed by an nightly update or a
 weekly pass for 30 days is retired (dated). The paper-book mark-to-market tail of today's
 `mode_weekly` (`brief.py:3303-3312`) is kept until `d7w` decides the paper sim's fate.
 
 ## 10. Defaults agreed
 
-1. **Lifecycle.** Fewer than 3 consumed attachments (accepted by an evening update) in 14 days →
+1. **Lifecycle.** Fewer than 3 consumed attachments (accepted by an nightly update) in 14 days →
    `dormant`. (A zero-attachment rule would rarely fire, since Haiku may attach up to 3 storylines
    per article.) Dormant means out of the brief, still in the attach prompt, so a burst of news
    wakes it: "back after 5 weeks". 60 days dormant → offered for
@@ -409,7 +443,7 @@ red-team rounds 1 and 2.
 | Phase 1 (evidence extraction, window tokens) | < $0.20 |
 | Attach (48 calls a day; ~6k-token storyline block at 60 + articles; ≤ ~450k in / 40k out a day, Haiku real time) | ≤ ~$2 |
 | Burst and surge (8 Haiku calls a day + confirms) | < $0.50 |
-| Evening updates (ceiling 20 a day × ~5k in / 0.7k out, Sonnet batch) | ≤ ~$5.10 |
+| Nightly updates (ceiling 20 a day × ~5k in / 0.7k out, Sonnet batch) | ≤ ~$5.10 |
 | Brief | **measure first**; ~$7–10.70 on the August composition |
 | Proposals + signpost confirms | ~$1.50 |
 | Weekly with thinking (60 storylines) | ~$0.60–1 |
@@ -440,13 +474,14 @@ pass.
 | Knob | Default | Turns on |
 |---|---|---|
 | `BRIEF_DATED_MEMORY_ENABLED` | false | phase 1 (§3) |
+| `BRIEF_FALLBACK_AT` | `06:30` | when collect stops waiting for the batch and runs the brief in real time (§6.1); empty = wait the full 12 h as today |
 | `STORYLINES_ENABLED` | false | `attach`, `storylines`, `propose` |
 | `STORYLINE_BRIEF_ENABLED` | false | the new layout and inputs (§7); off = today's layout (with phase 1 if on) |
 | `STORYLINE_ALERTS_ENABLED` | false | `burst`, signpost and surge alerts |
 | `STORYLINE_WEEKLY_ENABLED` | false | the rewritten weekly; off = today's weekly |
 | `STORYLINE_ATTACH_MODEL` | `claude-haiku-5-5` | attach and burst candidates |
-| `STORYLINE_UPDATE_MODEL` | `claude-sonnet-5` | evening update, confirms, proposals, flash, weekly |
-| `STORYLINE_UPDATE_MODE` | `batch` | `batch` or `realtime` evening update |
+| `STORYLINE_UPDATE_MODEL` | `claude-sonnet-5` | nightly update, confirms, proposals, flash, weekly |
+| `STORYLINE_UPDATE_MODE` | `batch` | `batch` or `realtime` nightly update |
 | `STORYLINE_MAX_LIVE` | 60 | §5.2 |
 | `STORYLINE_MAX_UPDATES_PER_DAY` | 20 | §5.2 |
 | `STORYLINE_DORMANT_DAYS` / `STORYLINE_RETIRE_OFFER_DAYS` / `STORYLINE_BRIEF_MAX_MOVED` | 14 / 60 / 12 | §10.1 |
@@ -492,6 +527,8 @@ Migration `0018_storylines`. All tables have `created_at`; code never DELETEs fr
 - `bqa.7`: stays deferred; it is §8.3's fallback.
 - New, later: remove the claim-ledger and comprehension code once the new brief has run without
   rollback.
+- `qap` (new, first): move the brief to 04:30 with the real-time fallback (§6.1). Independent of both
+  phases.
 
 ## 16. Out of scope
 
