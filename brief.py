@@ -2894,26 +2894,64 @@ def submit_batch_no_search(system: str, prompt_user: str, custom_id: str) -> str
     return submit_batch(system, prompt_user, custom_id, web_search=False)
 
 
+def fallback_wait_secs(now: datetime, at: str) -> int | None:
+    """Seconds from `now` until today's `at` (UTC "HH:MM"), floored at 0.
+
+    None means no fallback: `at` is "off", or unparseable (logged). Collect then
+    waits as it always did (news-brief-qap, storylines spec §6.1).
+    """
+    if at.strip().lower() == "off":
+        return None
+    try:
+        hhmm = datetime.strptime(at.strip(), "%H:%M")
+    except ValueError:
+        log.error(f"BRIEF_FALLBACK_AT={at!r} is not HH:MM or 'off'; fallback disabled")
+        return None
+    target = now.replace(hour=hhmm.hour, minute=hhmm.minute, second=0, microsecond=0)
+    return max(0, int((target - now).total_seconds()))
+
+
+def _http_error_detail(e: Exception) -> str:
+    """The response body of a failed HTTP call, when there is one: the status
+    and URL alone are not a diagnosis (memory: http-error-body-is-the-diagnosis)."""
+    resp = getattr(e, "response", None)
+    body = getattr(resp, "text", "") if resp is not None else ""
+    return f" body={body[:500]!r}" if body else ""
+
+
 def poll_batch(batch_id: str, max_wait_secs: int = 43200) -> str | None:
+    """Wait for a batch to end and return its succeeded text, or None.
+
+    Always checks at least once, even with a deadline already passed (a
+    catch-up collect), and never sleeps past the deadline. A failed status
+    check or results fetch is logged and polling continues: the fallback that
+    follows a timeout must not be skipped by one bad reply (news-brief-qap).
+    """
     url = f"https://api.anthropic.com/v1/messages/batches/{batch_id}"
     deadline = time.time() + max_wait_secs
     sleep = 60
 
-    while time.time() < deadline:
-        resp = requests.get(url, headers=ANTHROPIC_HEADERS, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        status = data.get("processing_status")
-        log.info(f"Batch {batch_id}: {status}")
+    while True:
+        try:
+            resp = requests.get(url, headers=ANTHROPIC_HEADERS, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            status = data.get("processing_status")
+            log.info(f"Batch {batch_id}: {status}")
 
-        if status == "ended":
-            results_url = (
-                data.get("results_url")
-                or f"https://api.anthropic.com/v1/messages/batches/{batch_id}/results"
-            )
-            return fetch_batch_results(results_url)
+            if status == "ended":
+                results_url = (
+                    data.get("results_url")
+                    or f"https://api.anthropic.com/v1/messages/batches/{batch_id}/results"
+                )
+                return fetch_batch_results(results_url)
+        except requests.RequestException as e:
+            log.warning(f"Batch {batch_id} check failed: {e}{_http_error_detail(e)}")
 
-        time.sleep(min(sleep, 300))
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            break
+        time.sleep(min(sleep, 300, remaining))
         sleep = int(sleep * 1.5)
 
     log.error(f"Batch {batch_id} timed out")

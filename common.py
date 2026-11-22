@@ -235,6 +235,17 @@ KNOBS: dict[str, Knob] = {
     # failure, too long costs only wall-clock nobody is waiting on. A row, so
     # the host can retune it from a measured duration without a redeploy.
     "RECONCILE_TIMEOUT": Knob(int, 90),
+    # Brief timing (news-brief-qap, storylines spec §6.1). Submit batches the
+    # brief at 04:30; collect at 06:00 waits for it only until this time (UTC,
+    # HH:MM), then cancels the batch and replays the request in real time.
+    # 06:30 leaves a slow batch two hours from submit and still lands the brief
+    # within the hour. "off" restores the old wait (poll_batch's window, cut to
+    # 4 h by JOB_MAX_RUNTIME_MINUTES); an unparseable value behaves as "off".
+    "BRIEF_FALLBACK_AT": Knob(str, "06:30"),
+    # Read timeout, in seconds, of each real-time brief call. 600 is a guess
+    # for a 16k-token, adaptive-thinking, web-search turn: retune it from the
+    # `elapsed=` that scripts/replay_brief_realtime.py prints on the host.
+    "BRIEF_REALTIME_TIMEOUT": Knob(int, 600),
     # Seconds between two consecutive fetches of the SAME host. The self-hosted
     # Nitter rate-limits requests that arrive close together; `order_by_host`
     # only reduces how often this has to fire, it is not a substitute for it.
