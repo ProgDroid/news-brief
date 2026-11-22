@@ -63,6 +63,7 @@ from common import (
     split_html_message,
 )
 import common
+import dated_memory
 import scheduler
 import trading
 from trading import (
@@ -2319,6 +2320,7 @@ def build_daily_prompt(
     market_block: str = "",
     enrichment_block: str = "",
     established_block: str = "",
+    dated_window: str = "",
 ) -> str:
     today = datetime.now(timezone.utc).strftime("%A, %d %B %Y")
     search_list = "\n".join(f"- {t['search']}" for t in TOPICS)
@@ -2352,7 +2354,10 @@ For any section where the situation is materially unchanged from yesterday, repl
 """
 
     weekly_block = ""
-    if weekly_summary:
+    if dated_window:
+        # Replaces the weekly slice in the same position (spec section 3.2).
+        weekly_block = f"\n{dated_window}\n"
+    elif weekly_summary:
         weekly_block = f"""
 ## WEEKLY CONTEXT (for trend awareness)
 Use this to identify multi-day patterns, unresolved watch list items, and slow-moving trends. Do not repeat it — use it as background framing only.
@@ -3279,17 +3284,30 @@ def mode_submit():
     fb = load_feedback()
     chroma_context = build_chroma_context(fb)
     yesterday_brief = load_yesterday_brief()
+    dated_on = common.BRIEF_DATED_MEMORY_ENABLED
     established_block = ""
     if brief_memory_enabled():
         try:
             with db.connect() as ledger_conn:
                 established_block = render_established_block(
-                    claim_store.load_ledger(ledger_conn)
+                    claim_store.load_ledger(ledger_conn),
+                    dated=dated_on,
+                    today=today if dated_on else None,
                 )
         except Exception as e:
             log.error(f"Brief-memory unreadable; brief continues degraded: {e}")
             established_block = claim_store.degraded_block()
     weekly_summary = load_last_weekly_summary()
+    dated_window = ""
+    if dated_on:
+        try:
+            win = dated_memory.build_window(load_last_n_briefs(7), today)
+            dated_window = win.block
+            log.info(
+                f"Dated window: {win.days} days, {win.lines} lines, {win.chars} chars"
+            )
+        except Exception as e:
+            log.warning(f"Dated window skipped (brief unaffected): {e}")
 
     log.info(
         f"Chroma: {len(chroma_context)} chars | "
@@ -3341,6 +3359,7 @@ def mode_submit():
         market_block,
         enrichment_block,
         established_block,
+        dated_window=dated_window,
     )
     try:
         save_brief_request(brief_request_params(SYSTEM_PROMPT, prompt), today)

@@ -248,6 +248,15 @@ KNOBS: dict[str, Knob] = {
     # for a 16k-token, adaptive-thinking, web-search turn: retune it from the
     # `elapsed=` that scripts/replay_brief_realtime.py prints on the host.
     "BRIEF_REALTIME_TIMEOUT": Knob(int, 600),
+    # Dated memory (storylines phase 1, spec section 3, news-brief-al7.1). On:
+    # the prompt carries a 7-day window of dated headlines in place of the
+    # weekly slice, and established claims render their first-seen date. Off
+    # (the default) leaves the prompt byte for byte as it was.
+    "BRIEF_DATED_MEMORY_ENABLED": Knob(bool, False),
+    # The thesis-evidence extraction call (Task 5). Unlike SIGNALS_MODEL the
+    # default is a model id, not "follow MODEL": this extraction is meant to be
+    # the cheap model (spec section 3.3).
+    "EVIDENCE_MODEL": Knob(str, "claude-haiku-5-5", env="NEWSBRIEF_EVIDENCE_MODEL"),
     # Seconds between two consecutive fetches of the SAME host. The self-hosted
     # Nitter rate-limits requests that arrive close together; `order_by_host`
     # only reduces how often this has to fire, it is not a substitute for it.
