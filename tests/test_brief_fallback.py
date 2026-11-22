@@ -1,7 +1,8 @@
 """news-brief-qap: brief submitted at 04:30, collect falls back to real time.
 
 Storylines spec §6.1. Collect polls the batch until BRIEF_FALLBACK_AT, then
-cancels it and replays the request submit persisted against /v1/messages.
+replays the request submit persisted against /v1/messages, cancelling the
+batch only once that call has produced a brief.
 """
 
 from datetime import datetime, timezone

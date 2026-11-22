@@ -237,7 +237,9 @@ KNOBS: dict[str, Knob] = {
     "RECONCILE_TIMEOUT": Knob(int, 90),
     # Brief timing (news-brief-qap, storylines spec §6.1). Submit batches the
     # brief at 04:30; collect at 06:00 waits for it only until this time (UTC,
-    # HH:MM), then cancels the batch and replays the request in real time.
+    # HH:MM), then replays the request in real time with the batch still alive.
+    # It cancels the batch only once that call has produced a brief, and on
+    # failure goes back to waiting on the batch (see brief.obtain_brief).
     # 06:30 leaves a slow batch two hours from submit and still lands the brief
     # within the hour. "off" restores the old wait (poll_batch's window, cut to
     # 4 h by JOB_MAX_RUNTIME_MINUTES); an unparseable value behaves as "off".
