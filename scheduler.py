@@ -52,10 +52,12 @@ class Decision:
     reason: str
 
 
-# The first four match the cron entries retired at the 2026-09-01 cutover
-# exactly, so that cutover changed when nothing:
-#   0 20 * * *  submit    0  6 * * *  collect
-#   0 21 * * 0  weekly    0  *  * * *  monitor
+# collect, weekly and monitor match the cron entries retired at the 2026-09-01
+# cutover (0 6 * * * collect, 0 21 * * 0 weekly, 0 * * * * monitor). submit
+# also matched (0 20 * * *) until 2026-11-22, when it moved to 04:30
+# (news-brief-qap, storylines spec §6.1): 20:00 bought batch slack that cost the
+# 06:00 brief Asia's day and the US close. Collect now falls back to a real-time
+# call at BRIEF_FALLBACK_AT if the batch is slow, so the slack is not needed.
 # `backup` is the one schedule that never had a cron entry — it is new work, at
 # 07:00 so it runs AFTER the 06:00 collect and therefore captures the day's
 # largest write rather than yesterday's state.
@@ -72,7 +74,7 @@ class Decision:
 # provisionally on 2026-11-19, before its replay gate (8lp.1) — user decision:
 # an unvalidated watcher beats none, but a quiet night is not yet proof.
 SCHEDULES: tuple[Schedule, ...] = (
-    Schedule("submit", "daily", "20:00", None, grace_minutes=60),
+    Schedule("submit", "daily", "04:30", None, grace_minutes=60),
     Schedule("collect", "daily", "06:00", None, grace_minutes=120),
     Schedule("backup", "daily", "07:00", None, grace_minutes=180),
     Schedule("weekly", "daily", "21:00", None, grace_minutes=180, weekdays=(7,)),

@@ -1521,7 +1521,7 @@ def test_collect_finishes_when_the_nudge_fails(monkeypatch):
 
     calls = {"cleared": 0, "retention": 0}
     monkeypatch.setattr(brief, "load_state", lambda: {"batch_id": "b1"})
-    monkeypatch.setattr(brief, "poll_batch", lambda bid: "RAW")
+    monkeypatch.setattr(brief, "poll_batch", lambda bid, **kw: "RAW")
     monkeypatch.setattr(brief, "deliver", lambda *a, **k: None)
     monkeypatch.setattr(brief, "extract_signals", lambda raw, **kw: ([], "ok"))
     monkeypatch.setattr(brief, "normalize_signals", lambda raw: ([], []))

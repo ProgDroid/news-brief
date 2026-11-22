@@ -3350,6 +3350,59 @@ def mode_submit():
     )
 
 
+# Minutes left to collect after its last batch wait, before the supervisor kills
+# it at JOB_MAX_RUNTIME_MINUTES: enough to deliver, extract signals and reconcile.
+RESUME_MARGIN_MINUTES = 15
+
+
+def obtain_brief(
+    batch_id: str, submit_day: str, *, now: datetime
+) -> tuple[str | None, str]:
+    """The brief text and how it was obtained: "batch", "realtime" or "none".
+
+    Waits on the batch until BRIEF_FALLBACK_AT, then replays the request submit
+    saved in real time. The batch is cancelled ONLY once that call has produced
+    a brief; if it fails, this goes back to waiting on the batch until just
+    under the job limit, so the fallback never does worse than the plain wait it
+    replaces (news-brief-qap, storylines spec §6.1). Never raises.
+    """
+    t0 = time.time()
+    at = common.BRIEF_FALLBACK_AT
+    rt_timeout = common.BRIEF_REALTIME_TIMEOUT
+    budget = (common.JOB_MAX_RUNTIME_MINUTES - RESUME_MARGIN_MINUTES) * 60
+    try:
+        wait = fallback_wait_secs(now, at)
+        if wait is None:
+            raw = poll_batch(batch_id)
+            return (raw, "batch") if raw else (None, "none")
+
+        raw = poll_batch(batch_id, max_wait_secs=wait)
+        if raw:
+            return raw, "batch"
+
+        params = load_brief_request(submit_day)
+        text = None
+        if params is None:
+            log.error(f"No saved brief request for {submit_day}; cannot fall back")
+        else:
+            log.info(
+                f"Batch {batch_id} not done by {at}; running the brief in real time"
+            )
+            text = run_brief_realtime(params, timeout=rt_timeout)
+        if text:
+            cancel_batch(batch_id)
+            return text, "realtime"
+
+        log.warning(f"Real-time brief unavailable; waiting on batch {batch_id} again")
+        raw = poll_batch(
+            batch_id, max_wait_secs=max(0, int(budget - (time.time() - t0)))
+        )
+        return (raw, "batch") if raw else (None, "none")
+    except Exception:
+        log.exception("Obtaining the brief failed")
+        return None, "none"
+
+
 def mode_collect():
     log.info("=== COLLECT ===")
     state = load_state() or {}
@@ -3366,12 +3419,14 @@ def mode_collect():
     # silently loaded nothing (news-brief-hw8). `today` stays the delivery date for
     # the archive, signals and the ledger.
     submit_day = state.get("date") or today
-    raw = poll_batch(batch_id)
+    raw, brief_path = obtain_brief(batch_id, submit_day, now=datetime.now(timezone.utc))
+    log.info(f"Brief obtained: brief_path={brief_path}")
     if raw:
         brief = raw.strip()
+        live = " <i>(live fallback)</i>" if brief_path == "realtime" else ""
         deliver(
             brief,
-            header=f"🌐 <b>Morning Brief — {datetime.now(timezone.utc).strftime('%d %b %Y')}</b>",
+            header=f"🌐 <b>Morning Brief — {datetime.now(timezone.utc).strftime('%d %b %Y')}</b>{live}",
             archive_path=BRIEFS_DIR / f"brief-{today}.md",
         )
         raw_signals, status = extract_signals(brief)

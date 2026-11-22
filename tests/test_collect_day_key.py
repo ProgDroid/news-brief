@@ -27,7 +27,7 @@ class _Conn:
 def _stub_collect(monkeypatch, tmp_path, state):
     seen = {}
     monkeypatch.setattr(brief, "load_state", lambda: state)
-    monkeypatch.setattr(brief, "poll_batch", lambda bid: "RAW")
+    monkeypatch.setattr(brief, "poll_batch", lambda bid, **kw: "RAW")
     monkeypatch.setattr(brief, "deliver", lambda *a, **k: None)
     monkeypatch.setattr(brief, "extract_signals", lambda raw, **kw: ([{"t": 1}], "ok"))
     monkeypatch.setattr(brief, "normalize_signals", lambda raw: (raw, []))
