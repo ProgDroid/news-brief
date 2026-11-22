@@ -474,7 +474,7 @@ git commit -m "feat(dated-memory): /evidence lists a thesis's last 30 days of ev
 
 **When to deploy:** after `/jobs` shows today's collect ✅ finished, and before 04:30 UTC; not around Sunday 21:00 (weekly). A deploy restarts the supervisor, which stops a running job and records it `finished` with no alert and no retry (`supervisor.py:803-819`), so deploying while collect runs (from 06:00) can cost that day's brief. The knob is off, so nothing changes until step 2. The migration runs on start.
 
-1. **See the window over the real archive before switching it on:** `docker compose run --rm --entrypoint python newsbrief scripts/preview_dated_window.py`.
+1. **See the window over the real archive before switching it on:** `docker compose run --rm --entrypoint python newsbrief scripts/preview_dated_window.py --today "$(date -u -d tomorrow +%F)"`. Pass tomorrow: the next 04:30 submit runs on tomorrow's date, and with today's date the window would leave out today's brief, showing 6 days where submit sees 7.
    - It should list `files=` with recent dates, `top`/`watch` sections found in each, then dated `[top]` and `[watch]` lines.
    - `files=0` means the container sees no archive (volume or `DATA_DIR`).
    - Files with no sections found means the parser doesn't recognise the real headings.
@@ -486,8 +486,10 @@ git commit -m "feat(dated-memory): /evidence lists a thesis's last 30 days of ev
    ```
 3. **Next morning, check the effect, not the row.** In `newsbrief.log` in the data folder:
    - a `Dated window: … lines` line from the 04:30 submit
-   - an `Evidence: status=… written=… push=…` line from collect (`status=no_section` is a legitimate quiet day; `push=` other than `ok` means the pushed theses were missing from extraction)
-   - the brief's `usage(in=…)` line, compared with the previous days', for the real token cost of the window
+   - an `Evidence: status=… written=… problems=… push=…` line from collect:
+     - `status=no_section` usually means a quiet day, but it is also what a reworded heading looks like. If it keeps appearing on days the brief has a position-signals section, report it.
+     - `push=` anything other than `ok` means the pushed theses were left out of extraction.
+   - the brief's own usage line, the `usage(in=…)` line carrying `searches=`, compared with the previous days', for the real token cost of the window. On a knob-on day, two other calls print `usage(in=` too.
 
    Then `/evidence` should list the day's rows for a thesis the brief mentioned.
 4. Close `news-brief-al7.1` when step 3 holds.
