@@ -56,6 +56,7 @@ def test_up_creates_the_expected_tables(conn):
         "0015_comprehend_spend",
         "0016_integrate_link_defers",
         "0017_census",
+        "0018_thesis_evidence",
     ]
     assert {
         "schema_migrations",

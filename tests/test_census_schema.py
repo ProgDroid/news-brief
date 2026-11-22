@@ -285,6 +285,8 @@ def test_down_refuses_with_labels_and_runs_when_empty(kb):
     kb.execute("DELETE FROM census_assignments")
     kb.commit()
 
+    # The refused attempt already reverted the newer migrations: recount.
+    steps = conftest.steps_back_through(kb, TARGET)
     reverted = db.run_migrations(kb, direction="down", steps=steps)
     kb.commit()
 
