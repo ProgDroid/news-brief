@@ -221,13 +221,16 @@ finished in minutes, so the slack is not worth that cost (operator decision, 202
 moves to 04:30 and stays a batch, at batch price.
 
 **Fallback.** `collect` at 06:00 polls the batch as today, but only until `BRIEF_FALLBACK_AT`
-(06:30). If it has not ended by then, collect cancels it and sends the same request in real time:
+(06:30). If it has not ended by then, collect sends the same request in real time, leaving the
+batch running:
 
 - **Submit persists the request** it batched (`brief_request-{submit_day}.json` on the volume,
   keyed by `state["date"]` like its siblings), since collect runs in another process and cannot
   rebuild it.
-- **Cancel, then check.** If the cancel finds the batch already ended, collect uses the batch
-  result. A brief is never delivered twice.
+- **Cancel only with a replacement in hand** (operator decision, 2026-11-22). If the real-time
+  call succeeds, collect delivers it and then cancels the batch. If it fails, collect goes back
+  to waiting on the batch until just under the 4 h job limit, as today. The fallback never does
+  worse than the wait it replaces. A brief is never delivered twice.
 - **The real-time call** has its own timeout (`BRIEF_REALTIME_TIMEOUT`), set from one measured
   run on the host before the bead closes. An overloaded or rate-limited reply (429, 5xx, 529) is
   retried, up to 3 attempts. A timeout is not retried, because that request may have finished
@@ -237,12 +240,11 @@ moves to 04:30 and stays a batch, at batch price.
 - **The path is recorded**: `brief_path=batch|realtime` in the collect log line, and a fallback
   brief's Telegram header says "(live fallback)", so a run of fallbacks shows up without reading
   logs. (`job_runs` has no column for it, and adding one is not worth a migration.)
-- If the real-time call also fails, collect alerts as today. The batch has been cancelled, so
-  that day's brief is lost unless it is rerun by hand.
+- If the real-time call fails and the batch never ends either, collect alerts as today.
 
 A fallback day costs that day's brief at full price instead of half: about $0.25–0.35 extra on
-§11's brief line, so about $1–1.50 a month at one fallback a week. Rarely it costs both: a
-cancelled request that finishes after collect has stopped waiting is still billed.
+§11's brief line, so about $1–1.50 a month at one fallback a week. Rarely it costs both: a batch
+that finishes while the real-time call runs is billed too (about $0.10–0.20).
 
 **Cutover.** Deploy the change between 06:00 and 20:00. Deployed after a 20:00 submit and before
 its 06:00 collect, the 04:30 submit sees yesterday's date in state, submits a second batch and

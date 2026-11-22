@@ -4,7 +4,7 @@
 
 **Goal:** submit the daily brief batch at 04:30 UTC instead of 20:00, and have collect fall back to a real-time call when the batch has not ended by 06:30 (bead `news-brief-qap`).
 
-**Architecture:** submit persists the exact request it batched. Collect gets the brief through one new function, `obtain_brief`. It polls the batch until the fallback time, then cancels it and waits for `ended`, using a batch result that still succeeded. Otherwise it replays the persisted request against `POST /v1/messages`, continuing on `pause_turn`. The path taken is logged and marked in the Telegram header.
+**Architecture:** submit persists the exact request it batched. Collect gets the brief through one new function, `obtain_brief`. It polls the batch until the fallback time, then replays the persisted request against `POST /v1/messages`, continuing on `pause_turn`. If that succeeds it cancels the batch; if it fails it goes back to waiting on the batch. The path taken is logged and marked in the Telegram header.
 
 **Tech Stack:** Python 3.14, `requests` against the Anthropic HTTP API (the project's existing pattern; no SDK is introduced), pytest, ruff.
 
@@ -29,12 +29,12 @@
 
 1. **Collect starts after 06:30** (a catch-up run): the batch is checked once, and if not ended the fallback starts at once. It must not wait a fixed minute or skip the check. Owned by Task 1 (`test_poll_checks_once_when_the_deadline_has_passed`) and Task 4 (`test_obtain_brief_after_the_fallback_time_checks_once_then_falls_back`).
 2. **The batch ended with an errored result** (not slow, just failed): falls back to real time rather than alerting. Task 4 (`test_obtain_brief_falls_back_when_the_batch_ended_without_success`).
-3. **No persisted request** (the batch was submitted by the old code, or the file was pruned): no real-time call; collect alerts as it does today. Task 4 (`test_obtain_brief_without_a_saved_request_gives_up_cleanly`).
+3. **No persisted request** (the batch was submitted by the old code, or the file was pruned): no real-time call; collect goes back to waiting on the batch, as today. Task 4 (`test_obtain_brief_without_a_saved_request_waits_on_the_batch`).
 4. **`pause_turn` beyond the continuation limit**, or a real-time HTTP failure: returns `None`, never a half-brief, never raises. Task 3 (`test_realtime_gives_up_after_the_continuation_limit`, `test_realtime_http_failure_returns_none`).
-5. **Cancel on a batch that has already ended** answers with an HTTP error: swallowed, and the succeeded result is still used. Task 3 (`test_cancel_batch_swallows_an_http_error`) and Task 4 (`test_obtain_brief_uses_a_result_that_finished_during_cancel`).
+5. **The API is down for longer than the real-time retries** (about 90 s): the batch was never cancelled, so collect goes back to waiting on it until just under the 4 h job limit. Today's late-but-delivered outcome is kept. Task 3 (`test_cancel_batch_swallows_an_http_error`) and Task 4 (`test_obtain_brief_goes_back_to_the_batch_when_realtime_fails`).
 6. **The API is degraded at 06:00–06:30** (5xx, 529 or timeouts on status checks): polling continues to the deadline, and an overloaded reply to the real-time call is retried rather than ending the day's brief. Task 1 (`test_poll_survives_a_failed_status_check`), Task 3 (`test_realtime_retries_an_overloaded_reply`, `test_realtime_never_retries_a_timeout`), Task 4 (`test_obtain_brief_never_raises`).
 
-**Billing note:** a cancelled request that finishes after `BRIEF_CANCEL_WAIT_SECS` is billed even though collect has moved on to the real-time call, so a rare fallback day pays for both.
+**Billing note:** the batch keeps running while the real-time call runs, and is cancelled only after it succeeds. A batch that finishes in those minutes is billed as well (about $0.10–0.20 extra), which is rare after two hours of waiting.
 
 ---
 
@@ -250,12 +250,12 @@ def test_cancel_batch_swallows_an_http_error(monkeypatch):
 
 **Interfaces:**
 - Consumes: Tasks 1–3.
-- Produces: `obtain_brief(batch_id: str, submit_day: str, *, now: datetime) -> tuple[str | None, str]`, with the path one of `"batch"`, `"realtime"` or `"none"`. It reads `common.BRIEF_FALLBACK_AT` and `common.BRIEF_REALTIME_TIMEOUT` once at entry. Algorithm:
+- Produces: `obtain_brief(batch_id: str, submit_day: str, *, now: datetime) -> tuple[str | None, str]`, with the path one of `"batch"`, `"realtime"` or `"none"`. It reads `common.BRIEF_FALLBACK_AT`, `common.BRIEF_REALTIME_TIMEOUT` and `common.JOB_MAX_RUNTIME_MINUTES` once at entry, and records `t0 = time.time()`. **Rule (user decision 2026-11-22, after a side-agent note): the batch is cancelled only once a replacement brief is in hand, so the fallback never does worse than today's wait.** Algorithm:
   1. `wait = fallback_wait_secs(now, at)`. If `None`: `raw = poll_batch(batch_id)` and return `(raw, "batch")`, or `(None, "none")` when `raw` is empty.
   2. `raw = poll_batch(batch_id, max_wait_secs=wait)`. If truthy, return `(raw, "batch")`.
-  3. `cancel_batch(batch_id)`, then `raw = poll_batch(batch_id, max_wait_secs=BRIEF_CANCEL_WAIT_SECS)` (a constant, 600). If truthy, return `(raw, "batch")`: the request finished during the cancel.
-  4. `params = load_brief_request(submit_day)`. If `None`, log an error and return `(None, "none")`.
-  5. `text = run_brief_realtime(params, timeout=…)`. Return `(text, "realtime")` if `text`, else `(None, "none")`.
+  3. `params = load_brief_request(submit_day)`. If `None`, log an error. Otherwise `text = run_brief_realtime(params, timeout=…)`.
+  4. If `text`: `cancel_batch(batch_id)` (the batch may still be running; this stops paying for it), then return `(text, "realtime")`.
+  5. Otherwise go back to the batch: `raw = poll_batch(batch_id, max_wait_secs=max(0, budget - (time.time() - t0)))`, where `budget = (JOB_MAX_RUNTIME_MINUTES - RESUME_MARGIN_MINUTES) * 60` and `RESUME_MARGIN_MINUTES = 15` (a constant leaving collect time to deliver before the supervisor kills it). Return `(raw, "batch")` if truthy, else `(None, "none")`.
 
 - [ ] **Step 1: Write the failing tests** (stub `poll_batch`, `cancel_batch`, `load_brief_request` and `run_brief_realtime` on `brief`, recording calls)
 
@@ -266,35 +266,37 @@ def test_obtain_brief_uses_the_batch_when_it_ends_in_time(...):
     assert cancels == [] and realtime_calls == []
     assert polls[0] == ("b1", 1800)
 
-def test_obtain_brief_falls_back_after_the_fallback_time(...):
-    # poll -> None, None; saved request present; realtime -> "R"
+def test_obtain_brief_runs_realtime_before_it_cancels(...):
+    # poll -> None; saved request present; realtime -> "R"
     assert brief.obtain_brief("b1", DAY, now=AT_0600) == ("R", "realtime")
-    assert cancels == ["b1"] and polls[1] == ("b1", brief.BRIEF_CANCEL_WAIT_SECS)
+    assert events == ["poll", "realtime", "cancel"]
 
-def test_obtain_brief_uses_a_result_that_finished_during_cancel(...):
-    # poll -> None, then "B"
+def test_obtain_brief_goes_back_to_the_batch_when_realtime_fails(...):
+    # poll -> None, then "B"; realtime -> None
     assert brief.obtain_brief("b1", DAY, now=AT_0600) == ("B", "batch")
-    assert realtime_calls == []
+    assert cancels == []
+    budget = (common.JOB_MAX_RUNTIME_MINUTES - brief.RESUME_MARGIN_MINUTES) * 60
+    assert budget - 60 <= polls[1][1] <= budget
 
 def test_obtain_brief_falls_back_when_the_batch_ended_without_success(...):
-    # the batch had ended errored: both polls return None at once; realtime -> "R"
+    # the batch had ended errored: poll returns None at once; realtime -> "R"
     assert brief.obtain_brief("b1", DAY, now=AT_0600) == ("R", "realtime")
 
 def test_obtain_brief_after_the_fallback_time_checks_once_then_falls_back(...):
     brief.obtain_brief("b1", DAY, now=AT_0715)
     assert polls[0] == ("b1", 0)
 
-def test_obtain_brief_without_a_saved_request_gives_up_cleanly(...):
-    # load_brief_request -> None
+def test_obtain_brief_without_a_saved_request_waits_on_the_batch(...):
+    # load_brief_request -> None; poll -> None, None
     assert brief.obtain_brief("b1", DAY, now=AT_0600) == (None, "none")
-    assert realtime_calls == []
+    assert realtime_calls == [] and cancels == [] and len(polls) == 2
 
 def test_obtain_brief_reads_the_request_by_the_submit_day(...):
     brief.obtain_brief("b1", "2000-01-01", now=AT_0600)
     assert loaded_days == ["2000-01-01"]
 
 def test_obtain_brief_never_raises(...):
-    # cancel_batch stubbed to raise RuntimeError; poll -> None
+    # run_brief_realtime stubbed to raise RuntimeError; poll -> None
     assert brief.obtain_brief("b1", DAY, now=AT_0600) == (None, "none")
 
 def test_obtain_brief_with_the_fallback_off_waits_the_full_window(monkeypatch, ...):
