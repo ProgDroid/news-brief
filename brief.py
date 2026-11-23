@@ -64,6 +64,7 @@ from common import (
 )
 import common
 import dated_memory
+import storyline_store
 import scheduler
 import trading
 from trading import (
@@ -759,6 +760,10 @@ HELP_TEXT = """<b>newsbrief commands</b>
   A thesis's logged evidence, last 30 days. Alone: a picker.
   e.g. <code>/evidence TESTCO since:2026-01-01</code>
 
+/storyline [list|add Name — description|retire]
+  Storylines the brief tracks. Alone: the live list with 7-day attachment counts.
+  e.g. <code>/storyline add Widget tariffs — import duties on widgets</code>
+
 /jobs — scheduler status: each job's last run, exit code and next due time
 /run [job]
   Run a job now, out of schedule. The supervisor picks it up within 30s.
@@ -1191,6 +1196,10 @@ def _handle_callback_query(cb: dict, fb: dict | None = None) -> dict | None:
             _evidence_render(key)
         return fb
 
+    if data.startswith("slp:") or data.startswith("slr:"):
+        _storyline_callback(data, msg_id)
+        return fb
+
     if data.startswith("unwatch:"):
         h = data[len("unwatch:") :]
         wl = load_watchlist()
@@ -1360,6 +1369,15 @@ def _handle_telegram_update(update: dict, fb: dict) -> dict:
                 telegram_send("Format: <code>/evidence KEY since:YYYY-MM-DD</code>")
                 return fb
         _evidence_render(key, since)
+
+    elif text == "/storyline" or text == "/storyline list":
+        _storyline_list_render()
+
+    elif text == "/storyline retire":
+        _storyline_retire_picker()
+
+    elif text.startswith("/storyline add"):
+        _storyline_add(text[len("/storyline add") :].strip())
 
     elif text == "/capture":
         _capture_render()
@@ -3930,6 +3948,170 @@ def _evidence_render(key: str, since: str | None = None) -> None:
     telegram_send_long("\n".join(lines))
 
 
+# ── /storyline and the storyline-proposal buttons (plan 2a) ───────────────────
+STORYLINE_COUNT_DAYS = 7
+STORYLINE_ADD_USAGE = (
+    "Usage: <code>/storyline add Name — description</code> "
+    "(an em dash, or a hyphen with spaces, between the two parts)"
+)
+
+
+def _storyline_unavailable(e: Exception) -> None:
+    log.exception("/storyline could not reach the storyline store")
+    telegram_send(f"Storylines unavailable: {_ledger_unreachable(e)}")
+
+
+def _storyline_bound_text() -> str:
+    return (
+        f"At the limit of {common.STORYLINE_MAX_LIVE} live storylines — "
+        "retire one first (/storyline retire)."
+    )
+
+
+def _storyline_list_render() -> None:
+    since = datetime.now(timezone.utc) - timedelta(days=STORYLINE_COUNT_DAYS)
+    try:
+        with db.connect(connect_timeout=JOBS_DB_TIMEOUT_SECONDS) as conn:
+            live = storyline_store.live_storylines(conn)
+            counts = storyline_store.attached_since(conn, since=since)
+    except Exception as e:
+        _storyline_unavailable(e)
+        return
+    if not live:
+        telegram_send("No storylines yet.")
+        return
+    lines = [f"<b>🧵 Storylines</b> ({len(live)} live)", ""]
+    for s in live:
+        pin = " · 📌" if s.pinned else ""
+        lines.append(
+            f"<b>{html.escape(s.name)}</b> · {html.escape(s.status)}{pin}"
+            f" · {counts.get(s.id, 0)} in {STORYLINE_COUNT_DAYS}d"
+        )
+    telegram_send_long("\n".join(lines))
+
+
+def _storyline_retire_picker(message_id: int | None = None) -> None:
+    try:
+        with db.connect(connect_timeout=JOBS_DB_TIMEOUT_SECONDS) as conn:
+            live = storyline_store.live_storylines(conn)
+    except Exception as e:
+        _storyline_unavailable(e)
+        return
+    if not live:
+        _picker_empty("No storylines yet.", message_id)
+        return
+    rows = [
+        [{"text": f"🗑 {s.name}"[:40], "callback_data": f"slr:{s.id}"}] for s in live
+    ]
+    _picker_send("🧵 <b>Retire which storyline?</b>", rows, message_id)
+
+
+def _storyline_add(arg: str) -> None:
+    parts = re.split(r"\s*—\s*|\s+-\s+", arg, maxsplit=1)
+    name, description = ("", "")
+    if len(parts) == 2:
+        name, description = parts[0].strip(), parts[1].strip()
+    if not name or not description:
+        telegram_send(STORYLINE_ADD_USAGE)
+        return
+    try:
+        with db.connect(connect_timeout=JOBS_DB_TIMEOUT_SECONDS) as conn:
+            out = storyline_store.add_storyline(
+                conn,
+                name,
+                description,
+                origin="operator",
+                max_live=common.STORYLINE_MAX_LIVE,
+            )
+            if out.problem is None:
+                conn.commit()
+    except Exception as e:
+        _storyline_unavailable(e)
+        return
+    if out.problem == "bound":
+        telegram_send(_storyline_bound_text())
+    elif out.problem == "duplicate":
+        telegram_send(
+            f"A live storyline named <b>{html.escape(name)}</b> already exists."
+        )
+    else:
+        telegram_send(f"🧵 Added storyline: <b>{html.escape(name)}</b>")
+
+
+def _storyline_retire(conn, sid: int, msg_id: int) -> None:
+    name = next(
+        (s.name for s in storyline_store.live_storylines(conn) if s.id == sid), None
+    )
+    today = datetime.now(timezone.utc).date().isoformat()
+    done = storyline_store.retire_storyline(conn, sid, on_date=today)
+    if done:
+        conn.commit()
+    text = f"Retired: {html.escape(name or str(sid))}" if done else "Already retired."
+    telegram_edit_text(msg_id, text, [])
+
+
+def _storyline_decide(conn, pid: int, accept: bool, msg_id: int) -> None:
+    prop = storyline_store.get_proposal(conn, pid)
+    if prop is None:
+        telegram_edit_text(msg_id, "That proposal no longer exists.", [])
+        return
+    name = html.escape(prop["name"])
+    out = storyline_store.decide_proposal(
+        conn, pid, accept, max_live=common.STORYLINE_MAX_LIVE
+    )
+    if out.problem is None:
+        conn.commit()
+        verdict = "✅ Accepted" if accept else "❌ Rejected"
+        telegram_edit_text(msg_id, f"{verdict}: {name}", [])
+    elif out.problem == "bound":
+        # No keyboard argument: a refused proposal keeps its buttons for later.
+        telegram_edit_text(msg_id, _storyline_bound_text())
+    elif out.problem == "duplicate":
+        telegram_edit_text(
+            msg_id, f"A live storyline named <b>{name}</b> already exists."
+        )
+    elif out.problem == "unknown":
+        telegram_edit_text(msg_id, "That proposal no longer exists.", [])
+    else:
+        telegram_edit_text(msg_id, f"{out.problem.capitalize()}.", [])
+
+
+def _storyline_callback(data: str, msg_id: int | None) -> None:
+    """slr:{id} retires a storyline; slp:a|r:{id} decides a proposal."""
+    retire = re.fullmatch(r"slr:(\d+)", data)
+    decide = re.fullmatch(r"slp:([ar]):(\d+)", data)
+    if msg_id is None or not (retire or decide):
+        return
+    try:
+        with db.connect(connect_timeout=JOBS_DB_TIMEOUT_SECONDS) as conn:
+            if retire:
+                _storyline_retire(conn, int(retire.group(1)), msg_id)
+            else:
+                _storyline_decide(
+                    conn, int(decide.group(2)), decide.group(1) == "a", msg_id
+                )
+    except Exception as e:
+        _storyline_unavailable(e)
+
+
+def send_proposal(proposal: dict) -> int | None:
+    """Send one storyline proposal with Accept / Reject buttons; the message id."""
+    text = (
+        f"🧵 Proposed storyline: <b>{html.escape(proposal['name'])}</b>\n"
+        f"{html.escape(proposal['description'])}"
+    )
+    if proposal.get("pinned"):
+        text += " · 📌 pinned"
+    pid = proposal["id"]
+    rows = [
+        [
+            {"text": "Accept", "callback_data": f"slp:a:{pid}"},
+            {"text": "Reject", "callback_data": f"slp:r:{pid}"},
+        ]
+    ]
+    return telegram_send_buttons(text, rows)
+
+
 def _run_request(job: str) -> None:
     """Queue an on-demand run for the supervisor to claim on its next tick."""
     import db
@@ -4062,6 +4244,7 @@ BOT_COMMANDS = [
     ("status", "Show current overrides"),
     ("jobs", "Scheduler status: last run, exit code, next due"),
     ("evidence", "Thesis evidence log, last 30 days"),
+    ("storyline", "Storylines: list, add, retire"),
     ("capture", "Feed capture health: last pass, failing feeds"),
     ("label", "Event-census labelling: progress + one-time link"),
     ("run", "Run a job now (collect, submit, weekly, monitor)"),

@@ -99,6 +99,19 @@ def pending_proposals(conn, *, origin: str | None = None) -> list[dict]:
     return [dict(zip(keys, r)) for r in rows]
 
 
+def get_proposal(conn, proposal_id: int) -> dict | None:
+    """One proposal by id (decided or not), or None."""
+    row = conn.execute(
+        "SELECT id, name, description, pinned, origin, outcome"
+        " FROM storyline_proposals WHERE id = %s",
+        (proposal_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    keys = ("id", "name", "description", "pinned", "origin", "outcome")
+    return dict(zip(keys, row))
+
+
 def decide_proposal(conn, proposal_id: int, accept: bool, *, max_live: int) -> Outcome:
     """Accept or reject a proposal. On `bound` or `duplicate` it stays pending."""
     row = conn.execute(

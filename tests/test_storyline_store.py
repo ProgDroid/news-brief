@@ -586,3 +586,18 @@ def test_attached_since_counts_per_storyline(store):
     assert ss.attached_since(store, since=NOW - timedelta(days=30)) == {s1: 3, s2: 1}
     cutoff = datetime.now(timezone.utc) - timedelta(days=1)
     assert ss.attached_since(store, since=cutoff) == {s1: 2, s2: 1}
+
+
+def test_get_proposal_returns_the_row_and_none_for_unknown(store):
+    pid = ss.add_proposal(store, "Gizmo strike", "d1", origin="seed", pinned=True)
+    assert ss.get_proposal(store, pid) == {
+        "id": pid,
+        "name": "Gizmo strike",
+        "description": "d1",
+        "pinned": True,
+        "origin": "seed",
+        "outcome": None,
+    }
+    ss.decide_proposal(store, pid, False, max_live=5)
+    assert ss.get_proposal(store, pid)["outcome"] == "rejected"
+    assert ss.get_proposal(store, 987654) is None

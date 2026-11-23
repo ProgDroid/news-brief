@@ -253,6 +253,7 @@ KNOBS: dict[str, Knob] = {
     # weekly slice, and established claims render their first-seen date. Off
     # (the default) leaves the prompt byte for byte as it was.
     "BRIEF_DATED_MEMORY_ENABLED": Knob(bool, False),
+    "STORYLINE_MAX_LIVE": Knob(int, 60),
     # The thesis-evidence extraction call (Task 5). Unlike SIGNALS_MODEL the
     # default is a model id, not "follow MODEL": this extraction is meant to be
     # the cheap model (spec section 3.3).
