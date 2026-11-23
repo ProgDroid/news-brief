@@ -100,7 +100,9 @@ def _load_or_write_snapshot(
             "storylines": [_storyline_to_json(s) for s in live],
         }
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(snap), encoding="utf-8")
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(snap), encoding="utf-8")
+        tmp.replace(path)  # atomic: a crash never leaves a half-written snapshot
     return snap["items"], [_storyline_from_json(d) for d in snap["storylines"]]
 
 
@@ -116,9 +118,11 @@ def _read_run(path: Path) -> dict[int, dict]:
         return {}
     done = {}
     for line in path.read_text(encoding="utf-8").splitlines():
-        if line.strip():
+        try:
             rec = json.loads(line)
             done[rec["chunk"]] = rec
+        except (ValueError, KeyError, TypeError):
+            continue  # a line cut short by a crash: that chunk is redone
     return done
 
 
@@ -180,6 +184,8 @@ def _do_run(post, name: str, model: str, items, live, runs_dir: Path) -> None:
         decided, problems = out
         runs_dir.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as f:
+            if path.stat().st_size and not path.read_bytes().endswith(b"\n"):
+                f.write("\n")  # close a fragment left by a crash
             f.write(
                 json.dumps({"chunk": index, "decided": decided, "problems": problems})
                 + "\n"

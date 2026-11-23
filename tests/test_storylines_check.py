@@ -569,3 +569,35 @@ def test_default_post_posts_with_one_attempt(monkeypatch):
         "max_attempts": 1,
         "label": "AttachCheck",
     }
+
+
+@needs_db
+def test_resume_survives_a_truncated_last_line(world, capsys):
+    _run(Stub(_even_attach))
+    capsys.readouterr()
+    path = _snap(world) / "runs" / "H.jsonl"
+    lines = path.read_text().splitlines()
+    # a crash mid-append: chunk 2 is cut short, with no trailing newline
+    path.write_text("\n".join(lines[:2]) + "\n" + lines[2][:25])
+    stub = Stub(_even_attach)
+    assert _run(stub) == 0
+    assert stub.calls == [HAIKU]  # only the cut chunk is redone
+    # the fragment is closed onto its own line, not glued to the new record
+    assert path.read_text().splitlines()[2] == lines[2][:25]
+    assert check._read_run(path).keys() == {0, 1, 2}
+    assert "verdict: PASS" in capsys.readouterr().out
+
+
+@needs_db
+def test_snapshot_is_written_through_a_temp_file(world, monkeypatch):
+    def boom(self, target):
+        raise OSError("killed before the rename")
+
+    with monkeypatch.context() as m:
+        m.setattr(Path, "replace", boom)
+        with pytest.raises(OSError):
+            _run(Stub(_even_attach))
+    assert not (_snap(world) / "input.json").exists()
+    # a leftover temp file from the crash is ignored and overwritten
+    assert _run(Stub(_even_attach)) in (0, 1)
+    assert json.loads((_snap(world) / "input.json").read_text())["items"]
