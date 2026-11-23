@@ -102,11 +102,21 @@ def main(argv: list[str] | None = None, *, post=None) -> int:
             )
         # Commit BEFORE sending, so a tap on a button can find its row.
         conn.commit()
+    unsent = []
     for row in rows:
-        brief.send_proposal(row)
-    print(f"seed: proposed={len(rows)} dropped={len(problems)}")
+        try:
+            ok = brief.send_proposal(row) is not None
+        except Exception:
+            ok = False
+        if not ok:
+            unsent.append(row["id"])
+    sent = len(rows) - len(unsent)
+    print(f"seed: proposed={len(rows)} sent={sent} dropped={len(problems)}")
     for problem in problems:
         print(f"  {problem}")
+    if unsent:
+        print(f"  not sent (stored, still pending): ids {unsent}")
+        return 1
     return 0 if rows else 1
 
 

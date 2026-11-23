@@ -106,12 +106,19 @@ def validate_seed(
     """(proposals, problems). Never raises on a bad answer; a bad item is
     dropped with one problem string, which never quotes the item's text."""
     raw = None
-    for block in resp.get("content") or []:
-        if block.get("type") == "tool_use" and block.get("name") == SEED_TOOL:
-            raw = (block.get("input") or {}).get("storylines")
-            break
+    if isinstance(resp, dict):
+        for block in resp.get("content") or []:
+            if (
+                isinstance(block, dict)
+                and block.get("type") == "tool_use"
+                and block.get("name") == SEED_TOOL
+            ):
+                inp = block.get("input")
+                raw = inp.get("storylines") if isinstance(inp, dict) else None
+                break
     if not isinstance(raw, list):
-        return [], [f"no tool_use block (stop_reason={resp.get('stop_reason')})"]
+        stop = resp.get("stop_reason") if isinstance(resp, dict) else None
+        return [], [f"no tool_use block (stop_reason={stop})"]
 
     seen = {n.strip().lower() for n in live_names}
     out: list[Proposed] = []

@@ -88,6 +88,7 @@ def test_validate_drops_duplicates_overlong_and_live_names():
             _item("Long desc", "d" * 401),
             _item("", "no name"),
             _item("No desc", "  "),
+            _item("   ", "blank name"),
             _item("Gizmo strike", pinned=True),
         ]
     )
@@ -98,7 +99,7 @@ def test_validate_drops_duplicates_overlong_and_live_names():
         storylines.Proposed("Widget tariffs", "A developing situation.", False),
         storylines.Proposed("Gizmo strike", "A developing situation.", True),
     ]
-    assert len(problems) == 6
+    assert len(problems) == 7
 
 
 def test_validate_caps_at_max_count():
@@ -225,7 +226,7 @@ def test_main_inserts_and_sends_each_proposal(env, capsys):
     text = payload["messages"][0]["content"]
     assert "OTHERCO" in text and "TESTCO" in text and "Gizmo strike" in text
     out = capsys.readouterr().out
-    assert "seed: proposed=2 dropped=0" in out
+    assert "seed: proposed=2 sent=2 dropped=0" in out
     assert "Widget tariffs" not in out and "Gizmo strike" not in out
 
 
@@ -251,7 +252,7 @@ def test_main_refuses_while_seed_proposals_pending(env, capsys):
     state["pending"] = [_pending()]
     assert seed.main([], post=post) == 2
     assert state["posts"] == [] and state["added"] == []
-    assert "1" in capsys.readouterr().out
+    assert "refused, 1 seed proposals are still pending" in capsys.readouterr().out
 
 
 def test_main_ignores_pending_proposals_of_other_origins(env):
@@ -305,3 +306,49 @@ def test_main_no_valid_proposals_sends_nothing(env, capsys):
     assert state["sent"] == [] and state["added"] == []
     out = capsys.readouterr().out
     assert "proposed=0" in out and "no tool_use block" in out
+
+
+@pytest.mark.parametrize(
+    "resp",
+    [
+        {"stop_reason": "tool_use", "content": ["junk"]},
+        {
+            "stop_reason": "tool_use",
+            "content": [
+                {"type": "tool_use", "name": storylines.SEED_TOOL, "input": "junk"}
+            ],
+        },
+        "junk",
+    ],
+)
+def test_validate_malformed_response_never_raises(resp):
+    ok, problems = storylines.validate_seed(resp, max_count=5, live_names=[])
+    assert ok == []
+    assert len(problems) == 1 and problems[0].startswith("no tool_use block")
+
+
+def test_main_failed_send_is_visible(env, monkeypatch, capsys):
+    seed, conn, state, post = env
+    monkeypatch.setattr(brief, "send_proposal", lambda p: None if p["id"] == 101 else 1)
+    rc = seed.main([], post=post)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "proposed=2 sent=1 dropped=0" in out
+    assert "101" in out and "Widget tariffs" not in out
+    assert conn.events.count("commit") == 1
+    assert len(state["added"]) == 2
+
+
+def test_main_raising_send_is_visible(env, monkeypatch, capsys):
+    seed, conn, state, post = env
+
+    def send(p):
+        raise RuntimeError("telegram down")
+
+    monkeypatch.setattr(brief, "send_proposal", send)
+    rc = seed.main([], post=post)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "proposed=2 sent=0 dropped=0" in out
+    assert "101" in out and "102" in out
+    assert conn.events.count("commit") == 1
