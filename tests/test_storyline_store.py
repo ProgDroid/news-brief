@@ -601,3 +601,17 @@ def test_get_proposal_returns_the_row_and_none_for_unknown(store):
     ss.decide_proposal(store, pid, False, max_live=5)
     assert ss.get_proposal(store, pid)["outcome"] == "rejected"
     assert ss.get_proposal(store, 987654) is None
+
+
+def test_items_between_is_half_open_oldest_first_with_the_keys(store):
+    start = NOW - timedelta(days=7)
+    a = _item(store, 1, age_hours=24 * 7)  # exactly at start: included
+    b = _item(store, 2, age_hours=24 * 3)
+    _item(store, 3, age_hours=24 * 7 + 1)  # before start
+    _item(store, 4, age_hours=0)  # exactly at end: excluded
+    c = _item(store, 5, age_hours=24 * 5)
+    got = ss.items_between(store, start=start, end=NOW)
+    assert [r["id"] for r in got] == [a, c, b]
+    assert set(got[0]) == {"id", "title", "body"}
+    assert got[0]["title"] == "Gizmo strike headline 1"
+    assert ss.items_between(store, start=NOW, end=NOW) == []

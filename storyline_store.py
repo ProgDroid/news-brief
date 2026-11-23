@@ -240,3 +240,13 @@ def attached_since(conn, *, since: datetime) -> dict[int, int]:
         (since,),
     ).fetchall()
     return {sid: n for sid, n in rows}
+
+
+def items_between(conn, *, start: datetime, end: datetime) -> list[dict]:
+    """Items created in [start, end), oldest first: the offline check's input."""
+    rows = conn.execute(
+        "SELECT id, title, body FROM items"
+        " WHERE created_at >= %s AND created_at < %s ORDER BY created_at, id",
+        (start, end),
+    ).fetchall()
+    return [{"id": r[0], "title": r[1], "body": r[2]} for r in rows]

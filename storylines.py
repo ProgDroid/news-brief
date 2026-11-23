@@ -333,3 +333,67 @@ def classify_error(exc: BaseException) -> str:
             return "config"
         return "request"
     return "unknown"
+
+
+# ---- offline attach check (spec 8.2): pure metrics over runs ----
+# A run is {item id: set of storyline ids}, holding only the items it decided.
+
+CHECK_ILL_POSED_BELOW = 0.65
+CHECK_AGREEMENT_SLACK = 0.10
+CHECK_AGREEMENT_FLOOR = 0.55
+CHECK_RATE_SLACK = 0.15
+
+
+def jaccard_mean(a: dict[int, set[int]], b: dict[int, set[int]]) -> tuple[float, int]:
+    """Mean Jaccard over items in both runs where at least one set is non-empty,
+    and that subset's size. Empty subset: (nan, 0)."""
+    scores = []
+    for item_id in a.keys() & b.keys():
+        x, y = a[item_id], b[item_id]
+        if x or y:
+            scores.append(len(x & y) / len(x | y))
+    if not scores:
+        return float("nan"), 0
+    return sum(scores) / len(scores), len(scores)
+
+
+def attach_rate(run: dict[int, set[int]]) -> float:
+    """The share of decided items with a non-empty set (nan when none)."""
+    if not run:
+        return float("nan")
+    return sum(1 for s in run.values() if s) / len(run)
+
+
+def differ_kinds(h: dict[int, set[int]], s: dict[int, set[int]]) -> dict[str, int]:
+    """Over items in both runs whose sets differ: h a proper subset of s
+    (`less`), a proper superset (`more`), or anything else (`elsewhere`)."""
+    kinds = {"less": 0, "more": 0, "elsewhere": 0}
+    for item_id in h.keys() & s.keys():
+        x, y = h[item_id], s[item_id]
+        if x == y:
+            continue
+        kinds["less" if x < y else "more" if x > y else "elsewhere"] += 1
+    return kinds
+
+
+def check_verdict(
+    j_ss: float, j_hs: float, rate_h: float, rate_s1: float
+) -> tuple[str, list[str]]:
+    """ILL-POSED when Sonnet disagrees with itself (Haiku is not judged); PASS
+    only when both bars hold; otherwise FAIL. The list names each bar."""
+    if not j_ss >= CHECK_ILL_POSED_BELOW:  # also true for nan
+        return "ILL-POSED", [
+            f"J(S1,S2)={j_ss:.2f} is below {CHECK_ILL_POSED_BELOW:.2f}: "
+            "the storylines are not well posed, Haiku is not judged"
+        ]
+    floor = max(j_ss - CHECK_AGREEMENT_SLACK, CHECK_AGREEMENT_FLOOR)
+    rate_floor = rate_s1 - CHECK_RATE_SLACK
+    ok_j = j_hs >= floor
+    ok_r = rate_h >= rate_floor
+    reasons = [
+        f"J(S1,S2)={j_ss:.2f} is at least {CHECK_ILL_POSED_BELOW:.2f}",
+        f"J(H,S1)={j_hs:.2f} {'meets' if ok_j else 'misses'} the floor {floor:.2f}",
+        f"H attach rate {rate_h:.2f} {'meets' if ok_r else 'misses'} "
+        f"the floor {rate_floor:.2f}",
+    ]
+    return ("PASS" if ok_j and ok_r else "FAIL"), reasons
