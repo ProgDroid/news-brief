@@ -177,7 +177,7 @@ def test_two_chunks_for_61_items(monkeypatch):
     out, conn = _run(post)
     assert sizes == [60, 1]
     assert out["calls"] == 2 and out["items"] == 61 and out["attached"] == 61
-    assert conn.commits == 2
+    assert conn.commits == 5  # read, then spend + records per chunk
     assert len(rec.decisions) == 61
     assert out["status"] == "ok" and out["error"] is None
 
@@ -198,7 +198,7 @@ def test_transient_error_on_second_chunk_keeps_first_chunk_and_writes_nothing_af
     assert out["status"] == "transient" and "slow" in out["error"]
     assert len(rec.decisions) == 60 and rec.failures == [] and rec.deferrals == []
     assert out["attached"] == 60 and out["deferred"] == 1 and out["items"] == 61
-    assert conn.commits == 1  # chunk 1 committed; nothing written for chunk 2
+    assert conn.commits == 3  # read + chunk 1 (spend, records); nothing for chunk 2
 
 
 @pytest.mark.parametrize(
@@ -245,7 +245,9 @@ def test_config_error_stops_the_pass_and_writes_nothing(monkeypatch, code):
     out, conn = _run(post)
     assert out["status"] == "config" and len(posts) == 1
     assert rec.decisions == rec.failures == rec.deferrals == rec.spend == []
-    assert out["deferred"] == 61 and out["items"] == 61 and conn.commits == 0
+    assert (
+        out["deferred"] == 61 and out["items"] == 61 and conn.commits == 1
+    )  # the read only
 
 
 def _alert_env(monkeypatch):
@@ -492,3 +494,68 @@ def test_end_to_end_attach_pass_on_a_real_schema():
         assert again["status"] == "nothing_to_do"
     finally:
         conn.close()
+
+
+# -- fix round 1 --------------------------------------------------------------
+
+
+def _seed_config_alert(state):
+    state["attach_alert"] = "config:HTTPError: HTTP 401"
+
+
+@pytest.mark.parametrize("scenario", ["transient", "nothing_to_do", "no_storylines"])
+def test_a_pass_that_made_no_call_leaves_a_stored_alert_alone(monkeypatch, scenario):
+    rec = Rec(
+        monkeypatch,
+        stories=0 if scenario == "no_storylines" else 2,
+        items=[] if scenario == "nothing_to_do" else _items(3),
+    )
+    state, sent = _alert_env(monkeypatch)
+    _seed_config_alert(state)
+
+    def post(payload):
+        raise requests.Timeout("slow")
+
+    monkeypatch.setattr(brief, "_attach_post", post)
+    brief.mode_attach()
+    assert state.get("attach_alert") == "config:HTTPError: HTTP 401"
+    assert sent == [] and rec.decisions == []
+
+
+def test_an_ok_pass_clears_a_stored_alert(monkeypatch):
+    Rec(monkeypatch)
+    state, sent = _alert_env(monkeypatch)
+    _seed_config_alert(state)
+    monkeypatch.setattr(brief, "_attach_post", lambda p: _answer_all(p))
+    brief.mode_attach()
+    assert "attach_alert" not in state and sent == []
+
+
+def test_spend_is_committed_before_the_record_writes_and_the_read_before_the_post(
+    monkeypatch,
+):
+    events = []
+
+    class Conn(FakeConn):
+        def commit(self):
+            events.append("commit")
+
+    rec = Rec(monkeypatch, items=_items(2))
+    monkeypatch.setattr(
+        comprehend, "record_spend", lambda *a, **k: events.append("spend")
+    )
+
+    def boom(conn, i, sids, *, model):
+        events.append("decision")
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(ss, "record_decision", boom)
+
+    def post(payload):
+        events.append("post")
+        return _answer_all(payload)
+
+    with pytest.raises(RuntimeError, match="db down"):
+        _run(post, conn=Conn())
+    assert events == ["commit", "post", "spend", "commit", "decision"]
+    assert rec.failures == [] and rec.deferrals == []

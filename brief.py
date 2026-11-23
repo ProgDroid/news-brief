@@ -4871,6 +4871,9 @@ def attach_pass(conn, *, now: datetime, model: str, post) -> dict:
     if not items:
         return done("nothing_to_do")
     counts["items"] = len(items)
+    # End the read transaction before the first HTTP call: a slow post must not
+    # hold the connection idle in transaction.
+    conn.commit()
 
     def defer(chunk, why):
         for it in chunk:
@@ -4896,6 +4899,9 @@ def attach_pass(conn, *, now: datetime, model: str, post) -> dict:
             conn.commit()
             continue
         comprehend.record_spend(conn, "attach", model, resp.get("usage") or {})
+        # The bill is committed on its own: a DB error in the record_* writes
+        # below must not roll back a call that was paid for.
+        conn.commit()
         res = storylines.validate_attach(resp, s_labels, a_labels)
         if res.whole is not None:
             log.warning(f"Attach: chunk deferred: {res.whole}")
@@ -4933,13 +4939,17 @@ def mode_attach() -> None:
         f" attached={out['attached']} none={out['none']} failed={out['failed']}"
         f" deferred={out['deferred']} stray={out['stray']}"
     )
-    verdict = None
+    # Only a fault rings, and only a returned response (status ok) clears it:
+    # a pass that made no call proves nothing about the key or the model, so
+    # clearing there would make a revoked key alert, clear and alert again.
     if out["status"] in ("config", "unpriced"):
         verdict = (
             f"{out['status']}:{out['error']}",
             f"Attach stopped ({out['status']}): {out['error']}",
         )
-    _alert_once(ATTACH_ALERT_KEY, verdict, load_state(), "🧵")
+        _alert_once(ATTACH_ALERT_KEY, verdict, load_state(), "🧵")
+    elif out["status"] == "ok":
+        _alert_once(ATTACH_ALERT_KEY, None, load_state(), "🧵")
 
 
 def mode_capture():
