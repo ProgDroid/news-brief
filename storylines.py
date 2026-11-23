@@ -26,8 +26,10 @@ _SEED_SYSTEM = (
     "company saga; it is not a one-day event and not a whole asset class. "
     "Draft about 20 storylines that together cover the topics, the pinned "
     "subjects, the investment theses and the watched triggers below. Give each "
-    "a short specific name and a description of what is unfolding and what "
-    "would move it. Set pinned to true for any storyline that covers a pinned "
+    f"a short specific name of at most {NAME_MAX} characters and a description, "
+    f"of at most {DESCRIPTION_MAX} characters, of what is unfolding and what "
+    "would move it; anything longer is discarded. Set pinned to true for any "
+    "storyline that covers a pinned "
     "subject. Never reuse a name from the existing storylines list. Call the "
     "tool once."
 )
@@ -55,30 +57,34 @@ def build_seed_request(
     max_count: int,
 ) -> dict:
     """One forced-tool Messages payload that asks for the seed storylines."""
+    # strict (news-brief-bcr): unconstrained, the model returned `storylines`
+    # as a JSON STRING holding {"storylines": [...]} on 2026-11-23, and a correct
+    # answer of 22 items was dropped. Grammar-constrained sampling makes that
+    # shape ungenerable. The strict subset 400s on maxItems/maxLength, so the
+    # count lives in the prompt and every limit in validate_seed.
     tool = {
         "name": SEED_TOOL,
         "description": "Propose the initial storylines.",
+        "strict": True,
         "input_schema": {
             "type": "object",
             "properties": {
                 "storylines": {
                     "type": "array",
-                    "maxItems": max_count,
                     "items": {
                         "type": "object",
                         "properties": {
-                            "name": {"type": "string", "maxLength": NAME_MAX},
-                            "description": {
-                                "type": "string",
-                                "maxLength": DESCRIPTION_MAX,
-                            },
+                            "name": {"type": "string"},
+                            "description": {"type": "string"},
                             "pinned": {"type": "boolean"},
                         },
                         "required": ["name", "description", "pinned"],
+                        "additionalProperties": False,
                     },
                 }
             },
             "required": ["storylines"],
+            "additionalProperties": False,
         },
     }
     user = (
@@ -112,6 +118,7 @@ def validate_seed(
     """(proposals, problems). Never raises on a bad answer; a bad item is
     dropped with one problem string, which never quotes the item's text."""
     raw = None
+    shape = None
     if isinstance(resp, dict):
         for block in resp.get("content") or []:
             if (
@@ -120,9 +127,18 @@ def validate_seed(
                 and block.get("name") == SEED_TOOL
             ):
                 inp = block.get("input")
-                raw = inp.get("storylines") if isinstance(inp, dict) else None
+                if not isinstance(inp, dict):
+                    shape = f"input type={type(inp).__name__}"
+                else:
+                    raw = inp.get("storylines")
+                    shape = f"storylines type={type(raw).__name__}"
                 break
     if not isinstance(raw, list):
+        if shape is not None:
+            # The block IS there. Saying "no tool_use block" here sent the
+            # 2026-11-23 diagnosis after a missing block (news-brief-bcr).
+            # The type name only: never the content.
+            return [], [f"{SEED_TOOL} input has no storylines list ({shape})"]
         stop = resp.get("stop_reason") if isinstance(resp, dict) else None
         return [], [f"no tool_use block (stop_reason={stop})"]
 
@@ -196,9 +212,13 @@ def build_attach_request(
     """(payload, s_labels, a_labels). The model sees S1.. and A1.. only."""
     s_labels = {f"S{i}": s.id for i, s in enumerate(storylines, 1)}
     a_labels = {f"A{i}": a["id"] for i, a in enumerate(articles, 1)}
+    # strict for the reason the seed tool is (news-brief-bcr): the same nested
+    # array shape. The per-article cap is in the system prompt and enforced in
+    # validate_attach, since the strict subset 400s on maxItems.
     tool = {
         "name": ATTACH_TOOL,
         "description": "Record which storylines each article materially develops.",
+        "strict": True,
         "input_schema": {
             "type": "object",
             "properties": {
@@ -210,15 +230,16 @@ def build_attach_request(
                             "article": {"type": "string"},
                             "storylines": {
                                 "type": "array",
-                                "maxItems": ATTACH_MAX_PER_ARTICLE,
                                 "items": {"type": "string", "enum": list(s_labels)},
                             },
                         },
                         "required": ["article", "storylines"],
+                        "additionalProperties": False,
                     },
                 }
             },
             "required": ["answers"],
+            "additionalProperties": False,
         },
     }
     s_block = "\n".join(
@@ -264,6 +285,7 @@ def validate_attach(
     for that article only, never a fall-through."""
     stop = resp.get("stop_reason") if isinstance(resp, dict) else None
     answers = None
+    shape = None
     if isinstance(resp, dict) and stop == "tool_use":
         content = resp.get("content")
         for block in content if isinstance(content, list) else []:
@@ -273,9 +295,16 @@ def validate_attach(
                 and block.get("name") == ATTACH_TOOL
             ):
                 inp = block.get("input")
-                answers = inp.get("answers") if isinstance(inp, dict) else None
+                if not isinstance(inp, dict):
+                    shape = f"input type={type(inp).__name__}"
+                else:
+                    answers = inp.get("answers")
+                    shape = f"answers type={type(answers).__name__}"
                 break
     if not isinstance(answers, list):
+        if shape is not None:
+            why = f"{ATTACH_TOOL} input has no answers list ({shape})"
+            return AttachResult({}, {}, [], why)
         return AttachResult({}, {}, [], f"unusable response (stop_reason={stop})")
 
     by_article: dict[str, list] = {}

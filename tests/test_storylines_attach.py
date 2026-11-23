@@ -5,6 +5,7 @@ import requests
 
 import storyline_store
 import storylines
+import strict_schema
 
 S = [
     storyline_store.Storyline(
@@ -76,10 +77,42 @@ def test_request_schema_limits_three_and_enumerates_storyline_labels():
     schema = payload["tools"][0]["input_schema"]
     item = schema["properties"]["answers"]["items"]
     lst = item["properties"]["storylines"]
-    assert lst["maxItems"] == storylines.ATTACH_MAX_PER_ARTICLE == 3
     assert lst["items"]["enum"] == ["S1", "S2", "S3"]
     assert set(item["required"]) == {"article", "storylines"}
     assert schema["required"] == ["answers"]
+    # The cap of three left the schema (strict 400s on maxItems); it is stated
+    # to the model and enforced by validate_attach
+    # (test_more_than_three_charges_that_article).
+    assert storylines.ATTACH_MAX_PER_ARTICLE == 3
+    assert "at most 3 storylines per article" in payload["system"]
+
+
+def test_attach_tool_is_strict_and_inside_the_strict_subset():
+    # news-brief-bcr: the seed call's unconstrained input arrived stringified
+    # and double-wrapped; attach has the same nested-array shape.
+    tool = _build()[0]["tools"][0]
+    assert tool["strict"] is True
+    assert strict_schema.unsupported(tool["input_schema"]) == []
+
+
+@pytest.mark.parametrize(
+    "inp, shape",
+    [
+        ({"answers": '[{"article": "A1", "storylines": []}]'}, "answers type=str"),
+        ({"answers": {"answers": []}}, "answers type=dict"),
+        ({}, "answers type=NoneType"),
+        ([], "input type=list"),
+    ],
+)
+def test_tool_block_with_wrong_shape_names_the_shape(inp, shape):
+    s, a = _labels()
+    resp = {
+        "stop_reason": "tool_use",
+        "content": [{"type": "tool_use", "name": storylines.ATTACH_TOOL, "input": inp}],
+    }
+    r = storylines.validate_attach(resp, s, a)
+    assert r.whole == f"{storylines.ATTACH_TOOL} input has no answers list ({shape})"
+    assert r.decided == {} and r.problems == {} and r.stray == []
 
 
 def test_valid_answer_maps_labels_back_to_ids():

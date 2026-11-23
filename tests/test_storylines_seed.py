@@ -2,6 +2,7 @@
 
 import contextlib
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ import common
 import comprehend
 import storyline_store
 import storylines
+import strict_schema
 import watch
 
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "storylines_seed.py"
@@ -57,11 +59,50 @@ def test_seed_request_forces_tool_and_disables_thinking():
     tool = req["tools"][0]
     assert tool["name"] == storylines.SEED_TOOL
     arr = tool["input_schema"]["properties"]["storylines"]
-    assert arr["maxItems"] == 20
+    assert arr["type"] == "array"
     props = arr["items"]["properties"]
-    assert props["name"]["maxLength"] == 80
-    assert props["description"]["maxLength"] == 400
+    assert props["name"]["type"] == "string"
+    assert props["description"]["type"] == "string"
     assert props["pinned"]["type"] == "boolean"
+
+
+def test_seed_tool_is_strict_and_inside_the_strict_subset():
+    # news-brief-bcr: unconstrained, the model returned `storylines` as a JSON
+    # STRING of {"storylines": [...]}, and a correct answer of 22 items was
+    # dropped. strict makes that shape ungenerable; the subset check keeps the
+    # schema from drawing a 400 instead.
+    tool = _request()["tools"][0]
+    assert tool["strict"] is True
+    assert strict_schema.unsupported(tool["input_schema"]) == []
+    # The checker can fail: the pre-bcr schema shape is refused.
+    assert strict_schema.unsupported(
+        {"type": "object", "properties": {"n": {"type": "string", "maxLength": 80}}}
+    ) == ["$: additionalProperties is not false", "$.properties.n: maxLength"]
+
+
+def test_seed_limits_the_schema_no_longer_carries_are_still_enforced():
+    # maxItems/maxLength left the schema (strict 400s on them). The prompt now
+    # states all three limits -- validate_seed DROPS an over-long item rather
+    # than cutting it, so a model that never hears the limit loses storylines
+    # (descriptions ran to 365 of 400 characters on 2026-11-23) -- and
+    # validate_seed still enforces them.
+    req = _request()
+    assert "Propose at most 20 storylines" in req["messages"][0]["content"]
+    assert f"at most {storylines.NAME_MAX} characters" in req["system"]
+    assert f"at most {storylines.DESCRIPTION_MAX} characters" in req["system"]
+    long_name = _item("n" * (storylines.NAME_MAX + 1))
+    long_desc = _item("Fine name", desc="d" * (storylines.DESCRIPTION_MAX + 1))
+    ok, problems = storylines.validate_seed(
+        _resp([long_name, long_desc, _item("A"), _item("B")]),
+        max_count=1,
+        live_names=[],
+    )
+    assert [p.name for p in ok] == ["A"]
+    assert problems == [
+        "item 1: empty or over-long name",
+        "item 2: empty or over-long description",
+        "item 4: beyond max_count=1",
+    ]
 
 
 def test_seed_request_carries_topics_pins_theses_and_watch_lines():
@@ -250,8 +291,7 @@ def test_main_caps_max_count_by_headroom(env):
     state["live"] = 50
     assert seed.main([], post=post) == 0
     payload = state["posts"][0][0]
-    arr = payload["tools"][0]["input_schema"]["properties"]["storylines"]
-    assert arr["maxItems"] == 10
+    assert "Propose at most 10 storylines" in payload["messages"][0]["content"]
 
 
 def test_main_cuts_long_theses(env, monkeypatch):
@@ -327,12 +367,6 @@ def test_main_no_valid_proposals_sends_nothing(env, capsys):
     "resp",
     [
         {"stop_reason": "tool_use", "content": ["junk"]},
-        {
-            "stop_reason": "tool_use",
-            "content": [
-                {"type": "tool_use", "name": storylines.SEED_TOOL, "input": "junk"}
-            ],
-        },
         "junk",
     ],
 )
@@ -340,6 +374,37 @@ def test_validate_malformed_response_never_raises(resp):
     ok, problems = storylines.validate_seed(resp, max_count=5, live_names=[])
     assert ok == []
     assert len(problems) == 1 and problems[0].startswith("no tool_use block")
+
+
+@pytest.mark.parametrize(
+    "inp, shape",
+    [
+        # The response that dropped 22 good items on 2026-11-23 (bcr).
+        (
+            {"storylines": json.dumps({"storylines": [_item("Secret saga")]})},
+            "storylines type=str",
+        ),
+        (
+            {"storylines": {"storylines": [_item("Secret saga")]}},
+            "storylines type=dict",
+        ),
+        ({}, "storylines type=NoneType"),
+        ("junk", "input type=str"),
+    ],
+)
+def test_validate_tool_block_with_wrong_shape_names_the_shape(inp, shape):
+    # A tool block that IS there must not read as "no tool_use block": that
+    # message sent the 2026-11-23 diagnosis looking for a missing block.
+    resp = {
+        "stop_reason": "tool_use",
+        "content": [{"type": "tool_use", "name": storylines.SEED_TOOL, "input": inp}],
+    }
+    ok, problems = storylines.validate_seed(resp, max_count=5, live_names=[])
+    assert ok == []
+    assert problems == [
+        f"{storylines.SEED_TOOL} input has no storylines list ({shape})"
+    ]
+    assert "Secret saga" not in problems[0]
 
 
 def test_main_failed_send_is_visible(env, monkeypatch, capsys):
