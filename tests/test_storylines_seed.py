@@ -8,6 +8,7 @@ import pytest
 
 import brief
 import common
+import comprehend
 import storyline_store
 import storylines
 import watch
@@ -160,7 +161,21 @@ def _pending(origin="seed"):
 def env(monkeypatch):
     seed = _load_script()
     conn = FakeConn()
-    state = {"pending": [], "live": 0, "added": [], "sent": [], "posts": []}
+    state = {
+        "pending": [],
+        "live": 0,
+        "added": [],
+        "sent": [],
+        "posts": [],
+        "spend": [],
+    }
+    monkeypatch.setattr(
+        comprehend,
+        "record_spend",
+        lambda c, stage, model, usage, **kw: state["spend"].append(
+            (stage, model, usage)
+        ),
+    )
 
     @contextlib.contextmanager
     def fake_connect():
@@ -352,3 +367,58 @@ def test_main_raising_send_is_visible(env, monkeypatch, capsys):
     assert "proposed=2 sent=0 dropped=0" in out
     assert "101" in out and "102" in out
     assert conn.events.count("commit") == 1
+
+
+def test_main_unpriced_model_exits_two_before_any_call(env, monkeypatch, capsys):
+    seed, conn, state, post = env
+    monkeypatch.setattr(common, "STORYLINE_UPDATE_MODEL", "no-such-model-x")
+    assert seed.main([], post=post) == 2
+    assert state["posts"] == [] and state["added"] == [] and state["spend"] == []
+    assert "no-such-model-x has no price" in capsys.readouterr().out
+
+
+def test_main_records_one_seed_spend_row(env):
+    seed, conn, state, post = env
+
+    def usage_post(payload, **kw):
+        resp = post(payload, **kw)
+        resp["usage"] = {"input_tokens": 100, "output_tokens": 10}
+        return resp
+
+    assert seed.main([], post=usage_post) == 0
+    assert state["spend"] == [
+        (
+            "seed",
+            common.STORYLINE_UPDATE_MODEL,
+            {"input_tokens": 100, "output_tokens": 10},
+        )
+    ]
+
+
+def test_main_no_spend_when_the_call_raises(env):
+    seed, conn, state, post = env
+
+    def boom(payload, **kw):
+        raise RuntimeError("down")
+
+    with pytest.raises(RuntimeError):
+        seed.main([], post=boom)
+    assert state["spend"] == []
+
+
+def test_main_ignored_portfolio_theses_print_a_count_only(env, monkeypatch, capsys):
+    seed, conn, state, post = env
+    monkeypatch.setattr(brief, "load_portfolio_theses", lambda: ({}, "file missing"))
+    assert seed.main([], post=post) == 0
+    out = capsys.readouterr().out
+    assert (
+        "seed: portfolio theses ignored (file missing); drafting from 1 local theses"
+        in out
+    )
+    assert "TESTCO" not in out and "Widgets demand" not in out
+
+
+def test_main_no_theses_line_when_portfolio_theses_load(env, capsys):
+    seed, conn, state, post = env
+    seed.main([], post=post)
+    assert "portfolio theses ignored" not in capsys.readouterr().out

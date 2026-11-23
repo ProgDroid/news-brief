@@ -472,14 +472,56 @@ def test_main_exhausted_transient_leaves_the_chunk_unrecorded(
             return requests.Timeout("slow")
         return _even_attach(model, run_no, n)
 
-    _run(Stub(rule))
+    assert _run(Stub(rule)) == 2
     out = capsys.readouterr().out
     assert sleeps == [30, 30]  # three attempts, a pause between each
     assert "chunk 0 of S1 incomplete" in out
     lines = (_snap(world) / "runs" / "S1.jsonl").read_text().splitlines()
     assert [json.loads(x)["chunk"] for x in lines] == [1, 2]
-    # the unrecorded chunk's two items count as excluded for S1
-    assert "excluded: S1=2 " in out
+    assert "INCOMPLETE: 1 chunks pending (S1=1, S2=0, H=0); rerun to finish" in out
+    assert "verdict" not in out and "excluded:" not in out
+
+
+@needs_db
+def test_main_incomplete_prints_no_verdict_and_a_rerun_finishes(
+    world, monkeypatch, capsys
+):
+    monkeypatch.setattr(check, "_sleep", lambda s: None)
+    state = {"fail": True}
+
+    def rule(model, run_no, n):
+        if state["fail"] and model == SONNET and run_no >= 1 and n == 3:
+            return requests.Timeout("slow")  # S2's second chunk
+        return _even_attach(model, run_no, n)
+
+    assert _run(Stub(rule)) == 2
+    out = capsys.readouterr().out
+    assert "INCOMPLETE: 1 chunks pending (S1=0, S2=1, H=0); rerun to finish" in out
+    for word in ("PASS", "FAIL", "ILL-POSED", "sample:", "J(S1"):
+        assert word not in out
+    state["fail"] = False
+    stub2 = Stub(_even_attach)
+    assert _run(stub2) == 0
+    out = capsys.readouterr().out
+    assert stub2.calls == [SONNET]  # only the missing chunk
+    assert "verdict: PASS" in out and "INCOMPLETE" not in out
+
+
+@needs_db
+def test_main_config_error_stops_the_check_and_writes_nothing(
+    world, monkeypatch, capsys
+):
+    resp = requests.Response()
+    resp.status_code = 401
+    err = requests.HTTPError("401 Unauthorized " + "x" * 300, response=resp)
+    stub = Stub(lambda model, run_no, n: err)
+    assert _run(stub) == 2
+    out = capsys.readouterr().out
+    assert len(stub.calls) == 1  # no further calls
+    assert "HTTPError: 401 Unauthorized" in out
+    assert "x" * 201 not in out  # truncated to 200 chars
+    assert not (_snap(world) / "runs" / "S1.jsonl").exists()
+    assert "verdict" not in out
 
 
 @needs_db

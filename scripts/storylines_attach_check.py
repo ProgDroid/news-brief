@@ -13,7 +13,9 @@ snapshot, written once and reused so every run scores the same inputs) and
 runs/<run>.jsonl (one line per finished chunk; a rerun resumes after it). The
 export holds real headlines: it stays in the data folder, never in git.
 
-Exit codes: 0 PASS, 1 FAIL or ILL-POSED, 2 usage or snapshot error.
+Exit codes: 0 PASS, 1 FAIL or ILL-POSED, 2 usage or snapshot error, a
+configuration error (401/403/404) that stopped the check, or chunks still
+pending after the runs (rerun to finish; no verdict is printed).
 """
 
 from __future__ import annotations
@@ -44,6 +46,10 @@ SAMPLE_SEED = 0
 RUNS = ("S1", "S2", "H")
 
 _sleep = time.sleep  # replaced in tests
+
+
+class ConfigStop(Exception):
+    """A configuration error (bad key, unknown model): stop the whole check."""
 
 
 def _default_post(payload: dict) -> dict:
@@ -156,6 +162,8 @@ def _attach_chunk(
     except Exception as exc:
         if storylines.classify_error(exc) == "transient":
             return None
+        if storylines.classify_error(exc) == "config":
+            raise ConfigStop(f"{type(exc).__name__}: {exc}"[:200]) from exc
         return {}, {k: f"{type(exc).__name__}: {exc}"[:200] for k in everything}
     _record_spend(model, resp)
     result = storylines.validate_attach(resp, s_labels, a_labels)
@@ -191,6 +199,20 @@ def _do_run(post, name: str, model: str, items, live, runs_dir: Path) -> None:
                 + "\n"
             )
         print(f"{name}: chunk {index + 1}/{len(chunks)} done")
+
+
+def _pending_chunks(items, runs_dir: Path) -> dict[str, int]:
+    """run name -> chunks with no line in its jsonl (only runs with some)."""
+    size = storylines.ATTACH_BATCH
+    n_chunks = len(range(0, len(items), size))
+    pending = {}
+    for name in RUNS:
+        missing = n_chunks - len(
+            [i for i in _read_run(runs_dir / f"{name}.jsonl") if 0 <= i < n_chunks]
+        )
+        if missing:
+            pending[name] = missing
+    return pending
 
 
 def _decided(path: Path) -> dict[int, set[int]]:
@@ -280,7 +302,21 @@ def main(argv: list[str] | None = None, *, post=None) -> int:
         ("S2", update_model),
         ("H", attach_model),
     ):
-        _do_run(post, name, model, items, live, root / "runs")
+        try:
+            _do_run(post, name, model, items, live, root / "runs")
+        except ConfigStop as stop:
+            print(
+                f"config error, check stopped (nothing written for the chunk): {stop}"
+            )
+            return 2
+    pending = _pending_chunks(items, root / "runs")
+    if pending:
+        detail = ", ".join(f"{n}={pending.get(n, 0)}" for n in RUNS)
+        print(
+            f"INCOMPLETE: {sum(pending.values())} chunks pending ({detail}); "
+            "rerun to finish"
+        )
+        return 2
     return _score(items, live, root / "runs", args.sample)
 
 

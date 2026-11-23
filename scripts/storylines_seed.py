@@ -24,6 +24,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import brief  # noqa: E402  (path shim above must run first)
+import comprehend  # noqa: E402
 import common  # noqa: E402
 import db  # noqa: E402
 import storyline_store  # noqa: E402
@@ -34,7 +35,15 @@ THESIS_CHARS = 300
 
 
 def _gather_theses() -> dict[str, str]:
-    merged = {**brief.load_local_theses(), **brief.load_portfolio_theses()[0]}
+    local = brief.load_local_theses()
+    pushed, problem = brief.load_portfolio_theses()
+    if problem:
+        # a count only: never a key or thesis text
+        print(
+            f"seed: portfolio theses ignored ({problem}); "
+            f"drafting from {len(local)} local theses"
+        )
+    merged = {**local, **pushed}
     return {str(k): str(v)[:THESIS_CHARS] for k, v in merged.items()}
 
 
@@ -57,6 +66,12 @@ def main(argv: list[str] | None = None, *, post=None) -> int:
         def post(payload, **kw):
             return brief._post_messages(payload, **kw)
 
+    model = common.STORYLINE_UPDATE_MODEL
+    try:
+        comprehend.price_of(model)
+    except comprehend.UnpricedModel:
+        print(f"seed: model {model} has no price: add it to PRICES_PER_MTOK first")
+        return 2
     with db.connect() as conn:
         pending = storyline_store.pending_proposals(conn, origin="seed")
         if pending and not args.again:
@@ -80,10 +95,11 @@ def main(argv: list[str] | None = None, *, post=None) -> int:
             _gather_theses(),
             _gather_watch_lines(),
             live_names,
-            model=common.STORYLINE_UPDATE_MODEL,
+            model=model,
             max_count=max_count,
         )
         resp = post(payload, timeout=180, max_attempts=1, label="Seed")
+        comprehend.record_spend(conn, "seed", model, resp.get("usage") or {})
         proposed, problems = storylines.validate_seed(
             resp, max_count=max_count, live_names=live_names
         )
