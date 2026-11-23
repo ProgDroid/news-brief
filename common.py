@@ -255,6 +255,9 @@ KNOBS: dict[str, Knob] = {
     "BRIEF_DATED_MEMORY_ENABLED": Knob(bool, False),
     "STORYLINE_MAX_LIVE": Knob(int, 60),
     "STORYLINE_UPDATE_MODEL": Knob(str, "claude-sonnet-5"),
+    # The attach job (plan 2a, task 6): off until storylines are seeded.
+    "STORYLINES_ENABLED": Knob(bool, False),
+    "STORYLINE_ATTACH_MODEL": Knob(str, "claude-haiku-5-5"),
     # The thesis-evidence extraction call (Task 5). Unlike SIGNALS_MODEL the
     # default is a model id, not "follow MODEL": this extraction is meant to be
     # the cheap model (spec section 3.3).

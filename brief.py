@@ -4811,6 +4811,137 @@ def mode_watch(*, as_of: datetime | None = None, post=None, fetch=None) -> None:
         raise RuntimeError("watch: " + "; ".join(stage_errors))
 
 
+ATTACH_LOOKBACK_HOURS = 24
+ATTACH_MAX_PER_PASS = 300
+ATTACH_MAX_ATTEMPTS = 3
+ATTACH_MAX_DEFERS = 10
+ATTACH_TIMEOUT = 120
+ATTACH_ALERT_KEY = "attach_alert"
+
+
+def _attach_post(payload: dict) -> dict:
+    return _post_messages(
+        payload, timeout=ATTACH_TIMEOUT, max_attempts=1, label="Attach"
+    )
+
+
+def attach_pass(conn, *, now: datetime, model: str, post) -> dict:
+    """Ask the model which storylines each newly captured article belongs to.
+
+    Decision records, not inferences: an article gets a row only when a model
+    call came back about it. A transient or configuration stop writes nothing.
+    Only a judgment about an article charges its `attempts`; a response that
+    judged nothing defers (see globals.md, Retry budget). Commits after each
+    chunk, so work done before a stop is kept. `items == attached + none +
+    failed + deferred` always: `deferred` also counts every selected item not
+    judged this pass.
+    """
+    import comprehend
+    import storylines
+
+    counts = {
+        "items": 0,
+        "calls": 0,
+        "attached": 0,
+        "none": 0,
+        "failed": 0,
+        "deferred": 0,
+        "stray": 0,
+    }
+
+    def done(status: str, error: str | None = None) -> dict:
+        return {**counts, "status": status, "error": error}
+
+    try:
+        comprehend.price_of(model)
+    except comprehend.UnpricedModel:
+        return done("unpriced", f"no price for model {model}")
+    stories = storyline_store.live_storylines(conn)
+    if not stories:
+        log.info("Attach: no live storylines")
+        return done("no_storylines")
+    items = storyline_store.undecided_items(
+        conn,
+        now=now,
+        lookback_hours=ATTACH_LOOKBACK_HOURS,
+        max_attempts=ATTACH_MAX_ATTEMPTS,
+        max_defers=ATTACH_MAX_DEFERS,
+        limit=ATTACH_MAX_PER_PASS,
+    )
+    if not items:
+        return done("nothing_to_do")
+    counts["items"] = len(items)
+
+    def defer(chunk, why):
+        for it in chunk:
+            storyline_store.record_deferral(conn, it["id"], model=model, problem=why)
+        counts["deferred"] += len(chunk)
+
+    step = storylines.ATTACH_BATCH
+    for start in range(0, len(items), step):
+        chunk = items[start : start + step]
+        payload, s_labels, a_labels = storylines.build_attach_request(
+            stories, chunk, model=model
+        )
+        counts["calls"] += 1
+        try:
+            resp = post(payload)
+        except Exception as e:
+            kind = storylines.classify_error(e)
+            if kind in ("transient", "config"):
+                counts["deferred"] += len(items) - start
+                return done(kind, f"{type(e).__name__}: {e}")
+            log.warning(f"Attach: chunk deferred ({kind}): {type(e).__name__}: {e}")
+            defer(chunk, f"{type(e).__name__}: {e}")
+            conn.commit()
+            continue
+        comprehend.record_spend(conn, "attach", model, resp.get("usage") or {})
+        res = storylines.validate_attach(resp, s_labels, a_labels)
+        if res.whole is not None:
+            log.warning(f"Attach: chunk deferred: {res.whole}")
+            defer(chunk, res.whole)
+        else:
+            for item_id, sids in res.decided.items():
+                storyline_store.record_decision(conn, item_id, sids, model=model)
+                counts["attached" if sids else "none"] += 1
+            for item_id, why in res.problems.items():
+                storyline_store.record_failure(conn, item_id, model=model, problem=why)
+                counts["failed"] += 1
+            counts["stray"] += len(res.stray)
+            if res.stray:
+                log.warning(f"Attach: stray labels {res.stray}")
+        conn.commit()
+    return done("ok")
+
+
+def mode_attach() -> None:
+    """Attach newly captured articles to storylines, behind STORYLINES_ENABLED.
+
+    Takes no arguments: run_job calls fn() with none. Knobs are read once.
+    """
+    enabled = common.STORYLINES_ENABLED
+    model = common.STORYLINE_ATTACH_MODEL
+    if not enabled:
+        log.info("Attach: off")
+        return
+    with db.connect() as conn:
+        out = attach_pass(
+            conn, now=datetime.now(timezone.utc), model=model, post=_attach_post
+        )
+    log.info(
+        f"Attach: status={out['status']} items={out['items']} calls={out['calls']}"
+        f" attached={out['attached']} none={out['none']} failed={out['failed']}"
+        f" deferred={out['deferred']} stray={out['stray']}"
+    )
+    verdict = None
+    if out["status"] in ("config", "unpriced"):
+        verdict = (
+            f"{out['status']}:{out['error']}",
+            f"Attach stopped ({out['status']}): {out['error']}",
+        )
+    _alert_once(ATTACH_ALERT_KEY, verdict, load_state(), "🧵")
+
+
 def mode_capture():
     """Poll every feed source into the knowledge base. Reads nothing back.
 
@@ -4897,6 +5028,7 @@ MODES = {
     "comprehend": mode_comprehend,
     "census_prepare": mode_census_prepare,
     "watch": mode_watch,
+    "attach": mode_attach,
 }
 
 
@@ -4917,6 +5049,7 @@ JOB_MODES = frozenset(
         "capture",
         "comprehend",
         "watch",
+        "attach",
     }
 )
 

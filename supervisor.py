@@ -75,11 +75,11 @@ JOB_KILL_GRACE_SECONDS = 30
 #     25  this budget           children exit after the broadcast
 #   +  2  SHUTDOWN_DRAIN        final output of whichever children did exit
 #   +  5  DB_CONNECT_TIMEOUT    opening the one connection the rows close on
-#   +  8  DB_STATEMENT_TIMEOUT  8 schedules x 2 statements x 0.5s
+#   +  9  DB_STATEMENT_TIMEOUT  9 schedules x 2 statements x 0.5s
 #   +  2  SHUTDOWN_DRAIN again  reaping whatever had to be SIGKILLed
 #   ----
-#     42  plus up to 5s for a tick-path connect already in flight when the
-#         signal arrived, so ~47s
+#     43  plus up to 5s for a tick-path connect already in flight when the
+#         signal arrived, so ~48s
 #
 # This row scales with len(scheduler.SCHEDULES) and is the ONLY line here
 # that does. Adding a schedule costs 1s of worst case; the 60s grace
