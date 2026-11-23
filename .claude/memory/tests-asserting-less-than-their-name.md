@@ -6,6 +6,7 @@ metadata:
   type: project
   originSessionId: c7b3e1ab-57c0-4dbc-8e99-58bd09ddc7f3
   modified: 2026-09-03T15:49:40.588Z
+promoted_to: core
 ---
 
 **The b42.1 capture run (2026-09-02/03) found SEVEN tests that passed while asserting materially less than their names and docstrings claimed.** Not one was found by a test failing. This is the dominant defect class in this repo, ahead of logic errors by a wide margin.
@@ -109,3 +110,5 @@ where the two DIVERGE can.
 present?* If the answer is "the same", the test is decorative. The pre-registered mutation count
 ([[mutation-diagnostic-demands-a-count]]) is what surfaces this. All four were predicted-N,
 measured-0, or were found by a reviewer who mentally deleted the line.
+
+**Case 5 (2026-11-22, storylines phase 1 red-team): "unchanged when the knob is off", tested by comparing the edited function with itself.** `f(*args) == f(*args, new_param="")` runs the NEW code twice, so a rewording of the old block passes. The fix that worked: capture golden text from HEAD *before* editing, with a frozen clock (`build_daily_prompt` reads `datetime.now`), commit it as a literal, and pre-register a one-character mutation of the old block. Reviewers then re-derived the golden independently by loading `git show <base>:brief.py` as a separate module, and it matched byte for byte. That is the check that makes such a test trustworthy.

@@ -8,6 +8,9 @@ metadata:
   modified: 2026-10-10T17:17:09.997Z
 ---
 
+> **DROPPED 2026-11-20 by the rethink charter.** The code freeze and the re-gate below no longer apply; bead ag1 removes the code. See [[rethink-charter-2026-11-20]].
+
+
 **State as of 2026-09-30.** Built and pushed (code through `3428111`, main at `608cbae`,
 CI green). Host runbook `docs/2026-10-01-host-runbook-census.md`: steps 1 (deploy, `0017_census`
 confirmed applied) and 2 (c439ade deploy timestamp confirmed, operator holds it) DONE on

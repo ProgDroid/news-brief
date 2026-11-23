@@ -20,3 +20,9 @@ Archived from `MEMORY.md` to keep the always-loaded index lean. These are "work 
 - [Multi-asset trading build (2026-06-14)](multi-asset-trading-build.md) — equity/crypto/prediction paper→live; ALL phases 1–5 DONE + pushed 2026-06-14 (modules + unified book.json + crypto/Kraken + PolyGram prediction + validation.py/go-live gate + volume monitor cron + /watch /unwatch /positions /performance cmds); build COMPLETE → [[brief-sources-and-edge-latency-thread]] is next
 - [T212 401 diagnosis (2026-06-01)](t212-401-diagnosis.md) — RESOLVED; auth is HTTP Basic base64(KEY_ID:KEY); root cause was literal-placeholder bug
 - [Brief claim-memory build (2026-06-24)](brief-claim-memory-build.md) — BUILT 2026-06-24: repetition is CLAIM-level, not topic-level; standing-claim ledger live since 2026-06-25 via a separate, fail-safe reconcile call.
+
+## Superseded by the 2026-11-20 rethink, or now documented in CLAUDE.md
+
+- [Comprehension cost redesign, phase 1 (2026-11-20)](comprehension-cost-redesign-phase-1.md) — **SUPERSEDED 2026-11-20 by the rethink (storylines replace per-item comprehension).** History only.
+- [Event census SP0 (2026-11-20)](event-census-sp0.md) — **DROPPED 2026-11-20 by the rethink; the census freeze and re-gate NO LONGER apply.** Code removal is bead ag1.
+- [Memory corpus travels now (2026-11-22)](memory-corpus-does-not-travel.md) — `hydrate-memory.sh` injects the committed index where absent. **The repo is PUBLIC — review the memory diff before committing.**

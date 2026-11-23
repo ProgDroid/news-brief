@@ -5,6 +5,8 @@ metadata:
   node_type: memory
   type: project
   originSessionId: 11654da7-d94c-4b83-a76e-7bbaac27f89b
+  modified: 2026-11-22T22:01:19.320Z
+promoted_to: core
 ---
 
 Since the 2026-06-09 testability refactor, `import brief` works with NO env vars and NO `/app/logs`: config is read with `.get()` (validated only in `__main__`), and the data root is `NEWSBRIEF_DATA_DIR` (default `/app/logs`; the file log handler degrades to console-only if the dir can't be created). Set `NEWSBRIEF_DATA_DIR` to a temp dir before importing so state files don't land in a cwd-drive `\app\logs`.
@@ -26,7 +28,11 @@ confirm the runs:
 `docker run --rm -d -p 5432:5432 --tmpfs /var/lib/postgresql (postgres:18 REFUSES .../data — exit 1; and prefix MSYS_NO_PATHCONV=1 or Git Bash rewrites the mount path) -e POSTGRES_PASSWORD=newsbrief -e POSTGRES_USER=newsbrief -e POSTGRES_DB=newsbrief_test postgres:18-alpine`
 (the `--tmpfs` is load-bearing -- see "every test-DB start leaked a volume" at the end of this file)
 then `export DATABASE_URL="postgresql://newsbrief:newsbrief@localhost:5432/newsbrief_test"`
-and check `pytest tests/test_db.py -q` reports runs rather than `skipped`. The container
+and check `pytest tests/test_db.py -q` reports runs rather than `skipped`.
+**The full suite with the DB takes ~11 min (2527 tests, 2026-11-22), longer than one
+foreground Bash call allows (600 s).** Run it with `run_in_background` and a terminal
+`REAL_EXIT=$?` line in the log, and give subagents a targeted gate instead: telling an
+implementer to run the full suite "in the foreground" can't be obeyed. The container
 is often already up from an earlier session — `docker ps` before starting a second one.
 Also now in the repo's own `CLAUDE.md` Build & Test section, so a fresh clone gets it.
 

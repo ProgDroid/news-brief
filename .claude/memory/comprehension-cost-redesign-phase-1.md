@@ -8,6 +8,9 @@ metadata:
   modified: 2026-10-10T17:16:41.670Z
 ---
 
+> **SUPERSEDED 2026-11-20 by the rethink charter:** storylines replace per-item comprehension. History only. See [[rethink-charter-2026-11-20]].
+
+
 **STATUS 2026-11-18: comprehension is OFF.** The user set the `COMPREHEND_ENABLED` settings row to `false` on the host, having decided comprehension *may not be worth it*, and wants time to think. `news-brief-2r5` and `news-brief-bqa.11` are deferred to 2026-12-16. The flip's effect was NOT verified by an agent: check the log for `Comprehend: disabled by COMPREHEND_ENABLED` and that `max(item_triage.created_at)` stopped moving. Capture stays ON (the watch-trigger job `8lp` reads captured items). Don't re-enable or resume steps 6–7 without asking. Everything below is the history up to that point.
 
 **Why it exists:** after re-enabling comprehension, the operator was topping up the Anthropic account by

@@ -51,3 +51,5 @@ edit and `tests/test_packaging.py` does not reference `scripts` at all.
 Run it with `docker compose run --rm --entrypoint python newsbrief scripts/<name>.py`. The
 bind-mount recipe above still works and is right for code that is not committed yet; it is not
 right as the standing answer, because it makes every future run a paste.
+
+**`from-server/briefs/` is a real-data oracle for brief-format code.** It holds a local copy of the host's archived briefs (90 files, to 2026-08-29; tags stripped, as `brief.deliver` writes them). Point a script at it with `NEWSBRIEF_DATA_DIR="$PWD/from-server" NEWSBRIEF_LOG_FILE=0 py scripts/<x>.py`. On 2026-11-22 it validated the storylines window parser before review (sections in 7/7 briefs). Keep any output under the gitignored workspace, because it contains real headlines. The archive predates the current prompt, so a host run is still owed before trusting a format change.

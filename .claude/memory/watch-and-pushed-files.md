@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: 8be1e10c-5ebb-4071-9f1c-599a0c2b2743
-  modified: 2026-11-18T20:41:13.162Z
+  modified: 2026-11-22T20:13:19.583Z
 ---
 
 Two files reach `DATA_DIR` (`/app/logs` in the container) by an operator push from the
@@ -13,6 +13,12 @@ user's **private** portfolio repo. Their contracts live in the 8lp/ajf/vap bead 
 `docs/superpowers/specs/2026-11-18-watch-event-triggers-design.md`. **Never commit either file
 or a real row, and never log a trigger's text: this repo is public.**
 
+- **The push overwrites in place and CANNOT create files (since 2026-11-20, portfolio bead
+  7qu).** It runs as a restricted host user whose folder access is read+execute only. So
+  news-brief must keep both files **present and group-writable by `users`**: deleting one, or
+  replacing it with a write-temp-then-rename that drops group write, breaks every later push.
+  Nothing here writes either file today (`watch.py` docstring: "never renamed or modified");
+  keep it that way, and any cleanup or retention job must skip them.
 - **`theses_portfolio.json` (ajf, closed 2026-11-18).** It's merged over `/thesis`'s
   `theses.json`, and the pushed line wins a clash. A **missing** file warns on Telegram on every
   `submit`. That's the user's explicit choice: a push that never lands must not go quiet.

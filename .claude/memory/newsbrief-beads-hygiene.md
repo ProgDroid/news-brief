@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: a1a7f73a-1f3e-48a3-93e0-6dd1c51ba905
-  modified: 2026-09-08T17:05:16.515Z
+  modified: 2026-11-22T19:43:13.008Z
 ---
 
 Built 2026-09-08 after `news-brief-bqa.12` was committed complete and stayed open for a
@@ -17,7 +17,11 @@ happened before. A stale committed export is a *published* misstatement of issue
 line** in a commit message means "this commit completes it" (`d48b036` ends with
 `news-brief-bqa.12`). An id mentioned inline in prose is a *reference*, not a claim —
 `be418b3` names three open beads that way. `.claude/hooks/check-beads.sh` (Stop hook)
-now reads that distinction.
+now reads that distinction. **A plan's commit step can collide with this** (2026-11-22,
+qap): writing-plans told the last code task to put the id alone on a line, but operator
+host checks were still owed after it. Reference the id inline in code commits while any
+post-deploy check remains; put it alone on a line only in the commit that truly finishes
+the bead (or just `bd close`).
 
 **It REPORTS beads and only REWRITES the export, and the asymmetry is the finding.**
 The same probe that caught bqa.12 also flagged `bqa.11`, whose trailer is simply **wrong**

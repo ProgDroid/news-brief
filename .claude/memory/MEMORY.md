@@ -1,5 +1,6 @@
 # Project memory — news-brief
 
+- [Rethink charter 2026-11-20](rethink-charter-2026-11-20.md) — **READ FIRST.** Approach A; storylines (al7) replace comprehension/KB (36 beads superseded); GBP 20 floor; census dropped; no trial phases. **Phase 1 (al7.1) built + pushed 11-22, knob OFF until rollout.**
 - [📁 Historical milestones](MEMORY-history.md) — Bigdata.com enrichment arc, sources & edge-latency redesign, multi-asset trading build, claim-memory build, T212 auth fix. NOT auto-loaded; read on demand.
 
 - [Trading retrospective 2026-08-16](trading-retrospective-2026-08-16.md) — **distrust every pre-2026-08-16 number.** "Fade the event" is DEAD. **REJECTED on evidence, don't re-propose: the momentum-prediction cap, the BTFDBot parallel sleeve.**
@@ -32,10 +33,11 @@
 - [Write-only fields hide from read paths](write-only-fields-hide-from-read-paths.md) — when every GET works and only the POST fails, look for the field no read consumes
 - [Signals delimiter fragility](signals-delimiter-fragility.md) — HISTORICAL (removed); rule stands: no markdown-looking in-band markers
 - [Signals parse_error = truncation](signals-parse-error-is-truncation.md) — project-wide: a post-gen call's parse/format failure is usually **max_tokens truncation, not a bad parser**. Check `stop_reason` first; size max_tokens + timeout to the workload.
-- [Batch pipeline timing](batch-pipeline-timing.md) — submit→collect may span 12h but must share a UTC day. A crashed submit with `NameResolutionError` created NO batch — resubmit freely.
+- [Batch pipeline timing](batch-pipeline-timing.md) — **submit 04:30, collect 06:00 + real-time fallback 06:30; cancel the batch ONLY with a live brief in hand. Deploy AFTER collect, before 04:30** (a deploy kills a running job silently). Submit-time files keyed by `state["date"]`.
 - [Stooq ticker resolution](stooq-ticker-resolution.md) — signals carry plain symbols (SHEL); T212 keys are SYMBOL_US_EQ / SYMBOLl_EQ; resolve by base, prefer US
 - [Stooq dead → Yahoo+Alpaca](stooq-dead-provider-replacement.md) — Stooq's free API is gone; quotes are market-routed Yahoo+Alpaca failover. T212 has no quote endpoint.
 - [Run Python from the Bash tool](python-via-powershell.md) — **`py` first** (`py -m pytest`, `py script.py`): it returns the real exit code; the winpty-wrapped `python` alias does not.
+- [Pre-push privacy scan](pre-push-privacy-scan.md) — scan ALL workbench CSVs (ids, thesis shingles, 3dp amounts) + credential regexes, control INSIDE the scanned text; known false positives; author email already public.
 - [Live state on deploy host](live-state-on-deploy-host.md) — runtime state lives on the deploy host, NOT the dev repo; **the repo is PUBLIC and `.gitignore` forbids committing live output (`from-server/`)**
 - [Fix the tooling, don't route around it](fix-the-tooling-dont-route-around-it.md) — FIX a false-firing guard, don't work around it; a second wrong firing on the same shape = stop and offer the fix. Verify a hook in BOTH directions.
 - [User working style](user-working-style.md) — doesn't rubber-stamp recommendations; lead with honest tradeoffs, expect to defend "recommended"; sequences work by context budget and audits what gets published
@@ -55,7 +57,6 @@
 - [Runtime foundation, phases 1 and 2](newsbrief-runtime-foundation-phase-1.md) — **All config is `settings` ROWS**: new knob = `KNOBS` entry + delete the constant + compose anchor line. **The unpushed-hold is OVER — don't re-apply it.**
 - [Continuous capture (Epic 2, b42.1)](newsbrief-capture-feature.md) — **ON since 2026-09-04. `captured_items` is DEAD; `items` has no feed column BY DESIGN.** Holds the reference alert contract (`capture.liveness`).
 - [Comprehend cost baseline](newsbrief-comprehend-cost.md) — **the 2026-09-25 £15/day was INPUT VOLUME: check per-outlet counts first.** DEAD IDEAS: truncating bodies, caching the 777-token prefix.
-- [Comprehension cost redesign, phase 1](comprehension-cost-redesign-phase-1.md) — **Comprehension OFF since 2026-11-18** (user: may not be worth it; 2r5/bqa.11 deferred to 2026-12-16). Don't re-enable without asking. History + phase 2 in the file.
 - [Snapshot config per unit of work](snapshot-config-per-unit-of-work.md) — a knob re-read through the 60 s settings cache can change MID-PASS. Resolve it once per pass and thread it through.
 - [Comprehension pipeline (bqa.4b)](newsbrief-comprehension-pipeline.md) — OFF since 2026-11-18 (was LIVE); ranking is pg_trgm. **`corroboration_by_outlet` CANNOT A/B a ranking change at this size.** Gate `bqa.11` = step 2 of the cost runbook.
 - [Reconstruction drifts from production](reconstruction-drifts-from-production.md) — a diagnostic that REIMPLEMENTS production's query drifts when production changes; **a control comparing two copies can't notice.** Call the production function with an `as_of`.
@@ -66,9 +67,7 @@
 - [Mutation diagnostics demand a COUNT](mutation-diagnostic-demands-a-count.md) — make the worker BREAK the code and report **how many** tests failed, pre-registered; it audits the TESTS. A zero or far-too-high count = a broken, unapplied or duplicated mutant.
 - [Tests asserting less than their name](tests-asserting-less-than-their-name.md) — **the dominant defect class here**: a test names a PROPERTY and asserts an easy PROXY. **Mentally delete the code — does the test still pass?**
 - [Test network guard](test-network-guard.md) — the suite blocks non-loopback sockets AND fails any test that caused a blocked call, swallowed or not; how to stub, and when `allow_blocked_network` is legitimate
-- [Memory corpus travels now](memory-corpus-does-not-travel.md) — `hydrate-memory.sh` injects the committed index where absent. **The repo is PUBLIC — review the memory diff before committing.**
 - [Red-team saturation](red-team-saturation.md) — stop spec red-team rounds when objections migrate to a DOWNSTREAM consumer: cut scope into a checklist for that spec, don't revise again.
 - [Parallel implementers share the test DB](parallel-implementers-share-test-db.md) — disjoint files ≠ independent: every DB fixture DROPs the schema on the ONE test Postgres, so concurrent pytest runs collide. Overlap implementers only with read-only reviewers.
-- [Event census (SP0)](event-census-sp0.md) — within-6h gap ruling (don't reopen window length). **FREEZE on `census.py`/`census_metrics.py`/`census_*` until step 10. RE-GATE after windows 3+4, BEFORE window 5 (`vd9.14`) — remind the operator, code won't stop.**
 - [Postgres role/grant gotchas](postgres-role-grant-gotchas.md) — PG 18.6: CREATEROLE needs ADMIN OPTION to ALTER a role; memberships are the hole ACL checks miss; plpgsql plans both sides of an AND guard — nest the IF.
-- [Watch job + pushed private files](watch-and-pushed-files.md) — 8lp SCHEDULED 06:30 PROVISIONALLY (gate `8lp.1` deferred to 12-03, still owed); replay needs `--entrypoint python`; missing theses push warns nightly BY DECISION; TRIGGERED alerts RING (decided 11-19), all else silent. Price rows (vap) = stage 2 of the same job; bars dated in EXCHANGE tz (FX 23:00Z in summer).
+- [Watch job + pushed private files](watch-and-pushed-files.md) — 8lp watch job 06:30 PROVISIONAL (gate `8lp.1` due 12-03); price rows (vap) are its stage 2. **Pushed files must stay present + group-writable** (the push can't create files). Replay needs `--entrypoint python`; TRIGGERED alerts ring.
