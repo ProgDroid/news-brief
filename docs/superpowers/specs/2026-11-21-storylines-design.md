@@ -6,7 +6,10 @@ Parent: `docs/superpowers/specs/2026-11-20-rethink-charter-design.md` (§3 succe
 and red-team rounds 1 and 2 (`docs/superpowers/reviews/2026-11-21-storylines-redteam.md`,
 `…-redteam-r2.md`). Round 2 recommended stopping red-team rounds here: its fixes were small and
 local, and are checked again in plan review. Revision 4 (2026-11-22) moves the brief's batch
-from the evening to the early morning (§6.1); nothing else changed.
+from the evening to the early morning (§6.1); nothing else changed. Revision 5 (2026-11-23)
+splits phase 2 into three plans (§18) and absorbs what changed since: phase 1 took migration
+0018, `d7w` removes the signals call and the paper sim (`cg3`), and the brief's cost has been
+measured on the host (§11).
 
 The repo is public. Nothing in this document, its tests or its fixtures names a holding, an
 amount, or the text of an operator thesis. §13 says where that material lives instead.
@@ -268,7 +271,8 @@ Replaces the OUTPUT FORMAT block of `build_daily_prompt` when `STORYLINE_BRIEF_E
 4. **📊 Macro signal.** Unchanged.
 5. **📌 Position signals.** From today's storyline thesis-evidence rows (`source = 'storyline'`)
    plus unclaimed news that bears on a holding. It never reads `source = 'brief'` rows, so the log
-   cannot feed itself. The separate forced-tool signals call is untouched; its fate is `d7w`.
+   cannot feed itself. The separate forced-tool signals call is removed by `cg3` (`d7w` ruled
+   it not useful, 2026-11-23); this section never depended on it.
 6. **👁 Watch / forward.** From the live signposts of moved and pinned storylines and the live
    watch triggers, not invented daily.
 
@@ -411,7 +415,7 @@ input and writes:
 New links it finds are stored and appear in the daily threads section from then on. Links are
 applied without approval and carry their reason. A link not re-affirmed by an nightly update or a
 weekly pass for 30 days is retired (dated). The paper-book mark-to-market tail of today's
-`mode_weekly` (`brief.py:3303-3312`) is kept until `d7w` decides the paper sim's fate.
+`mode_weekly` goes with the paper sim (`cg3`); the rewritten weekly does not carry it.
 
 ## 10. Defaults agreed
 
@@ -456,8 +460,26 @@ red-team rounds 1 and 2.
 | Brief | **measure first**; ~$7–10.70 on the August composition |
 | Proposals + signpost confirms | ~$1.50 |
 | Weekly with thinking (60 storylines) | ~$0.60–1 |
-| Signals call (unchanged, `d7w`) | ~$0.90 |
-| **Total of the priced lines** | **~$18–22 (about £14–17)** |
+| ~~Signals call~~ (removed by `cg3`) | $0 |
+| **Total of the priced lines** | **~$17–21 (about £13–16)** on the August brief estimate; see the measurement below |
+
+**Measured 2026-11-23 (revision 5).** Three batch briefs on the host:
+
+| Day | Input tokens | Output tokens | Searches | Cost |
+|---|---|---|---|---|
+| 11-21 | 397k | 9.1k | 3 | ≈ $0.47 |
+| 11-22 | 92k | 8.3k | 0 | ≈ $0.13 |
+| 11-23 | 205k | 9.9k | 3 | ≈ $0.29 |
+
+- **The costs are re-priced** at `PRICES_PER_MTOK` × `BATCH_FACTOR`, plus $0.01 per search.
+  - The log's own `est_batch_cost` reads $0.69, $0.20 and $0.41.
+  - It is hard-coded at older rates and runs 1.5× high on tokens. Bead `5ni` fixes it.
+  - An earlier draft of this paragraph quoted it, and concluded wrongly that the brief was over estimate.
+- **What drives the size:** the base prompt is ~90k tokens; search and code-execution results add 100–300k.
+- **At their mean the brief line is ~$9 a month,** inside the $7–10.70 estimate, so the total stays ~$17–21.
+- **Three days is not a month.** Plan 2a's first task re-prices this table from up to 30 days of host log, by tokens rather than `est_batch_cost`.
+
+The dial order below stands.
 
 Not priced: the watch job's calls, `claim_verify` if enabled, flash briefs (on demand), and the
 one-off offline check.
@@ -509,7 +531,9 @@ pass.
 
 ## 14. Data model (for the plan to refine)
 
-Migration `0018_storylines`. All tables have `created_at`; code never DELETEs from them.
+Migration `0019_storylines` (phase 1 took `0018_thesis_evidence`, which already created
+`thesis_evidence`; 0019 adds its `storyline_id` foreign key). All tables have `created_at`; code
+never DELETEs from them.
 
 - `storylines` (id, name, description, status, pinned, origin `seed|proposal|operator|burst`,
   last_attached_at, dormant_since, retired_on, merged_into)
@@ -543,8 +567,8 @@ Migration `0018_storylines`. All tables have `created_at`; code never DELETEs fr
 ## 16. Out of scope
 
 Event skeletons (`uk1`), the MCP query interface (`nyy.2`), Telegram `/set` and signpost editing
-(`f71`), the budget dial (`3km`), the signals call and paper sim (`d7w`), fetching full article
-pages, multi-user, and a web UI.
+(`f71`), the budget dial (`3km`), removing the signals call and paper sim (`cg3`), fetching full
+article pages, multi-user, and a web UI.
 
 ## 17. Success, for this sub-project
 
@@ -557,3 +581,26 @@ From charter §3, judged by the operator reading the output, with phase 1 as the
    unprompted.
 3. For each thesis, `/evidence` shows what built it up or eroded it since a given date.
 4. Monthly spend on this sub-project's lines stays within §11, as measured.
+
+## 18. Build order for phase 2 (revision 5)
+
+Operator decision 2026-11-23: phase 2 is built as **three plans**, in order, each ending in
+something checkable on the host. Approaches considered: one plan for all of phase 2 (what "one
+build" in §1 implied; rejected as 30+ tasks that land nothing for weeks and are hard to review),
+two plans (foundation and brief together, then the rest), and three. Three was chosen.
+
+1. **Plan 2a, foundation.** Task 1 re-prices §11 from 30 days of host `est_batch_cost` lines.
+   Then: migration 0019, the storyline store, `/storyline add|retire|list`, Accept/Reject buttons
+   (needed by seeding), `storylines_seed`, the `attach` job with its decision records
+   (`STORYLINES_ENABLED`), and the §8.2 offline check script. Nothing the operator reads changes.
+   It ends with the offline check's verdict, which gates plan 2b's brief. If Haiku fails, §8.3
+   is decided before 2b starts.
+2. **Plan 2b, the brief.** The nightly `storylines` update, `storyline_updates` and
+   consumed/unclaimed accounting, storyline thesis evidence with §3.3's no-double-counting rule,
+   the §7 layout and inputs (`STORYLINE_BRIEF_ENABLED`), `/pin` and `/unpin` retargeted, and the
+   claims-block omission on rollback. Closes `6wc` as superseded.
+3. **Plan 2c, the rest.** Signpost, burst and surge alerts with the Flash brief button
+   (`STORYLINE_ALERTS_ENABLED`), the daily `propose` job, dormancy and retirement offers, merges,
+   and the weekly rewrite (`STORYLINE_WEEKLY_ENABLED`).
+
+Each plan is written when the previous one has landed, so it plans against the code as built.
