@@ -520,7 +520,7 @@ Spec §8.2. The check must call the **production** `build_attach_request` and `v
 2. **Seed:** `docker compose run --rm --entrypoint python newsbrief scripts/storylines_seed.py`. About 20 proposals arrive on Telegram. Accept or reject each one, and add your own with `/storyline add Name — description`. `/storyline list` shows the result.
 3. **Offline check:** `docker compose run --rm --entrypoint python newsbrief scripts/storylines_attach_check.py --week-ending <a recent Monday>`. It costs roughly $8–10, with two Sonnet runs and one Haiku run over about 90 chunks each, and takes an hour or two. Paste the output, minus the sampled disagreements, and read the 20 samples yourself.
    - **PASS:** the controller writes `docs/<date>-storylines-attach-check.md` with counts and percentages only, storyline names replaced by labels (spec §8.2 step 6), and closes `sse` with that result.
-   - **ILL-POSED:** rewrite the descriptions the samples show are vague (`/storyline retire` + `add`), then rerun the check. The snapshot keeps the items, so delete `storylines_check/<date>/runs/` first, or use another week. Storylines are re-read only for a new snapshot, so a new week is simplest.
+   - **ILL-POSED:** rewrite the descriptions the samples show are vague (`/storyline retire` + `add`), then rerun the check. The snapshot (`input.json`) holds the storylines as well as the items, so deleting only `runs/` would rerun the old descriptions. Delete the whole `storylines_check/<date>/` directory, or use another week.
    - **FAIL:** stop. §8.3's fallback (embeddings shortlist, `bqa.7`) is decided with the operator before plan 2b.
 4. **Switch attach on** (only after PASS):
    ```sql
