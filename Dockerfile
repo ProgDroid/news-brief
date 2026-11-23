@@ -8,7 +8,18 @@ WORKDIR /app
 # this the build ships whatever the base image last baked — 2026-08-31 that was
 # openssl 3.5.6-1~deb13u2, one patch behind CVE-2026-14456. Upgrading here patches
 # the class, not the instance, so the next CVE does not need another commit.
-RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
+#
+# APT_REFRESH is what makes that true in CI (news-brief-y49). The gha layer cache
+# keys a RUN on its text and its parent, neither of which changes when Debian
+# ships a fix, so this upgrade and the PGDG install below (which pulls krb5 in
+# through libpq) were served from cache: on 2026-11-23 Trivy failed on krb5
+# deb13u1 while deb13u2 was already the Debian candidate. The workflow passes a
+# per-run value, so these layers and everything after them rebuild on every run;
+# both builds in one run share it, so the pushed image is the scanned one.
+# Echoed rather than merely declared so the RUN visibly depends on it.
+ARG APT_REFRESH=unset
+RUN echo "apt refresh: ${APT_REFRESH}" \
+    && apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 

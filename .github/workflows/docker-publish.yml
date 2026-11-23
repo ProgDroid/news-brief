@@ -138,6 +138,9 @@ jobs:
           load: true
           tags: newsbrief:scan
           labels: ${{ steps.meta.outputs.labels }}
+          # Re-runs the apt layers every run (news-brief-y49; see Dockerfile).
+          # MUST match the push step's value, or the push rebuilds unscanned layers.
+          build-args: APT_REFRESH=${{ github.run_id }}-${{ github.run_attempt }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -166,4 +169,5 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: APT_REFRESH=${{ github.run_id }}-${{ github.run_attempt }}
           cache-from: type=gha
