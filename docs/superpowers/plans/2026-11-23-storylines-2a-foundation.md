@@ -418,7 +418,11 @@ Spec §6 (the `attach` row, decision records, labels) and §12.
   - `mode_attach() -> None`. It reads `common.STORYLINES_ENABLED` and `common.STORYLINE_ATTACH_MODEL` once. When the knob is off it logs `Attach: off` and returns. Otherwise:
     - it runs `attach_pass` with `post = _attach_post`;
     - it logs `Attach: status=… items=… calls=… attached=… none=… failed=… deferred=… stray=…`;
-    - it passes a verdict to `_alert_once("attach_alert", verdict, state, "🧵")` (`brief.py:4288`). The verdict is `(f"{status}:{error}", message)` for `config` and `unpriced`, and None otherwise, so a fault rings once and clears on the next good pass.
+    - it calls `_alert_once("attach_alert", verdict, state, "🧵")` (`brief.py:4288`) only when the pass proved something:
+      - verdict `(f"{status}:{error}", message)` for `config` and `unpriced`;
+      - verdict None (which clears a stored alert) only for `ok`, since a returned response proves the key and the model.
+
+      It doesn't call it at all for `transient`, `no_storylines` or `nothing_to_do`, which made no call and prove nothing. Clearing on those would make a revoked-key alert flap.
   - `_attach_post(payload: dict) -> dict` is `_post_messages(payload, timeout=ATTACH_TIMEOUT, max_attempts=1, label="Attach")`.
 
 **What `attach_pass` does:**
