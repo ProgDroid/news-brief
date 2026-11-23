@@ -18,3 +18,9 @@ metadata:
 **Confirmed safe overlaps (2026-09-29, census minors, 0 collisions):** an implementer running
 pytest alongside (a) a docs-only agent told not to run pytest and (b) read-only reviewers told the
 same. The browser-verification run was given the DB exclusively, since its setup resets the schema.
+
+**What worked 2026-11-23 (plan 2a SDD):** a SECOND test Postgres for the implementers, so the
+controller's background full suite never shares a database with them:
+`MSYS_NO_PATHCONV=1 docker run --rm -d --name nb-testpg2 -p 5433:5432 --tmpfs /var/lib/postgresql ...`
+and `DATABASE_URL=...localhost:5433/newsbrief_test` in every dispatch (5432 stays the controller's).
+Still one implementer at a time on 5433; read-only reviewers told never to touch 5432.

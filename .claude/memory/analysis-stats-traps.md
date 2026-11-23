@@ -135,3 +135,20 @@ If a large share are fixed by construction:
 **Tell:** the headline and a "not ruled" subset line disagree by far more than the tolerance.
 The pre-registered verdict still stands. Record the dilution beside it; do not re-rule.
 
+## Trap 9: a clause of a pre-registered bar that can never bind
+
+Found 2026-11-23 (plan 2a, the storylines attach check). Spec §8.2's bar: Sonnet self-agreement
+below 0.65 is ILL-POSED (Haiku not judged); otherwise Haiku passes if J(H,S1) ≥ max(J(S1,S2) −
+0.10, 0.55). Once J(S1,S2) ≥ 0.65, J(S1,S2) − 0.10 ≥ 0.55, so the 0.55 floor is unreachable. The
+implementer's pre-registered mutation (drop the floor) predicted 0 failures and got 0: an
+equivalent mutant exposing a redundant rule, not a weak test. Harmless here (kept verbatim,
+noted), but the same shape could hide a floor someone believes is protecting them.
+
+**How to apply:** before registering a multi-clause bar, give each clause an input where it ALONE
+decides the verdict. If none exists, the clause is decoration: drop it or say so.
+
+**Related, same day (d7w):** I registered a position-level sign test while trap 1 above says to
+check the unit first; a side agent caught it before the data was opened. Dropping the single
+largest entry-week cluster is NOT a dependence control. Put the independent unit in the RULING
+checks (instrument-collapsed hit and p, and sign stability across weeks), not only beside the
+verdict.

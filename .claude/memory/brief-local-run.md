@@ -189,3 +189,7 @@ reports green. Freeze the change set before starting the ~10-minute gate. If you
   Without a DB it takes ~45 s.
 - **`docker compose config` exits 1 locally** on the required `POSTGRES_PASSWORD`, and committed
   HEAD fails the same way. Check with `POSTGRES_PASSWORD=x docker compose config`.
+
+**Update 2026-11-23:** 2751 tests, ~13 min with the DB (plan 2a added ~220). Two test Postgres
+containers on different ports (5432 controller, 5433 implementers) let a background full run and
+an implementer's DB tests proceed at once; see [[parallel-implementers-share-test-db]].

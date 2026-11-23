@@ -19,3 +19,11 @@ Before pushing, scan the ADDED lines of the outgoing range (`git diff <origin>..
 **Why:** the older one-liner scan read only theses keys, watchlist names and trigger ids, so positions, trades and thesis text were never checked; and its control term sat in the term list, so `matched=0` on a file without it proved nothing (probe-failures #4, 2026-11-22). The full recipe's script lived in a session scratchpad: rewrite it from the bullets above (~60 lines), print counts per source and identifier names only, never matched free-text or amounts.
 
 **How to apply:** expect false positives from short tickers and thesis keys that are also ordinary English or technical words (the case-insensitive match catches the word), and from API-cost decimals in specs that coincide with weight figures. Read every hit in context. **NEVER write the matched terms down anywhere in this repo, this memory included**: the list of "harmless" matches IS a list of the portfolio's tickers and thesis keys, and memory syncs into the public repo (a side agent caught exactly that in this note, 2026-11-22). **The author's email and name are ALREADY public**: the git author field of every commit since the start, plus `owner`/`created_by` in `.beads/issues.jsonl` (202 occurrences before 2026-11-22). Not a new leak when it shows up; switching to a GitHub no-reply address was offered, not done. Related: [[live-state-on-deploy-host]], [[memory-corpus-does-not-travel]].
+
+**The script now lives at `from-server/privacy_scan.py`** (gitignored, this machine only; it holds
+the workbench data path, which must not enter this public repo). Run `git fetch` then
+`py from-server/privacy_scan.py`; it scans `git diff origin/main..HEAD` added lines and prints
+counts, control hits, identifier names and line numbers. Every credential regex except the
+`assignment` one has a planted control (2026-11-23). Also scan the outgoing COMMIT MESSAGES
+(`git log origin/main..HEAD --format=%B`), which the diff does not contain. Bare-number hits come
+from the CSVs' numeric id columns and are noise.

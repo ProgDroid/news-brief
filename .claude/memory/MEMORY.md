@@ -1,12 +1,12 @@
 # Project memory — news-brief
 
-- [Rethink charter 2026-11-20](rethink-charter-2026-11-20.md) — **READ FIRST.** Approach A; storylines (al7) replace comprehension/KB (36 beads superseded); GBP 20 floor; census dropped; no trial phases. **Phase 1 (al7.1) built + pushed 11-22, knob OFF until rollout.**
+- [Rethink charter 2026-11-20](rethink-charter-2026-11-20.md) — **READ FIRST.** Approach A; storylines (al7) replace comprehension/KB (36 beads superseded); GBP 20 floor; census dropped; no trial phases. **Phase 1 (al7.1) knob ON 11-23. Plan 2a (attach foundation) built + pushed 11-23; host Rollout next, then plan 2b. Signals ruled NOT USEFUL (d7w) → removal cg3.**
 - [📁 Historical milestones](MEMORY-history.md) — Bigdata.com enrichment arc, sources & edge-latency redesign, multi-asset trading build, claim-memory build, T212 auth fix. NOT auto-loaded; read on demand.
 
-- [Trading retrospective 2026-08-16](trading-retrospective-2026-08-16.md) — **distrust every pre-2026-08-16 number.** "Fade the event" is DEAD. **REJECTED on evidence, don't re-propose: the momentum-prediction cap, the BTFDBot parallel sleeve.**
-- [Analysis stats traps](analysis-stats-traps.md) — **eight** traps behind confident wrong numbers. Read before trusting any measurement here.
+- [Trading retrospective 2026-08-16](trading-retrospective-2026-08-16.md) — **2026-11-23 refresh: signals NOT USEFUL (n=41, 51.2%), being removed (cg3); don't re-propose.** Distrust every pre-2026-08-16 number. "Fade the event" is DEAD. **REJECTED on evidence, don't re-propose: the momentum-prediction cap, the BTFDBot parallel sleeve.**
+- [Analysis stats traps](analysis-stats-traps.md) — **nine** traps (9: a bar clause that can never bind) behind confident wrong numbers. Read before trusting any measurement here.
 - [PolyGram live trading spec](polygram-live-trading-spec.md) — **RETIRED 2026-09-11, code removed: ~$1/share fees at any price. Don't re-propose.**
-- [Self-improving trading roadmap](self-improving-trading-roadmap.md) — staged A→B→C→D; Stage A BUILT, **Stage B NEXT** (edit `performance_prompt_block`'s HARDCODED dim tuple, not `_DIMENSIONS`).
+- [Self-improving trading roadmap](self-improving-trading-roadmap.md) — **SUPERSEDED 2026-11-23**: Stage B moot, the paper sim is being removed (cg3). History only.
 
 - [External geo-dashboards borrow-backlog](external-geo-dashboards-backlog.md) — CLOSED 2026-06-26. Durable: the ≥3-entries native→proxy gate, the AGPL-vs-MIT guard.
 - [Mauldin TWIE Wix-warmup scrape](mauldin-twie-wix-warmup-scrape.md) — TWIE comes from Wix's `wix-warmup-data` JSON (no RSS); only the ARTICLE page carries records.
@@ -23,6 +23,7 @@
 - [Google News RSS recipe](google-news-rss-recipe.md) — feeds for dead publisher RSS; `site:` not `allinurl:`+`when:`. **A whole-domain `site:` proxy ingests author/tag/help pages: list ALL titles first. "Native returns 0" = that PATH failed.**
 - [Direct-page temp sources](direct-page-temp-sources.md) — temp sources can be `source_type=page` (scraped). **PENDING: host re-add of both BCA dashboards as page sources.**
 - [Paper sim: no fees (decided)](paper-sim-no-fees-decision.md) — frictionless by design; demo T212 account rejected
+- [Brief cost measurement](brief-cost-measurement.md) — **never quote `est_batch_cost` (stale rates, 1.5× high)**; price tokens with `scripts/brief_cost.py`. ~$9/month measured 2026-11-23.
 - [Run brief.py locally](brief-local-run.md) — the gate is THREE commands, and **`pytest` alone is green with the DB layer SKIPPED** — export `DATABASE_URL`.
 - [Deferred review findings](newsbrief-deferred-findings.md) — one item per session, proper design each. **STILL OPEN, deferred-for-cause:** #2 `split_html_message` tag-split, #3 latent `fetch_web_source` fallback.
 - [Beads hygiene + the Stop hook](newsbrief-beads-hygiene.md) — a bead id ALONE on a line in a commit means "completes it"; inline prose is a reference. **`bd update --notes` OVERWRITES (use `--append-notes`).**

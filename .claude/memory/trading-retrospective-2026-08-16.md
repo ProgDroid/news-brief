@@ -56,3 +56,16 @@ model's own track-record block was reading fiction. Mean edge was reported as
 Related: [[analysis-stats-traps]], [[live-state-on-deploy-host]],
 [[self-improving-trading-roadmap]], [[polygram-live-trading-spec]],
 [[newsbrief-deferred-findings]].
+
+## 2026-11-23 refresh (d7w): the signals are NOT USEFUL, and they are being removed
+
+Record: `docs/2026-11-23-paper-trade-refresh.md`. Positions opened 2026-08-17..10-26, 4w
+market-adjusted (recomputed; the book's `edge` field double-counts the market on bearish calls):
+n=41, hit 51.2%, p=0.50, instrument-collapsed 54.8% p=0.36, 4 of 9 weeks positive, against a bar
+pre-registered (and twice amended) before the book was opened. Same picture as 08-16. Per the
+operator's 2026-11-20 decision the signals extraction call and the paper sim are removed
+(`news-brief-cg3`); the brief's Position Signals section stays. **Do not re-propose a signals or
+paper-sim measurement, Stage B, or the gate rows (`7dy`, `9r8`, `ngw` close with cg3).** The 2w
+horizon (58.5%) and 5/8 high-confidence calls were NOT pre-registered and do not reopen it.
+Operator correction that day: some shorts are available in the ISA (incl. leveraged inverse ETPs,
+used for crude), so bearish calls are partly actionable, not "trim only".

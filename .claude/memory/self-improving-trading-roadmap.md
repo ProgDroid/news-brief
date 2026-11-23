@@ -42,3 +42,7 @@ Aligns with descriptive-only philosophy of [[sentiment-sizing-null-decided]].
 
 
 **2026-09-11:** the prediction asset class is GONE (oh4). `validation._DIMENSIONS` no longer carries `play_type`; `_ASSET_CLASSES` is (equity, crypto); Stage B's hardcoded dim tuple in `performance_prompt_block` was already (asset_class, confidence, thesis_ref).
+
+**SUPERSEDED 2026-11-23:** d7w ruled the signals NOT USEFUL; `news-brief-cg3` removes the signals
+call, the paper sim, the gate and `performance_prompt_block`, so Stage B (`7dy`) closes as moot
+with it. History only. See [[trading-retrospective-2026-08-16]].

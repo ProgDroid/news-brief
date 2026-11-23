@@ -76,3 +76,10 @@ committed `.beads/issues.jsonl` at `HEAD` still held the old text.
 only on a bead whose notes you have just read and mean to rewrite. After any notes edit, check
 that a marker phrase from the OLD text survives. The committed JSONL is the recovery path, so
 export and commit after every bead change session.
+
+**`bd delete` breaks the JSONL auto-export (2026-11-23).** After deleting a misfiled bead, every
+later bd write warned "auto-export skipped: issues.jsonl contains 1 JSONL-only issue record(s)
+absent from the local Dolt store … refusing to overwrite". The export is passive, so drop that one
+line (`grep -v '"id":"<deleted-id>"'`, assert exactly one line removed) and the next write exports
+again. Better: avoid the delete — check `--parent` before creating; a wrong parent also burns a
+child id (`al7.2` was gone, so the next child was `al7.3`).
