@@ -5,8 +5,9 @@ when the 04:30 batch is late; every test stubs that call, so this is the one
 place the real-time path meets the real API before the fallback is trusted.
 It prints the elapsed time that BRIEF_REALTIME_TIMEOUT should be set from.
 
-Costs one full-price brief (about $0.35). Sends nothing to Telegram, writes
-nothing. On the host:
+Costs one full-price brief: about $0.89 measured on 2026-11-23 (377k input
+tokens, 8 web searches; search results dominate the input). Sends nothing to
+Telegram, writes nothing. On the host:
 
     docker compose run --rm --entrypoint python newsbrief \
         scripts/replay_brief_realtime.py YYYY-MM-DD
