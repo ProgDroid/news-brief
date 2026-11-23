@@ -57,6 +57,7 @@ def test_up_creates_the_expected_tables(conn):
         "0016_integrate_link_defers",
         "0017_census",
         "0018_thesis_evidence",
+        "0019_storylines",
     ]
     assert {
         "schema_migrations",
@@ -92,6 +93,10 @@ def test_up_creates_the_expected_tables(conn):
         "census_adjudications",
         "census_sessions",
         "census_events",
+        "storylines",
+        "storyline_proposals",
+        "item_attach_decisions",
+        "item_attachments",
     } <= _tables(conn)
 
 

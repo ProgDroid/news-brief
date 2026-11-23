@@ -38,7 +38,7 @@ RUN python -c "import zoneinfo; zoneinfo.ZoneInfo('Europe/London'); zoneinfo.Zon
 # image, however present it is in the repo. tests/test_packaging.py walks the
 # import graph and fails when one is missing, because nothing else can -- pytest
 # and CI both run against a full checkout, where the absence is invisible.
-COPY common.py config.py trading.py validation.py brief.py capture.py comprehend.py brief_memory.py claim_store.py claim_verify.py retention.py db.py scheduler.py supervisor.py backup.py census.py census_metrics.py labeller.py watch.py dated_memory.py .
+COPY common.py config.py trading.py validation.py brief.py capture.py comprehend.py brief_memory.py claim_store.py claim_verify.py retention.py db.py scheduler.py supervisor.py backup.py census.py census_metrics.py labeller.py watch.py dated_memory.py storyline_store.py .
 COPY migrations/ ./migrations/
 COPY enrichment/ ./enrichment/
 COPY labeller_static/ ./labeller_static/
