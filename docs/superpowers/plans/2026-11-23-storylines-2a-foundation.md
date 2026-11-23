@@ -30,7 +30,12 @@ Bead `news-brief-al7.3`.
 - **A new script** under `scripts/` needs the `sys.path` shim (`scripts/replay_brief_realtime.py:24-25`).
 - **Every model call sets `thinking` explicitly** (`{"type": "disabled"}`) and forces its tool (`tool_choice`).
 - **Labels, not ids (spec §6).** The model sees storylines as `S1…Sn` and articles as `A1…An`, mapped back in code. An unknown label is a problem for that article, never a fall-through. The pattern to copy is `dated_memory.validate_evidence` (`dated_memory.py:275`), not `comprehend._resolve_label`, which falls through.
-- **Decision records, not inferences (spec §6).** An article gets an `item_attach_decisions` row only when a model call judged it: `attached`, `none`, or `failed` (judged badly). A deferral writes nothing.
+- **Decision records, not inferences (spec §6).** An article gets an `item_attach_decisions` row only when a model call came back about it:
+  - `attached` or `none`;
+  - `failed`, judged badly;
+  - `deferred`, when the response judged nothing.
+
+  A transient or configuration stop writes nothing, so "not looked at yet" stays distinguishable.
 - **Retry budget (memory `retry-budget-needs-a-verdict`, including its h8p section):** only a judgment about an article charges that article.
   - **Charges `attempts`:** an invalid answer for one article (unknown label, more than 3, answered twice, missing). At `ATTACH_MAX_ATTEMPTS = 3` the article is never selected again.
   - **Charges nobody but counts `defers`:** a response that judged nothing, such as a `max_tokens` stop, no tool block, or an HTTP 400 for the whole request. The chunk's articles get outcome `deferred` with `defers + 1`. `ATTACH_MAX_DEFERS = 10` bounds it, so an article whose own content keeps provoking the failure is eventually retired, following the precedent of `COMPREHEND_MAX_DEFERS` (`common.py:304-313`).
