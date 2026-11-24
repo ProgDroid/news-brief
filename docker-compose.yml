@@ -152,6 +152,19 @@ x-newsbrief: &newsbrief
     - NEWSBRIEF_TRIAGE_MODEL=${NEWSBRIEF_TRIAGE_MODEL:-}
     - NEWSBRIEF_INTEGRATE_MODEL=${NEWSBRIEF_INTEGRATE_MODEL:-}
     - JOB_MAX_RUNTIME_MINUTES=${JOB_MAX_RUNTIME_MINUTES:-}
+    - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER:-}
+    - EMBEDDING_MODAL_MODEL=${EMBEDDING_MODAL_MODEL:-}
+    - EMBEDDING_OPENAI_MODEL=${EMBEDDING_OPENAI_MODEL:-}
+    - EMBEDDING_DIM=${EMBEDDING_DIM:-}
+    - EMBEDDING_MODAL_URL=${EMBEDDING_MODAL_URL:-}
+    - EMBEDDING_GPU_RATE=${EMBEDDING_GPU_RATE:-}
+    - EMBEDDING_MODAL_IDLE_SECONDS=${EMBEDDING_MODAL_IDLE_SECONDS:-}
+    - EMBEDDING_TIMEOUT=${EMBEDDING_TIMEOUT:-}
+    # The ONE credential that sends article text to a third party (spec 19): used
+    # only when EMBEDDING_PROVIDER=openai, and read from the environment at call
+    # time by embeddings.active_embedder. Not a knob, no settings row. Empty is
+    # fine while the provider is modal.
+    - OPENAI_API_KEY=${OPENAI_API_KEY:-}
     # Postgres holds the run ledger, the advisory locks that interlock the entry
     # paths, and the scheduler's state. These MUST be declared here: compose
     # passes through only what this block names, so setting them on the host or

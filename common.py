@@ -344,6 +344,24 @@ KNOBS: dict[str, Knob] = {
     # collect's two -- by a margin, so it can only ever catch a job that is
     # genuinely stuck. A test pins that relation rather than the number.
     "JOB_MAX_RUNTIME_MINUTES": Knob(int, 240),
+    # Embeddings (storylines plan 1). Credentials are NOT knobs: OPENAI_API_KEY and
+    # MODAL_PROXY_KEY / MODAL_PROXY_SECRET stay environment variables.
+    # Which provider embed calls go to: "modal" or "openai".
+    "EMBEDDING_PROVIDER": Knob(str, "modal"),
+    # Provisional until the calibration run picks the model.
+    "EMBEDDING_MODAL_MODEL": Knob(str, "Qwen/Qwen3-Embedding-4B"),
+    "EMBEDDING_OPENAI_MODEL": Knob(str, "text-embedding-3-large"),
+    # Stored vector width. Part of the space id, so changing it opens a new space.
+    "EMBEDDING_DIM": Knob(int, 1024),
+    # Endpoint of the deployed Modal embedding service; empty until deployed.
+    "EMBEDDING_MODAL_URL": Knob(str, ""),
+    # Modal's per-second GPU rate (T4, 2026-11-24; L4 is 0.000222).
+    "EMBEDDING_GPU_RATE": Knob(float, 0.000164),
+    # MUST equal the Modal app's scaledown_window: a cold start is billed one idle
+    # tail when its container ends, and the cost record adds exactly this.
+    "EMBEDDING_MODAL_IDLE_SECONDS": Knob(float, 10.0),
+    # Seconds per request. A cold start loads several GB of weights.
+    "EMBEDDING_TIMEOUT": Knob(int, 180),
 }
 
 _TRUTHY = {"1", "true", "yes", "on"}
