@@ -6,7 +6,7 @@ metadata:
   type: user
   promoted_to: global
   originSessionId: 0dcbbd13-5be1-4f55-92f5-0638d2a112d1
-  modified: 2026-08-09T14:44:29.411Z
+  modified: 2026-11-24T11:43:46.037Z
 ---
 
 The user is a hands-on decision-maker who does NOT rubber-stamp recommendations.
@@ -128,3 +128,20 @@ anything to the public repo — where he has consistently wanted the call to be 
 
 Consistent with the standing entries: lead with the more thorough option, expect to defend it,
 and treat friction as the master variable — a confirmation gate he did not need IS friction.
+
+## 2026-11-24 — design for quality first, cost last
+
+After two failed storylines attach checks and two option rounds that both kept the old frame, the
+user said both options *"feel flimsy… stacking on top of a brittle foundation. what are we
+missing?"*, then: *"let's design for quality then tweak cost at the end… designing around cost
+isn't working"*.
+
+**Why:** the attach check existed only to justify the cheap model, so every option inherited a
+question (Haiku vs Sonnet agreement) the chosen two-step design (D5) never asked. Cost shaped the
+problem statement before quality was defined.
+
+**How to apply:** when a design keeps failing its checks, step back to what the feature is FOR
+before offering fixes, and design the best version first; price it afterwards and cut from there.
+When the user says an option feels like a workaround, look for the wrong question or the bad
+input upstream (here: the check scored against storylines already known to be malformed), not a
+better patch.

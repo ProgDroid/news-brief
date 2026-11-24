@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: dd284abf-9374-4918-ac8e-e3648a2b3cca
-  modified: 2026-11-20T15:28:00.883Z
+  modified: 2026-11-24T19:14:23.369Z
 ---
 
 Charter: `docs/superpowers/specs/2026-11-20-rethink-charter-design.md` (approved 2026-11-20, bead lnr closed).
@@ -45,3 +45,5 @@ Rollout on the host (cost script, seed, offline check, then `STORYLINES_ENABLED`
 (`al7.4`, written against the code as built; carries the final review's "unclaimed pool must
 include failed/deferred/never-decided articles" note). Brief cost is ~$9/month, not near the
 floor: see [[brief-cost-measurement]].
+
+**Status 2026-11-24: REDESIGN (`news-brief-al7.7`).** The attach check failed twice (Jaccard vs Sonnet), and the operator chose a redesign over fixing the gate: spec `docs/superpowers/specs/2026-11-24-storylines-editor-design.md`. A per-storyline **editor** (two batched passes: triage up to 5 full-text reads, then write) decides relevance; Haiku `attach` survives only as one of two candidate **feeders** (with embedding retrieval). Document gains consensus, actors, constraints, 2–4 scenarios (evidence lines, never odds), open questions, a pre-registered calendar. A citation must name what it changed. Gate = **hindsight replay** of a past month with a judge independent of retrieval. Embeddings on **Modal** (GPU, 4B–8B open model) with an `EMBEDDING_PROVIDER=openai` switch, priced side by side. Fetch probe (second run, Google links decoded 69/71): 46% of items give usable text; **Reuters blocks automated fetches** (14/15), as do SCMP, Times of Israel, ISW, 38 North, so they stay headline-only; decoding uses an undocumented Google endpoint, so production decodes are capped (spec §6.2). Operator: build at target quality, no lower-quality trial steps; price last. Plans 2b/2c (`al7.4`/`al7.5`) are superseded by the spec's four plans.
