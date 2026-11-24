@@ -42,8 +42,10 @@ if str(REPO_ROOT) not in sys.path:
 import brief  # noqa: E402  (path shim above must run first)
 import db  # noqa: E402
 
-# Paragraph text at or above this many characters counts as a usable article
+# Extracted text at or above this many characters counts as a usable article
 # (a few paragraphs). Below it is a teaser, a consent wall or a paywall stub.
+# The extractor is trafilatura; the old <p>-paragraph measure is kept as the
+# `usable_by_paragraphs` comparison column.
 USABLE_CHARS = 1500
 FETCH_TIMEOUT = 15
 PAUSE_SECONDS = 1.0
@@ -196,6 +198,14 @@ def google_news_target(url: str) -> str | None:
     return match.group(0).decode("ascii") if match else None
 
 
+def default_extract(html: str) -> str:
+    """Article text by trafilatura. Imported here, not at module top, so a
+    broken install fails the probe's rows, never the import of this module."""
+    import trafilatura
+
+    return trafilatura.extract(html, include_comments=False) or ""
+
+
 def classify(status: int | None, final_url: str, text: str) -> str:
     if status is None:
         return "error"
@@ -210,23 +220,33 @@ def classify(status: int | None, final_url: str, text: str) -> str:
     return "thin" if text else "empty"
 
 
-def probe_one(url: str, get, post=None) -> tuple[str, int, str]:
-    """(category, paragraph characters, google) for one item's page, where
-    google is "" for a non-Google link, else "decoded" or "undecoded"."""
+def probe_one(url: str, get, post=None, extract=None) -> tuple[str, int, str, int]:
+    """(category, extracted characters, google, paragraph characters) for one
+    item's page, where google is "" for a non-Google link, else "decoded" or
+    "undecoded". The category follows the extracted text; the paragraph count
+    is the old measure, kept for comparison."""
+    extract = extract or default_extract
     google = ""
     target = url
     if is_google(url):
         resolved = resolve_google(url, get, post) if post else google_news_target(url)
         google = "decoded" if resolved else "undecoded"
         if not resolved:
-            return "google_unresolved", 0, google
+            return "google_unresolved", 0, google, 0
         target = resolved
     try:
         resp = get(target)
     except Exception:
-        return "error", 0, google
-    text = paragraph_text(resp.text or "") if resp.status_code < 400 else ""
-    return classify(resp.status_code, resp.url or target, text), len(text), google
+        return "error", 0, google, 0
+    if resp.status_code >= 400:
+        return classify(resp.status_code, resp.url or target, ""), 0, google, 0
+    html = resp.text or ""
+    try:
+        text = extract(html)
+    except Exception:
+        return "error", 0, google, 0
+    para = len(paragraph_text(html))
+    return classify(resp.status_code, resp.url or target, text), len(text), google, para
 
 
 def _default_get(url: str):
@@ -274,29 +294,42 @@ def _sample_rows(days: int, per_outlet: int) -> list[tuple[str, str]]:
 
 
 GOOGLE_COLUMNS = ("google_links", "google_decoded")
+PARAGRAPH_COLUMN = "usable_by_paragraphs"
 
 
-def report(results: dict[str, list[tuple[str, int, str]]]) -> str:
-    head = ["outlet", "n", *CATEGORIES, *GOOGLE_COLUMNS, "median_chars_usable"]
+def report(results: dict[str, list[tuple[str, int, str, int]]]) -> str:
+    head = [
+        "outlet",
+        "n",
+        *CATEGORIES,
+        *GOOGLE_COLUMNS,
+        PARAGRAPH_COLUMN,
+        "median_chars_usable",
+    ]
     lines = ["\t".join(head)]
     totals = defaultdict(int)
     for outlet in sorted(results):
         rows = results[outlet]
-        counts = {c: 0 for c in (*CATEGORIES, *GOOGLE_COLUMNS)}
-        for cat, _, google in rows:
+        counts = {c: 0 for c in (*CATEGORIES, *GOOGLE_COLUMNS, PARAGRAPH_COLUMN)}
+        for cat, _, google, para in rows:
             counts[cat] += 1
+            if para >= USABLE_CHARS:
+                counts[PARAGRAPH_COLUMN] += 1
             if google:
                 counts["google_links"] += 1
             if google == "decoded":
                 counts["google_decoded"] += 1
         for key, value in counts.items():
             totals[key] += value
-        usable = [n for cat, n, _ in rows if cat == "usable"]
+        usable = [n for cat, n, _, _ in rows if cat == "usable"]
         median = int(statistics.median(usable)) if usable else 0
         lines.append(
             "\t".join(
                 [outlet, str(len(rows))]
-                + [str(counts[c]) for c in (*CATEGORIES, *GOOGLE_COLUMNS)]
+                + [
+                    str(counts[c])
+                    for c in (*CATEGORIES, *GOOGLE_COLUMNS, PARAGRAPH_COLUMN)
+                ]
                 + [str(median)]
             )
         )
@@ -304,14 +337,16 @@ def report(results: dict[str, list[tuple[str, int, str]]]) -> str:
     lines.append(
         "\t".join(
             ["TOTAL", str(n)]
-            + [str(totals[c]) for c in (*CATEGORIES, *GOOGLE_COLUMNS)]
+            + [str(totals[c]) for c in (*CATEGORIES, *GOOGLE_COLUMNS, PARAGRAPH_COLUMN)]
             + ["-"]
         )
     )
     return "\n".join(lines)
 
 
-def main(argv=None, *, rows=None, get=None, post=None, sleep=time.sleep) -> int:
+def main(
+    argv=None, *, rows=None, get=None, post=None, sleep=time.sleep, extract=None
+) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--per-outlet", type=int, default=15)
     parser.add_argument("--days", type=int, default=7)
@@ -323,14 +358,15 @@ def main(argv=None, *, rows=None, get=None, post=None, sleep=time.sleep) -> int:
         return 2
     get = get or _default_get
     post = post or _default_post
-    results: dict[str, list[tuple[str, int, str]]] = defaultdict(list)
+    results: dict[str, list[tuple[str, int, str, int]]] = defaultdict(list)
     for i, (outlet, url) in enumerate(rows):
         if i:
             sleep(PAUSE_SECONDS)
-        results[outlet].append(probe_one(url, get, post))
+        results[outlet].append(probe_one(url, get, post, extract))
     print(
         f"fetch probe: {len(rows)} items, {len(results)} outlets, "
-        f"usable = at least {USABLE_CHARS} characters of paragraph text"
+        f"usable = at least {USABLE_CHARS} characters of extracted text "
+        f"(usable_by_paragraphs: the same bar on <p> text)"
     )
     print(report(results))
     return 0

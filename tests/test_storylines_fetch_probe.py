@@ -32,6 +32,11 @@ REPLY = ")]}'\n\n" + json.dumps(
 )
 
 
+def _paras(html: str) -> str:
+    """Injected extractor for the flow tests: the paragraph text."""
+    return probe.paragraph_text(html)
+
+
 def _resp(status=200, text="", url="https://example.test/a"):
     return SimpleNamespace(status_code=status, text=text, url=url)
 
@@ -84,7 +89,9 @@ def test_a_page_that_ends_on_googles_consent_wall_is_unresolved_not_thin():
     consent = "https://consent.google.com/ml?continue=x"
     assert probe.classify(200, consent, "x" * 925) == "google_unresolved"
     page = _resp(text="<p>Before you continue</p>" * 40, url=consent)
-    cat, _, google = probe.probe_one("https://example.test/a", lambda u: page)
+    cat, _, google, _ = probe.probe_one(
+        "https://example.test/a", lambda u: page, extract=_paras
+    )
     assert (cat, google) == ("google_unresolved", "")
 
 
@@ -96,28 +103,34 @@ def test_probe_one_fetches_the_decoded_publisher_url():
         seen.append(url)
         return _resp(text=f"<p>{LONG}</p>", url=url)
 
-    cat, chars, google = probe.probe_one(_google(target), get)
+    cat, chars, google, para = probe.probe_one(_google(target), get, extract=_paras)
     assert seen == [target]
     assert cat == "usable" and chars >= probe.USABLE_CHARS
+    assert para == chars
     assert google == "decoded"
 
 
 def test_probe_one_unresolved_google_link_and_errors():
     shell = "https://news.google.com/rss/articles/AU_yqL"
-    assert probe.probe_one(shell, lambda u: _resp(text=f"<p>{LONG}</p>", url=u)) == (
-        "google_unresolved",
-        0,
-        "undecoded",
-    )
+    assert probe.probe_one(
+        shell, lambda u: _resp(text=f"<p>{LONG}</p>", url=u), extract=_paras
+    ) == ("google_unresolved", 0, "undecoded", 0)
 
     def boom(url):
         raise OSError("down")
 
-    assert probe.probe_one("https://example.test/a", boom) == ("error", 0, "")
+    assert probe.probe_one("https://example.test/a", boom, extract=_paras) == (
+        "error",
+        0,
+        "",
+        0,
+    )
     # an error page's body is not counted as article text
     assert probe.probe_one(
-        "https://example.test/a", lambda u: _resp(403, f"<p>{LONG}</p>", u)
-    ) == ("blocked", 0, "")
+        "https://example.test/a",
+        lambda u: _resp(403, f"<p>{LONG}</p>", u),
+        extract=_paras,
+    ) == ("blocked", 0, "", 0)
 
 
 def test_signature_timestamp_and_batchexecute_body():
@@ -154,7 +167,7 @@ def test_new_style_google_link_is_decoded_through_batchexecute():
         posts.append((url, body))
         return _resp(text=REPLY)
 
-    cat, chars, google = probe.probe_one(link, get, post)
+    cat, chars, google, _ = probe.probe_one(link, get, post, extract=_paras)
     assert (cat, google) == ("usable", "decoded")
     assert gets == ["https://news.google.com/articles/AU_yqLnew", TARGET]
     assert [u for u, _ in posts] == [probe.BATCHEXECUTE]
@@ -167,12 +180,13 @@ def test_undecodable_google_link_is_never_fetched_as_an_article():
         gets.append(url)
         return _resp(text="<html></html>", url=url)
 
-    cat, chars, google = probe.probe_one(
+    cat, chars, google, para = probe.probe_one(
         "https://news.google.com/rss/articles/AU_yqLnew",
         get,
         lambda u, b: _resp(text=""),
+        extract=_paras,
     )
-    assert (cat, chars, google) == ("google_unresolved", 0, "undecoded")
+    assert (cat, chars, google, para) == ("google_unresolved", 0, "undecoded", 0)
     assert gets and all(u.startswith("https://news.google.com/") for u in gets)
 
 
@@ -197,6 +211,7 @@ def test_main_reports_counts_per_outlet_and_never_a_url_or_text(capsys):
         get=pages.__getitem__,
         post=lambda u, b: _resp(text=REPLY),
         sleep=sleeps.append,
+        extract=_paras,
     )
     assert rc == 0
     assert sleeps == [probe.PAUSE_SECONDS] * 3
@@ -209,6 +224,7 @@ def test_main_reports_counts_per_outlet_and_never_a_url_or_text(capsys):
         "n",
         *probe.CATEGORIES,
         *probe.GOOGLE_COLUMNS,
+        "usable_by_paragraphs",
         "median_chars_usable",
     ]
     wire = dict(zip(cols, lines["Widget Wire"]))
@@ -230,3 +246,73 @@ def test_main_reports_counts_per_outlet_and_never_a_url_or_text(capsys):
 def test_main_with_nothing_to_probe_exits_2(capsys):
     assert probe.main(["--days", "3"], rows=[], get=None) == 2
     assert "no items in the last 3 days" in capsys.readouterr().out
+
+
+ARTICLE_ONLY = "<html><body><article>%s</article></body></html>"
+
+
+def test_category_uses_the_extractor():
+    # No <p> anywhere: the paragraph measure sees nothing, the extractor sees
+    # the article. The category must follow the extractor.
+    page = ARTICLE_ONLY % LONG
+    assert probe.paragraph_text(page) == ""
+    cat, chars, google, para = probe.probe_one(
+        "https://example.test/a",
+        lambda u: _resp(text=page, url=u),
+        extract=lambda html: LONG,
+    )
+    assert cat == "usable"
+    assert chars == len(LONG)
+    assert para == 0
+    # and the reverse: paragraphs present, the extractor finds a stub
+    cat, chars, _, para = probe.probe_one(
+        "https://example.test/a",
+        lambda u: _resp(text=f"<p>{LONG}</p>", url=u),
+        extract=lambda html: "stub",
+    )
+    assert (cat, chars) == ("thin", 4)
+    assert para >= probe.USABLE_CHARS
+
+
+def test_an_extractor_that_raises_is_an_error_row_not_a_crash():
+    def boom(html):
+        raise RuntimeError("broken install")
+
+    cat, chars, google, para = probe.probe_one(
+        "https://example.test/a",
+        lambda u: _resp(text=f"<p>{LONG}</p>", url=u),
+        extract=boom,
+    )
+    assert (cat, chars, google) == ("error", 0, "")
+
+
+def test_default_extractor_pulls_article_text_from_a_real_page():
+    body = " ".join(f"Widget line {i} says Gizmo output rose." for i in range(80))
+    html = (
+        "<html><head><title>t</title></head><body><nav>menu</nav>"
+        f"<article><h1>Widgets</h1><div>{body}</div></article>"
+        "<footer>footer</footer></body></html>"
+    )
+    text = probe.default_extract(html)
+    assert "Widget line 10" in text
+    assert probe.default_extract("") == ""
+
+
+def test_report_has_both_usable_columns():
+    results = {
+        "Widget Wire": [
+            ("usable", 3000, "", 0),  # extractor only
+            ("usable", 2000, "", 2000),  # both
+            ("thin", 100, "", 1600),  # paragraphs only
+        ]
+    }
+    lines = probe.report(results).splitlines()
+    head = lines[0].split("	")
+    assert "usable" in head and "usable_by_paragraphs" in head
+    row = dict(zip(head, lines[1].split("	")))
+    assert row["usable"] == "2"
+    assert row["usable_by_paragraphs"] == "2"
+    # the median is over the extracted length of the extractor-usable rows
+    assert row["median_chars_usable"] == "2500"
+    total = dict(zip(head, lines[-1].split("	")))
+    assert (total["usable"], total["usable_by_paragraphs"]) == ("2", "2")
