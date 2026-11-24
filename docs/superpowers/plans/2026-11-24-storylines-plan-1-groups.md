@@ -210,7 +210,7 @@ In compose, the comment above `image:` says three things: the swap is from `post
   - `@dataclass(frozen=True) class Candidate: group_id: int; similarity: float; title_similarity: float`
   - `@dataclass(frozen=True) class Calibration: space: str; join_sim: float; pair_sim: float; title_sim: float; retrieval_min_sim: float | None; weighted_precision: float; weighted_recall: float; pairs_labelled: int; prompt_version: int; judge_model: str; week_ending: date`
   - `record_calls(conn, calls: Sequence[CallRecord], *, purpose: str) -> None`
-  - `items_missing_vectors(conn, *, space: str, limit: int) -> list[PendingItem]`, oldest first by `(created_at, id)`. It excludes items that have a skip row in the space. `PendingItem` also carries `url`, which `embed_text` needs.
+  - `items_missing_vectors(conn, *, space: str, limit: int, item_ids: Sequence[int] | None = None) -> list[PendingItem]`, oldest first by `(created_at, id)`. When `item_ids` is given, only those items are considered (pre-flight ruling R2: calibration embeds a snapshot week, not 81 days). It excludes items that have a skip row in the space. `PendingItem` also carries `url`, which `embed_text` needs.
   - `record_skip(conn, *, space: str, item_id: int, reason: str) -> None` (`ON CONFLICT DO NOTHING`).
   - `vectors_by_hash(conn, *, space: str, hashes: Sequence[str]) -> dict[str, str]` (hash to the stored vector as text).
   - `store_vectors(conn, *, space: str, dim: int, rows: Sequence[tuple[int, str, str]]) -> None`, where each row is `(item_id, text_hash, vector literal)`. It uses `ON CONFLICT DO NOTHING`.
@@ -225,7 +225,8 @@ In compose, the comment above `image:` says three things: the swap is from `post
   - `@dataclass(frozen=True) class Thresholds: join_sim: float; pair_sim: float; title_sim: float` (from a `Calibration`).
   - `decide_group(cands: Sequence[Candidate], th: Thresholds) -> Candidate | None`. It returns the candidate with the highest similarity among those that pass `similarity ≥ join_sim` or `(similarity ≥ pair_sim and title_similarity ≥ title_sim)`. Ties go to the lower `group_id`.
   - `EMBED_CHUNK = 128`; `LIVE_MAX_ITEMS = 500`.
-  - `embed_pending(conn, embedder, *, space: str, dim: int, limit: int, purpose: str) -> dict`.
+  - `space_lock(conn, space: str)`: a context manager over `db.advisory_lock(conn, f"group:{space}")`, yielding whether the lock was taken. `group_pass` uses it, and so do the backfill (Task 7) and calibration (Task 8), per pre-flight ruling R1.
+  - `embed_pending(conn, embedder, *, space: str, dim: int, limit: int, purpose: str, item_ids: Sequence[int] | None = None) -> dict`. `item_ids` is passed through to `items_missing_vectors`.
     - It builds `embed_text`; a `""` text gets a skip row (`empty_text`).
     - It reuses vectors by `text_hash` from both the store and this batch, so identical texts make one provider input. The rest are embedded as `kind="document"`.
     - It records calls and stores vectors, committing after recording each call's spend and after each chunk's vectors.
@@ -233,7 +234,7 @@ In compose, the comment above `image:` says three things: the swap is from `post
     - It returns `{"embedded", "reused", "skipped", "calls"}` and raises `EmbedError` after recording its calls.
   - `assign_pending(conn, *, space: str, thresholds: Thresholds, window_hours: int, limit: int) -> dict`. It walks `next_ungrouped` in order and **stops at the first item with no vector**. For each item it calls `candidate_groups`, then `decide_group`, then joins or opens. It commits every 100 items and returns `{"grouped", "opened", "joined", "stopped_at_missing_vector": bool}`.
   - `group_pass(conn, embedder, *, space: str, dim: int, window_hours: int, max_items: int, purpose: str = "items") -> dict`.
-    - It holds `db.advisory_lock(conn, f"group:{space}")` for the whole pass, so the live job and a backfill of the same space never interleave. When the lock is taken it returns status `busy`.
+    - It holds `space_lock(conn, space)` for the whole pass, so the live job and a backfill of the same space never interleave. When another connection holds the lock it returns status `busy`.
     - It runs `embed_pending`, then (if a calibration exists) `assign_pending`, and returns `{"status", "error", "embedded", "reused", "skipped", "calls", "grouped", "opened", "joined"}`. Status is `ok`, `nothing_to_do`, `busy`, `uncalibrated` (vectors are still stored; the error names the space), `transient`, `config` or `bad_response`. On an embed error it still assigns items that already have vectors, since order is preserved by the stop rule.
 
 - [ ] **Step 1: Write the failing tests.**
@@ -348,7 +349,8 @@ In compose, the comment above `image:` says three things: the swap is from `post
     - When the batch completes, it downloads the output, stores the vectors and records one `CallRecord` per chunk with `batch=True` and `usd` at `OPENAI_BATCH_FACTOR`.
     - It refuses to submit when the estimated cost (chars ÷ 4 tokens) exceeds `--max-usd` (default 5).
   - **The target space may differ from the active one,** so a new space can be filled and grouped before the switch.
-  - Exit codes: 0 done; 1 provider error, with the reason printed; 2 usage error; 3 a batch still in progress (rerun later).
+  - **It holds `grouping.space_lock(conn, space)` for its whole run** (pre-flight ruling R1). When the lock isn't taken, it prints `busy: another pass holds <space>` and exits 4.
+  - Exit codes: 0 done; 1 provider error, with the reason printed; 2 usage error; 3 a batch still in progress (rerun later); 4 busy.
 
 - [ ] **Step 1: Write the failing tests** (`tmp_path` as `DATA_DIR`, stub HTTP):
   - `test_modal_backfill_embeds_then_groups_and_prints_totals`
@@ -358,6 +360,7 @@ In compose, the comment above `image:` says three things: the swap is from `post
   - `test_openai_batch_output_maps_back_by_custom_id_and_is_priced_at_half`
   - `test_refuses_above_max_usd`
   - `test_backfill_into_a_non_active_space_leaves_the_active_space_untouched`
+  - `test_backfill_exits_4_when_the_space_lock_is_held` (hold it on another connection)
 - [ ] **Step 2–4:** fail, implement, then run the gate.
 - [ ] **Step 5: Commit:** `feat(storylines): embedding backfill, with OpenAI Batch API for bulk (Refs news-brief-al7.7)`.
 
@@ -367,7 +370,10 @@ In compose, the comment above `image:` says three things: the swap is from `post
 
 **Files:**
 - Create: `scripts/embed_calibrate.py`, `tests/test_embed_calibrate.py`
-- Modify: `comprehend.py` (`PRICES_PER_MTOK` gains `"claude-opus-5-5": (4.00, 20.00)` and `"claude-sonnet-5-5": (2.00, 10.00)`, from the pricing page 2026-11-24)
+- Modify:
+  - `comprehend.py`: `PRICES_PER_MTOK` gains `"claude-opus-5-5": (4.00, 20.00)` and `"claude-sonnet-5-5": (2.00, 10.00)`, from the pricing page 2026-11-24.
+  - `group_store.py`: add `nearest_items(conn, *, space, vector: str, since: datetime, until: datetime, limit: int, exclude_ids: Sequence[int] = ()) -> list[tuple[int, float]]`, item-level cosine neighbours among items with `created_at` in `[since, until)` (pre-flight ruling R3). Pair sampling and the retrieval check both use it.
+- Calibration embeds only the snapshot's items (`embed_pending(..., item_ids=snapshot ids)`) and holds `grouping.space_lock` for each space while it embeds (ruling R2).
 
 **Interfaces:**
 - `main(argv=None, *, embedders=None, post=None) -> int`, run as `--week-ending YYYY-MM-DD --space SPEC [--space SPEC …] [--pairs 600] [--judge-model claude-opus-5-5] [--accept SPACE]`. `SPEC` is `modal:<model>@<dim>=<url>` or `openai:<model>@<dim>`. An `openai:` spec requires `--include-openai`, and the script prints that it sends one week of titles and summaries, and the generated queries, to OpenAI (spec §19).
@@ -384,7 +390,7 @@ In compose, the comment above `image:` says three things: the swap is from `post
   6. **Retrieval check per space, with production-shaped queries.** The editor's queries are its document fields (open questions, actors, constraints, consensus, signposts; spec §7.3), not storyline names, and the live storylines are to be re-seeded in plan 2 (§13). So the queries are generated:
      - Sample 20 **situations**: items in the week with a near-duplicate from another outlet (similarity > 0.8 in any space), with a fixed seed of 0 and at most 2 per outlet.
      - For each, the judge reads the item and its near-duplicates and writes 3 queries, one per style: an open question, an actor and what it wants, and a constraint. It is told not to reuse the headline's distinctive words. That gives 60 queries, labelled `Q1…`.
-     - Pool the top 30 items per query per space over the whole week, excluding the situation's own items, and judge each (query, item) pair as relevant or not, 30 per call, **through the batch API** (half price).
+     - Pool the top 30 items per query per space over the whole week, excluding the situation's own items, and judge each (query, item) pair as relevant or not, 30 per call, in real time through `brief._post_messages` (pre-flight ruling R4: the repo has no multi-request tool-call batch helper, and building one saves about $2 once).
      - Report per space: nDCG@30 and pooled recall@30, and the lexical arm's precision at `LEXICAL_MIN`.
      - **No retrieval floor is fitted here:** `retrieval_min_sim` stays NULL and is fitted in plan 2 on real document queries over the replay.
   7. **Report:** one row per space, with the thresholds, weighted P/R/F1, AUC, the bar verdict, nDCG@30, recall@30 and the unclear count, plus the judge's spend. Then a recommendation by the **pre-registered rule**:
@@ -394,7 +400,7 @@ In compose, the comment above `image:` says three things: the swap is from `post
      - If every space is unreliable, recommend none and exit 1.
   8. **`--accept SPACE`** writes the `embedding_calibrations` row for that space (with `prompt_version`), and prints the `INSERT … ON CONFLICT` statements that make it active (`EMBEDDING_PROVIDER`, `EMBEDDING_MODAL_MODEL` or `EMBEDDING_OPENAI_MODEL`, `EMBEDDING_DIM`, `EMBEDDING_MODAL_URL`, `EMBEDDING_GPU_RATE`).
 - It never prints a title, a generated query, an article text or a URL, and it reads no storylines.
-- Expected judge spend is about $3–6: 30 real-time calls for the pairs, 3 calls to write the queries, and about 100 batch calls for relevance.
+- Expected judge spend is about $4–8: 30 calls for the pairs, 3 calls to write the queries, and about 100 calls for relevance, all real time.
 
 - [ ] **Step 1: Write the failing tests** (stub embedders and judge; invented items):
   - `test_auc_perfect_and_random`: separable scores give 1.0; identical scores give 0.5.
@@ -490,7 +496,7 @@ In compose, the comment above `image:` says three things: the swap is from `post
    Keep the three URLs on the host, not in git. **Check the proxy tokens reach them** before calibrating; this is unverified until it runs. From the host:
    `curl -s -o /dev/null -w "%{http_code}\n" -X POST -H "Modal-Key: $MODAL_PROXY_KEY" -H "Modal-Secret: $MODAL_PROXY_SECRET" -H "Content-Type: application/json" -d '{"texts":["Widget test"],"dim":1024,"kind":"document","model":"Qwen/Qwen3-Embedding-4B","prompt_version":1}' <url1>`
    It should print `200` (the first call may take a minute: a cold start plus the weight download). A `401` means the tokens belong to another workspace: create proxy tokens in this one.
-7. **Calibrate** on the host. It costs about $3–6 of Opus judging and cents of GPU time:
+7. **Calibrate** on the host. It costs about $4–8 of Opus judging and cents of GPU time:
    ```bash
    docker compose run --rm --entrypoint python newsbrief scripts/embed_calibrate.py --week-ending <a recent Monday> \
      --space "modal:Qwen/Qwen3-Embedding-4B@1024=<url1>" --space "modal:Qwen/Qwen3-Embedding-8B@1024=<url2>" \
