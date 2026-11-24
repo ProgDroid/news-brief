@@ -105,6 +105,22 @@ def test_seed_limits_the_schema_no_longer_carries_are_still_enforced():
     ]
 
 
+def test_seed_prompt_asks_for_one_situation_per_storyline_never_a_merge():
+    # news-brief-al7.6: "about 20 storylines that together cover" topics, pins,
+    # theses and triggers made the model merge them -- two situations joined
+    # with "and", or a thesis phrased as a storyline -- and Sonnet attached any
+    # article touching either half (attach check 2026-11-24, S1 wrong 25 of 33
+    # decided disagreements). "What would move it" invited trade language.
+    system = _request()["system"]
+    assert "together cover" not in system
+    assert "what would move it" not in system
+    assert "exactly one situation" in system
+    assert "never merge two situations" in system
+    assert "An investment thesis or a watched trigger is not a storyline" in system
+    assert "leave the rest out rather than merge them" in system
+    assert "what kind of news counts as a development" in system
+
+
 def test_seed_request_carries_topics_pins_theses_and_watch_lines():
     text = _request()["messages"][0]["content"]
     for needle in (
