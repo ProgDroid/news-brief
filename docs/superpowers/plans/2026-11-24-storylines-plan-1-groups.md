@@ -462,8 +462,9 @@ In compose, the comment above `image:` says three things: the swap is from `post
    ```bash
    docker compose stop newsbrief
    docker compose run --rm --no-deps newsbrief backup
-   docker compose exec postgres psql -U newsbrief -d newsbrief -c "SELECT count(*) FROM items" -c "SELECT datlocprovider, datcollate, datctype FROM pg_database WHERE datname = current_database()"
+   docker compose exec postgres psql -U newsbrief -d newsbrief -c "SELECT count(*) FROM items" -c "SELECT datlocprovider, datcollate, datctype FROM pg_database WHERE datname = current_database()" -c "SHOW data_directory"
    ```
+   **`data_directory` must be `/var/lib/postgresql/18/docker`,** the new image's default (measured 2026-11-24), and it must sit inside the volume the compose file mounts. If it differs, stop and paste: the new image would start an empty cluster.
 2. In the host's compose file, set the `postgres:` image to
    `pgvector/pgvector:0.8.7-pg18-trixie@sha256:ab49524d18df7200b74ac9a475e1db6297fc1eb57da4c214c63d10ecc4b754fa`.
    That is the tag's multi-architecture index digest, read from Docker Hub on 2026-11-24; Task 1 pins the same string. Change nothing else, the volume line least of all. Then:
