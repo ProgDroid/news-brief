@@ -46,8 +46,11 @@ def _resp(items, stop="tool_use"):
     }
 
 
-def _item(name, desc="A developing situation.", pinned=False):
-    return {"name": name, "description": desc, "pinned": pinned}
+def _item(name, desc="A developing situation.", covers=()):
+    return {"name": name, "description": desc, "covers": list(covers)}
+
+
+LABELS = ["P1", "T1"]  # what _request's one pin and one thesis are labelled
 
 
 def test_seed_request_forces_tool_and_disables_thinking():
@@ -63,7 +66,13 @@ def test_seed_request_forces_tool_and_disables_thinking():
     props = arr["items"]["properties"]
     assert props["name"]["type"] == "string"
     assert props["description"]["type"] == "string"
-    assert props["pinned"]["type"] == "boolean"
+    # pinned is worked out from covers (a pinned subject's label), never asked
+    assert "pinned" not in props
+    assert props["covers"] == {
+        "type": "array",
+        "items": {"type": "string", "enum": ["P1", "T1"]},
+    }
+    assert arr["items"]["required"] == ["name", "description", "covers"]
 
 
 def test_seed_tool_is_strict_and_inside_the_strict_subset():
@@ -117,8 +126,41 @@ def test_seed_prompt_asks_for_one_situation_per_storyline_never_a_merge():
     assert "exactly one situation" in system
     assert "never merge two situations" in system
     assert "An investment thesis or a watched trigger is not a storyline" in system
-    assert "leave the rest out rather than merge them" in system
     assert "what kind of news counts as a development" in system
+
+
+def test_seed_prompt_puts_pins_and_theses_first_and_never_drops_them():
+    # al7.6 review: "keep the ones that will draw the most news and leave the
+    # rest out" ranked by noise, so a quiet thesis -- the reader's own -- was
+    # the first to go, and nothing said it had gone. "About 20" was the squeeze
+    # that caused the merges; the count now comes from max_count alone.
+    system = _request()["system"]
+    assert "about 20" not in system
+    assert "draw the most news" not in system
+    assert "covered by at least one storyline" in system
+    assert "list in covers the labels" in system
+    assert "never leave out a pinned subject or a thesis" in system
+    assert storylines.SEED_MAX == 40
+
+
+def test_seed_request_labels_pins_and_theses_for_covers():
+    text = _request()["messages"][0]["content"]
+    assert "- P1: Gizmo strike" in text
+    assert "- T1 TESTCO: Widgets demand recovers" in text
+    assert storylines.coverage_labels(["Gizmo strike"], {"TESTCO": "w"}) == {
+        "P1": "Gizmo strike",
+        "T1": "TESTCO",
+    }
+
+
+def test_seed_request_without_pins_or_theses_has_no_covers_field():
+    # An empty enum is not a valid strict schema; with nothing to cover the
+    # field goes, and the schema stays inside the strict subset.
+    tool = _request(pins=[], theses={})["tools"][0]
+    items = tool["input_schema"]["properties"]["storylines"]["items"]
+    assert "covers" not in items["properties"]
+    assert items["required"] == ["name", "description"]
+    assert strict_schema.unsupported(tool["input_schema"]) == []
 
 
 def test_seed_request_carries_topics_pins_theses_and_watch_lines():
@@ -147,15 +189,15 @@ def test_validate_drops_duplicates_overlong_and_live_names():
             _item("", "no name"),
             _item("No desc", "  "),
             _item("   ", "blank name"),
-            _item("Gizmo strike", pinned=True),
+            _item("Gizmo strike", covers=["P1"]),
         ]
     )
     ok, problems = storylines.validate_seed(
-        resp, max_count=20, live_names=["existing saga"]
+        resp, max_count=20, live_names=["existing saga"], labels=LABELS
     )
     assert ok == [
         storylines.Proposed("Widget tariffs", "A developing situation.", False),
-        storylines.Proposed("Gizmo strike", "A developing situation.", True),
+        storylines.Proposed("Gizmo strike", "A developing situation.", True, ("P1",)),
     ]
     assert len(problems) == 7
 
@@ -183,13 +225,54 @@ def test_validate_non_object_item_is_a_problem():
     assert len(problems) == 1
 
 
-def test_validate_pinned_must_be_true_boolean():
+def test_pinned_comes_from_covering_a_pinned_subject_only():
     ok, _ = storylines.validate_seed(
-        _resp([{"name": "A", "description": "d", "pinned": "yes"}]),
+        _resp(
+            [
+                {"name": "A", "description": "d", "pinned": True, "covers": ["T1"]},
+                _item("B", covers=["T1", "P1", "P1"]),
+            ]
+        ),
         max_count=5,
         live_names=[],
+        labels=LABELS,
     )
-    assert ok[0].pinned is False
+    assert [(p.pinned, p.covers) for p in ok] == [
+        (False, ("T1",)),
+        (True, ("T1", "P1")),
+    ]
+
+
+def test_covers_keeps_known_labels_only():
+    # strict should make an unknown label ungenerable; the validator does not
+    # rely on it, and a junk covers value is dropped, not fatal.
+    ok, problems = storylines.validate_seed(
+        _resp(
+            [
+                _item("A", covers=["T9", "T1", 3]),
+                {"name": "B", "description": "d", "covers": "P1"},
+            ]
+        ),
+        max_count=5,
+        live_names=[],
+        labels=LABELS,
+    )
+    assert [(p.name, p.covers, p.pinned) for p in ok] == [
+        ("A", ("T1",), False),
+        ("B", (), False),
+    ]
+    assert problems == []
+
+
+def test_uncovered_lists_labels_no_proposal_covers_in_label_order():
+    labels = {"P1": "Gizmo strike", "P2": "Gadget law", "T1": "TESTCO", "T2": "X"}
+    props = [
+        storylines.Proposed("A", "d", True, ("P2", "T2")),
+        storylines.Proposed("B", "d", False, ()),
+    ]
+    assert storylines.uncovered(props, labels) == ["P1", "T1"]
+    assert storylines.uncovered([], labels) == ["P1", "P2", "T1", "T2"]
+    assert storylines.uncovered(props, {}) == []
 
 
 # ---- the script ----------------------------------------------------------
@@ -225,6 +308,8 @@ def env(monkeypatch):
         "sent": [],
         "posts": [],
         "spend": [],
+        "long": [],
+        "long_ok": True,
     }
     monkeypatch.setattr(
         comprehend,
@@ -262,6 +347,12 @@ def env(monkeypatch):
         return 1
 
     monkeypatch.setattr(brief, "send_proposal", send)
+
+    def send_long(text, **kw):
+        state["long"].append(text)
+        return state["long_ok"]
+
+    monkeypatch.setattr(common, "telegram_send_long", send_long)
     monkeypatch.setattr(
         brief, "load_local_theses", lambda: {"TESTCO": "Widgets demand recovers"}
     )
@@ -275,7 +366,13 @@ def env(monkeypatch):
 
     def post(payload, **kw):
         state["posts"].append((payload, kw))
-        return _resp([_item("Widget tariffs"), _item("Gizmo strike", pinned=True)])
+        # labels: P1 Gizmo strike, T1 TESTCO, T2 OTHERCO (local, then pushed)
+        return _resp(
+            [
+                _item("Widget tariffs", covers=["T1", "T2"]),
+                _item("Gizmo strike", covers=["P1"]),
+            ]
+        )
 
     return seed, conn, state, post
 
@@ -293,13 +390,54 @@ def test_main_inserts_and_sends_each_proposal(env, capsys):
     # committed after the inserts and BEFORE the first send
     assert conn.events == ["add", "add", "commit", "send", "send"]
     payload, kw = state["posts"][0]
-    assert kw == {"timeout": 180, "max_attempts": 1, "label": "Seed"}
+    # ~40 storylines of output on Sonnet: 180 s was sized for ~20.
+    assert kw == {"timeout": 300, "max_attempts": 1, "label": "Seed"}
     assert payload["model"] == common.STORYLINE_UPDATE_MODEL
     text = payload["messages"][0]["content"]
     assert "OTHERCO" in text and "TESTCO" in text and "Gizmo strike" in text
     out = capsys.readouterr().out
-    assert "seed: proposed=2 sent=2 dropped=0" in out
+    assert "seed: proposed=2 sent=2 dropped=0 uncovered=0" in out
     assert "Widget tariffs" not in out and "Gizmo strike" not in out
+    assert state["sent"][0]["covers"] == ["TESTCO", "OTHERCO"]
+    assert state["long"] == [
+        "🧵 Every thesis and pinned subject has a proposed storyline."
+    ]
+
+
+def test_main_reports_uncovered_theses_and_pins_on_telegram_not_stdout(env, capsys):
+    seed, conn, state, _ = env
+    rc = seed.main(
+        [], post=lambda p, **kw: _resp([_item("Widget <tariffs>", covers=["T1"])])
+    )
+    assert rc == 0
+    (text,) = state["long"]
+    assert text.startswith("🧵 No proposed storyline covers:")
+    assert "\n- Gizmo strike" in text and "\n- OTHERCO" in text
+    assert "TESTCO" not in text
+    assert "/storyline add" in text
+    out = capsys.readouterr().out
+    assert "uncovered=2" in out
+    assert "OTHERCO" not in out and "Gizmo strike" not in out
+
+
+def test_main_escapes_names_in_the_coverage_line(env, monkeypatch):
+    seed, conn, state, _ = env
+    monkeypatch.setattr(brief, "resolved_pins", lambda fb: ["A <b> & B"])
+    seed.main([], post=lambda p, **kw: _resp([_item("S", covers=["T1", "T2"])]))
+    assert "- A &lt;b&gt; &amp; B" in state["long"][0]
+
+
+def test_main_failed_coverage_line_is_visible(env, capsys):
+    seed, conn, state, post = env
+    state["long_ok"] = False
+    assert seed.main([], post=post) == 1
+    assert "coverage line not sent" in capsys.readouterr().out
+
+
+def test_main_no_coverage_line_when_nothing_was_proposed(env):
+    seed, conn, state, _ = env
+    seed.main([], post=lambda p, **kw: {"stop_reason": "max_tokens", "content": []})
+    assert state["long"] == []
 
 
 def test_main_caps_max_count_by_headroom(env):
@@ -429,7 +567,7 @@ def test_main_failed_send_is_visible(env, monkeypatch, capsys):
     rc = seed.main([], post=post)
     out = capsys.readouterr().out
     assert rc == 1
-    assert "proposed=2 sent=1 dropped=0" in out
+    assert "proposed=2 sent=1 dropped=0 uncovered=0" in out
     assert "101" in out and "Widget tariffs" not in out
     assert conn.events.count("commit") == 1
     assert len(state["added"]) == 2
@@ -445,7 +583,7 @@ def test_main_raising_send_is_visible(env, monkeypatch, capsys):
     rc = seed.main([], post=post)
     out = capsys.readouterr().out
     assert rc == 1
-    assert "proposed=2 sent=0 dropped=0" in out
+    assert "proposed=2 sent=0 dropped=0 uncovered=0" in out
     assert "101" in out and "102" in out
     assert conn.events.count("commit") == 1
 

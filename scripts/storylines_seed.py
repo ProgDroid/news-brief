@@ -1,9 +1,10 @@
 """Draft the initial storylines and send them as proposals (news-brief-al7.3).
 
-Spec 10.5. Sonnet drafts about 20 storylines from the brief's topics, the
-pinned subjects, the operator's theses and the watch triggers. They are stored
-as `seed` proposals and sent to Telegram with Accept / Reject buttons. On the
-host:
+Spec 10.5. Sonnet drafts up to 40 storylines from the brief's topics, the
+pinned subjects, the operator's theses and the watch triggers, every pin and
+thesis first. They are stored as `seed` proposals and sent to Telegram with
+Accept / Reject buttons, followed by one line naming any pin or thesis that no
+proposal covers (al7.6). On the host:
 
     docker compose run --rm --entrypoint python newsbrief \
         scripts/storylines_seed.py [--again]
@@ -16,6 +17,7 @@ Never prints a storyline name or description.
 from __future__ import annotations
 
 import argparse
+import html
 import sys
 from pathlib import Path
 
@@ -89,19 +91,23 @@ def main(argv: list[str] | None = None, *, post=None) -> int:
             return 1
         live_names = [s.name for s in storyline_store.live_storylines(conn)]
         topics = [{"label": t["label"], "search": t["search"]} for t in brief.TOPICS]
+        pins = brief.resolved_pins(brief.load_feedback())
+        theses = _gather_theses()
+        labels = storylines.coverage_labels(pins, theses)
         payload = storylines.build_seed_request(
             topics,
-            brief.resolved_pins(brief.load_feedback()),
-            _gather_theses(),
+            pins,
+            theses,
             _gather_watch_lines(),
             live_names,
             model=model,
             max_count=max_count,
         )
-        resp = post(payload, timeout=180, max_attempts=1, label="Seed")
+        # ~40 storylines of Sonnet output (al7.6); 180 s was sized for ~20.
+        resp = post(payload, timeout=300, max_attempts=1, label="Seed")
         comprehend.record_spend(conn, "seed", model, resp.get("usage") or {})
         proposed, problems = storylines.validate_seed(
-            resp, max_count=max_count, live_names=live_names
+            resp, max_count=max_count, live_names=live_names, labels=labels
         )
         rows = []
         for p in proposed:
@@ -114,6 +120,7 @@ def main(argv: list[str] | None = None, *, post=None) -> int:
                     "name": p.name,
                     "description": p.description,
                     "pinned": p.pinned,
+                    "covers": [labels[c] for c in p.covers],
                 }
             )
         # Commit BEFORE sending, so a tap on a button can find its row.
@@ -127,13 +134,37 @@ def main(argv: list[str] | None = None, *, post=None) -> int:
         if not ok:
             unsent.append(row["id"])
     sent = len(rows) - len(unsent)
-    print(f"seed: proposed={len(rows)} sent={sent} dropped={len(problems)}")
+    gaps = storylines.uncovered(proposed, labels)
+    print(
+        f"seed: proposed={len(rows)} sent={sent} dropped={len(problems)} "
+        f"uncovered={len(gaps)}"
+    )
     for problem in problems:
         print(f"  {problem}")
+    coverage_sent = True
+    if rows:
+        coverage_sent = common.telegram_send_long(_coverage_text(gaps, labels))
+        if not coverage_sent:
+            print("  coverage line not sent")
     if unsent:
         print(f"  not sent (stored, still pending): ids {unsent}")
         return 1
+    if not coverage_sent:
+        return 1
     return 0 if rows else 1
+
+
+def _coverage_text(gaps: list[str], labels: dict[str, str]) -> str:
+    """The Telegram line that says which pins and theses no proposal covers, so
+    the operator never has to check the proposals against them (al7.6). Names
+    go to Telegram only, never to stdout."""
+    if not gaps:
+        return "🧵 Every thesis and pinned subject has a proposed storyline."
+    lines = "\n".join(f"- {html.escape(labels[g])}" for g in gaps)
+    return (
+        f"🧵 No proposed storyline covers:\n{lines}\n"
+        "Add one with /storyline add Name — description."
+    )
 
 
 if __name__ == "__main__":

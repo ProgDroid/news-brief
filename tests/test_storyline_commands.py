@@ -354,6 +354,21 @@ def test_send_proposal_marks_pinned(monkeypatch):
     assert cap["buttons"][0][0].endswith("d · 📌 pinned")
 
 
+def test_send_proposal_shows_what_it_covers_escaped(monkeypatch):
+    # al7.6: rejecting a proposal can uncover a thesis; the message says which.
+    cap = _wire(monkeypatch)
+    brief.send_proposal(
+        {"id": 1, "name": "N", "description": "d", "covers": ["TESTCO", "A&B"]}
+    )
+    assert cap["buttons"][0][0].endswith("d\nCovers: TESTCO, A&amp;B")
+
+
+def test_send_proposal_without_covers_has_no_covers_line(monkeypatch):
+    cap = _wire(monkeypatch)
+    brief.send_proposal({"id": 1, "name": "N", "description": "d", "covers": []})
+    assert "Covers" not in cap["buttons"][0][0]
+
+
 def test_storyline_is_in_bot_commands_and_help():
     assert ("storyline", "Storylines: list, add, retire") in brief.BOT_COMMANDS
     assert "/storyline" in brief.HELP_TEXT

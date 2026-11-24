@@ -4102,6 +4102,9 @@ def send_proposal(proposal: dict) -> int | None:
     )
     if proposal.get("pinned"):
         text += " · 📌 pinned"
+    if proposal.get("covers"):
+        # Rejecting a proposal can leave a thesis uncovered: say which (al7.6).
+        text += "\nCovers: " + ", ".join(html.escape(c) for c in proposal["covers"])
     pid = proposal["id"]
     rows = [
         [

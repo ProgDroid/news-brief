@@ -13,9 +13,11 @@ import requests
 from storyline_store import Storyline
 
 SEED_TOOL = "propose_storylines"
-SEED_MAX = 25
-# ~25 items of up to 80 + 400 characters is about 3-4k tokens; leave headroom.
-SEED_MAX_TOKENS = 8000
+# Room enough that pins, theses, topics and triggers fit without a merge
+# (news-brief-al7.6); still under STORYLINE_MAX_LIVE's default of 60.
+SEED_MAX = 40
+# ~40 items of up to 80 + 400 characters plus labels is ~6-7k tokens.
+SEED_MAX_TOKENS = 12000
 NAME_MAX = 80
 DESCRIPTION_MAX = 400
 
@@ -28,16 +30,22 @@ _SEED_SYSTEM = (
     "into one storyline, and a name that joins two subjects with 'and' is two "
     "storylines. An investment thesis or a watched trigger is not a storyline: "
     "cover it with the situation whose news would move it, and describe that "
-    "situation, not the trade. Draft about 20 storylines from the topics, the "
-    "pinned subjects, the investment theses and the watched triggers below; if "
-    "they need more situations than that, keep the ones that will draw the "
-    "most news and leave the rest out rather than merge them. Give each a "
-    f"short specific name of at most {NAME_MAX} characters and a description, "
-    f"of at most {DESCRIPTION_MAX} characters, of what is unfolding and what "
-    "kind of news counts as a development; anything longer is discarded. Set "
-    "pinned to true for any storyline that covers a pinned subject. Never "
-    "reuse a name from the existing storylines list. Call the tool once."
+    "situation, not the trade. Start with the pinned subjects (P1, P2, ...) "
+    "and the theses (T1, T2, ...) below: make sure each is covered by at least "
+    "one storyline (two may share one only when the same situation moves "
+    "both), and list in covers the labels of every pinned subject and thesis "
+    "a storyline covers. Then cover the topics and the watched triggers with "
+    "the room left. If the room runs out, leave out topic or trigger "
+    "situations rather than merge them; never leave out a pinned subject or a "
+    f"thesis. Give each a short specific name of at most {NAME_MAX} characters "
+    f"and a description, of at most {DESCRIPTION_MAX} characters, of what is "
+    "unfolding and what kind of news counts as a development; anything longer "
+    "is discarded. Never reuse a name from the existing storylines list. Call "
+    "the tool once."
 )
+
+PIN_PREFIX = "P"
+THESIS_PREFIX = "T"
 
 
 @dataclass(frozen=True)
@@ -45,6 +53,23 @@ class Proposed:
     name: str
     description: str
     pinned: bool
+    covers: tuple[str, ...] = ()
+
+
+def coverage_labels(pins: list[str], theses: dict[str, str]) -> dict[str, str]:
+    """label -> what it stands for: P1.. per pinned subject, T1.. per thesis key.
+
+    The seed answers in these labels, so coverage maps back exactly even when
+    the model rephrases a name."""
+    labels = {f"{PIN_PREFIX}{i}": p for i, p in enumerate(pins, 1)}
+    labels.update({f"{THESIS_PREFIX}{i}": k for i, k in enumerate(theses, 1)})
+    return labels
+
+
+def uncovered(proposed: list[Proposed], labels: dict[str, str]) -> list[str]:
+    """Labels no proposal covers, in label order."""
+    covered = {c for p in proposed for c in p.covers}
+    return [label for label in labels if label not in covered]
 
 
 def _bullets(lines: list[str]) -> str:
@@ -67,6 +92,20 @@ def build_seed_request(
     # answer of 22 items was dropped. Grammar-constrained sampling makes that
     # shape ungenerable. The strict subset 400s on maxItems/maxLength, so the
     # count lives in the prompt and every limit in validate_seed.
+    labels = coverage_labels(pins, theses)
+    item_props: dict = {
+        "name": {"type": "string"},
+        "description": {"type": "string"},
+    }
+    if labels:
+        # The enum makes an unknown label ungenerable. pinned is worked out
+        # from covering a P label (news-brief-al7.6), so the two cannot
+        # disagree. With nothing to cover the field goes: an empty enum is
+        # not a valid schema.
+        item_props["covers"] = {
+            "type": "array",
+            "items": {"type": "string", "enum": list(labels)},
+        }
     tool = {
         "name": SEED_TOOL,
         "description": "Propose the initial storylines.",
@@ -78,12 +117,8 @@ def build_seed_request(
                     "type": "array",
                     "items": {
                         "type": "object",
-                        "properties": {
-                            "name": {"type": "string"},
-                            "description": {"type": "string"},
-                            "pinned": {"type": "boolean"},
-                        },
-                        "required": ["name", "description", "pinned"],
+                        "properties": item_props,
+                        "required": list(item_props),
                         "additionalProperties": False,
                     },
                 }
@@ -92,13 +127,21 @@ def build_seed_request(
             "additionalProperties": False,
         },
     }
+    pin_lines = [
+        f"{lab}: {pin}" for lab, pin in labels.items() if lab.startswith(PIN_PREFIX)
+    ]
+    thesis_lines = [
+        f"{lab} {key}: {theses[key]}"
+        for lab, key in labels.items()
+        if lab.startswith(THESIS_PREFIX)
+    ]
     user = (
         "## TOPICS\n"
         + _bullets([f"{t.get('label', '')}: {t.get('search', '')}" for t in topics])
         + "\n\n## PINNED SUBJECTS\n"
-        + _bullets(list(pins))
+        + _bullets(pin_lines)
         + "\n\n## THESES\n"
-        + _bullets([f"{k}: {v}" for k, v in theses.items()])
+        + _bullets(thesis_lines)
         + "\n\n## WATCHED TRIGGERS\n"
         + _bullets(list(watch_lines))
         + "\n\n## EXISTING STORYLINES (do not reuse these names)\n"
@@ -117,8 +160,19 @@ def build_seed_request(
     }
 
 
+def _covers(value, labels: set[str]) -> tuple[str, ...]:
+    """Known labels only, first occurrence kept; anything else is ignored."""
+    if not isinstance(value, list):
+        return ()
+    out: list[str] = []
+    for c in value:
+        if isinstance(c, str) and c in labels and c not in out:
+            out.append(c)
+    return tuple(out)
+
+
 def validate_seed(
-    resp: dict, *, max_count: int, live_names: list[str]
+    resp: dict, *, max_count: int, live_names: list[str], labels=()
 ) -> tuple[list[Proposed], list[str]]:
     """(proposals, problems). Never raises on a bad answer; a bad item is
     dropped with one problem string, which never quotes the item's text."""
@@ -147,6 +201,7 @@ def validate_seed(
         stop = resp.get("stop_reason") if isinstance(resp, dict) else None
         return [], [f"no tool_use block (stop_reason={stop})"]
 
+    known = set(labels)
     seen = {n.strip().lower() for n in live_names}
     out: list[Proposed] = []
     problems: list[str] = []
@@ -171,7 +226,9 @@ def validate_seed(
             problems.append(f"item {i}: duplicate name")
             continue
         seen.add(name.lower())
-        out.append(Proposed(name, desc, entry.get("pinned") is True))
+        covers = _covers(entry.get("covers"), known)
+        pinned = any(c.startswith(PIN_PREFIX) for c in covers)
+        out.append(Proposed(name, desc, pinned, covers))
     return out, problems
 
 
