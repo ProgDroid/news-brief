@@ -84,10 +84,16 @@ def modal(post, **kw):
 
 def test_embed_text_strips_the_google_suffix_and_a_repeated_body():
     t = "Widget plant shut - Gizmo News Agency"
+    nbsp = "\u00a0"
     assert (
-        embed_text(t, "Widget plant shut  Gizmo News Agency", GOOGLE)
+        embed_text(t, f"Widget plant shut{nbsp}{nbsp}Gizmo News Agency", GOOGLE)
         == "Widget plant shut"
     )
+    assert (
+        embed_text(t, "Widget plant shut - Gizmo News Agency", GOOGLE)
+        == "Widget plant shut"
+    )
+    assert embed_text(t, "Widget plant shut", GOOGLE) == "Widget plant shut"
     assert embed_text(t, None, PLAIN) == t
     assert (
         embed_text(t, "Gizmo output fell.", GOOGLE)
@@ -95,9 +101,26 @@ def test_embed_text_strips_the_google_suffix_and_a_repeated_body():
     )
 
 
+def test_embed_text_keeps_a_real_lede_that_starts_with_the_headline():
+    out = embed_text(
+        "Widget plant shut - Gizmo", "Widget plant shut as orders fall", GOOGLE
+    )
+    assert out == "Widget plant shut\nWidget plant shut as orders fall"
+    # Same publisher words, but a real sentence after them: still a lede.
+    out = embed_text(
+        "Widget plant shut - Gizmo", "Widget plant shut Gizmo says orders fell", GOOGLE
+    )
+    assert "orders fell" in out
+
+
 def test_embed_text_never_empties_a_real_title():
+    # A title that is only a publisher segment: stripping would empty it.
     assert embed_text(" - Gizmo", None, GOOGLE) == "- Gizmo"
-    assert embed_text("    ", "body", GOOGLE) == ""
+    assert (
+        embed_text("- Gizmo", "Widget output fell.", GOOGLE)
+        == "- Gizmo\nWidget output fell."
+    )
+    assert embed_text("  \u00a0 ", "body", GOOGLE) == ""
 
 
 def test_embed_text_caps_on_a_word_boundary():
@@ -227,6 +250,16 @@ def test_modal_reply_with_another_prompt_version_is_bad_response():
     with pytest.raises(EmbedError) as ei:
         modal(Poster([reply])).embed(["x"], kind="document")
     assert ei.value.kind == "bad_response"
+
+
+@pytest.mark.parametrize("missing", ["runtime_s", "boot_s", "cold_start", "tokens"])
+def test_modal_reply_missing_a_billing_field_is_bad_response(missing):
+    reply = modal_reply(1)
+    del reply._body[missing]
+    with pytest.raises(EmbedError) as ei:
+        modal(Poster([reply])).embed(["x"], kind="document")
+    assert ei.value.kind == "bad_response"
+    assert ei.value.calls[-1].outcome == "failed"
 
 
 def test_modal_wrong_vector_count_is_bad_response():

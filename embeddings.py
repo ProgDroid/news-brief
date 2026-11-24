@@ -40,8 +40,6 @@ EMBED_PROMPT_VERSION = 1
 
 PROBLEM_MAX_CHARS = 300  # embedding_calls.problem is limited to this
 _GOOGLE_HOST = "news.google.com"
-_PUBLISHER_SEGMENT_MAX_CHARS = 40
-_PUBLISHER_SEGMENT_MAX_WORDS = 5
 
 
 # ---- text prep ----
@@ -59,17 +57,16 @@ def _is_google(url: str) -> bool:
         return False
 
 
-def _repeats_title(title: str, body: str) -> bool:
-    """The body is the title, optionally followed by one short publisher segment."""
+def _repeats_title(title: str, publisher: str, body: str) -> bool:
+    """The body only restates the title: it equals it, or equals it followed by the
+    publisher segment that was stripped from the title (Google joins the two with
+    no-break spaces, which normalisation has made one space, or with " - ").
+    Nothing looser: a real lede that starts with the headline must survive."""
     if body == title:
         return True
-    if not body.startswith(title):
-        return False
-    rest = body[len(title) :].strip(" -–—|:")
-    return (
-        bool(rest)
-        and len(rest) <= _PUBLISHER_SEGMENT_MAX_CHARS
-        and len(rest.split()) <= _PUBLISHER_SEGMENT_MAX_WORDS
+    return bool(publisher) and body in (
+        f"{title} {publisher}",
+        f"{title} - {publisher}",
     )
 
 
@@ -95,9 +92,13 @@ def embed_text(title: str, body: str | None, url: str) -> str:
     if _is_google(url):
         # Google appends " - <its own publisher name>", which is not our outlet's
         # name and gives every item from one wire a shared tail.
-        stripped = title.rsplit(" - ", 1)[0].strip() if " - " in title else title
+        # Pad so a title that is only a segment ("- Gizmo") still splits; that
+        # leaves nothing, and the unstripped title stands.
+        head, sep, publisher = f" {title}".rpartition(" - ")
+        stripped = head.strip() if sep else title
+        publisher = publisher.strip() if sep and stripped else ""
         stripped = stripped or title
-        if body and _repeats_title(stripped, body):
+        if body and _repeats_title(stripped, publisher, body):
             body = ""
         title = stripped
     text = f"{title}\n{body}" if body else title
@@ -321,10 +322,13 @@ class ModalEmbedder:
         if not isinstance(raw, list) or len(raw) != n:
             raise ValueError("vector count does not match the request")
         vecs = [_normalise(v, self.dim) for v in raw]
+        # All four are required: a silently-warm default would under-charge a cold start.
         runtime = float(body["runtime_s"])
-        boot = float(body.get("boot_s") or 0.0)
-        cold = bool(body.get("cold_start", False))
-        tokens = int(body.get("tokens") or 0)
+        boot = float(body["boot_s"])
+        cold = body["cold_start"]
+        if not isinstance(cold, bool):
+            raise ValueError("cold_start is not a boolean")
+        tokens = int(body["tokens"])
         # A cold start implies one billed idle tail when its container ends.
         usd = (runtime + (boot + self.idle_s if cold else 0.0)) * self.gpu_rate
         equiv = tokens * OPENAI_PRICES_PER_MTOK[OPENAI_EQUIVALENT_MODEL] / 1e6
