@@ -511,3 +511,95 @@ def groups_as_of(
         )
         for r in rows
     }
+
+
+# ---- calibration reads (scripts/embed_calibrate.py) ----
+
+
+def items_in_window(conn, *, since: datetime, until: datetime) -> list[PendingItem]:
+    """Items created in [since, until), oldest first."""
+    rows = conn.execute(
+        f"SELECT {_PENDING_COLS}"
+        " WHERE i.created_at >= %s AND i.created_at < %s"
+        " ORDER BY i.created_at, i.id",
+        (since, until),
+    ).fetchall()
+    return [PendingItem(*r) for r in rows]
+
+
+def item_vectors(conn, *, space: str, item_ids: Sequence[int]) -> dict[int, str]:
+    """item id -> its vector literal in `space`, for the items that have one."""
+    if not item_ids:
+        return {}
+    rows = conn.execute(
+        "SELECT item_id, embedding::text FROM item_embeddings"
+        " WHERE space = %s AND item_id = ANY(%s)",
+        (space, list(item_ids)),
+    ).fetchall()
+    return dict(rows)
+
+
+def nearest_items(
+    conn,
+    *,
+    space: str,
+    vector: str,
+    since: datetime,
+    until: datetime,
+    limit: int,
+    exclude_ids: Sequence[int] = (),
+) -> list[tuple[int, float]]:
+    """(item id, cosine similarity), best first, ties to the lower id: item-level
+    neighbours of `vector` among items created in [since, until) that have a
+    vector in `space`, without `exclude_ids`."""
+    rows = conn.execute(
+        "SELECT e.item_id, 1 - (e.embedding <=> %(vec)s::vector) AS sim"
+        " FROM item_embeddings e JOIN items i ON i.id = e.item_id"
+        " WHERE e.space = %(space)s AND i.created_at >= %(since)s"
+        " AND i.created_at < %(until)s AND NOT (e.item_id = ANY(%(ex)s))"
+        " ORDER BY e.embedding <=> %(vec)s::vector, e.item_id LIMIT %(limit)s",
+        {
+            "vec": vector,
+            "space": space,
+            "since": since,
+            "until": until,
+            "ex": list(exclude_ids),
+            "limit": limit,
+        },
+    ).fetchall()
+    return [(iid, float(sim)) for iid, sim in rows]
+
+
+def pair_similarities(
+    conn, *, space: str, pairs: Sequence[tuple[int, int]]
+) -> list[float | None]:
+    """Cosine similarity of each (item, item) pair in `space`, in order; None
+    where either item has no vector there."""
+    if not pairs:
+        return []
+    rows = conn.execute(
+        "SELECT 1 - (a.embedding <=> b.embedding)"
+        " FROM unnest(%(x)s::bigint[], %(y)s::bigint[]) WITH ORDINALITY AS p(x, y, n)"
+        " LEFT JOIN item_embeddings a ON a.item_id = p.x AND a.space = %(space)s"
+        " LEFT JOIN item_embeddings b ON b.item_id = p.y AND b.space = %(space)s"
+        " ORDER BY p.n",
+        {"x": [a for a, _ in pairs], "y": [b for _, b in pairs], "space": space},
+    ).fetchall()
+    return [None if r[0] is None else float(r[0]) for r in rows]
+
+
+def trigram_similarities(
+    conn, pairs: Sequence[tuple[str, str]], *, word: bool = False
+) -> list[float]:
+    """pg_trgm `similarity(a, b)` per pair, in order, or `word_similarity(a, b)`
+    (a found inside b) with `word`: the two functions grouping and retrieval use."""
+    if not pairs:
+        return []
+    fn = "word_similarity" if word else "similarity"
+    rows = conn.execute(
+        f"SELECT {fn}(p.a, p.b)"
+        " FROM unnest(%s::text[], %s::text[]) WITH ORDINALITY AS p(a, b, n)"
+        " ORDER BY p.n",
+        ([a for a, _ in pairs], [b for _, b in pairs]),
+    ).fetchall()
+    return [float(r[0]) for r in rows]

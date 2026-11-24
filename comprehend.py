@@ -465,15 +465,18 @@ def _chunk(seq, size):
 
 # $ per million tokens, (input, output). Source: the Anthropic model table
 # (claude-api skill, cached 2026-06-24), checked 2026-09-25; Haiku 5.5 checked
-# against the live pricing page 2026-10-10. Cache tokens use the documented
-# multipliers. A model missing from this table REFUSES to run (UnpricedModel):
-# pricing an unknown model at $0 would make the budget an accepted-and-inert
-# config the moment a settings row named a new model.
+# against the live pricing page 2026-10-10; Opus 5.5 and Sonnet 5.5 from the
+# pricing page 2026-11-24. Cache tokens use the documented multipliers. A
+# model missing from this table REFUSES to run (UnpricedModel): pricing an
+# unknown model at $0 would make the budget an accepted-and-inert config the
+# moment a settings row named a new model.
 PRICES_PER_MTOK: dict[str, tuple[float, float]] = {
     "claude-sonnet-5": (2.00, 10.00),
     "claude-haiku-4-5": (1.00, 5.00),
     "claude-haiku-4-5-20251001": (1.00, 5.00),
     "claude-haiku-5-5": (0.10, 0.50),
+    "claude-opus-5-5": (4.00, 20.00),
+    "claude-sonnet-5-5": (2.00, 10.00),
 }
 # Models priced by prompt length: (threshold, (input, output)) applies to EVERY
 # token of a request whose prompt -- input plus cache reads plus cache writes --

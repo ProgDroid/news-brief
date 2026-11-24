@@ -760,3 +760,83 @@ def test_candidates_below_the_pair_floor_are_filtered_in_sql(store):
     near = _vec_lit([0.6, 0.8, 0.0])  # cosine 0.6
     assert gs.candidate_groups(store, vector=near, min_similarity=0.7, **kw) == []
     assert len(gs.candidate_groups(store, vector=near, min_similarity=0.5, **kw)) == 1
+
+
+# ---- calibration reads (task 8) ----
+
+
+def _vec(conn, item_id, vec, space=SPACE):
+    gs.store_vectors(
+        conn,
+        space=space,
+        dim=len(vec),
+        rows=[(item_id, f"t{item_id}", embeddings.to_pg_vector(vec))],
+    )
+
+
+def test_nearest_items_ranks_within_the_window_and_space(store):
+    near = _item(store, "Widget near", T0)
+    far = _item(store, "Widget far", T0 + timedelta(minutes=1))
+    late = _item(store, "Widget late", T0 + timedelta(hours=5))
+    me = _item(store, "Widget me", T0 + timedelta(minutes=2))
+    other = _item(store, "Widget other space", T0 + timedelta(minutes=3))
+    _vec(store, near, [0.9, 0.1, 0.0])
+    _vec(store, far, [0.0, 1.0, 0.0])
+    _vec(store, late, [1.0, 0.0, 0.0])
+    _vec(store, me, A)
+    _vec(store, other, A, space="modal:other@3")
+    store.commit()
+
+    hits = gs.nearest_items(
+        store,
+        space=SPACE,
+        vector=embeddings.to_pg_vector(A),
+        since=T0,
+        until=T0 + timedelta(hours=1),
+        limit=10,
+        exclude_ids=[me],
+    )
+
+    # `late` is outside [since, until), `me` is excluded, `other` is another space.
+    assert [i for i, _ in hits] == [near, far]
+    assert hits[0][1] == pytest.approx(0.9 / math.sqrt(0.82), abs=1e-5)
+    assert hits[1][1] == pytest.approx(0.0, abs=1e-6)
+    limited = gs.nearest_items(
+        store,
+        space=SPACE,
+        vector=embeddings.to_pg_vector(A),
+        since=T0,
+        until=T0 + timedelta(minutes=1),  # until is exclusive: `far` is out
+        limit=10,
+    )
+    assert [i for i, _ in limited] == [near]
+
+
+def test_calibration_reads_items_vectors_and_similarities(store):
+    a = _item(store, "Widget plant opens", T0, outlet="Wire A")
+    b = _item(store, "Widget plant opens - Gizmo News", T0 + timedelta(minutes=1))
+    _item(store, "Widget outside", T0 + timedelta(days=8))
+    _vec(store, a, A)
+    _vec(store, b, [0.6, 0.8, 0.0])
+    store.commit()
+
+    items = gs.items_in_window(store, since=T0, until=T0 + timedelta(days=7))
+    assert [(i.id, i.outlet) for i in items] == [(a, "Wire A"), (b, "Test Wire")]
+
+    vecs = gs.item_vectors(store, space=SPACE, item_ids=[a, b])
+    assert embeddings.from_pg_vector(vecs[a]) == pytest.approx(A)
+    assert gs.item_vectors(store, space="modal:other@3", item_ids=[a]) == {}
+
+    sims = gs.pair_similarities(store, space=SPACE, pairs=[(a, b), (b, a), (a, 999)])
+    assert sims[0] == pytest.approx(0.6, abs=1e-5)
+    assert sims[1] == pytest.approx(0.6, abs=1e-5)
+    assert sims[2] is None  # no vector for 999: unknown, never 0
+
+    same, part = gs.trigram_similarities(
+        store, [("Widget plant", "Widget plant"), ("Widget", "Gizmo")]
+    )
+    assert same == pytest.approx(1.0) and part < 0.2
+    (word,) = gs.trigram_similarities(
+        store, [("plant", "the Widget plant opens")], word=True
+    )
+    assert word == pytest.approx(1.0)
