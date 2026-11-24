@@ -56,7 +56,8 @@ class Embedder:
         self.model = SentenceTransformer(
             EMBED_MODEL,
             cache_folder=MODELS_DIR,
-            model_kwargs={"torch_dtype": core.DTYPE_BY_GPU[EMBED_GPU]},
+            device="cpu",  # no torch.cuda probing inside the CPU-only snapshot
+            model_kwargs={"dtype": core.DTYPE_BY_GPU[EMBED_GPU]},
         )
         self.model.max_seq_length = core.MAX_SEQ_TOKENS
         self.native_dim = self.model.get_sentence_embedding_dimension()

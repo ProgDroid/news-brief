@@ -129,3 +129,50 @@ def test_max_inputs_agrees_with_the_client():
 def test_every_prompt_model_has_a_dtype_table_for_each_gpu():
     assert set(core.DTYPE_BY_GPU) == {"T4", "L4", "A10"}
     assert core.DTYPE_BY_GPU["T4"] == "float16"
+
+
+def test_client_request_round_trips_through_the_service_core():
+    seen = {}
+
+    class Resp:
+        status_code = 200
+
+        def __init__(self, body):
+            self._body = body
+
+        def json(self):
+            return self._body
+
+    def post(url, timeout, headers, json):
+        seen["payload"] = json
+        req = core.parse_request(json, served_model=QWEN, native_dim=2560)
+        assert not isinstance(req, str), req
+        prepared = core.prepare(req.texts, req.kind, req.model)
+        assert prepared == [INSTR + "Widget news"]
+        vecs = [[1.0] + [0.0] * (req.dim - 1) for _ in prepared]
+        reply = core.response(
+            model=req.model,
+            dim=req.dim,
+            vectors=vecs,
+            tokens=5,
+            runtime_s=0.1,
+            boot_s=2.0,
+            cold_start=True,
+        )
+        return Resp(reply)
+
+    emb = embeddings.ModalEmbedder(
+        "https://example.invalid/embed",
+        QWEN,
+        64,
+        key="k",
+        secret="s",
+        gpu_rate=0.0001,
+        idle_s=10,
+        timeout=5,
+        post=post,
+    )
+    vecs, calls = emb.embed(["Widget news"], kind="query")
+    assert vecs == [[1.0] + [0.0] * 63]
+    assert seen["payload"]["dim"] == 64
+    assert len(calls) == 1 and calls[0].outcome == "ok" and calls[0].cold_start is True

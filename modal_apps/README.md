@@ -58,3 +58,9 @@ transformers is at least 4.51, which Qwen3 requires.
 ## Not used
 
 GPU memory snapshots (alpha in Modal's docs on 2026-11-24). Only the CPU snapshot is on.
+
+## What `boot_s` is
+
+`boot_s` is the duration of the `snap=False` hook, the move of the model to CUDA. It is
+not the container's billed boot time (image start and snapshot restore are not in it),
+so it under-reports. Reconcile it against Modal's usage page at Rollout step 11.
