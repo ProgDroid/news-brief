@@ -19,6 +19,9 @@ consent-page error (§6.2), and the cost measures (§21.2).
 budget in dollars instead of a run count, measured model choice in plan 2's gate, and the floor
 gap stated (§21).
 
+**Synced to plan 1 as built, 2026-11-24:** §6.1, §16, §18, §21.2, §22 and §25 state the groups
+and embeddings layer as it runs.
+
 The repo is public. Nothing in this document, its tests or its fixtures names a holding, an
 amount, or the text of an operator thesis. §19 says where that material lives.
 
@@ -170,13 +173,47 @@ Grouping is by embedding similarity within a 72 h window, plus title trigram as 
 no model call per article (the retired comprehension step is not coming back). A group stays
 open for new members for 72 h.
 
+- **Order.** Items are assigned strictly by `(created_at, id)`, and assignment stops at the first
+  item with no vector yet. An outage delays grouping and never reorders it. `items (created_at,
+  id)` is indexed (0020) for this.
+- **The rule.** An item joins the best candidate group whose similarity reaches `join_sim`, or
+  reaches the lower `pair_sim` and also has a title similarity of at least `title_sim`. Ties go
+  to the lower group id. Candidates are filtered at `pair_sim` in the query, then limited to 50.
+- **Titles are cleaned first.** Grouping compares cleaned titles (`embeddings.clean_title`: the
+  Google News " - <Publisher>" suffix removed). The cleaned title is stored on
+  `item_group_members.title`. The embedded text is the cleaned title plus the summary, with a
+  body that only repeats the title dropped.
+- **Syndicated copy.** Identical text is one provider input and one vector per item, so the
+  copies land in one group.
+- **One bad item never stalls the queue.** An empty text, or an input the provider refuses when
+  sent alone, gets a row in `item_embed_skips`, and assignment passes over it. An item gets a
+  skip row only when another call in the same run succeeded; otherwise the fault is the
+  provider's or the config's, and the item waits.
+- **A failure that judged nothing retires nothing.** A timeout, a 429 or a 5xx is `transient` and
+  defers. A 401, 403 or 404, a missing URL or key, or any other 4xx is `config`. A reply of the
+  wrong shape is `bad_response`. The Modal service answers 409 for a contract mismatch (model,
+  dimension or prompt version), which maps to `config`, and 400 only for a malformed body.
+- **One pass at a time per space.** `group` and the backfill share an advisory lock named for the
+  space; the backfill exits 4 when `group` holds it.
+
 **Embeddings run on Modal** (operator, 2026-11-24), on a GPU, with a top open embedding model in
 the 4B–8B range (the builder picks it by a retrieval check on captured data; §25). Fly was
 considered and dropped: its GPUs were withdrawn on 2026-07-31, which caps it at small CPU models.
 
 - **One interface, two providers.** `EMBEDDING_PROVIDER` is `modal` or `openai`. Switching is a
-  settings change plus a re-embed job; it never needs code. Vectors are stored per model, so both
-  spaces can coexist while a re-embed runs, and retrieval uses the active model only.
+  settings change plus a re-embed **and a calibration** of the new space; it never needs code.
+  Vectors are stored per **space** (`provider:model@dim`), so spaces coexist while a re-embed
+  runs, and grouping and retrieval use the active space only. A space with no calibration row
+  embeds but does not assign: `group` reports `uncalibrated` naming the space, and the alert
+  rings.
+- **Thresholds live in `embedding_calibrations`, per space.** Each row holds `join_sim`,
+  `pair_sim`, `title_sim`, the weighted precision and recall they were chosen at, the judge
+  model, the week, and `EMBED_PROMPT_VERSION`; the newest row for a space is in force.
+  `retrieval_min_sim` is NULL until plan 2 fits it on real document queries; while it is NULL the
+  vector arm has no floor and only rank counts. The prompt version is also part of the
+  query-cache key.
+- **Vectors are a rebuildable cache.** `pg_dump` leaves out the data of `item_embeddings` and
+  `query_embeddings`; the tables stay in the dump. A restore is followed by a backfill.
 - **Cost is measured, not guessed, so the switch is a recognition decision.** The Modal endpoint
   returns its own runtime and whether the call cold-started; news-brief prices that at the
   configured GPU rate. OpenAI calls are priced from their token usage. The monthly cost line
@@ -184,9 +221,23 @@ considered and dropped: its GPUs were withdrawn on 2026-07-31, which caps it at 
 - **Privacy:** on Modal the text goes to the operator's own deployment. Switching to OpenAI sends
   article text and storyline query text (questions, constraints) to OpenAI; turning that setting
   on is the operator's decision, and §19 records it as the one exception.
-- **When the service is down,** `group` defers its work (a decision row, not a silent skip) and
-  retrieval falls back to trigram only. Nothing crashes the pipeline.
-- Thresholds are calibrated once on captured data and checked by the replay (§15.4).
+- **When the service is down,** `group` defers its work (a status, not a silent skip) and
+  retrieval falls back to trigram only, saying why. Nothing crashes the pipeline. A backlog older
+  than the alert threshold rings.
+- **Calibration** (`scripts/embed_calibrate.py`) runs once per candidate space on one captured
+  week. Each space is scored on its own neighbour pool; the judge (Opus) labels pairs under
+  opaque labels, never database ids, in real time. A distance band with fewer than 5 labelled
+  pairs is thin and excluded; a space whose bands are all thin is not reliable. The grouping bar
+  is weighted precision of at least 0.90 and recall of at least 0.60. Among spaces that meet it
+  the choice follows a pre-registered rule, and a `--gpu SPACE=GPU` flag supplies the GPU each
+  space runs on so the cheaper-GPU tie-break has data. Thresholds are checked later by the
+  replay (§15.4).
+- **The model pick** uses generated queries on that week (plan 1). `retrieval_min_sim` is fitted
+  in plan 2 on real document queries (questions, constraints, signposts), once documents exist.
+- **Backfill** (`scripts/embed_backfill.py`) embeds and groups every item for a space. It retires
+  a failed batch itself, so a rerun needs no hand-deleted state, and it never exits 0 with items
+  missing, except under `--max-items`. `--wait` is how long one run polls a batch (default
+  1800 s) before exiting 3.
 
 ### 6.2 Article text
 
@@ -480,7 +531,7 @@ before plan 3 (§21.1, which also schedules the gate across two months).
 
 | Job | When | Does |
 |---|---|---|
-| `group` (new) | every 15 min | embeds new items, joins or opens groups |
+| `group` (new) | every 30 min, behind `STORYLINE_GROUPING_ENABLED` | embeds new items, joins or opens groups |
 | `attach` (built, repurposed) | every 30 min | Haiku proposes candidates (§7.3) |
 | `alerts` (new) | every 30 min | §11 |
 | `editor` (new) | 01:30 candidates; pass 1 and pass 2 batches through the night; mid-day after a confirmed alert | §7 |
@@ -524,16 +575,23 @@ Designed for, not built now:
 | `STORYLINE_EDITOR_MAX_CANDIDATES` | 60 | §7.3 |
 | `STORYLINE_EDITOR_MAX_READS` | 5 | §7.2 |
 | `STORYLINE_GOOGLE_DECODE` / `STORYLINE_GOOGLE_DECODES_PER_NIGHT` | true / 30 | §6.2 fetch policy |
+| `STORYLINE_GROUPING_ENABLED` | false | runs `group` (§6.1); independent of `STORYLINES_ENABLED` |
+| `STORYLINE_GROUP_WINDOW_HOURS` | 72 | how far back a candidate group may reach (§6.1) |
 | `EMBEDDING_PROVIDER` | `modal` | `modal` or `openai` (§6.1) |
-| `EMBEDDING_MODEL` | builder's pick (§25) | per provider |
-| `EMBEDDING_MODAL_URL`, `EMBEDDING_GPU_RATE` | — | the endpoint, and the per-second rate it is priced at |
-| `STORYLINE_GROUP_WINDOW_HOURS` | 72 | §6.1 |
+| `EMBEDDING_MODAL_MODEL` | `Qwen/Qwen3-Embedding-4B` (provisional until calibration, §25) | the Modal model |
+| `EMBEDDING_OPENAI_MODEL` | `text-embedding-3-large` | the OpenAI model |
+| `EMBEDDING_DIM` | 1024 | stored width; part of the space id, so changing it opens a new space |
+| `EMBEDDING_MODAL_URL` | empty until deployed | the Modal endpoint |
+| `EMBEDDING_GPU_RATE` | 0.000164 (T4, USD per second) | the rate Modal calls are priced at |
+| `EMBEDDING_MODAL_IDLE_SECONDS` | 10 | must equal the Modal app's `scaledown_window`; a cold start is charged one idle tail |
+| `EMBEDDING_TIMEOUT` | 180 | seconds per request; a cold start loads several GB of weights |
 | `STORYLINE_MAX_LIVE` | 60 | as the 11-21 spec §5.2 |
 | `STORYLINE_DORMANT_DAYS` / `STORYLINE_RETIRE_OFFER_DAYS` | 14 / 60 | §12 |
 | `STORYLINE_SURGE_FACTOR` | 3 | §11 |
 
-Each is a `KNOBS` entry with its compose anchor line, resolved once per pass. Secrets (the Modal
-token, the OpenAI key) go in the environment, never in a settings row.
+Each is a `KNOBS` entry with its compose anchor line, resolved once per pass. Secrets
+(`MODAL_PROXY_KEY`, `MODAL_PROXY_SECRET`, `OPENAI_API_KEY`) go in the environment, never in a
+settings row.
 
 ## 19. Privacy
 
@@ -678,8 +736,8 @@ searches (plan 3).
 - **Modal:** GPU memory snapshots to shorten cold starts (Modal's own examples: about 20 s down to
   about 2 s; marked experimental, so measured before relying on it), and a short idle window. At a
   15-minute cadence a 20-minute window would keep the GPU on all day (roughly $400 a month on a
-  T4), so the window stays short and each call pays one cold start. `group` may move to every 30
-  minutes, in step with `attach` and `alerts`, to halve the wake-ups.
+  T4), so the window stays short and each call pays one cold start. `group` runs every 30 minutes,
+  in step with `attach` and `alerts`.
 - **Anthropic:** both editor passes and the hindsight judge go through the batch API. The system
   prompt and tool definitions are the same for every storyline, so they are cached inside each
   batch (cache reads on Sonnet and Opus cost 0.05× input; batch and cache discounts stack; cache
@@ -691,13 +749,23 @@ searches (plan 3).
 
 ## 22. Data model (for the plan to refine)
 
-Migration `0020`. Keeps `storylines` and `storyline_proposals` from `0019`. Every table has
-`created_at`; code never DELETEs.
+Plan 1 took migration `0020`; plan 2's tables are `0021`. Plan 1's tables, as built, all with
+`created_at`; code never DELETEs, and the down migration refuses while any row exists:
 
-- `item_embeddings` (item_id, model, dim, vector): several models may coexist (§6.1)
-- `embedding_calls` (provider, model, items, tokens, runtime_s, cold_start, cost)
-- `item_groups` (id, opened_at, closed_at, title, outlet_count, has_primary)
-- `item_group_members` (group_id, item_id, joined_at, similarity)
+- `item_embeddings` (item_id, space, text_hash, dim, embedding): one row per item per space
+- `item_embed_skips` (item_id, space, reason): items the provider can never embed
+- `query_embeddings` (text_hash, space, dim, embedding): the query-vector cache; the key includes
+  the prompt version
+- `embedding_calls` (provider, space, purpose `items|queries|backfill|calibration`, inputs, tokens,
+  runtime_s, boot_s, cold_start, batch, usd, openai_equivalent_usd, outcome, problem)
+- `embedding_calibrations` (space, join_sim, pair_sim, title_sim, retrieval_min_sim, weighted
+  precision and recall, pairs_labelled, prompt_version, judge_model, week_ending)
+- `item_groups` (id, space, opened_at, last_seen_at, title, outlet_count, has_primary)
+- `item_group_members` (item_id, space, group_id, joined_at, title, similarity, title_similarity)
+- an index on `items (created_at, id)`, and the spend stage `calibrate` in `comprehend_spend`
+
+Plan 2 and later (`0021`), keeping `storylines` and `storyline_proposals` from `0019`:
+
 - `storyline_runs` (id, storyline_id, kind `nightly|midday|first|replay`, started_at, landed_at,
   outcome `landed|failed|deferred`, reason, usage)
 - `storyline_candidates` (run_id, group_id, feeder `retrieval|attach|primary`, read_in_full)
@@ -766,7 +834,6 @@ Judged by the operator, against the briefs actually delivered:
 
 ## 25. Left to the builder
 
-The embedding model (picked by a retrieval check on captured data, 4B–8B, open), grouping
-thresholds, retrieval weighting, prompt wording, the extraction library for article text, the
-replay window's dates, how pgvector stores vectors of several dimensions, and table details within
-§22.
+The embedding model (picked by plan 1's calibration on captured data, 4B–8B, open), the
+retrieval floor `retrieval_min_sim` (fitted in plan 2), retrieval weighting, prompt wording, the extraction library for article text, the
+replay window's dates, and table details within §22.
