@@ -9,6 +9,13 @@ each page once, and reports counts per outlet. On the host:
     docker compose run --rm --entrypoint python newsbrief \
         scripts/storylines_fetch_probe.py [--per-outlet 15] [--days 7]
 
+Google News links are resolved to the publisher first: an older link embeds
+the URL in its id; a newer one is decoded through Google's own batchexecute
+call, with consent cookies so an EU host is not stopped at consent.google.com.
+`google_links` / `google_decoded` say how many were Google links and how many
+of those reached the publisher; an undecoded one is `google_unresolved`, never
+counted as a thin article.
+
 Prints outlet names and counts only: never a URL, a title or article text.
 Fetches run one at a time with a pause between them. Exit codes: 0 report
 printed, 2 nothing to probe (no items in the window).
@@ -18,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import json
 import re
 import statistics
 import sys
@@ -25,7 +33,7 @@ import time
 from collections import defaultdict
 from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
@@ -52,6 +60,85 @@ CATEGORIES = (
 
 GOOGLE_HOST = "news.google.com"
 _URL_IN_BYTES = re.compile(rb"https?://[\x21-\x7e]+")
+BATCHEXECUTE = "https://news.google.com/_/DotsSplashUi/data/batchexecute"
+# Google sends EU visitors to consent.google.com first; these cookies record
+# the choice so the article page itself is served (round 2 red team: every
+# fetch ended on consent.google.com, and the first probe counted that "thin").
+GOOGLE_COOKIES = {"CONSENT": "YES+cb", "SOCS": "CAI"}
+_SIG = re.compile(r'data-n-a-sg="([^"]+)"')
+_TS = re.compile(r'data-n-a-ts="([^"]+)"')
+_URL_IN_TEXT = re.compile(r"https?://[^\"\\\s]+")
+
+
+def is_google(url: str) -> bool:
+    host = urlparse(url).hostname or ""
+    return host == "google.com" or host.endswith(".google.com")
+
+
+def _article_id(url: str) -> str | None:
+    parsed = urlparse(url)
+    if parsed.hostname != GOOGLE_HOST:
+        return None
+    segment = parsed.path.rstrip("/").rsplit("/", 1)[-1]
+    return segment or None
+
+
+def signature_and_timestamp(html: str) -> tuple[str, str] | None:
+    sig, ts = _SIG.search(html), _TS.search(html)
+    return (sig.group(1), ts.group(1)) if sig and ts else None
+
+
+def batchexecute_body(article_id: str, timestamp: str, signature: str) -> str:
+    inner = (
+        '["garturlreq",[["X","X",["X","X"],null,null,1,1,"US:en",null,1,null,'
+        'null,null,null,null,0,1],"X","X",1,[1,1,1],1,1,null,0,0,null,0],'
+        f'"{article_id}",{timestamp},"{signature}"]'
+    )
+    return "f.req=" + quote(json.dumps([[["Fbv4je", inner, None, "generic"]]]))
+
+
+def parse_batchexecute(text: str) -> str | None:
+    """The publisher URL in a batchexecute reply, or None."""
+    _, _, rest = text.partition("\n\n")
+    try:
+        outer = json.loads(rest)
+        inner = json.loads(outer[0][2])
+        if isinstance(inner[1], str) and inner[1].startswith("http"):
+            return inner[1]
+    except Exception:
+        pass
+    match = _URL_IN_TEXT.search(rest.replace("\\/", "/"))
+    if match and not is_google(match.group(0)):
+        return match.group(0)
+    return None
+
+
+def resolve_google(url: str, get, post) -> str | None:
+    """The publisher URL behind a Google News link, by the old base64 id or
+    by the page signature plus Google's batchexecute call. None if neither."""
+    old = google_news_target(url)
+    if old:
+        return old
+    article_id = _article_id(url)
+    if not article_id:
+        return None
+    for page in (
+        f"https://{GOOGLE_HOST}/articles/{article_id}",
+        f"https://{GOOGLE_HOST}/rss/articles/{article_id}",
+    ):
+        try:
+            found = signature_and_timestamp(get(page).text or "")
+        except Exception:
+            found = None
+        if found:
+            break
+    else:
+        return None
+    try:
+        resp = post(BATCHEXECUTE, batchexecute_body(article_id, found[1], found[0]))
+    except Exception:
+        return None
+    return parse_batchexecute(resp.text or "")
 
 
 class _Paragraphs(HTMLParser):
@@ -112,7 +199,7 @@ def google_news_target(url: str) -> str | None:
 def classify(status: int | None, final_url: str, text: str) -> str:
     if status is None:
         return "error"
-    if urlparse(final_url).hostname == GOOGLE_HOST:
+    if is_google(final_url):
         return "google_unresolved"
     if status in (401, 402, 403, 429, 451):
         return "blocked"
@@ -123,15 +210,23 @@ def classify(status: int | None, final_url: str, text: str) -> str:
     return "thin" if text else "empty"
 
 
-def probe_one(url: str, get) -> tuple[str, int]:
-    """(category, paragraph characters) for one item's page."""
-    target = google_news_target(url) or url
+def probe_one(url: str, get, post=None) -> tuple[str, int, str]:
+    """(category, paragraph characters, google) for one item's page, where
+    google is "" for a non-Google link, else "decoded" or "undecoded"."""
+    google = ""
+    target = url
+    if is_google(url):
+        resolved = resolve_google(url, get, post) if post else google_news_target(url)
+        google = "decoded" if resolved else "undecoded"
+        if not resolved:
+            return "google_unresolved", 0, google
+        target = resolved
     try:
         resp = get(target)
     except Exception:
-        return "error", 0
+        return "error", 0, google
     text = paragraph_text(resp.text or "") if resp.status_code < 400 else ""
-    return classify(resp.status_code, resp.url or target, text), len(text)
+    return classify(resp.status_code, resp.url or target, text), len(text), google
 
 
 def _default_get(url: str):
@@ -141,7 +236,23 @@ def _default_get(url: str):
         url,
         timeout=FETCH_TIMEOUT,
         headers={"User-Agent": brief.SOURCE_USER_AGENT},
+        cookies=GOOGLE_COOKIES if is_google(url) else None,
         allow_redirects=True,
+    )
+
+
+def _default_post(url: str, body: str):
+    import requests
+
+    return requests.post(
+        url,
+        data=body,
+        timeout=FETCH_TIMEOUT,
+        headers={
+            "User-Agent": brief.SOURCE_USER_AGENT,
+            "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+        },
+        cookies=GOOGLE_COOKIES,
     )
 
 
@@ -162,32 +273,45 @@ def _sample_rows(days: int, per_outlet: int) -> list[tuple[str, str]]:
         return [(r[0], r[1]) for r in conn.execute(sql, (days, per_outlet))]
 
 
-def report(results: dict[str, list[tuple[str, int]]]) -> str:
-    head = ["outlet", "n", *CATEGORIES, "median_chars_usable"]
+GOOGLE_COLUMNS = ("google_links", "google_decoded")
+
+
+def report(results: dict[str, list[tuple[str, int, str]]]) -> str:
+    head = ["outlet", "n", *CATEGORIES, *GOOGLE_COLUMNS, "median_chars_usable"]
     lines = ["\t".join(head)]
     totals = defaultdict(int)
     for outlet in sorted(results):
         rows = results[outlet]
-        counts = {c: 0 for c in CATEGORIES}
-        for cat, _ in rows:
+        counts = {c: 0 for c in (*CATEGORIES, *GOOGLE_COLUMNS)}
+        for cat, _, google in rows:
             counts[cat] += 1
-            totals[cat] += 1
-        usable = [n for cat, n in rows if cat == "usable"]
+            if google:
+                counts["google_links"] += 1
+            if google == "decoded":
+                counts["google_decoded"] += 1
+        for key, value in counts.items():
+            totals[key] += value
+        usable = [n for cat, n, _ in rows if cat == "usable"]
         median = int(statistics.median(usable)) if usable else 0
         lines.append(
             "\t".join(
-                [outlet, str(len(rows)), *(str(counts[c]) for c in CATEGORIES)]
+                [outlet, str(len(rows))]
+                + [str(counts[c]) for c in (*CATEGORIES, *GOOGLE_COLUMNS)]
                 + [str(median)]
             )
         )
-    n = sum(totals.values())
+    n = sum(totals[c] for c in CATEGORIES)
     lines.append(
-        "\t".join(["TOTAL", str(n), *(str(totals[c]) for c in CATEGORIES), "-"])
+        "\t".join(
+            ["TOTAL", str(n)]
+            + [str(totals[c]) for c in (*CATEGORIES, *GOOGLE_COLUMNS)]
+            + ["-"]
+        )
     )
     return "\n".join(lines)
 
 
-def main(argv=None, *, rows=None, get=None, sleep=time.sleep) -> int:
+def main(argv=None, *, rows=None, get=None, post=None, sleep=time.sleep) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--per-outlet", type=int, default=15)
     parser.add_argument("--days", type=int, default=7)
@@ -198,11 +322,12 @@ def main(argv=None, *, rows=None, get=None, sleep=time.sleep) -> int:
         print(f"fetch probe: no items in the last {args.days} days")
         return 2
     get = get or _default_get
-    results: dict[str, list[tuple[str, int]]] = defaultdict(list)
+    post = post or _default_post
+    results: dict[str, list[tuple[str, int, str]]] = defaultdict(list)
     for i, (outlet, url) in enumerate(rows):
         if i:
             sleep(PAUSE_SECONDS)
-        results[outlet].append(probe_one(url, get))
+        results[outlet].append(probe_one(url, get, post))
     print(
         f"fetch probe: {len(rows)} items, {len(results)} outlets, "
         f"usable = at least {USABLE_CHARS} characters of paragraph text"
