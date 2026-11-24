@@ -180,7 +180,7 @@ skip is not a pass. Export a connection first, and check the run count moved:
 # is /var/lib/postgresql (NOT .../data — the image exits 1 on that path).
 # MSYS_NO_PATHCONV=1: Git Bash otherwise rewrites the mount path to C:/Program Files/Git/...
 MSYS_NO_PATHCONV=1 docker run --rm -d -p 5432:5432 --tmpfs /var/lib/postgresql \
-  -e POSTGRES_PASSWORD=newsbrief -e POSTGRES_USER=newsbrief -e POSTGRES_DB=newsbrief_test postgres:18-alpine
+  -e POSTGRES_PASSWORD=newsbrief -e POSTGRES_USER=newsbrief -e POSTGRES_DB=newsbrief_test pgvector/pgvector:0.8.7-pg18-trixie@sha256:ab49524d18df7200b74ac9a475e1db6297fc1eb57da4c214c63d10ecc4b754fa
 export DATABASE_URL="postgresql://newsbrief:newsbrief@localhost:5432/newsbrief_test"
 pytest tests/test_db.py -q   # must report runs, not "skipped"
 ```

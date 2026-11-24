@@ -15,7 +15,7 @@ pytestmark = pytest.mark.skipif(
     not db.is_configured(),
     reason="No database is configured: start a Postgres and export DATABASE_URL, e.g. "
     "docker run --rm -d -p 5432:5432 -e POSTGRES_PASSWORD=newsbrief "
-    "-e POSTGRES_USER=newsbrief -e POSTGRES_DB=newsbrief_test postgres:18-alpine",
+    "-e POSTGRES_USER=newsbrief -e POSTGRES_DB=newsbrief_test pgvector/pgvector:0.8.7-pg18-trixie",
 )
 
 
@@ -58,6 +58,7 @@ def test_up_creates_the_expected_tables(conn):
         "0017_census",
         "0018_thesis_evidence",
         "0019_storylines",
+        "0020_groups",
     ]
     assert {
         "schema_migrations",
@@ -97,6 +98,13 @@ def test_up_creates_the_expected_tables(conn):
         "storyline_proposals",
         "item_attach_decisions",
         "item_attachments",
+        "item_embeddings",
+        "item_embed_skips",
+        "query_embeddings",
+        "embedding_calls",
+        "embedding_calibrations",
+        "item_groups",
+        "item_group_members",
     } <= _tables(conn)
 
 

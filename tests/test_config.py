@@ -26,7 +26,7 @@ pytestmark = [
         not db.is_configured(),
         reason="No database is configured: start a Postgres and export DATABASE_URL, e.g. "
         "docker run --rm -d -p 5432:5432 -e POSTGRES_PASSWORD=newsbrief "
-        "-e POSTGRES_USER=newsbrief -e POSTGRES_DB=newsbrief_test postgres:18-alpine",
+        "-e POSTGRES_USER=newsbrief -e POSTGRES_DB=newsbrief_test pgvector/pgvector:0.8.7-pg18-trixie",
     ),
     # Opts this module out of conftest's suite-wide `config.chat_id` stub.
     # Everywhere else that stub is what keeps the suite infra-free; here it

@@ -17,7 +17,7 @@ pytestmark = pytest.mark.skipif(
     not db.is_configured(),
     reason="No database is configured: start a Postgres and export DATABASE_URL, e.g. "
     "docker run --rm -d -p 55432:5432 -e POSTGRES_PASSWORD=newsbrief "
-    "-e POSTGRES_USER=newsbrief -e POSTGRES_DB=newsbrief_test postgres:18-alpine",
+    "-e POSTGRES_USER=newsbrief -e POSTGRES_DB=newsbrief_test pgvector/pgvector:0.8.7-pg18-trixie",
 )
 
 
