@@ -114,21 +114,117 @@ def test_bar_marks_low_recall_unreliable():
     assert not ec.meets_bar(0.89, 0.99)
     # Through the scorer: precise, but most true pairs sit at 0.32 with titles
     # that never pass, so weighted recall is 0.5 / 0.85 = 0.59.
-    rows = [(0.90, 0.0, True)] * 3 + [(0.32, 0.0, True)] * 7 + [(0.32, 0.0, False)] * 3
+    # (Five or more labelled pairs per band, so no band is thin.)
+    rows = [(0.90, 0.0, True)] * 5 + [(0.32, 0.0, True)] * 7 + [(0.32, 0.0, False)] * 3
     score = ec.score_space(rows, natural={0: 100, 12: 100})
     assert score.precision == pytest.approx(1.0)
     assert score.recall == pytest.approx(0.5 / 0.85)
     assert not score.reliable
     assert "grouping unreliable" in score.verdict
     good = ec.score_space(
-        [(0.90, 0.0, True)] * 3 + [(0.32, 0.0, False)] * 3, natural={0: 1, 12: 1}
+        [(0.90, 0.0, True)] * 5 + [(0.32, 0.0, False)] * 5, natural={0: 1, 12: 1}
     )
     assert good.reliable and good.join_sim == 0.35
 
 
 def test_no_join_threshold_is_unreliable():
-    score = ec.score_space([(0.5, 0.5, False)] * 4, natural={4: 10})
+    score = ec.score_space([(0.5, 0.5, False)] * 5, natural={4: 10})
     assert score.join_sim is None and not score.reliable
+
+
+def test_thin_bands_are_left_out_and_reported():
+    # Band 12 has five labelled pairs; band 0 has four, which is thin.
+    rows = [(0.90, 0.0, True)] * 5 + [(0.32, 0.0, False)] * 4
+    score = ec.score_space(rows, natural={0: 900, 12: 100})
+    assert score.thin == (0.30,)
+    # The thin band is not weighted up: it is out of the sums, so the four
+    # negatives at 0.32 cannot pull precision at 0.30 down.
+    assert score.join_sim == 0.30
+    assert score.precision == pytest.approx(1.0)
+    assert ec.score_space(rows + [(0.32, 0.0, False)], {0: 900, 12: 100}).thin == ()
+
+
+A, B = "modal:a@8", "modal:b@8"
+
+
+def _pair(n, sim_a, sim_b, pools):
+    return {
+        "a": n,
+        "b": n + 1000,
+        "sims": {A: sim_a, B: sim_b},
+        "title_sim": 0.0,
+        "in_pool": list(pools),
+    }
+
+
+def test_each_space_is_scored_only_on_its_own_pool():
+    pairs = (
+        [_pair(n, 0.97, 0.10, [A]) for n in range(5)]
+        + [_pair(n, 0.32, 0.10, [A]) for n in range(10, 15)]
+        + [_pair(20, 0.97, 0.97, [A, B])]  # the one shared pair
+        # B-only pairs that A also rates 0.97: outside A's natural population.
+        + [_pair(n, 0.97, 0.97, [B]) for n in range(30, 35)]
+    )
+    labels = {f"{p['a']}-{p['b']}": "same" for p in pairs}
+    for n in range(10, 15):
+        labels[f"{n}-{n + 1000}"] = "different"
+    natural = {A: {0: 50, 13: 50}, B: {13: 10}}
+
+    def scores(lab):
+        out = {}
+        for space in (A, B):
+            rows, _ = ec.scoring_rows(pairs, lab, space)
+            out[space] = ec.score_space(rows, natural[space])
+        return out
+
+    before = scores(labels)
+    flipped = dict(labels, **{"30-1030": "different"})
+    after = scores(flipped)
+
+    assert after[A] == before[A]
+    assert before[A].labelled == 11  # its own 10 plus the shared one
+    assert before[B].labelled == 6
+    assert after[B] != before[B]  # the flip is real: B sees it
+
+
+def test_unclear_labels_are_excluded_from_every_metric():
+    pairs = [_pair(n, 0.97, 0.97, [A]) for n in range(6)] + [
+        _pair(n, 0.32, 0.32, [A]) for n in range(10, 16)
+    ]
+    labels = {f"{p['a']}-{p['b']}": "same" for p in pairs}
+    for n in range(10, 16):
+        labels[f"{n}-{n + 1000}"] = "different"
+    natural = {0: 50, 13: 50}
+    # One high pair the judge could not call. Counted as "different", it would
+    # drop precision at every threshold to 5/6.
+    with_unclear = dict(labels, **{"0-1000": "unclear"})
+    rows_u, unclear = ec.scoring_rows(pairs, with_unclear, A)
+    rows_x, none = ec.scoring_rows(pairs[1:], labels, A)  # the pair left out
+
+    assert unclear == 1 and none == 0
+    assert rows_u == rows_x
+    assert ec.score_space(rows_u, natural) == ec.score_space(rows_x, natural)
+    as_different = dict(labels, **{"0-1000": "different"})
+    rows_d, _ = ec.scoring_rows(pairs, as_different, A)
+    assert ec.score_space(rows_d, natural) != ec.score_space(rows_u, natural)
+
+
+def test_tie_break_never_moves_to_an_equal_or_dearer_space():
+    best_s, other = "modal:best@8", "modal:other@8"
+    best = [0.9, 0.5, 0.8, 0.6, 0.7, 0.9, 0.4, 0.8]
+    close = [0.8, 0.6, 0.8, 0.5, 0.8, 0.8, 0.5, 0.7]  # its interval holds 0
+    reliable = {best_s: True, other: True}
+    for gpus in (("L4", "L4"), ("T4", "L4"), ("L4", "A10")):
+        cost = ec.gpu_costs(
+            [best_s, other], [f"{best_s}={gpus[0]}", f"{other}={gpus[1]}"]
+        )
+        choice, _ = ec.recommend(reliable, {best_s: best, other: close}, cost)
+        assert choice == best_s, gpus
+    # Two OpenAI spaces cost the same (0): the best keeps it.
+    oa1, oa2 = "openai:x@8", "openai:y@8"
+    cost = ec.gpu_costs([oa1, oa2], [])
+    choice, _ = ec.recommend({oa1: True, oa2: True}, {oa1: best, oa2: close}, cost)
+    assert choice == oa1
 
 
 def test_ndcg_at_30():
@@ -609,3 +705,25 @@ def test_the_lexical_arm_is_judged_and_its_precision_reported(conn, capsys):
     constraint = [q for q in judged if q % 3 == 2]
     assert constraint and all(len(judged[q]) > 1 for q in constraint)
     assert re.search(r"precision=0\.\d\d", line)
+
+
+@needs_db
+def test_an_old_pairs_file_is_refused_and_labels_are_reused_by_pair_key(conn, capsys):
+    _seed(conn)
+    judge = FakeJudge()
+    assert ec.main(_args(), embedders=_embedders(), post=judge) == 0
+    capsys.readouterr()
+    path = _dir() / "pairs.json"
+    data = json.loads(path.read_text("utf-8"))
+    assert all(set(p["in_pool"]) <= {SPACE_A, SPACE_B} for p in data["pairs"])
+    assert any(p["in_pool"] for p in data["pairs"])
+    for p in data["pairs"]:
+        del p["in_pool"]  # the shape this file had before the fix
+    path.write_text(json.dumps(data), "utf-8")
+
+    assert ec.main(_args(), embedders=_embedders(), post=_no_post) == 2
+    assert "delete" in capsys.readouterr().out
+
+    path.unlink()  # the documented fix: the same seed re-draws the same pairs
+    assert ec.main(_args(), embedders=_embedders(), post=_no_post) == 0
+    assert "recommendation:" in capsys.readouterr().out

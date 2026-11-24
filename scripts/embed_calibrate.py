@@ -62,6 +62,7 @@ BAND_LO, BAND_STEP, N_BANDS = 0.30, 0.05, 14  # 0.30 .. 1.00
 GRID = [round(BAND_LO + BAND_STEP * i, 2) for i in range(N_BANDS)]  # 0.30 .. 0.95
 TITLE_GRID = [round(0.05 * i, 2) for i in range(1, 20)]  # 0.05 .. 0.95
 JOIN_PRECISION, PAIR_PRECISION = 0.95, 0.90
+MIN_BAND_LABELLED = 5  # fewer labelled in-pool pairs: the band is thin
 BAR_PRECISION, BAR_RECALL = 0.90, 0.60
 NEAR_DUP, SITUATIONS, PER_OUTLET = 0.8, 20, 2
 QUERY_STYLES = ("open_question", "actor_goal", "constraint")
@@ -174,23 +175,49 @@ class SpaceScore:
     labelled: int
     reliable: bool
     verdict: str
+    thin: tuple[float, ...] = ()  # lower edges of the bands left out
+
+
+def scoring_rows(pairs, labels: dict, space: str) -> tuple[list, int]:
+    """(rows, unclear) for one space: (similarity, title similarity, same) for
+    each labelled pair in THIS space's own neighbour pool, `unclear` left out
+    and counted. Pairs drawn only from another space's pool are not part of
+    this space's natural population, so its band weights would misprice them."""
+    rows, unclear = [], 0
+    for p in pairs:
+        if space not in p["in_pool"]:
+            continue
+        label = labels[f"{p['a']}-{p['b']}"]
+        if label == "unclear":
+            unclear += 1
+            continue
+        if p["sims"][space] is not None:
+            rows.append((p["sims"][space], p["title_sim"], label == "same"))
+    return rows, unclear
 
 
 def score_space(rows, natural: dict[int, int]) -> SpaceScore:
     """rows: (similarity in this space, title similarity, same event) per labelled
     pair, `unclear` already left out."""
     sims, tsims, truth = ([r[i] for r in rows] for i in range(3))
-    w = band_weights([band_of(s) for s in sims], natural)
+    bands = [band_of(s) for s in sims]
+    counts = Counter(b for b in bands if b is not None)
+    thin = {b for b, n in counts.items() if n < MIN_BAND_LABELLED}
+    # A thin band is left out of every weighted sum, never weighted up.
+    w = band_weights([None if b in thin else b for b in bands], natural)
+    edges = tuple(GRID[b] for b in sorted(thin))
     a = auc(sims, truth)
     join = join_threshold(sims, truth, w)
     found = grid_search(sims, tsims, truth, w, join=join) if join else None
     if found is None:
         why = "grouping unreliable (no join threshold reaches weighted precision 0.95)"
-        return SpaceScore(None, None, None, 0.0, 0.0, 0.0, a, len(rows), False, why)
+        return SpaceScore(
+            None, None, None, 0.0, 0.0, 0.0, a, len(rows), False, why, edges
+        )
     pair, title, p, r, f1 = found
     ok = meets_bar(p, r)
     verdict = "ok" if ok else "grouping unreliable"
-    return SpaceScore(join, pair, title, p, r, f1, a, len(rows), ok, verdict)
+    return SpaceScore(join, pair, title, p, r, f1, a, len(rows), ok, verdict, edges)
 
 
 def ndcg_at(rels, n_relevant: int, k: int = RANK_K) -> float:
@@ -688,6 +715,11 @@ def _pairs(conn, path: Path, meta, pools, target, items) -> dict:
             raise ValueError(
                 f"{path.name} was drawn for other --space/--pairs values: move the folder aside, or rerun with the same ones"
             )
+        if any("in_pool" not in p for p in data["pairs"]):
+            raise ValueError(
+                f"{path} predates per-space pools (no in_pool): delete it to"
+                " re-sample; labels already judged are reused by pair key"
+            )
         return data
     picked = sample_pairs(pools, target)
     titles = {it["id"]: it["title"] for it in items}
@@ -706,6 +738,9 @@ def _pairs(conn, path: Path, meta, pools, target, items) -> dict:
                 "b": b,
                 "sims": {s: sims[s][n] for s in pools},
                 "title_sim": tsims[n],
+                # The spaces whose own neighbour pool holds the pair: each space
+                # is scored on these only.
+                "in_pool": [s for s in pools if (a, b) in pools[s]],
             }
             for n, (a, b) in enumerate(picked)
         ],
@@ -751,30 +786,27 @@ def _own(sit: dict) -> set[int]:
 
 
 def _label_pairs(judge, path, pairs, texts) -> tuple[dict, int]:
-    done = {r["chunk"]: r for r in _read_jsonl(path) if "chunk" in r}
-    keys = [(p["a"], p["b"]) for p in pairs]
+    """Labels by pair key ("a-b"). A pair already labelled in any earlier run is
+    reused, so a re-drawn pairs.json judges only its new pairs."""
+    labels: dict[str, str] = {}
+    for r in _read_jsonl(path):
+        labels.update(r.get("labels") or {})
+    todo = [(p["a"], p["b"]) for p in pairs if f"{p['a']}-{p['b']}" not in labels]
     pending = 0
-    for c in range(0, len(keys), PAIR_CHUNK):
-        if c // PAIR_CHUNK in done:
-            continue
-        payload, labels = pair_request(judge.model, keys[c : c + PAIR_CHUNK], texts)
+    for c in range(0, len(todo), PAIR_CHUNK):
+        payload, chunk = pair_request(judge.model, todo[c : c + PAIR_CHUNK], texts)
         resp, usd = judge.ask(payload)
         try:
             if resp is None:
                 raise JudgeError("no reply")
-            got = parse_pair_labels(resp, labels)
+            got = parse_pair_labels(resp, chunk)
         except JudgeError as exc:
             print(f"pair chunk {c // PAIR_CHUNK}: {exc}")
             pending += 1
             continue
-        rec = {
-            "chunk": c // PAIR_CHUNK,
-            "labels": {f"{a}-{b}": v for (a, b), v in got.items()},
-            "usd": usd,
-        }
+        rec = {"labels": {f"{a}-{b}": v for (a, b), v in got.items()}, "usd": usd}
         _append(path, rec)
-        done[rec["chunk"]] = rec
-    labels = {k: v for r in done.values() for k, v in r["labels"].items()}
+        labels.update(rec["labels"])
     return labels, pending
 
 
@@ -1097,19 +1129,9 @@ def main(argv=None, *, embedders=None, post=None) -> int:
             )
             return EXIT_PENDING
 
-        unclear = sum(1 for v in labels.values() if v == "unclear")
-        scores = {}
+        scores, unclear = {}, {}
         for sp in spaces:
-            rows = [
-                (
-                    p["sims"][sp.space],
-                    p["title_sim"],
-                    labels[f"{p['a']}-{p['b']}"] == "same",
-                )
-                for p in data["pairs"]
-                if labels[f"{p['a']}-{p['b']}"] != "unclear"
-                and p["sims"][sp.space] is not None
-            ]
+            rows, unclear[sp.space] = scoring_rows(data["pairs"], labels, sp.space)
             natural = {int(b): n for b, n in data["natural"][sp.space].items()}
             scores[sp.space] = score_space(rows, natural)
         retr, n_q = _retrieval_scores(ranks, pools_q, judged)
@@ -1117,13 +1139,22 @@ def main(argv=None, *, embedders=None, post=None) -> int:
         def f(x):
             return "none" if x is None else f"{x:.2f}"
 
+        def thin(edges):
+            return "|".join(f"{e:.2f}" for e in edges) or "none"
+
+        print(
+            f"each space is scored on its own pool's pairs; a band with fewer than"
+            f" {MIN_BAND_LABELLED} of them is thin and left out of wP and wR"
+        )
+
         for sp in spaces:
             s, (nd, rec) = scores[sp.space], retr[sp.space]
             mean_nd = sum(nd) / len(nd) if nd else math.nan
             print(
                 f"space={sp.space} join={f(s.join_sim)} pair={f(s.pair_sim)} title={f(s.title_sim)}"
                 f" wP={s.precision:.2f} wR={s.recall:.2f} wF1={s.f1:.2f} auc={s.auc:.2f}"
-                f" labelled={s.labelled} unclear={unclear} verdict={s.verdict}"
+                f" labelled={s.labelled} unclear={unclear[sp.space]}"
+                f" thin={thin(s.thin)} verdict={s.verdict}"
                 f" ndcg30={mean_nd:.3f} recall30={rec:.3f} queries={n_q}"
             )
         lex_hits = [(q, i) for q, ids in lex.items() for i in ids]
