@@ -139,6 +139,11 @@ def dump_command(parts: dict, target: Path) -> list[str]:
         # source, which is exactly the case success criterion 10 exercises.
         "--no-owner",
         "--no-privileges",
+        # Vectors are a cache, rebuilt from the items by scripts/embed_backfill.py
+        # in about an hour. Dumped as text at ~10 KB a row they would multiply
+        # every nightly dump, with 14 kept. The tables themselves stay.
+        "--exclude-table-data=item_embeddings",
+        "--exclude-table-data=query_embeddings",
         "--file",
         str(target),
     ]

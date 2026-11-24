@@ -102,6 +102,15 @@ def test_dump_command_carries_connection_but_not_password(tmp_path):
     assert "--format=custom" in cmd
 
 
+def test_backup_excludes_embedding_data(tmp_path):
+    cmd = bk.dump_command(_parts(), tmp_path / "newsbrief-2026-09-01.dump")
+    assert "--exclude-table-data=item_embeddings" in cmd
+    assert "--exclude-table-data=query_embeddings" in cmd
+    # Data only: the schema of both tables is still dumped, so a restore has them.
+    assert "--exclude-table=item_embeddings" not in cmd
+    assert "--exclude-table=query_embeddings" not in cmd
+
+
 def test_dump_env_carries_password_and_keeps_environ(monkeypatch):
     monkeypatch.setenv("SOME_UNRELATED", "kept")
     env = bk.dump_env(_parts())

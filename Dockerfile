@@ -54,18 +54,17 @@ COPY migrations/ ./migrations/
 COPY enrichment/ ./enrichment/
 COPY labeller_static/ ./labeller_static/
 
-# TEMPORARY (news-brief-115) — added 2026-09-05 so the pre-registered
-# comprehension gate can be run against production data from inside the
-# container:
+# news-brief-115: no longer temporary. Added 2026-09-05 for the comprehension
+# gate; it now has standing consumers, all run from inside the container:
 #
-#   docker compose run --rm --entrypoint python newsbrief scripts/score_comprehension.py
+#   docker compose run --rm --entrypoint python newsbrief scripts/embed_backfill.py ...
+#   docker compose run --rm --entrypoint python newsbrief scripts/embed_calibrate.py ...
+#   docker compose run --rm --entrypoint python newsbrief scripts/storylines_fetch_probe.py
+#   docker compose run --rm --entrypoint python newsbrief scripts/brief_cost.py
 #
-# It is here ONLY for that measurement. `scripts/` is otherwise deliberately
-# absent from this allowlist: nothing in it is runtime code, the supervisor
-# never invokes it, and the three older scripts have always been run from a
-# checkout. Once bqa.4b's gate numbers are recorded, delete this line —
-# news-brief-115 exists to make sure that happens rather than leaving a
-# widened image surface nobody remembers widening.
+# They are the embedding backfill, the calibration, the fetch probe and
+# brief_cost. Nothing in `scripts/` is runtime code and the supervisor never
+# invokes it; do not remove this line without moving those four elsewhere.
 COPY scripts/ ./scripts/
 
 # Logs and brief archive persist via volume mount. Run as a real non-root user
