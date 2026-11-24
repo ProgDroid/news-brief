@@ -13,15 +13,19 @@ embeddings on Modal with OpenAI as a settings switch (§6.1), a measured article
 editor's retrieval (§15). A second red team (`…-redteam-r2.md`) recommended stopping rounds; its
 fixes are applied: a judge pool of every group with a pinned, frozen judge (§15.2), a 60-tap audit
 (§15.4), runs per night as the cost unit with its own setting (§18, §21), the probe's Google
-consent-page error (§6.2), and the cost measures (§21.1).
+consent-page error (§6.2), and the cost measures (§21.2).
+
+**Approved** by the operator 2026-11-24. The cost pass (§21) followed the same day: an editor
+budget in dollars instead of a run count, measured model choice in plan 2's gate, and the floor
+gap stated (§21).
 
 The repo is public. Nothing in this document, its tests or its fixtures names a holding, an
 amount, or the text of an operator thesis. §19 says where that material lives.
 
 **Designed for quality first, priced last** (operator, 2026-11-24: "designing around cost isn't
 working"), and **built at the target quality, without trial steps at lower quality** (operator,
-same day). One exception was forced by the red team: the editor's shape sets cost by 10–40×, so
-it was chosen now (§7.2, §21).
+same day). One exception was forced by the red team: a multi-turn loop cost 2–6× the two-pass
+shape on the same model and could not batch, so the shape was chosen now (§7.2, §21).
 
 ## 1. Why this revision exists
 
@@ -253,7 +257,8 @@ sources it watches:
 
 - **Nightly, after the candidate check.** At 01:30 UTC the candidate lists are built for every
   `active` **and** `dormant` storyline (§7.3). Every storyline with at least one candidate, or a
-  calendar entry due in 2 days or passed without an outcome, gets a run. Pinned first.
+  calendar entry due in 2 days or passed without an outcome, gets a run, up to the night's count
+  from the editor budget, in the order §18 gives (`STORYLINE_EDITOR_BUDGET_USD`, §21).
 - States land before the 04:30 brief submit; a storyline whose run has not landed is rendered from
   its last state (§7.5).
 - **Mid-day runs** follow a confirmed alert (§11), in real time, so the flash brief and the next
@@ -350,6 +355,8 @@ The 11-21 spec §7 stands, with these changes:
    outcomes against their set-ups ("held as expected", "surprise: …").
 4. **The claimed-headline block** lists the groups each run cited, with outlets and vantages.
 5. **Feedback** (§14) comes in a short follow-up message, not inside the brief's text.
+6. **Not updated:** one line naming each storyline whose nightly run was skipped by the budget
+   (§21) or failed, with the date of its last landed run, so a stale state is never silent.
 
 *Moved* means a landed run since the previous brief's submit that cited at least one group or
 recorded a calendar outcome.
@@ -465,8 +472,9 @@ The hindsight judge is independent of everything it scores: retrieval, attach an
 ### 15.5 Use
 
 Every change to the editor's prompt, model, feeders or retrieval reruns the replay on the same
-window and reports before and after. It is the regression test, and its cost is priced in the
-cost pass (§21).
+window and reports before and after, against the frozen rulings. It is the regression test. A
+rerun covers the fixed 15-storyline subset; the full window runs again only for a judge change or
+before plan 3 (§21.1, which also schedules the gate across two months).
 
 ## 16. Schedule
 
@@ -506,10 +514,12 @@ Designed for, not built now:
 | `STORYLINE_BRIEF_ENABLED` | false | §10 |
 | `STORYLINE_ALERTS_ENABLED` | false | §11 |
 | `STORYLINE_WEEKLY_ENABLED` | false | §12 weekly |
-| `STORYLINE_EDITOR_MODEL` | set in the cost pass | both passes, mid-day runs |
-| `STORYLINE_JUDGE_MODEL` | set once, then pinned | the hindsight judge (§15.2); changing it re-judges |
-| `STORYLINE_MAX_RUNS_PER_NIGHT` | set in the cost pass | nightly runs, pinned first, then calendar due, then most candidates; the rest keep their last state and their groups stay unclaimed |
-| `STORYLINE_ALERT_MODEL` | set in the cost pass | §11 checks |
+| `STORYLINE_EDITOR_MODEL` | `claude-sonnet-5-5` (confirmed or changed by plan 2's gate, §21) | both passes, mid-day runs |
+| `STORYLINE_JUDGE_MODEL` | `claude-opus-5-5`, then pinned | the hindsight judge (§15.2); changing it re-judges |
+| `STORYLINE_EDITOR_BUDGET_USD` | 60 (a month) | sets each night's run count (§21); order: pinned, calendar due, then nights since the last landed run × candidates; the rest keep their last state, their groups stay unclaimed, and the brief says so (§10) |
+| `STORYLINE_MAX_RUNS_PER_NIGHT` | 60 | hard bound on the count the budget gives |
+| `STORYLINE_MAX_MIDDAY_RUNS_PER_DAY` | 4 | past it, the alert still sends and says the state updates tonight |
+| `STORYLINE_ALERT_MODEL` | `claude-haiku-5-5` | §11 checks |
 | `STORYLINE_ATTACH_MODEL` | `claude-haiku-5-5` | the attach feeder |
 | `STORYLINE_EDITOR_MAX_CANDIDATES` | 60 | §7.3 |
 | `STORYLINE_EDITOR_MAX_READS` | 5 | §7.2 |
@@ -561,27 +571,97 @@ The 11-21 spec §13 stands, and adds:
 | §17 success | replaced by §24 |
 | §18 build order | replaced by §23 |
 
-## 21. Cost (the pass after approval)
+## 21. Cost (pass of 2026-11-24)
 
-Priced in the next step, against the floor (£20 a month) and the ceiling (the free API-credit
-allowance, about $100). **The unit is runs per night, priced at the bound:** the design runs every
-storyline with a candidate, dormant ones included, and the attach feeder alone puts about 277
-items a day on storylines, so expect most of the 60 to run most nights unless
-`STORYLINE_MAX_RUNS_PER_NIGHT` caps it. Rough figures so far, all estimates:
+Against the floor (£20 a month, about $25) and the ceiling (the free Anthropic API-credit
+allowance, about $100). Prices from the platform pricing page, 2026-11-24, per million tokens:
+Opus 5.5 $4 in / $20 out, Sonnet 5.5 $2 / $10, Haiku 5.5 $0.10 / $0.50 (prompts up to 100,000
+tokens). The batch API halves both and stacks with caching. Web search is $10 per 1,000.
 
-- **Editor, two passes, batch:** about $45 a month on Sonnet 5.5 and $90 on Opus 5.5 at 20 runs a
-  night; about $135 and $270 at 60 (the red team's scaling of the same per-run figures). The
-  multi-turn loop was $186–588 at 20, which is why it is out.
-- **Embeddings:** Modal on a T4 GPU, about $10–15 a month, mostly model loading at each wake-up,
-  probably inside Modal's $30 monthly credit; OpenAI, under $1 a month. Measured once running
-  (§6.1).
-- **The brief** is ~$9 or ~$19 a month (two measurements disagree; `brief_cost.py` settles it).
+**Per editor run** (estimate; plan 2 replaces it with the measured `storyline_runs.usage`).
+Pass 1: about 14k tokens in (system and tools 3k, document 4k, context 2k, 60 candidates 5k) and
+1.5k out with thinking. Pass 2: the same plus 5 reads of about 2.5k (26.5k in), 6k out. Batch:
 
-The dials, roughly in order of size: the editor's model; `STORYLINE_MAX_RUNS_PER_NIGHT`;
-candidates per run and reads per run; the alert check's model; how often the replay runs; the
-brief's web searches.
+| Editor model | Per run | 20 runs a night, a month | 40 | 60 |
+|---|---|---|---|---|
+| Haiku 5.5 | $0.004 | $2 | $5 | $7 |
+| Sonnet 5.5 | $0.078 | $47 | $94 | $140 |
+| Opus 5.5 | $0.156 | $94 | $187 | $281 |
 
-### 21.1 Cost measures built in (not dials)
+The design runs every storyline with a candidate, dormant ones included, so the run count is
+close to the live count (the seed proposes up to 40; the live count is known at re-seed).
+
+**Other lines, a month** (estimates unless marked):
+
+- **The brief: $19, measured** (`brief_cost.py` over 82 days, $0.64 a day). The earlier $9 came
+  from 3 days.
+- **Attach feeder,** Haiku, real time: about $1.50 (about 790 items a day).
+- **Alert checks,** Haiku, real time: about $4 (about 277 checks a day of about 3k tokens).
+- **Mid-day runs,** real time, twice the batch price: $0.16 each on Sonnet. At most 4 a day
+  (`STORYLINE_MAX_MIDDAY_RUNS_PER_DAY`): at most $19, about $5 at one a day.
+- **Embeddings:** Modal $10–15, inside Modal's own monthly credit, not the Anthropic allowance;
+  OpenAI under $1 (§6.1).
+
+### 21.1 The configuration
+
+**At the ceiling (the default).** The editor runs on Sonnet 5.5 with a budget in dollars, not a
+run count: `STORYLINE_EDITOR_BUDGET_USD` = 60 a month. Each night's run count is the budget ÷ 30
+÷ the mean cost of a landed run over the last 7 nights (the estimate above until 7 nights are
+measured), bounded by `STORYLINE_MAX_RUNS_PER_NIGHT`. At $0.078 a run that is 25 runs a night.
+The order is pinned, calendar due, then nights since the last landed run × candidates, so no
+storyline starves; one skipped tonight is named in the brief with its last landed date (§10).
+The job logs the count it derived and why.
+
+| Line | Expected | Worst case |
+|---|---|---|
+| Editor (25 runs a night) | $58.50 | $58.50 |
+| Brief | $19 | $19 |
+| Mid-day runs | $5 | $19 |
+| Alerts | $4 | $4 |
+| Attach | $1.50 | $1.50 |
+| **Total** | **about $88** | **about $102** |
+
+**Why Sonnet, not Opus:** the same $60 buys Opus about 12 runs a night, so with 40 storylines
+each is updated about every third night. Whether Opus's documents are better by enough to pay
+that is measured in plan 2's gate (below), not assumed.
+
+**At the floor, if the allowance goes:** the editor on Haiku 5.5 for every storyline every night
+($7), alerts $4, attach $1.50, embeddings on OpenAI $1, the brief $19: **about $33. The design
+misses the floor by about $8, and the gap is the brief**, which alone is three quarters of the
+floor. Without the brief, the storylines layer costs about $14 at the floor. Plan 3 replaces the
+brief's input (claimed and unclaimed groups instead of raw headlines and web searches); the floor
+is re-priced there with `brief_cost.py`, and the brief's own dials (its model, its web searches)
+get settings then. Everything else at the floor is a settings change: `STORYLINE_EDITOR_MODEL`,
+`STORYLINE_EDITOR_BUDGET_USD`, `EMBEDDING_PROVIDER`.
+
+**Choosing the editor model by measurement (plan 2's gate).** The frozen judge (§15.2) makes a
+second model cheap to score. The replay runs the production budget logic, so a full-window replay
+runs as many storylines a night as production would (25 on Sonnet at $60), never all of them. The
+gate is spread across **two months of allowance** (operator, 2026-11-24), choosing the model first:
+
+| Month | Replays | Estimate |
+|---|---|---|
+| 1 | The judge rules the window once, frozen (Opus) | $34 |
+| 1 | Sonnet, Opus and Haiku on a fixed subset: 15 storylines (every pinned one, the rest drawn once at random), the window's first 14 days, 210 runs each | $16 + $33 + $1 |
+| 1 | **Month 1 total**, plus the brief's $19 | **about $84 + $19** |
+| 2 | The chosen model over the full 30-day window under the production budget, plus first runs: the gate against the operator's bars | about $61 on Sonnet (750 runs); $56 on Opus; $3 on Haiku |
+| 2 | **Month 2 total**, plus the brief's $19 | **at most about $61 + $19** |
+
+The cheapest model that clears the operator's bars on the subset is chosen; Opus only if it
+clears a bar Sonnet misses. Haiku's subset scores also say, before it is ever needed, how good the
+floor configuration is. The editor stays off in production (`STORYLINES_ENABLED` false) while the
+gate runs, so the replays and the brief are the month's only Anthropic spend.
+
+The replay command takes a required `--max-usd`, stops once its measured spend reaches it, and
+resumes where it stopped on the next invocation, so a replay can straddle a month boundary
+without overspending one month. A rerun after a change replays the subset on the chosen model
+only (about $16 on Sonnet); the full window runs again only for a judge change or before plan 3.
+
+The dials, roughly in order of size: the editor's model; `STORYLINE_EDITOR_BUDGET_USD`;
+candidates per run and reads per run; the mid-day cap; how often the replay runs; the brief's web
+searches (plan 3).
+
+### 21.2 Cost measures built in (not dials)
 
 - **Embed each text once:** by the item's content hash, so syndicated copies with identical text
   share one vector.
@@ -600,10 +680,12 @@ brief's web searches.
   15-minute cadence a 20-minute window would keep the GPU on all day (roughly $400 a month on a
   T4), so the window stays short and each call pays one cold start. `group` may move to every 30
   minutes, in step with `attach` and `alerts`, to halve the wake-ups.
-- **Anthropic:** both editor passes and the hindsight judge go through the batch API. Pass 2
-  repeats pass 1's input, and the system prompt and tool definitions are the same for every
-  storyline, so both are cached (cache reads cost a tenth of input; batch and cache discounts
-  stack, cache hits inside a batch are best-effort). The attach feeder is not cached: at 30-minute
+- **Anthropic:** both editor passes and the hindsight judge go through the batch API. The system
+  prompt and tool definitions are the same for every storyline, so they are cached inside each
+  batch (cache reads on Sonnet and Opus cost 0.05× input; batch and cache discounts stack; cache
+  hits inside a batch are best-effort). Pass 2's copy of pass 1's input is **not** cached: the
+  passes are separate batches, a 5-minute cache expires between them, and a 1-hour write costs
+  2× input, which the read in pass 2 does not quite pay back. The attach feeder is not cached: at 30-minute
   spacing a 5-minute cache expires between calls and a 1-hour cache costs double to write.
 - **Frozen judge rulings** (§15.2): a rerun of the replay pays for the editor only.
 
