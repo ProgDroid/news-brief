@@ -270,7 +270,7 @@ In compose, the comment above `image:` says three things: the swap is from `post
 - `group_store.py` adds:
   - `query_vector(conn, *, space, text_hash) -> str | None` and `store_query_vector(conn, *, space, dim, text_hash, vector) -> None`.
   - `vector_hits(conn, *, space, vector: str, since: datetime, as_of: datetime, min_similarity: float, limit: int) -> list[tuple[int, float]]` gives `(group_id, best similarity)`. It considers only members with `since < joined_at ≤ as_of`.
-  - `lexical_hits(conn, *, space, query: str, since, as_of, min_score: float, limit: int) -> list[tuple[int, float]]`. The score is `word_similarity(member title, query)`, so a short title found inside a long query scores high.
+  - `lexical_hits(conn, *, space, query: str, since, as_of, min_score: float, limit: int) -> list[tuple[int, float]]`. The score is `word_similarity(item_group_members.title, query)`, so a short title found inside a long query scores high. That column holds the cleaned title, with the Google " - Publisher" stripped (Task 4 fix round 1, `embeddings.clean_title`).
   - `groups_as_of(conn, *, group_ids: Sequence[int], as_of: datetime) -> dict[int, GroupView]`, where `GroupView(group_id, title, outlets: tuple[str, ...], outlet_count, perspectives: tuple[str, ...], has_primary, first_seen, last_seen, item_ids: tuple[int, ...])` is computed **only from members with `joined_at ≤ as_of`**.
 - `retrieval.py`:
   - `RRF_K = 60`, `LEXICAL_MIN = 0.5` (provisional; Task 8 reports the lexical arm's precision), `PER_QUERY_LIMIT = 50`.
