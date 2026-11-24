@@ -368,8 +368,9 @@ def test_a_first_boot_inside_a_grace_window_runs_nothing(clean_db):
         "capture",
         "comprehend",
         "attach",
+        "group",
     }, (
-        "an empty ledger runs all five immediately; if that stops being true the "
+        "an empty ledger runs all six immediately; if that stops being true the "
         "seed is guarding nothing and this fixture time is wrong"
     )
 
