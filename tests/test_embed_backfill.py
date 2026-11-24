@@ -492,8 +492,9 @@ def test_a_failed_line_leaves_its_items_unembedded_and_a_rerun_resubmits_only_th
 
     rc = eb.main(OPENAI_ARGS + ["--no-group"], post=api.post, get=api.get)
 
-    assert rc == 0
-    assert "failed_lines=1" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert rc == 1  # two items are still missing: never "done"
+    assert "failed_lines=1" in out and "missing=2" in out
     assert _count(conn, "item_embeddings") == 2
     failed = conn.execute(
         "SELECT outcome, usd FROM embedding_calls WHERE outcome = 'failed'"
@@ -519,7 +520,9 @@ def test_a_failed_batch_exits_1_keeps_state_and_prints_counts_only(
     assert rc == 1
     assert "status=failed" in out and "error_lines=3" in out
     path, state = _state(data_dir)
-    assert path.exists() and state["batches"][0]["done"] is False
+    assert path.exists() and state["batches"] == []
+    (old,) = state["history"]
+    assert old["status"] == "failed" and old["id"] == "batch-0" and old["seen_at"]
     assert _count(conn, "item_embeddings") == 0
 
 
@@ -552,3 +555,72 @@ def test_space_slug_keeps_only_safe_characters():
         "openai_text-embedding-3-large_1024"
     )
     assert eb.space_slug("a/b c") == "a_b_c"
+
+
+def test_a_failed_batch_is_retired_and_the_next_run_resubmits_what_is_missing(
+    conn, data_dir, monkeypatch
+):
+    monkeypatch.setattr(eb, "BATCH_CHUNK", 2)
+    for n in range(1, 4):
+        _item(conn, n)
+    api = StubOpenAI(statuses=["failed"])
+    assert eb.main(OPENAI_ARGS + ["--no-group"], post=api.post, get=api.get) == 1
+    assert len(api.posts) == 2
+
+    api2 = StubOpenAI()
+    rc = eb.main(OPENAI_ARGS + ["--no-group"], post=api2.post, get=api2.get)
+
+    assert rc == 0
+    (lines,) = api2.inputs.values()  # a new upload...
+    assert sum(len(ln["body"]["input"]) for ln in lines) == 3  # ...for the missing
+    assert _count(conn, "item_embeddings") == 3
+    _, state = _state(data_dir)
+    assert len(state["history"]) == 1  # the history survives the fresh state
+
+
+def test_a_run_with_items_still_missing_never_exits_0(
+    conn, data_dir, monkeypatch, capsys
+):
+    monkeypatch.setattr(eb, "BATCH_CHUNK", 2)
+    for n in range(1, 5):
+        _item(conn, n)
+    api = StubOpenAI(fail_chunks={"chunk-0"})
+    assert eb.main(OPENAI_ARGS + ["--no-group"], post=api.post, get=api.get) == 1
+    assert "missing=2" in capsys.readouterr().out
+    # An explicit --max-items cap is the operator's own limit: it only reports.
+    api2 = StubOpenAI(fail_chunks={"chunk-0"})
+    rc = eb.main(
+        OPENAI_ARGS + ["--no-group", "--max-items", "2"], post=api2.post, get=api2.get
+    )
+    assert rc == 0 and "missing=" in capsys.readouterr().out
+    # Control: once everything is embedded the same call is 0 and prints no count.
+    api3 = StubOpenAI()
+    assert eb.main(OPENAI_ARGS + ["--no-group"], post=api3.post, get=api3.get) == 0
+    assert eb.main(OPENAI_ARGS + ["--no-group"], post=api3.post, get=api3.get) == 0
+    assert "missing=" not in capsys.readouterr().out
+
+
+def test_a_rerun_after_a_crash_after_commit_does_not_double_record_spend(
+    conn, data_dir, monkeypatch
+):
+    monkeypatch.setattr(eb, "BATCH_CHUNK", 2)
+    for n in range(1, 5):
+        _item(conn, n)
+    api = StubOpenAI()
+    real = eb._save_state
+
+    def crash_once_a_batch_is_done(path, state):
+        if any(b["done"] for b in state["batches"]):
+            raise RuntimeError("crash after the commit")
+        real(path, state)
+
+    monkeypatch.setattr(eb, "_save_state", crash_once_a_batch_is_done)
+    with pytest.raises(RuntimeError):
+        eb.main(OPENAI_ARGS + ["--no-group"], post=api.post, get=api.get)
+    assert _count(conn, "item_embeddings") == 4  # committed
+    assert _count(conn, "embedding_calls") == 2
+    monkeypatch.setattr(eb, "_save_state", real)
+
+    assert eb.main(OPENAI_ARGS + ["--no-group"], post=api.post, get=api.get) == 0
+    assert _count(conn, "embedding_calls") == 2  # one row per chunk, not four
+    assert len(api.posts) == 2  # and nothing was resubmitted

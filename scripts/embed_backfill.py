@@ -35,6 +35,7 @@ import os
 import re
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -377,7 +378,14 @@ def _call(embedder, n: int, tokens: int, ok: bool) -> CallRecord:
 def _collect(conn, embedder, batch: dict, text: str, *, space, dim) -> dict:
     """Store what a completed batch's output holds. Lines that failed (an error,
     a bad shape, a missing chunk) leave their items without vectors."""
-    out = {"embedded": 0, "reused": 0, "failed": 0, "calls": 0, "usd": 0.0}
+    out = {
+        "embedded": 0,
+        "reused": 0,
+        "failed": 0,
+        "already_stored": 0,
+        "calls": 0,
+        "usd": 0.0,
+    }
     rows, calls, seen = [], [], set()
     for raw in text.splitlines():
         if not raw.strip():
@@ -405,6 +413,14 @@ def _collect(conn, embedder, batch: dict, text: str, *, space, dim) -> dict:
         except (KeyError, TypeError, ValueError, AttributeError):
             out["failed"] += 1
             calls.append(_call(embedder, len(chunk), 0, False))
+            continue
+        # A rerun after a crash between the commit and the state write sees a
+        # chunk whose vectors are all stored: its spend is already recorded.
+        have = gs.items_with_vectors(
+            conn, space=space, item_ids=[i for _, ids in chunk for i in ids]
+        )
+        if all(i in have for _, ids in chunk for i in ids):
+            out["already_stored"] += 1
             continue
         for (h, ids), vec in zip(chunk, vecs):
             lit = to_pg_vector(vec)
@@ -455,10 +471,23 @@ def _poll(conn, embedder, state_path, state, *, space, dim, get, sleep, wait) ->
                             headers=headers,
                         )
                     )
+                # Retire it: the next run sees no batch in flight and resubmits
+                # what is still missing, with nothing for the operator to delete.
+                state["batches"].remove(b)
+                state.setdefault("history", []).append(
+                    {
+                        "id": b["id"],
+                        "input_file_id": b["input_file_id"],
+                        "inputs": b["inputs"],
+                        "status": status,
+                        "seen_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+                _save_state(state_path, state)
                 print(
                     f"batch {b['id']} ({n}/{total}) status={status}"
-                    f" error_lines={n_err}; {state_path} is kept: remove it to"
-                    " resubmit what is still missing"
+                    f" error_lines={n_err}; retired to history in {state_path.name}:"
+                    " the next run resubmits what is still missing"
                 )
                 return EXIT_ERROR
             if status != "completed":
@@ -480,7 +509,8 @@ def _poll(conn, embedder, state_path, state, *, space, dim, get, sleep, wait) ->
             print(
                 f"batch {b['id']} ({n}/{total}) completed:"
                 f" embedded={res['embedded']} reused={res['reused']}"
-                f" failed_lines={res['failed']} calls={res['calls']}"
+                f" failed_lines={res['failed']}"
+                f" already_stored={res['already_stored']} calls={res['calls']}"
                 f" usd={res['usd']:.4f}"
             )
         left = [b for b in state["batches"] if not b["done"]]
@@ -514,7 +544,13 @@ def _run_batch(conn, embedder, ns, *, space, dim, post, get, sleep) -> int:
         if est > ns.max_usd:
             print("refused: the estimate is above --max-usd; nothing was submitted")
             return EXIT_USAGE
-        state = {"space": space, "model": embedder.model, "dim": dim, "batches": []}
+        state = {
+            "space": space,
+            "model": embedder.model,
+            "dim": dim,
+            "batches": [],
+            "history": (state or {}).get("history", []),
+        }
         _save_state(state_path, state)
         _submit(embedder, state_dir, state, todo, texts, by_hash, post)
     else:
@@ -627,6 +663,16 @@ def main(argv=None, *, embedder=None, post=None, get=None, sleep=time.sleep) -> 
                 return exc.code
             if rc == EXIT_OK and not ns.no_group:
                 _group(conn, space)
+            if rc == EXIT_OK:
+                # Never report done while items still lack a vector (a failed
+                # line, a failed submit). An explicit --max-items cap is the
+                # operator's own limit, so it only reports.
+                missing = len(gs.items_missing_vectors(conn, space=space, limit=10**9))
+                conn.commit()
+                if missing:
+                    print(f"missing={missing}")
+                    if not ns.max_items:
+                        return EXIT_ERROR
             return rc
     finally:
         conn.close()

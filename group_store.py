@@ -110,6 +110,17 @@ def items_missing_vectors(
     return [PendingItem(*r) for r in rows]
 
 
+def items_with_vectors(conn, *, space: str, item_ids: Sequence[int]) -> set[int]:
+    """Of `item_ids`, those that already have a vector in `space`."""
+    if not item_ids:
+        return set()
+    rows = conn.execute(
+        "SELECT item_id FROM item_embeddings WHERE space = %s AND item_id = ANY(%s)",
+        (space, list(item_ids)),
+    ).fetchall()
+    return {r[0] for r in rows}
+
+
 def record_skip(conn, *, space: str, item_id: int, reason: str) -> None:
     conn.execute(
         "INSERT INTO item_embed_skips (item_id, space, reason) VALUES (%s, %s, %s)"
