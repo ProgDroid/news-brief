@@ -640,6 +640,9 @@ def main(argv=None, *, embedder=None, post=None, get=None, sleep=time.sleep) -> 
                 conn.rollback()
                 print(f"busy: another pass holds {space}")
                 return EXIT_BUSY
+            # The database's clock, taken before any work: items captured after
+            # it are the live job's, not this run's.
+            run_started = conn.execute("SELECT clock_timestamp()").fetchone()[0]
             conn.commit()
             try:
                 if ns.openai_batch:
@@ -667,8 +670,15 @@ def main(argv=None, *, embedder=None, post=None, get=None, sleep=time.sleep) -> 
                 # Never report done while items still lack a vector (a failed
                 # line, a failed submit). An explicit --max-items cap is the
                 # operator's own limit, so it only reports.
-                missing = len(gs.items_missing_vectors(conn, space=space, limit=10**9))
+                missing = len(
+                    gs.items_missing_vectors(
+                        conn, space=space, limit=10**9, created_before=run_started
+                    )
+                )
+                later = len(gs.items_missing_vectors(conn, space=space, limit=10**9))
                 conn.commit()
+                if later - missing:
+                    print(f"captured_during_run={later - missing}")
                 if missing:
                     print(f"missing={missing}")
                     if not ns.max_items:

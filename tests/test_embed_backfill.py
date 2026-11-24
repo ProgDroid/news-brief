@@ -624,3 +624,33 @@ def test_a_rerun_after_a_crash_after_commit_does_not_double_record_spend(
     assert eb.main(OPENAI_ARGS + ["--no-group"], post=api.post, get=api.get) == 0
     assert _count(conn, "embedding_calls") == 2  # one row per chunk, not four
     assert len(api.posts) == 2  # and nothing was resubmitted
+
+
+def test_items_captured_during_the_run_do_not_fail_it(conn, data_dir, capsys):
+    _item(conn, 1)
+    api = StubOpenAI()
+    real_post = api.post
+    live = db.connect()
+
+    def post(url, **kw):
+        resp = real_post(url, **kw)
+        if url.endswith("/files"):  # the live capture job writes mid-run
+            outlet = conn.execute("SELECT id FROM outlets LIMIT 1").fetchone()[0]
+            live.execute(
+                "INSERT INTO items (outlet_id, url, title, content_hash, created_at)"
+                " VALUES (%s, 'https://example.test/late', 'Gizmo late', 'hlate',"
+                " clock_timestamp())",
+                (outlet,),
+            )
+            live.commit()
+        return resp
+
+    try:
+        rc = eb.main(OPENAI_ARGS + ["--no-group"], post=post, get=api.get)
+    finally:
+        live.close()
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "captured_during_run=1" in out and "missing=" not in out
+    assert _count(conn, "item_embeddings") == 1  # the late item is not this run's

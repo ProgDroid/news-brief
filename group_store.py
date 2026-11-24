@@ -94,18 +94,31 @@ def record_calls(conn, calls: Sequence[CallRecord], *, purpose: str) -> None:
 
 
 def items_missing_vectors(
-    conn, *, space: str, limit: int, item_ids: Sequence[int] | None = None
+    conn,
+    *,
+    space: str,
+    limit: int,
+    item_ids: Sequence[int] | None = None,
+    created_before: datetime | None = None,
 ) -> list[PendingItem]:
     """Items with neither a vector nor a skip row in `space`, oldest first. With
-    `item_ids`, only those items are considered."""
+    `item_ids`, only those items are considered; with `created_before`, only
+    those created at or before it."""
     only = " AND i.id = ANY(%(ids)s)" if item_ids is not None else ""
+    if created_before is not None:
+        only += " AND i.created_at <= %(before)s"
     rows = conn.execute(
         f"SELECT {_PENDING_COLS}"
         " WHERE NOT EXISTS (SELECT 1 FROM item_embeddings e"
         " WHERE e.item_id = i.id AND e.space = %(space)s)"
         f" AND {_NOT_SKIPPED}{only}"
         " ORDER BY i.created_at, i.id LIMIT %(limit)s",
-        {"space": space, "limit": limit, "ids": list(item_ids or [])},
+        {
+            "space": space,
+            "limit": limit,
+            "ids": list(item_ids or []),
+            "before": created_before,
+        },
     ).fetchall()
     return [PendingItem(*r) for r in rows]
 
