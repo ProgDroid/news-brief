@@ -326,3 +326,149 @@ def write_calibration(conn, cal: Calibration) -> None:
             cal.week_ending,
         ),
     )
+
+
+# ---- retrieval ----
+
+
+@dataclass(frozen=True)
+class GroupView:
+    """A group as it stood at `as_of`: every field comes from the members that
+    had joined by then, never from the stored (current) group row."""
+
+    group_id: int
+    title: str
+    outlets: tuple[str, ...]
+    outlet_count: int
+    perspectives: tuple[str, ...]
+    has_primary: bool
+    first_seen: datetime
+    last_seen: datetime
+    item_ids: tuple[int, ...]
+
+
+def query_vector(conn, *, space: str, text_hash: str) -> str | None:
+    row = conn.execute(
+        "SELECT embedding::text FROM query_embeddings"
+        " WHERE space = %s AND text_hash = %s",
+        (space, text_hash),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def store_query_vector(
+    conn, *, space: str, dim: int, text_hash: str, vector: str
+) -> None:
+    conn.execute(
+        "INSERT INTO query_embeddings (text_hash, space, dim, embedding)"
+        " VALUES (%s, %s, %s, %s::vector) ON CONFLICT DO NOTHING",
+        (text_hash, space, dim, vector),
+    )
+
+
+def vector_hits(
+    conn,
+    *,
+    space: str,
+    vector: str,
+    since: datetime,
+    as_of: datetime,
+    min_similarity: float | None,
+    limit: int,
+) -> list[tuple[int, float]]:
+    """(group_id, best cosine similarity), best first. A group qualifies through
+    any member with `since < joined_at <= as_of`. `min_similarity` None means no
+    floor: only rank counts."""
+    rows = conn.execute(
+        "SELECT m.group_id, max(1 - (e.embedding <=> %(vec)s::vector)) AS sim"
+        " FROM item_group_members m"
+        " JOIN item_embeddings e ON e.item_id = m.item_id AND e.space = m.space"
+        " WHERE m.space = %(space)s AND m.joined_at > %(since)s"
+        " AND m.joined_at <= %(as_of)s"
+        " GROUP BY m.group_id"
+        " HAVING %(floor)s::float8 IS NULL"
+        " OR max(1 - (e.embedding <=> %(vec)s::vector)) >= %(floor)s::float8"
+        " ORDER BY sim DESC, m.group_id LIMIT %(limit)s",
+        {
+            "vec": vector,
+            "space": space,
+            "since": since,
+            "as_of": as_of,
+            "floor": min_similarity,
+            "limit": limit,
+        },
+    ).fetchall()
+    return [(gid, float(sim)) for gid, sim in rows]
+
+
+def lexical_hits(
+    conn,
+    *,
+    space: str,
+    query: str,
+    since: datetime,
+    as_of: datetime,
+    min_score: float,
+    limit: int,
+) -> list[tuple[int, float]]:
+    """(group_id, best word_similarity of a member's cleaned title inside the
+    query), best first. The title is the first argument, so a short title found
+    inside a long query scores high."""
+    rows = conn.execute(
+        "SELECT m.group_id, max(word_similarity(m.title, %(q)s)) AS score"
+        " FROM item_group_members m"
+        " WHERE m.space = %(space)s AND m.joined_at > %(since)s"
+        " AND m.joined_at <= %(as_of)s"
+        " GROUP BY m.group_id"
+        " HAVING max(word_similarity(m.title, %(q)s)) >= %(min)s"
+        " ORDER BY score DESC, m.group_id LIMIT %(limit)s",
+        {
+            "q": query,
+            "space": space,
+            "since": since,
+            "as_of": as_of,
+            "min": min_score,
+            "limit": limit,
+        },
+    ).fetchall()
+    return [(gid, float(score)) for gid, score in rows]
+
+
+def groups_as_of(
+    conn, *, group_ids: Sequence[int], as_of: datetime
+) -> dict[int, GroupView]:
+    """Each group as it stood at `as_of`, from members with `joined_at <= as_of`
+    only. A group with no such member is absent. The stored outlet_count,
+    last_seen_at and has_primary are current, not as-of, and are never read."""
+    if not group_ids:
+        return {}
+    rows = conn.execute(
+        "SELECT m.group_id,"
+        " (array_agg(m.title ORDER BY m.joined_at, m.item_id))[1],"
+        " array_agg(DISTINCT o.name ORDER BY o.name),"
+        " count(DISTINCT o.id),"
+        " array_agg(DISTINCT o.perspective ORDER BY o.perspective)"
+        " FILTER (WHERE o.perspective IS NOT NULL),"
+        " bool_or(o.kind = 'primary'),"
+        " min(m.joined_at), max(m.joined_at),"
+        " array_agg(m.item_id ORDER BY m.joined_at, m.item_id)"
+        " FROM item_group_members m"
+        " JOIN items i ON i.id = m.item_id JOIN outlets o ON o.id = i.outlet_id"
+        " WHERE m.group_id = ANY(%s) AND m.joined_at <= %s"
+        " GROUP BY m.group_id",
+        (list(group_ids), as_of),
+    ).fetchall()
+    return {
+        r[0]: GroupView(
+            group_id=r[0],
+            title=r[1],
+            outlets=tuple(r[2]),
+            outlet_count=r[3],
+            perspectives=tuple(r[4] or ()),
+            has_primary=r[5],
+            first_seen=r[6],
+            last_seen=r[7],
+            item_ids=tuple(r[8]),
+        )
+        for r in rows
+    }
