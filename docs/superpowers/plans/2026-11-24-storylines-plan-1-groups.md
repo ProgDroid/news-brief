@@ -473,16 +473,17 @@ In compose, the comment above `image:` says three things: the swap is from `post
    ```
 3. Rebuild and verify the indexes. The C library changed from musl to glibc, so text indexes built under musl may be out of order. A row count cannot see that; amcheck can:
    ```bash
-   docker compose exec postgres psql -U newsbrief -d newsbrief \
+   docker compose exec postgres psql -v ON_ERROR_STOP=1 -U newsbrief -d newsbrief \
      -c "CREATE EXTENSION IF NOT EXISTS amcheck" \
      -c "REINDEX DATABASE newsbrief" \
-     -c "ALTER DATABASE newsbrief REFRESH COLLATION VERSION" \
      -c "SELECT count(*) AS indexes_checked FROM (SELECT bt_index_check(c.oid, true) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_am a ON a.oid = c.relam WHERE a.amname = 'btree' AND c.relpersistence <> 't' AND i.indisvalid) x" \
      -c "SELECT count(*) FROM items"
    ```
    - `bt_index_check` raises on the first damaged index. A clean finish that prints `indexes_checked` above 0 is the pass.
    - The item count must equal step 1's. The app was stopped, so nothing was captured in between.
-   - If either fails, stop: put the old image back. The data volume is unchanged.
+   - `-v ON_ERROR_STOP=1` makes psql stop and exit non-zero at the first error; without it psql carries on and exits 0.
+   - There is no `REFRESH COLLATION VERSION` step. musl records no collation version (NULL), and Postgres refuses to refresh from NULL with `invalid collation version change`, an error after a swap that worked (measured on a test cluster moved from alpine to this image, 2026-11-24). The REINDEX is what matters.
+   - If either check fails, stop: put the old image back. The data volume is unchanged.
 4. Start the **current** app again: `docker compose up -d newsbrief`. It has no 0020 yet; check `/jobs` is normal. Paste steps 1–4's output; the controller then pushes plan 1.
 
 **After plan 1 is pushed and built:**
@@ -494,21 +495,35 @@ In compose, the comment above `image:` says three things: the swap is from `post
    EMBED_MODEL=Qwen/Qwen3-Embedding-8B EMBED_GPU=L4 modal deploy modal_apps/embed_service.py
    EMBED_MODEL=Octen/Octen-Embedding-8B EMBED_GPU=L4 modal deploy modal_apps/embed_service.py
    ```
-   Keep the three URLs on the host, not in git. **Check the proxy tokens reach them** before calibrating; this is unverified until it runs. From the host:
-   `curl -s -o /dev/null -w "%{http_code}\n" -X POST -H "Modal-Key: $MODAL_PROXY_KEY" -H "Modal-Secret: $MODAL_PROXY_SECRET" -H "Content-Type: application/json" -d '{"texts":["Widget test"],"dim":1024,"kind":"document","model":"Qwen/Qwen3-Embedding-4B","prompt_version":1}' <url1>`
-   It should print `200` (the first call may take a minute: a cold start plus the weight download). A `401` means the tokens belong to another workspace: create proxy tokens in this one.
+   Keep the three URLs on the host, not in git. **Check the proxy tokens reach each one** before calibrating; this is unverified until it runs. From the host, once per URL, putting that deployment's own model in the body (another model gets a `409`):
+   ```bash
+   curl -sL -o /dev/null -w "%{http_code}\n" -X POST -H "Modal-Key: $MODAL_PROXY_KEY" -H "Modal-Secret: $MODAL_PROXY_SECRET" -H "Content-Type: application/json" -d '{"texts":["Widget test"],"dim":1024,"kind":"document","model":"Qwen/Qwen3-Embedding-4B","prompt_version":1}' <url1>
+   ```
+   Repeat with `"model":"Qwen/Qwen3-Embedding-8B"` against `<url2>` and `"model":"Octen/Octen-Embedding-8B"` against `<url3>`.
+   - Each should print `200`. The first call can take minutes: a cold start plus the weight download.
+   - `-L` follows the 303 Modal sends when a request runs past 150 s.
+   - A `401` means the tokens belong to another workspace: create proxy tokens in this one.
 7. **Calibrate** on the host. It costs about $4–8 of Opus judging and cents of GPU time:
    ```bash
    docker compose run --rm --entrypoint python newsbrief scripts/embed_calibrate.py --week-ending <a recent Monday> \
      --space "modal:Qwen/Qwen3-Embedding-4B@1024=<url1>" --space "modal:Qwen/Qwen3-Embedding-8B@1024=<url2>" \
-     --space "modal:Octen/Octen-Embedding-8B@1024=<url3>" --space "modal:Octen/Octen-Embedding-8B@4096=<url3>"
+     --space "modal:Octen/Octen-Embedding-8B@1024=<url3>" --space "modal:Octen/Octen-Embedding-8B@4096=<url3>" \
+     --gpu "modal:Qwen/Qwen3-Embedding-4B@1024=T4" --gpu "modal:Qwen/Qwen3-Embedding-8B@1024=L4" \
+     --gpu "modal:Octen/Octen-Embedding-8B@1024=L4" --gpu "modal:Octen/Octen-Embedding-8B@4096=L4"
    ```
+   The `--gpu` flags feed the cheaper-GPU tie-break and set the `EMBEDDING_GPU_RATE` the accepted space is priced at. Without them an L4 pick stays priced at the T4 rate, and the 🧮 line reads about 26% low.
    Add `--include-openai --space "openai:text-embedding-3-large@1024"` only if you are content to send one week of titles, summaries and the generated queries to OpenAI. It tells you whether switching later costs quality.
-   Paste the report; the recommendation follows the pre-registered rule. Then rerun the same command with `--accept <space>`, and run the statements it prints.
+   Paste the report; the recommendation follows the pre-registered rule. Then rerun the same command with `--accept <space>`. It writes the calibration row, and it writes every activation statement to a file in the week's folder, the Modal URL included (which it does not print). Apply that file from the host:
+   ```bash
+   docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U newsbrief -d newsbrief < "<the file>"
+   ```
+   `--accept` prints the file's path inside the container (`/app/logs/embed_calibration/<week>/activate-….sql`); on the host that is `${APPDATA_DIR}/news-brief/embed_calibration/<week>/activate-….sql`.
    - **Expected:** at least one space meets the grouping bar (weighted precision ≥ 0.90, recall ≥ 0.60). If none does, stop: grouping by embedding is unreliable on this data, and that is decided with the controller before plan 2.
+   - The bar is measured on item pairs. The live job joins an item to a group on the best match across that group's members, so real groups' precision is at or below the bar rather than measured by it. Plan 2's grouping audit taps (spec §15.4) measure real groups.
 8. **Backfill** the chosen space: `docker compose run --rm --entrypoint python newsbrief scripts/embed_backfill.py --space-from-settings`.
    - This is an estimate, measured when it runs: about 64k items take 1–2 h of T4 time, about $1, or more on an L4 for an 8B model.
    - Paste the totals: every item embedded or skipped, and the groups opened and joined.
+   - Items captured while it runs are reported as `captured_during_run=K` and left to the live job; they never fail the run. Grouping alone measured 65.6 ms per item (5,000 synthetic items at 1024 dims, final review 2026-11-24), so allow about 70 minutes of grouping for 64k items on top of the embedding, and more at 4096 dims.
    - Then run `docker compose run --rm --no-deps newsbrief backup` and paste the new dump's size beside the previous night's. Vectors are excluded from dumps, so the two should be close.
 9. **Switch grouping on:**
    ```sql
