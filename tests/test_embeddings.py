@@ -123,6 +123,19 @@ def test_embed_text_never_empties_a_real_title():
     assert embed_text("  \u00a0 ", "body", GOOGLE) == ""
 
 
+def test_clean_title_is_the_title_half_of_embed_text():
+    t = "Widget  plant shut - Gizmo News Agency"
+    assert embeddings.clean_title(t, GOOGLE) == "Widget plant shut"
+    assert embeddings.clean_title(t, PLAIN) == "Widget plant shut - Gizmo News Agency"
+    assert embeddings.clean_title(" - Gizmo", GOOGLE) == "- Gizmo"  # the fallback
+    assert embeddings.clean_title("  ", GOOGLE) == ""
+    # embed_text's first line is the same string, so the trigram and the vector
+    # read one title.
+    for title, url in ((t, GOOGLE), (t, PLAIN), ("- Gizmo", GOOGLE)):
+        first = embed_text(title, "Widget output fell.", url).split("\n")[0]
+        assert first == embeddings.clean_title(title, url)
+
+
 def test_embed_text_caps_on_a_word_boundary():
     out = embed_text("Widget", "gizmo " * 900, PLAIN)
     assert 0 < len(out) <= embeddings.EMBED_TEXT_MAX_CHARS
@@ -278,6 +291,7 @@ def test_modal_wrong_vector_count_is_bad_response():
         (Resp(401), "config"),
         (Resp(403), "config"),
         (Resp(404), "config"),
+        (Resp(409), "config"),  # the service's contract mismatch, never `input`
         (Resp(400), "input"),
         (Resp(413), "input"),
         (Resp(422), "input"),

@@ -40,32 +40,58 @@ class Request:
     model: str
 
 
+@dataclass(frozen=True)
+class Refusal:
+    """Why a request was refused, and the HTTP status to answer with.
+
+    400: the body is not a request (texts missing, not a list of strings, or
+    more than MAX_INPUTS). 409: a well-formed request this deployment does not
+    serve: the model, prompt version, dim or kind disagree with it. The client
+    reads 400 as "this content was refused" and may skip the item; a 409 is a
+    configuration fault and skips nothing. Every contract mismatch must
+    therefore be 409, or a misdeployed service would retire the whole queue.
+    """
+
+    status: int
+    message: str
+
+
+def _bad(message: str) -> Refusal:
+    return Refusal(400, message)
+
+
+def _mismatch(message: str) -> Refusal:
+    return Refusal(409, message)
+
+
 def _is_int(x) -> bool:
     return isinstance(x, int) and not isinstance(x, bool)
 
 
-def parse_request(payload, *, served_model: str, native_dim: int) -> "Request | str":
-    """A Request, or a message naming the first bad field."""
+def parse_request(
+    payload, *, served_model: str, native_dim: int
+) -> "Request | Refusal":
+    """A Request, or a Refusal naming the first bad field."""
     if not isinstance(payload, dict):
-        return "request body must be a JSON object"
+        return _bad("request body must be a JSON object")
     texts = payload.get("texts")
     if not isinstance(texts, list):
-        return "texts must be a list"
+        return _bad("texts must be a list")
     if not all(isinstance(t, str) for t in texts):
-        return "texts must all be strings"
+        return _bad("texts must all be strings")
     if len(texts) > MAX_INPUTS:
-        return f"texts has {len(texts)} items, at most {MAX_INPUTS}"
+        return _bad(f"texts has {len(texts)} items, at most {MAX_INPUTS}")
     dim = payload.get("dim")
     if not _is_int(dim) or not MIN_DIM <= dim <= native_dim:
-        return f"dim must be an integer in [{MIN_DIM}, {native_dim}]"
+        return _mismatch(f"dim must be an integer in [{MIN_DIM}, {native_dim}]")
     kind = payload.get("kind")
     if kind not in ("document", "query"):
-        return "kind must be 'document' or 'query'"
+        return _mismatch("kind must be 'document' or 'query'")
     model = payload.get("model")
     if model != served_model:
-        return f"model is {model!r}, this service serves {served_model!r}"
+        return _mismatch(f"model is {model!r}, this service serves {served_model!r}")
     if payload.get("prompt_version") != PROMPT_VERSION:
-        return (
+        return _mismatch(
             f"prompt_version is {payload.get('prompt_version')!r}, "
             f"this service is {PROMPT_VERSION}"
         )

@@ -77,8 +77,9 @@ class Embedder:
         req = core.parse_request(
             payload, served_model=EMBED_MODEL, native_dim=self.native_dim
         )
-        if isinstance(req, str):
-            return JSONResponse(status_code=400, content={"error": req})
+        if isinstance(req, core.Refusal):
+            # 400 for a malformed body, 409 for a contract mismatch: see Refusal.
+            return JSONResponse(status_code=req.status, content={"error": req.message})
         cold = not self.warm
         self.warm = True
         texts = core.prepare(req.texts, req.kind, req.model)

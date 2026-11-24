@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Sequence
 
-from embeddings import PROBLEM_MAX_CHARS, CallRecord
+from embeddings import PROBLEM_MAX_CHARS, CallRecord, clean_title
 
 SKIP_REASON_MAX_CHARS = 300  # item_embed_skips.reason is limited to this
 
@@ -175,23 +175,30 @@ def candidate_groups(
     title: str,
     created_at: datetime,
     window_hours: int,
-    limit: int = 5,
+    min_similarity: float,
+    limit: int = 50,
 ) -> list[Candidate]:
     """Groups opened within `window_hours` before `created_at`, seen only through
     members that joined at or before `created_at`. Per group: the best cosine
-    similarity and the best title trigram similarity over those members."""
+    similarity and the best title trigram similarity over those members.
+
+    `title` is the item's CLEANED title (`embeddings.clean_title`), compared with
+    the members' cleaned titles. Groups whose best similarity is under
+    `min_similarity` (the caller passes the pair floor, below which no rule can
+    pass) are dropped BEFORE the limit, so a pair-rule match ranked below a
+    crowd of cosine-only near misses is still returned."""
     rows = conn.execute(
         "SELECT m.group_id,"
         " max(1 - (e.embedding <=> %(vec)s::vector)) AS sim,"
-        " max(similarity(i.title, %(title)s)) AS tsim"
+        " max(similarity(m.title, %(title)s)) AS tsim"
         " FROM item_groups g"
         " JOIN item_group_members m ON m.group_id = g.id AND m.space = g.space"
         " JOIN item_embeddings e ON e.item_id = m.item_id AND e.space = m.space"
-        " JOIN items i ON i.id = m.item_id"
         " WHERE g.space = %(space)s"
         " AND g.opened_at >= %(at)s - %(hours)s * interval '1 hour'"
         " AND m.joined_at <= %(at)s"
         " GROUP BY m.group_id"
+        " HAVING max(1 - (e.embedding <=> %(vec)s::vector)) >= %(floor)s"
         " ORDER BY sim DESC, m.group_id"
         " LIMIT %(limit)s",
         {
@@ -200,6 +207,7 @@ def candidate_groups(
             "space": space,
             "at": created_at,
             "hours": window_hours,
+            "floor": min_similarity,
             "limit": limit,
         },
     ).fetchall()
@@ -209,9 +217,17 @@ def candidate_groups(
 def _add_member(conn, *, space, group_id, item, sim, tsim) -> None:
     conn.execute(
         "INSERT INTO item_group_members"
-        " (item_id, space, group_id, joined_at, similarity, title_similarity)"
-        " VALUES (%s, %s, %s, %s, %s, %s)",
-        (item.id, space, group_id, item.created_at, sim, tsim),
+        " (item_id, space, group_id, joined_at, title, similarity, title_similarity)"
+        " VALUES (%s, %s, %s, %s, %s, %s, %s)",
+        (
+            item.id,
+            space,
+            group_id,
+            item.created_at,
+            clean_title(item.title, item.url),
+            sim,
+            tsim,
+        ),
     )
 
 
@@ -240,7 +256,7 @@ def open_group(conn, *, space: str, item: PendingItem) -> int:
             space,
             item.created_at,
             item.created_at,
-            item.title,
+            clean_title(item.title, item.url),
             item.outlet_kind == "primary",
         ),
     ).fetchone()[0]

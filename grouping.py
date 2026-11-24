@@ -22,7 +22,7 @@ from typing import Sequence
 import db
 import group_store as gs
 from common import log
-from embeddings import EmbedError, embed_text, text_hash, to_pg_vector
+from embeddings import EmbedError, clean_title, embed_text, text_hash, to_pg_vector
 
 EMBED_CHUNK = 128  # provider inputs per call
 LIVE_MAX_ITEMS = 500  # items per live pass
@@ -92,9 +92,10 @@ def embed_pending(
     committing; the counts so far are on the exception as `.counts`.
     """
     counts = _zero_embed_counts()
-    own = getattr(embedder, "space", space)
-    if own != space:
-        raise EmbedError("config", f"embedder is for space {own!r}, not {space!r}")
+    if embedder.space != space:
+        raise EmbedError(
+            "config", f"embedder is for space {embedder.space!r}, not {space!r}"
+        )
     items = gs.items_missing_vectors(conn, space=space, limit=limit, item_ids=item_ids)
     # End the read transaction before any HTTP call.
     conn.commit()
@@ -142,11 +143,31 @@ def embed_pending(
         gs.store_vectors(conn, space=space, dim=dim, rows=out)
         conn.commit()
 
-    def refused(h: str, message: str) -> None:
+    # A text refused on its own is skipped only once a call in this run has
+    # come back ok: that is the evidence the service accepts requests, so the
+    # refusal judged the content. Until then refusals are held; a run in which
+    # nothing was accepted is a refusing service (a contract or deploy
+    # mismatch), which raises `config` and skips nothing.
+    accepted = False
+    held: list[tuple[str, str]] = []  # (text hash, provider message)
+
+    def skip(h: str, message: str) -> None:
         for iid in by_hash[h]:
             gs.record_skip(conn, space=space, item_id=iid, reason=message)
             counts["skipped"] += 1
         conn.commit()
+
+    def refused(h: str, message: str) -> None:
+        if accepted:
+            skip(h, message)
+        else:
+            held.append((h, message))
+
+    def accept() -> None:
+        nonlocal accepted
+        accepted = True
+        while held:
+            skip(*held.pop(0))
 
     def embed(hashes: list[str]) -> None:
         """One call; on `input`, the two halves, down to single texts."""
@@ -175,11 +196,18 @@ def embed_pending(
                 f"{len(vectors)} vectors for {len(hashes)} texts",
             )
         stored(hashes, vectors)
+        accept()
 
     todo = [h for h in by_hash if h not in known]
     try:
         for start in range(0, len(todo), EMBED_CHUNK):
             embed(todo[start : start + EMBED_CHUNK])
+        if held:
+            raise EmbedError(
+                "config",
+                f"the provider refused every request in this run ({len(held)}"
+                f" text(s) even alone), so nothing was skipped: {held[0][1]}",
+            )
     except EmbedError as exc:
         exc.counts = dict(counts)
         raise
@@ -208,9 +236,10 @@ def assign_pending(
             conn,
             space=space,
             vector=vector,
-            title=item.title,
+            title=clean_title(item.title, item.url),
             created_at=item.created_at,
             window_hours=window_hours,
+            min_similarity=thresholds.pair_sim,
         )
         choice = decide_group(cands, thresholds)
         if choice is None:
@@ -259,6 +288,8 @@ def group_pass(
     }
     with space_lock(conn, space) as got:
         if not got:
+            # Trying the lock opened a transaction; leave the caller idle.
+            conn.rollback()
             out.update(status="busy", error=f"another pass holds {space}")
             return out
         cal = gs.latest_calibration(conn, space)

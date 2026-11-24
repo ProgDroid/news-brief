@@ -27,41 +27,47 @@ def parse(payload, model=QWEN, native=2560):
     return core.parse_request(payload, served_model=model, native_dim=native)
 
 
+# 400 is only for a body that is not a request at all. A contract mismatch (the
+# wrong model, prompt version, dim or kind) is 409: it means the client and the
+# deployed service disagree, which the client treats as `config`. Were it 400,
+# the client would read it as "this content was refused" and skip every item.
 @pytest.mark.parametrize(
-    "payload, field",
+    "payload, field, status",
     [
-        ({k: v for k, v in good().items() if k != "texts"}, "texts"),
-        (good(texts="one string"), "texts"),
-        (good(texts=["x"] * (core.MAX_INPUTS + 1)), "texts"),
-        (good(texts=[1, 2]), "texts"),
-        (good(dim=31), "dim"),
-        (good(dim=2561), "dim"),
-        (good(dim="256"), "dim"),
-        (good(dim=True), "dim"),
-        (good(kind="doc"), "kind"),
-        (good(model="other/model"), "model"),
-        (good(prompt_version=core.PROMPT_VERSION + 1), "prompt_version"),
-        (good(prompt_version=None), "prompt_version"),
+        ({k: v for k, v in good().items() if k != "texts"}, "texts", 400),
+        (good(texts="one string"), "texts", 400),
+        (good(texts=["x"] * (core.MAX_INPUTS + 1)), "texts", 400),
+        (good(texts=[1, 2]), "texts", 400),
+        (good(dim=31), "dim", 409),
+        (good(dim=2561), "dim", 409),
+        (good(dim="256"), "dim", 409),
+        (good(dim=True), "dim", 409),
+        (good(kind="doc"), "kind", 409),
+        (good(model="other/model"), "model", 409),
+        (good(prompt_version=core.PROMPT_VERSION + 1), "prompt_version", 409),
+        (good(prompt_version=None), "prompt_version", 409),
     ],
 )
-def test_parse_request_rejects_each_bad_field(payload, field):
+def test_parse_request_rejects_each_bad_field(payload, field, status):
     err = parse(payload)
-    assert isinstance(err, str)
-    assert field in err
+    assert isinstance(err, core.Refusal)
+    assert field in err.message
+    assert err.status == status
 
 
 def test_parse_request_rejects_a_non_object():
-    assert isinstance(parse(["texts"]), str)
+    err = parse(["texts"])
+    assert isinstance(err, core.Refusal) and err.status == 400
 
 
 def test_parse_request_accepts_a_valid_request():
     req = parse(good(texts=["a", "b"], kind="query"))
-    assert not isinstance(req, str)
+    assert isinstance(req, core.Request)
     assert (req.texts, req.dim, req.kind, req.model) == (["a", "b"], 256, "query", QWEN)
     # the bounds themselves are valid
-    assert not isinstance(parse(good(dim=32)), str)
-    assert not isinstance(parse(good(dim=2560)), str)
-    assert not isinstance(parse(good(texts=["x"] * core.MAX_INPUTS)), str)
+    assert isinstance(parse(good(dim=32)), core.Request)
+    assert isinstance(parse(good(dim=2560)), core.Request)
+    assert isinstance(parse(good(texts=["x"] * core.MAX_INPUTS)), core.Request)
 
 
 @pytest.mark.parametrize("model", [QWEN, QWEN8])
@@ -146,7 +152,7 @@ def test_client_request_round_trips_through_the_service_core():
     def post(url, timeout, headers, json):
         seen["payload"] = json
         req = core.parse_request(json, served_model=QWEN, native_dim=2560)
-        assert not isinstance(req, str), req
+        assert isinstance(req, core.Request), req
         prepared = core.prepare(req.texts, req.kind, req.model)
         assert prepared == [INSTR + "Widget news"]
         vecs = [[1.0] + [0.0] * (req.dim - 1) for _ in prepared]

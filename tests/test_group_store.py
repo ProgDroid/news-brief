@@ -9,9 +9,11 @@ import hashlib
 import math
 from datetime import date, datetime, timedelta, timezone
 
+import psycopg
 import pytest
 
 import db
+import embeddings
 import group_store as gs
 import grouping
 from embeddings import CallRecord, EmbedError, embed_text, text_hash
@@ -116,14 +118,14 @@ def _outlet(conn, name="Test Wire", kind="wire"):
 _seq = iter(range(10**6))
 
 
-def _item(conn, title, at, *, body=None, outlet="Test Wire", kind="wire"):
+def _item(conn, title, at, *, body=None, outlet="Test Wire", kind="wire", url=None):
     n = next(_seq)
     return conn.execute(
         "INSERT INTO items (outlet_id, url, title, body, content_hash, created_at)"
         " VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
         (
             _outlet(conn, outlet, kind),
-            f"https://example.test/{n}",
+            url or f"https://example.test/{n}",
             title,
             body,
             f"h{n}",
@@ -300,6 +302,7 @@ def test_an_item_never_joins_a_group_through_a_later_member(store):
         title="Gizmo",
         created_at=T0 + timedelta(hours=3),
         window_hours=WINDOW,
+        min_similarity=0.0,
     )
     assert [(x.group_id, round(x.similarity, 6)) for x in cands] == [(gid, 1.0)]
     out = grouping.assign_pending(
@@ -468,6 +471,8 @@ def test_a_second_pass_on_the_same_space_reports_busy(store):
             out = _pass(store, fake)
             assert out["status"] == "busy"
             assert fake.sent == []
+            # The read that tried the lock is not left open on the caller.
+            assert store.info.transaction_status == psycopg.pq.TransactionStatus.IDLE
         # The control: once released, the same pass runs.
         assert _pass(store, fake)["status"] == "ok"
     finally:
@@ -482,7 +487,13 @@ def test_spaces_do_not_mix(store):
     gid = gs.open_group(store, space="a@2", item=pending)
     store.commit()
     later = T0 + timedelta(hours=1)
-    kw = dict(vector="[1,0]", title="Widget A", created_at=later, window_hours=WINDOW)
+    kw = dict(
+        vector="[1,0]",
+        title="Widget A",
+        created_at=later,
+        window_hours=WINDOW,
+        min_similarity=0.0,
+    )
     assert [c.group_id for c in gs.candidate_groups(store, space="a@2", **kw)] == [gid]
     assert gs.candidate_groups(store, space="b@2", **kw) == []
     assert gs.next_ungrouped(store, space="a@2", limit=10) == []
@@ -515,7 +526,7 @@ def test_has_primary_and_outlet_count(store):
 
     def group(iid):
         return store.execute(
-            "SELECT outlet_count, has_primary, last_seen_at, opened_at, title"
+            "SELECT outlet_count, has_primary, last_seen_at, opened_at, g.title"
             " FROM item_groups g JOIN item_group_members m ON m.group_id = g.id"
             " WHERE m.item_id = %s",
             (iid,),
@@ -623,3 +634,129 @@ def test_an_embedder_for_another_space_is_refused(store):
             store, fake, space=SPACE, dim=DIM, limit=10, purpose="items"
         )
     assert ei.value.kind == "config" and fake.sent == []
+
+
+# ---- fix round 1 ----
+
+
+def test_a_provider_that_refuses_everything_skips_nothing(store):
+    # Every call answers `input`: that is a service that refuses requests (a
+    # contract or deploy mismatch), not content judged unembeddable.
+    _many(store, 5)
+    store.commit()
+    _calibrate(store)
+    fake = FakeEmbedder(fail=lambda texts, n: "input")
+    out = _pass(store, fake)
+    assert out["status"] == "config", out
+    assert out["skipped"] == 0
+    assert _count(store, "item_embed_skips") == 0
+    assert out["calls"] == 9  # 5 texts: 2n - 1 calls, all recorded
+    assert _count(store, "embedding_calls", "outcome = 'failed'") == 9
+    assert gs.oldest_ungrouped_created_at(store, space=SPACE) == T0
+    assert len(gs.items_missing_vectors(store, space=SPACE, limit=10)) == 5
+
+
+GOOGLE = "https://news.google.com/rss/articles/x"
+
+
+def test_title_similarity_reads_cleaned_titles(store):
+    tail = " - Yonhap News Agency"
+    th = grouping.Thresholds(join_sim=0.85, pair_sim=0.7, title_sim=0.3)
+    near = [0.75, math.sqrt(1 - 0.75**2), 0.0]  # cosine 0.75 with A
+    # Also 0.75 with A, but 0.125 with `near`: the copy can only join via A.
+    near_too = [0.75, -math.sqrt(1 - 0.75**2), 0.0]
+    founder = _item(store, "Widget deal signed" + tail, T0, url=GOOGLE + "1")
+    other = _item(
+        store, "Gizmo strike ends" + tail, T0 + timedelta(hours=1), url=GOOGLE + "2"
+    )
+    copy = _item(
+        store,
+        "Widget deal signed - Other Paper",
+        T0 + timedelta(hours=2),
+        outlet="Wire Two",
+        url=GOOGLE + "3",
+    )
+    for iid, v in ((founder, A), (other, near), (copy, near_too)):
+        _store_vec(store, iid, v)
+    store.commit()
+    raw = store.execute(
+        "SELECT similarity(a.title, b.title) FROM items a, items b"
+        " WHERE a.id = %s AND b.id = %s",
+        (founder, other),
+    ).fetchone()[0]
+    assert raw >= th.title_sim  # the raw titles would pass on their shared tail
+    out = grouping.assign_pending(
+        store, space=SPACE, thresholds=th, window_hours=WINDOW, limit=1
+    )
+    assert out["opened"] == 1
+    (cand,) = gs.candidate_groups(
+        store,
+        space=SPACE,
+        vector=_vec_lit(near),
+        title=embeddings.clean_title("Gizmo strike ends" + tail, GOOGLE),
+        created_at=T0 + timedelta(hours=1),
+        window_hours=WINDOW,
+        min_similarity=0.0,
+    )
+    assert cand.title_similarity < th.title_sim
+    out = grouping.assign_pending(
+        store, space=SPACE, thresholds=th, window_hours=WINDOW, limit=100
+    )
+    assert (out["opened"], out["joined"]) == (1, 1)
+    assert _group_of(store, other) != _group_of(store, founder)
+    # The control: a cross-outlet copy of the founder joins on the pair rule.
+    assert _group_of(store, copy) == _group_of(store, founder)
+    titles = store.execute(
+        "SELECT g.title, m.title FROM item_groups g"
+        " JOIN item_group_members m ON m.group_id = g.id WHERE m.item_id = %s",
+        (founder,),
+    ).fetchone()
+    assert titles == ("Widget deal signed", "Widget deal signed")
+
+
+def test_a_pair_rule_match_ranked_sixth_by_cosine_joins(store):
+    space, dim = "modal:fake@8", 8
+
+    def unit(k, w):
+        v = [0.0] * dim
+        v[0], v[k] = w, math.sqrt(1 - w * w)
+        return v
+
+    groups = []
+    for k in range(1, 6):  # five decoys at cosine 0.80, unrelated titles
+        iid = _item(store, f"Gizmo decoy {k} harbour", T0)
+        _store_vec(store, iid, unit(k, 0.80), space=space)
+        groups.append(iid)
+    target = _item(store, "Widget summit opens", T0)
+    _store_vec(store, target, unit(6, 0.75), space=space)
+    store.commit()
+    out = grouping.assign_pending(
+        store, space=space, thresholds=TH, window_hours=WINDOW, limit=100
+    )
+    assert out["opened"] == 6  # the founders are far enough apart not to merge
+    item = _item(store, "Widget summit opens", T0 + timedelta(hours=1))
+    _store_vec(store, item, [1.0] + [0.0] * (dim - 1), space=space)
+    store.commit()
+    out = grouping.assign_pending(
+        store, space=space, thresholds=TH, window_hours=WINDOW, limit=100
+    )
+    assert out["joined"] == 1
+    assert _group_of(store, item, space) == _group_of(store, target, space)
+
+
+def test_candidates_below_the_pair_floor_are_filtered_in_sql(store):
+    iid = _item(store, "Widget A", T0)
+    _store_vec(store, iid, A)
+    store.commit()
+    grouping.assign_pending(
+        store, space=SPACE, thresholds=TH, window_hours=WINDOW, limit=100
+    )
+    kw = dict(
+        space=SPACE,
+        title="Widget A",
+        created_at=T0 + timedelta(hours=1),
+        window_hours=WINDOW,
+    )
+    near = _vec_lit([0.6, 0.8, 0.0])  # cosine 0.6
+    assert gs.candidate_groups(store, vector=near, min_similarity=0.7, **kw) == []
+    assert len(gs.candidate_groups(store, vector=near, min_similarity=0.5, **kw)) == 1

@@ -51,6 +51,7 @@ ALTER TABLE comprehend_spend DROP CONSTRAINT IF EXISTS comprehend_spend_stage_ch
 ALTER TABLE comprehend_spend ADD CONSTRAINT comprehend_spend_stage_check
     CHECK (stage IN ('triage', 'integration', 'attach', 'seed', 'attach_check'));
 
+DROP INDEX IF EXISTS items_created_at_id;
 DROP TABLE IF EXISTS item_group_members;
 DROP TABLE IF EXISTS item_groups;
 DROP TABLE IF EXISTS embedding_calibrations;

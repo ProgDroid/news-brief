@@ -82,25 +82,37 @@ def _cut_on_word(text: str, limit: int) -> str:
     return head.rstrip()
 
 
+def _title_parts(title: str, url: str) -> tuple[str, str]:
+    """(the cleaned title, the publisher segment stripped from it, or "")."""
+    title = _squash(title)
+    if not title or not _is_google(url):
+        return title, ""
+    # Google appends " - <its own publisher name>", which is not our outlet's
+    # name and gives every item from one wire a shared tail.
+    # Pad so a title that is only a segment ("- Gizmo") still splits; that
+    # leaves nothing, and the unstripped title stands.
+    head, sep, publisher = f" {title}".rpartition(" - ")
+    stripped = head.strip() if sep else title
+    publisher = publisher.strip() if sep and stripped else ""
+    return stripped or title, publisher
+
+
+def clean_title(title: str, url: str) -> str:
+    """The title as embedded: whitespace normalised, Google's publisher segment
+    stripped. Grouping's trigram similarity reads this, never the raw title, so
+    the vector and the title rule see one string."""
+    return _title_parts(title, url)[0]
+
+
 def embed_text(title: str, body: str | None, url: str) -> str:
     """The text that is embedded for one item. "" only when the title is blank
     (the caller turns that into a skip row)."""
-    title = _squash(title)
+    title, publisher = _title_parts(title, url)
     body = _squash(body)
     if not title:
         return ""
-    if _is_google(url):
-        # Google appends " - <its own publisher name>", which is not our outlet's
-        # name and gives every item from one wire a shared tail.
-        # Pad so a title that is only a segment ("- Gizmo") still splits; that
-        # leaves nothing, and the unstripped title stands.
-        head, sep, publisher = f" {title}".rpartition(" - ")
-        stripped = head.strip() if sep else title
-        publisher = publisher.strip() if sep and stripped else ""
-        stripped = stripped or title
-        if body and _repeats_title(stripped, publisher, body):
-            body = ""
-        title = stripped
+    if _is_google(url) and body and _repeats_title(title, publisher, body):
+        body = ""
     text = f"{title}\n{body}" if body else title
     return _cut_on_word(text, EMBED_TEXT_MAX_CHARS)
 
@@ -169,6 +181,8 @@ def _problem(text: str) -> str:
 
 
 def _status_kind(code: int) -> str:
+    # 409 is the Modal service's contract mismatch (model, prompt_version, dim,
+    # kind): `config`, never `input`, or a misdeployment would skip every item.
     if code == 429 or code >= 500:
         return "transient"
     if code in (400, 413, 422):

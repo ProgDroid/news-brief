@@ -86,7 +86,8 @@ CREATE TABLE embedding_calibrations (
 );
 CREATE INDEX embedding_calibrations_space ON embedding_calibrations (space, id);
 
--- opened_at is the founding item's created_at, never wall clock.
+-- opened_at is the founding item's created_at, never wall clock. title is the
+-- founder's cleaned title (embeddings.clean_title), as members' titles are.
 CREATE TABLE item_groups (
     id           BIGSERIAL   PRIMARY KEY,
     space        TEXT        NOT NULL,
@@ -101,11 +102,15 @@ CREATE INDEX item_groups_space_opened ON item_groups (space, opened_at);
 
 -- joined_at is the item's own created_at (capture time), never wall clock:
 -- that is what makes as_of cuts consistent. The founder's similarities are NULL.
+-- title is the member's cleaned title (embeddings.clean_title: Google's
+-- " - Publisher" tail stripped), which the trigram rule compares; a raw tail
+-- would make every item from one wire look alike.
 CREATE TABLE item_group_members (
     item_id          BIGINT      NOT NULL REFERENCES items (id) ON DELETE RESTRICT,
     space            TEXT        NOT NULL,
     group_id         BIGINT      NOT NULL REFERENCES item_groups (id),
     joined_at        TIMESTAMPTZ NOT NULL,
+    title            TEXT        NOT NULL,
     similarity       REAL        NULL,
     title_similarity REAL        NULL,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -113,6 +118,11 @@ CREATE TABLE item_group_members (
 );
 CREATE INDEX item_group_members_space_joined ON item_group_members (space, joined_at);
 CREATE INDEX item_group_members_group ON item_group_members (group_id);
+
+-- Capture order, which every queue read here walks. It does not shorten the
+-- steady-state anti-joins, which visit every item anyway, but it makes a new
+-- space (a backfill, a switched model) O(limit) instead of O(items).
+CREATE INDEX items_created_at_id ON items (created_at, id);
 
 ALTER TABLE comprehend_spend DROP CONSTRAINT comprehend_spend_stage_check;
 ALTER TABLE comprehend_spend ADD CONSTRAINT comprehend_spend_stage_check
