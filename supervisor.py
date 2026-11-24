@@ -75,11 +75,11 @@ JOB_KILL_GRACE_SECONDS = 30
 #     25  this budget           children exit after the broadcast
 #   +  2  SHUTDOWN_DRAIN        final output of whichever children did exit
 #   +  5  DB_CONNECT_TIMEOUT    opening the one connection the rows close on
-#   +  9  DB_STATEMENT_TIMEOUT  9 schedules x 2 statements x 0.5s
+#   + 10  DB_STATEMENT_TIMEOUT  10 schedules x 2 statements x 0.5s
 #   +  2  SHUTDOWN_DRAIN again  reaping whatever had to be SIGKILLed
 #   ----
-#     43  plus up to 5s for a tick-path connect already in flight when the
-#         signal arrived, so ~48s
+#     44  plus up to 5s for a tick-path connect already in flight when the
+#         signal arrived, so ~49s
 #
 # This row scales with len(scheduler.SCHEDULES) and is the ONLY line here
 # that does. Adding a schedule costs 1s of worst case; the 60s grace
@@ -94,7 +94,7 @@ JOB_KILL_GRACE_SECONDS = 30
 # it.** Two things the sum does not model: statement_timeout does NOT abort a
 # COMMIT already blocked in fsync, which is the wedged-disk case the timeout was
 # added for; and closing a connection whose socket is wedged is unbounded too.
-# The extra ~17s is cover for what cannot be bounded, not slack to be reclaimed
+# The extra ~16s is cover for what cannot be bounded, not slack to be reclaimed
 # by someone re-deriving this table and finding it generous.
 SHUTDOWN_BUDGET_SECONDS = 25.0
 

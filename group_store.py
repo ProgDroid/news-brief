@@ -290,6 +290,34 @@ def oldest_ungrouped_created_at(conn, *, space: str) -> datetime | None:
     ).fetchone()[0]
 
 
+def embedding_month_to_date(conn, *, now: datetime) -> dict[str, dict]:
+    """Spend per provider for the calendar month of `now`, in UTC.
+
+    Every recorded call counts, a failed one included: it may have been billed.
+    Providers with no calls this month are absent."""
+    rows = conn.execute(
+        "SELECT provider, sum(usd), sum(openai_equivalent_usd), count(*),"
+        " count(*) FILTER (WHERE cold_start), sum(tokens)"
+        " FROM embedding_calls"
+        " WHERE created_at >= date_trunc('month', %(now)s AT TIME ZONE 'UTC')"
+        "   AT TIME ZONE 'UTC'"
+        " AND created_at < (date_trunc('month', %(now)s AT TIME ZONE 'UTC')"
+        "   + interval '1 month') AT TIME ZONE 'UTC'"
+        " GROUP BY provider",
+        {"now": now},
+    ).fetchall()
+    return {
+        provider: {
+            "usd": float(usd),
+            "openai_equivalent_usd": float(equiv),
+            "calls": int(calls),
+            "cold_starts": int(cold),
+            "tokens": int(tokens),
+        }
+        for provider, usd, equiv, calls, cold, tokens in rows
+    }
+
+
 # ---- calibrations ----
 
 _CAL_COLS = (

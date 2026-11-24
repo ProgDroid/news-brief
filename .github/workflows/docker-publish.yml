@@ -26,6 +26,11 @@ on:
       - 'dated_memory.py'
       - 'storyline_store.py'
       - 'storylines.py'
+      - 'embeddings.py'
+      - 'group_store.py'
+      - 'grouping.py'
+      - 'retrieval.py'
+      - 'modal_apps/**'
       - 'labeller_static/**'
       - 'migrations/**'
       - 'enrichment/**'
@@ -79,8 +84,8 @@ jobs:
 
       - name: Lint
         run: |
-          ruff check brief.py capture.py comprehend.py brief_memory.py claim_store.py claim_verify.py retention.py common.py config.py trading.py validation.py db.py scheduler.py supervisor.py backup.py census.py census_metrics.py labeller.py watch.py dated_memory.py storyline_store.py storylines.py enrichment scripts tests
-          ruff format --check brief.py capture.py comprehend.py brief_memory.py claim_store.py claim_verify.py retention.py common.py config.py trading.py validation.py db.py scheduler.py supervisor.py backup.py census.py census_metrics.py labeller.py watch.py dated_memory.py storyline_store.py storylines.py enrichment scripts tests
+          ruff check brief.py capture.py comprehend.py brief_memory.py claim_store.py claim_verify.py retention.py common.py config.py trading.py validation.py db.py scheduler.py supervisor.py backup.py census.py census_metrics.py labeller.py watch.py dated_memory.py storyline_store.py storylines.py embeddings.py group_store.py grouping.py retrieval.py enrichment modal_apps scripts tests
+          ruff format --check brief.py capture.py comprehend.py brief_memory.py claim_store.py claim_verify.py retention.py common.py config.py trading.py validation.py db.py scheduler.py supervisor.py backup.py census.py census_metrics.py labeller.py watch.py dated_memory.py storyline_store.py storylines.py embeddings.py group_store.py grouping.py retrieval.py enrichment modal_apps scripts tests
 
       - name: Test
         env:

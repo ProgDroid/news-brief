@@ -3672,6 +3672,8 @@ def mode_weekly():
         log.error("Weekly batch failed or timed out")
         telegram_alert("weekly summary batch failed or timed out")
 
+    _send_embedding_cost_line()
+
     # Mark the paper book to market regardless of the weekly-summary outcome
     refresh_instruments_cache(force=True)
     with file_lock(trading.BOOK_FILE):
@@ -4955,6 +4957,134 @@ def mode_attach() -> None:
         _alert_once(ATTACH_ALERT_KEY, None, load_state(), "🧵")
 
 
+GROUP_ALERT_KEY = "group_alert"
+# A transient embedding failure is routine; a backlog this old is not.
+GROUP_BACKLOG_ALERT_HOURS = 2
+_GROUP_FAULTS = ("config", "bad_response", "uncalibrated", "input")
+
+
+def _group_space(embedder) -> str:
+    """The space the pass works in: the embedder's own, else the knobs'."""
+    import embeddings
+
+    if embedder is not None:
+        return embedder.space
+    provider = common.EMBEDDING_PROVIDER
+    model = (
+        common.EMBEDDING_OPENAI_MODEL
+        if provider == "openai"
+        else common.EMBEDDING_MODAL_MODEL
+    )
+    return embeddings.space_id(provider, model, common.EMBEDDING_DIM)
+
+
+def mode_group() -> None:
+    """Embed new items and assign them to event groups, behind
+    STORYLINE_GROUPING_ENABLED. Takes no arguments: run_job calls fn() with none.
+    Knobs are read once.
+
+    Rings (once per distinct fault) on a hard fault, and on a transient failure
+    only once the oldest ungrouped item is older than GROUP_BACKLOG_ALERT_HOURS.
+    Clears on ok / nothing_to_do with the backlog under that threshold. `busy`
+    (a backfill holds the space) neither rings nor clears.
+    """
+    import embeddings
+    import group_store
+    import grouping
+
+    enabled = common.STORYLINE_GROUPING_ENABLED
+    window_hours = common.STORYLINE_GROUP_WINDOW_HOURS
+    dim = common.EMBEDDING_DIM
+    if not enabled:
+        log.info("Group: off")
+        return
+    embedder, problem = embeddings.active_embedder()
+    space = _group_space(embedder)
+    now = datetime.now(timezone.utc)
+    with db.connect() as conn:
+        if embedder is None:
+            # No call is made, so there is no embedding_calls row: the record of
+            # this run is the job_runs row, the log line and the alert.
+            out = {
+                "status": "config",
+                "error": problem,
+                "embedded": 0,
+                "reused": 0,
+                "calls": 0,
+                "grouped": 0,
+                "opened": 0,
+                "joined": 0,
+            }
+        else:
+            out = grouping.group_pass(
+                conn,
+                embedder,
+                space=space,
+                dim=dim,
+                window_hours=window_hours,
+                max_items=grouping.LIVE_MAX_ITEMS,
+            )
+        oldest = group_store.oldest_ungrouped_created_at(conn, space=space)
+    backlog_h = None if oldest is None else (now - oldest).total_seconds() / 3600
+    shown = "-" if backlog_h is None else f"{backlog_h:.1f}"
+    status = out["status"]
+    log.info(
+        f"Group: status={status} embedded={out['embedded']} reused={out['reused']}"
+        f" grouped={out['grouped']} opened={out['opened']} joined={out['joined']}"
+        f" calls={out['calls']} backlog_h={shown}"
+    )
+    old = backlog_h is not None and backlog_h > GROUP_BACKLOG_ALERT_HOURS
+    age = "no backlog" if backlog_h is None else f"oldest ungrouped item {shown} h old"
+    ring = status in _GROUP_FAULTS or (status == "transient" and old)
+    if ring:
+        # A transient fault keys on the status alone: its text carries timings,
+        # and a key that changes every pass would ring every pass.
+        key = status if status == "transient" else f"{status}:{out['error']}"
+        verdict = (key, f"Group stopped ({status}): {out['error']}; {age}")
+        _alert_once(GROUP_ALERT_KEY, verdict, load_state(), "\U0001f9e9")
+    elif status in ("ok", "nothing_to_do") and not old:
+        _alert_once(GROUP_ALERT_KEY, None, load_state(), "\U0001f9e9")
+
+
+def embedding_cost_line(conn, *, now) -> str | None:
+    """The weekly embeddings spend line, or None when the month has no calls."""
+    import group_store
+
+    month = group_store.embedding_month_to_date(conn, now=now)
+    if not month:
+        return None
+    modal = month.get("modal") or {
+        "usd": 0.0,
+        "openai_equivalent_usd": 0.0,
+        "calls": 0,
+        "cold_starts": 0,
+    }
+    line = (
+        f"\U0001f9ee Embeddings this month: Modal ${modal['usd']:.2f}"
+        f" ({modal['calls']} calls, {modal['cold_starts']} cold starts);"
+        f" the same tokens on OpenAI \u2248 ${modal['openai_equivalent_usd']:.2f}."
+    )
+    openai = month.get("openai")
+    if openai and openai["usd"] > 0:
+        line += f" OpenAI: ${openai['usd']:.2f}."
+    return line
+
+
+def _send_embedding_cost_line() -> None:
+    """After the weekly summary. Fixed-size, so the bare send is allowed; never
+    allowed to stop the paper book being marked."""
+    try:
+        if not db.is_configured():
+            return
+        now = datetime.now(timezone.utc)
+        with db.connect() as conn:
+            line = embedding_cost_line(conn, now=now)
+        if line:
+            common.telegram_send(line)
+    except Exception:
+        log.exception("embedding cost line failed")
+
+
 def mode_capture():
     """Poll every feed source into the knowledge base. Reads nothing back.
 
@@ -5030,6 +5160,7 @@ def mode_census_prepare():
 # A mode in JOB_MODES but missing here is not a quiet no-op: the supervisor
 # spawns it, gets exit 1 from the usage branch, and alerts on every fire time.
 MODES = {
+    "group": mode_group,
     "submit": mode_submit,
     "collect": mode_collect,
     "weekly": mode_weekly,
@@ -5063,6 +5194,7 @@ JOB_MODES = frozenset(
         "comprehend",
         "watch",
         "attach",
+        "group",
     }
 )
 

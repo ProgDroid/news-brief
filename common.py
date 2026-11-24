@@ -258,6 +258,11 @@ KNOBS: dict[str, Knob] = {
     # The attach job (plan 2a, task 6): off until storylines are seeded.
     "STORYLINES_ENABLED": Knob(bool, False),
     "STORYLINE_ATTACH_MODEL": Knob(str, "claude-haiku-5-5"),
+    # The group job (plan 1): embeds new items and assigns them to event groups.
+    # Independent of STORYLINES_ENABLED.
+    "STORYLINE_GROUPING_ENABLED": Knob(bool, False),
+    # How far back a candidate group may reach when an item is assigned.
+    "STORYLINE_GROUP_WINDOW_HOURS": Knob(int, 72),
     # The thesis-evidence extraction call (Task 5). Unlike SIGNALS_MODEL the
     # default is a model id, not "follow MODEL": this extraction is meant to be
     # the cheap model (spec section 3.3).

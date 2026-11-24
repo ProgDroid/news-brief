@@ -82,6 +82,7 @@ SCHEDULES: tuple[Schedule, ...] = (
     Schedule("capture", "interval", None, 30, grace_minutes=10),
     Schedule("comprehend", "interval", None, 60, grace_minutes=15),
     Schedule("attach", "interval", None, 30, grace_minutes=10),
+    Schedule("group", "interval", None, 30, grace_minutes=10),
     Schedule("watch", "daily", "06:30", None, grace_minutes=180),
 )
 
