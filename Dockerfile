@@ -61,10 +61,12 @@ COPY labeller_static/ ./labeller_static/
 #   docker compose run --rm --entrypoint python newsbrief scripts/embed_calibrate.py ...
 #   docker compose run --rm --entrypoint python newsbrief scripts/storylines_fetch_probe.py
 #   docker compose run --rm --entrypoint python newsbrief scripts/brief_cost.py
+#   docker compose run --rm --entrypoint python newsbrief scripts/grouping_rules_check.py ...
 #
-# They are the embedding backfill, the calibration, the fetch probe and
-# brief_cost. Nothing in `scripts/` is runtime code and the supervisor never
-# invokes it; do not remove this line without moving those four elsewhere.
+# They are the embedding backfill, the calibration, the fetch probe, brief_cost
+# and the pre-registered grouping rules check. Nothing in `scripts/` is runtime
+# code and the supervisor never invokes it; do not remove this line without
+# moving those five elsewhere.
 COPY scripts/ ./scripts/
 
 # Logs and brief archive persist via volume mount. Run as a real non-root user

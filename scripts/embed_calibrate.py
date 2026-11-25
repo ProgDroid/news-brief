@@ -200,15 +200,21 @@ def scoring_rows(pairs, labels: dict, space: str) -> tuple[list, int]:
     return rows, unclear
 
 
+def space_weights(sims, natural: dict[int, int]) -> tuple[list[float], set[int]]:
+    """(weight per labelled pair, thin bands). A band with fewer than
+    MIN_BAND_LABELLED labelled pairs is thin: left out of every weighted sum,
+    never weighted up. Shared with scripts/grouping_rules_check.py."""
+    bands = [band_of(s) for s in sims]
+    counts = Counter(b for b in bands if b is not None)
+    thin = {b for b, n in counts.items() if n < MIN_BAND_LABELLED}
+    return band_weights([None if b in thin else b for b in bands], natural), thin
+
+
 def score_space(rows, natural: dict[int, int]) -> SpaceScore:
     """rows: (similarity in this space, title similarity, same event) per labelled
     pair, `unclear` already left out."""
     sims, tsims, truth = ([r[i] for r in rows] for i in range(3))
-    bands = [band_of(s) for s in sims]
-    counts = Counter(b for b in bands if b is not None)
-    thin = {b for b, n in counts.items() if n < MIN_BAND_LABELLED}
-    # A thin band is left out of every weighted sum, never weighted up.
-    w = band_weights([None if b in thin else b for b in bands], natural)
+    w, thin = space_weights(sims, natural)
     edges = tuple(GRID[b] for b in sorted(thin))
     a = auc(sims, truth)
     join = join_threshold(sims, truth, w)

@@ -519,7 +519,13 @@ In compose, the comment above `image:` says three things: the swap is from `post
    - `FAILED config HTTP 401` means the tokens belong to another workspace: create proxy tokens in this one.
    - **Done 2026-11-25:** both checks passed for all three services.
 7. **Calibrate** on the host. It costs about $5–10 of Opus judging (an estimate, with thinking on at low effort) and cents of GPU time.
-   **2026-11-25, first attempt:** every judge call got a 400, because Opus 5.5 rejects `thinking: disabled` and a forced `tool_choice`. Fixed in news-brief-931. The snapshot and the embeddings were kept, so the rerun goes straight to judging. The command:
+   **2026-11-25, first attempt:** every judge call got a 400, because Opus 5.5 rejects `thinking: disabled` and a forced `tool_choice`. Fixed in news-brief-931. The snapshot and the embeddings were kept, so the rerun goes straight to judging.
+   **2026-11-25, result (week ending 2026-11-23, judge Opus 5.5 at low effort, $3.50 for 600 pairs and 49 queries): recommendation none.** No space has a vector-alone threshold at weighted precision 0.95 (AUC 0.80–0.83). Retrieval nDCG@30: Octen-8B@1024 0.716, @4096 0.715, Qwen3-8B 0.669, Qwen3-4B 0.623; the lexical arm's precision was 0.08. A local re-analysis of the host's `pairs.json` and `labels.jsonl`, through the script's own scoring functions (the controls matched the host report), found:
+   - **Pairs from different outlets at similarity ≥ 0.80 were all labelled same, in every space** (Octen@1024: 49 of 49).
+   - **The precision loss is pairs from one outlet.** In the 0.95–1.00 band, 30–50% are "different". Reading the 0.90+ "different" pairs for Octen@1024 showed recurring series from a single outlet: daily war assessments, price lists, exchange-rate quotes, daily editorial round-ups and sports highlights. Their text is nearly identical, the event differs, and the judge was right. A few are follow-ups ("expected to meet" then "meet"), which count as different only under the strict same-event definition.
+   - **Blocking same-outlet joins is not enough.** With the combined rule, the best at weighted precision ≥ 0.90 is Octen@1024: join 0.75, pair 0.75, title 0.95, wR 0.28; the other spaces reach 0.19–0.24. Across outlets the 0.65–0.75 band is about half same event and half same topic.
+   - This was explored on the same labels it was measured on. Any rule drawn from it needs a second week, pre-registered, before it counts.
+   The command:
    ```bash
    docker compose run --rm --entrypoint python newsbrief scripts/embed_calibrate.py --week-ending <a recent Monday> \
      --space "modal:Qwen/Qwen3-Embedding-4B@1024=<url1>" --space "modal:Qwen/Qwen3-Embedding-8B@1024=<url2>" \
