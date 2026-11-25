@@ -25,7 +25,7 @@ layer unexecuted.** `tests/test_db.py` (and any DB-backed module) skips on
 told you nothing about `db.py`, the migrations, or the run ledger. A skip is not a pass,
 and the count moving is the only proof the probe can return anything. Start one and
 confirm the runs:
-`docker run --rm -d -p 5432:5432 --tmpfs /var/lib/postgresql (postgres:18 REFUSES .../data — exit 1; and prefix MSYS_NO_PATHCONV=1 or Git Bash rewrites the mount path) -e POSTGRES_PASSWORD=newsbrief -e POSTGRES_USER=newsbrief -e POSTGRES_DB=newsbrief_test postgres:18-alpine`
+`docker run --rm -d -p 5432:5432 --tmpfs /var/lib/postgresql (postgres:18 REFUSES .../data — exit 1; and prefix MSYS_NO_PATHCONV=1 or Git Bash rewrites the mount path) -e POSTGRES_PASSWORD=newsbrief -e POSTGRES_USER=newsbrief -e POSTGRES_DB=newsbrief_test pgvector/pgvector:0.8.7-pg18-trixie@sha256:ab49524d18df7200b74ac9a475e1db6297fc1eb57da4c214c63d10ecc4b754fa`
 (the `--tmpfs` is load-bearing -- see "every test-DB start leaked a volume" at the end of this file)
 then `export DATABASE_URL="postgresql://newsbrief:newsbrief@localhost:5432/newsbrief_test"`
 and check `pytest tests/test_db.py -q` reports runs rather than `skipped`.

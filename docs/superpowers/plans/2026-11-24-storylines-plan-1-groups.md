@@ -462,9 +462,13 @@ In compose, the comment above `image:` says three things: the swap is from `post
    ```bash
    docker compose stop newsbrief
    docker compose run --rm --no-deps newsbrief backup
-   docker compose exec postgres psql -U newsbrief -d newsbrief -c "SELECT count(*) FROM items" -c "SELECT datlocprovider, datcollate, datctype FROM pg_database WHERE datname = current_database()" -c "SHOW data_directory"
+   docker compose exec postgres psql -U newsbrief -d newsbrief -c "SELECT count(*) FROM items" -c "SELECT datlocprovider, datcollate, datctype FROM pg_database WHERE datname = current_database()" -c "SHOW data_directory" -c "SELECT rolsuper FROM pg_roles WHERE rolname = current_user"
+   docker inspect $(docker compose ps -q postgres) --format '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{"\n"}}{{end}}'
    ```
-   **`data_directory` must be `/var/lib/postgresql/18/docker`,** the new image's default (measured 2026-11-24), and it must sit inside the volume the compose file mounts. If it differs, stop and paste: the new image would start an empty cluster.
+   - The commands here use plain `docker compose`. On the host, use its own invocation (its compose file and env files).
+   - **`data_directory` must be `/var/lib/postgresql/18/docker`,** the new image's default (measured 2026-11-24), and it must sit under one of the mount destinations printed. If it differs, stop and paste: the new image would start an empty cluster.
+   - `rolsuper` must be `t`: `vector` is not a trusted extension, so 0020 needs a superuser.
+   - Note the current `image:` line, for a rollback.
 2. In the host's compose file, set the `postgres:` image to
    `pgvector/pgvector:0.8.7-pg18-trixie@sha256:ab49524d18df7200b74ac9a475e1db6297fc1eb57da4c214c63d10ecc4b754fa`.
    That is the tag's multi-architecture index digest, read from Docker Hub on 2026-11-24; Task 1 pins the same string. Change nothing else, the volume line least of all. Then:
@@ -483,7 +487,8 @@ In compose, the comment above `image:` says three things: the swap is from `post
    - The item count must equal step 1's. The app was stopped, so nothing was captured in between.
    - `-v ON_ERROR_STOP=1` makes psql stop and exit non-zero at the first error; without it psql carries on and exits 0.
    - There is no `REFRESH COLLATION VERSION` step. musl records no collation version (NULL), and Postgres refuses to refresh from NULL with `invalid collation version change`, an error after a swap that worked (measured on a test cluster moved from alpine to this image, 2026-11-24). The REINDEX is what matters.
-   - If either check fails, stop: put the old image back. The data volume is unchanged.
+   - If either check fails, stop: put the old image back, start it, and run `REINDEX DATABASE newsbrief` again under it, because indexes rebuilt here are in glibc order. The data volume is unchanged, and step 1's backup covers anything worse.
+   - **Done 2026-11-25** by the operator, who checked every output against these criteria.
 4. Start the **current** app again: `docker compose up -d newsbrief`. It has no 0020 yet; check `/jobs` is normal. Paste steps 1–4's output; the controller then pushes plan 1.
 
 **After plan 1 is pushed and built:**

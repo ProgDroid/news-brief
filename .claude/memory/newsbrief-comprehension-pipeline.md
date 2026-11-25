@@ -349,7 +349,7 @@ an artifact of a similarity-selected eval set and would vanish in low-overlap ba
 the edge is LARGEST there (48% vs 23%).** Caveat carried forward: in the biggest band Jaccard still
 leads pg_trgm 42 vs 33, so revisit it first if the deployed ranking underperforms 44%.
 
-**`pg_trgm` is CONTRIB and works in the stock `postgres:18-alpine` already running** — verified,
+**`pg_trgm` is CONTRIB and works in the stock `postgres:18-alpine` then running (plan 1 moves compose to `pgvector/pgvector:0.8.7-pg18-trixie`, committed 2026-11-24; the HOST swapped on 2026-11-25, Rollout step 0; contrib is bundled in both)** — verified,
 no image swap, which is exactly what separates it from `bqa.7`/pgvector. Migration **0012**.
 
 **THE CEILING ON THE FAILING DIRECTION IS 6.7%, against a 6.4% base. It fails.** Merging all 90

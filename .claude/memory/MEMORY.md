@@ -1,6 +1,6 @@
 # Project memory — news-brief
 
-- [Rethink charter 2026-11-20](rethink-charter-2026-11-20.md) — **READ FIRST.** Approach A; storylines (al7) replace comprehension/KB; GBP 20 floor; census dropped; no trial phases. **2026-11-24: storylines REDESIGNED (al7.7, editor spec approved + cost pass); plan 1 written; host image swap (plan 1 Rollout step 0) before any plan-1 push. Signals ruled NOT USEFUL (d7w) → removal cg3.**
+- [Rethink charter 2026-11-20](rethink-charter-2026-11-20.md) — **READ FIRST.** Approach A; storylines (al7) replace comprehension/KB; GBP 20 floor; census dropped; no trial phases. **2026-11-24: storylines REDESIGNED (al7.7, editor spec approved + cost pass); 2026-11-25: plan 1 built, host on pgvector, pushed; next: Rollout steps 5-9 (calibrate, backfill). Signals ruled NOT USEFUL (d7w) → removal cg3.**
 - [📁 Historical milestones](MEMORY-history.md) — Bigdata.com enrichment arc, sources & edge-latency redesign, multi-asset trading build, claim-memory build, T212 auth fix. NOT auto-loaded; read on demand.
 
 - [Trading retrospective 2026-08-16](trading-retrospective-2026-08-16.md) — **2026-11-23 refresh: signals NOT USEFUL (n=41, 51.2%), being removed (cg3); don't re-propose.** Distrust every pre-2026-08-16 number. "Fade the event" is DEAD. **REJECTED on evidence, don't re-propose: the momentum-prediction cap, the BTFDBot parallel sleeve.**
