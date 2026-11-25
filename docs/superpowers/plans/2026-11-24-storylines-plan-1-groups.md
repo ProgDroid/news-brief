@@ -500,14 +500,24 @@ In compose, the comment above `image:` says three things: the swap is from `post
    EMBED_MODEL=Qwen/Qwen3-Embedding-8B EMBED_GPU=L4 modal deploy modal_apps/embed_service.py
    EMBED_MODEL=Octen/Octen-Embedding-8B EMBED_GPU=L4 modal deploy modal_apps/embed_service.py
    ```
-   Keep the three URLs on the host, not in git. **Check the proxy tokens reach each one** before calibrating; this is unverified until it runs. From the host, once per URL, putting that deployment's own model in the body (another model gets a `409`):
+   Keep the three URLs on the host, not in git.
+   - **Check the services refuse strangers.** From anywhere, a POST without the `Modal-Key`/`Modal-Secret` headers, and one with made-up values, must both get `401`.
+   - **Check the host's proxy tokens reach each service.** Run this inside the app container, which already holds `MODAL_PROXY_KEY` and `MODAL_PROXY_SECRET`, through the app's own client. Pass each deployment its own model (another model gets a `409`):
    ```bash
-   curl -sL -o /dev/null -w "%{http_code}\n" -X POST -H "Modal-Key: $MODAL_PROXY_KEY" -H "Modal-Secret: $MODAL_PROXY_SECRET" -H "Content-Type: application/json" -d '{"texts":["Widget test"],"dim":1024,"kind":"document","model":"Qwen/Qwen3-Embedding-4B","prompt_version":1}' <url1>
+   docker compose run --rm --no-deps --entrypoint python newsbrief -c '
+   import os, embeddings as e
+   for url, model in [("<url1>", "Qwen/Qwen3-Embedding-4B"), ("<url2>", "Qwen/Qwen3-Embedding-8B"), ("<url3>", "Octen/Octen-Embedding-8B")]:
+       m = e.ModalEmbedder(url, model, 1024, key=os.environ.get("MODAL_PROXY_KEY", ""), secret=os.environ.get("MODAL_PROXY_SECRET", ""), gpu_rate=0.000222, idle_s=10, timeout=900)
+       try:
+           v, calls = m.embed(["Widget test"], kind="document")
+           print(model, "OK dim", len(v[0]), "cold_start", calls[-1].cold_start)
+       except e.EmbedError as x:
+           print(model, "FAILED", x.kind, str(x)[:200])
+   '
    ```
-   Repeat with `"model":"Qwen/Qwen3-Embedding-8B"` against `<url2>` and `"model":"Octen/Octen-Embedding-8B"` against `<url3>`.
-   - Each should print `200`. The first call can take minutes: a cold start plus the weight download.
-   - `-L` follows the 303 Modal sends when a request runs past 150 s.
-   - A `401` means the tokens belong to another workspace: create proxy tokens in this one.
+   - Each line should read `OK dim 1024`. The first call takes minutes: a cold start plus the weight download.
+   - `FAILED config HTTP 401` means the tokens belong to another workspace: create proxy tokens in this one.
+   - **Done 2026-11-25:** both checks passed for all three services.
 7. **Calibrate** on the host. It costs about $4–8 of Opus judging and cents of GPU time:
    ```bash
    docker compose run --rm --entrypoint python newsbrief scripts/embed_calibrate.py --week-ending <a recent Monday> \
