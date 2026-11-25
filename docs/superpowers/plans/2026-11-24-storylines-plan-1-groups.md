@@ -400,7 +400,7 @@ In compose, the comment above `image:` says three things: the swap is from `post
      - If every space is unreliable, recommend none and exit 1.
   8. **`--accept SPACE`** writes the `embedding_calibrations` row for that space (with `prompt_version`), and prints the `INSERT … ON CONFLICT` statements that make it active (`EMBEDDING_PROVIDER`, `EMBEDDING_MODAL_MODEL` or `EMBEDDING_OPENAI_MODEL`, `EMBEDDING_DIM`, `EMBEDDING_MODAL_URL`, `EMBEDDING_GPU_RATE`).
 - It never prints a title, a generated query, an article text or a URL, and it reads no storylines.
-- Expected judge spend is about $4–8: 30 calls for the pairs, 3 calls to write the queries, and about 100 calls for relevance, all real time.
+- Expected judge spend is about $5–10 (an estimate; not yet measured): 30 calls for the pairs, 3 calls to write the queries, and about 100 calls for relevance, all real time. Inputs are about 575k tokens ($2.30) and answers about 70k ($1.40); the rest is thinking. Opus 5.5 cannot turn thinking off (news-brief-931), so every call thinks at `JUDGE_EFFORT` (`low`), and thinking is billed as output. The ceiling is `JUDGE_MAX_TOKENS` on every call: about $45 if each of the ~133 calls used all 16,000 tokens.
 
 - [ ] **Step 1: Write the failing tests** (stub embedders and judge; invented items):
   - `test_auc_perfect_and_random`: separable scores give 1.0; identical scores give 0.5.
@@ -518,7 +518,8 @@ In compose, the comment above `image:` says three things: the swap is from `post
    - Each line should read `OK dim 1024`. The first call takes minutes: a cold start plus the weight download.
    - `FAILED config HTTP 401` means the tokens belong to another workspace: create proxy tokens in this one.
    - **Done 2026-11-25:** both checks passed for all three services.
-7. **Calibrate** on the host. It costs about $4–8 of Opus judging and cents of GPU time:
+7. **Calibrate** on the host. It costs about $5–10 of Opus judging (an estimate, with thinking on at low effort) and cents of GPU time.
+   **2026-11-25, first attempt:** every judge call got a 400, because Opus 5.5 rejects `thinking: disabled` and a forced `tool_choice`. Fixed in news-brief-931. The snapshot and the embeddings were kept, so the rerun goes straight to judging. The command:
    ```bash
    docker compose run --rm --entrypoint python newsbrief scripts/embed_calibrate.py --week-ending <a recent Monday> \
      --space "modal:Qwen/Qwen3-Embedding-4B@1024=<url1>" --space "modal:Qwen/Qwen3-Embedding-8B@1024=<url2>" \

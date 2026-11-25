@@ -329,6 +329,52 @@ def test_judge_labels_map_back_and_unknown_label_is_an_error():
     assert ec.parse_relevance(rel, {"D1": 7, "D2": 8}) == {7: True, 8: False}
 
 
+def test_every_judge_request_has_a_shape_opus_5_5_accepts():
+    """news-brief-931. Opus 5.5 answers a 400 to thinking `disabled` and to a
+    forced tool_choice (`tool` or `any`), at every effort. Every request must
+    leave thinking on, set effort explicitly (the default is `medium`), let the
+    model choose the tool, and leave room in max_tokens for the thinking."""
+    texts = {1: "Widget a", 2: "Gizmo b", 3: "Widget c"}
+    requests = [
+        ec.pair_request("claude-opus-5-5", [(1, 2), (2, 3)], texts)[0],
+        ec.query_request("claude-opus-5-5", [(0, {"seed": 1, "own": [1, 3]})], texts)[
+            0
+        ],
+        ec.relevance_request("claude-opus-5-5", "a query", [1, 2, 3], texts)[0],
+    ]
+    for req in requests:
+        assert req["thinking"] == {"type": "adaptive"}
+        assert req["output_config"] == {"effort": ec.JUDGE_EFFORT}
+        assert ec.JUDGE_EFFORT in ("low", "medium", "high", "xhigh", "max")
+        assert req["tool_choice"] == {"type": "auto"}
+        assert [t["strict"] for t in req["tools"]] == [True]
+        assert req["max_tokens"] >= 16000
+
+
+def test_a_reply_with_thinking_before_the_tool_call_parses():
+    """With thinking on, the tool_use block follows a thinking block."""
+    labels = {"P1": (1, 2)}
+    resp = {
+        "stop_reason": "tool_use",
+        "content": [
+            {"type": "thinking", "thinking": "", "signature": "s"},
+            {
+                "type": "tool_use",
+                "name": ec.PAIR_TOOL,
+                "input": {"answers": [{"pair": "P1", "label": "same"}]},
+            },
+        ],
+    }
+    assert ec.parse_pair_labels(resp, labels) == {(1, 2): "same"}
+
+
+def test_a_text_only_reply_is_a_judge_error_not_a_crash():
+    """tool_choice auto lets the model answer in prose; that chunk stays pending."""
+    resp = {"stop_reason": "end_turn", "content": [{"type": "text", "text": "same"}]}
+    with pytest.raises(ec.JudgeError):
+        ec.parse_pair_labels(resp, {"P1": (1, 2)})
+
+
 def test_space_specs_parse():
     s = ec.parse_space("modal:Qwen/Qwen3-Embedding-4B@1024=https://x.modal.run/embed")
     assert (s.provider, s.model, s.dim) == ("modal", "Qwen/Qwen3-Embedding-4B", 1024)
@@ -436,9 +482,9 @@ class FakeJudge:
         return f"Gizmo question {style} about event {k}"
 
     def __call__(self, payload):
-        tool = payload["tool_choice"]["name"]
-        assert payload["thinking"] == {"type": "disabled"}
-        assert [t["name"] for t in payload["tools"]] == [tool]
+        assert len(payload["tools"]) == 1
+        tool = payload["tools"][0]["name"]
+        assert payload["tool_choice"] == {"type": "auto"}
         text = payload["messages"][0]["content"]
         self.calls.append((tool, text))
         if tool == ec.PAIR_TOOL:

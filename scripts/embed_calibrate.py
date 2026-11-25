@@ -72,7 +72,10 @@ JUDGE_TEXT_MAX = 500
 RESAMPLES, SEED = 1000, 0
 GPU_RATES = {"T4": 0.000164, "L4": 0.000222, "A10": 0.000306}
 SPEND_STAGE, PURPOSE = "calibrate", "calibration"
-JUDGE_TIMEOUT, TRANSIENT_ATTEMPTS, TRANSIENT_SLEEP_S = 180, 3, 30
+JUDGE_TIMEOUT, TRANSIENT_ATTEMPTS, TRANSIENT_SLEEP_S = 300, 3, 30
+# Opus 5.5 cannot run with thinking off and refuses a forced tool_choice
+# (news-brief-931): effort is the only control, and its default is medium.
+JUDGE_EFFORT, JUDGE_MAX_TOKENS = "low", 16000
 PAIR_TOOL, QUERY_TOOL, RELEVANCE_TOOL = "label_pairs", "write_queries", "judge_items"
 PAIR_VALUES = ("same", "different", "unclear")
 EXIT_OK, EXIT_NONE, EXIT_USAGE, EXIT_PENDING, EXIT_BUSY = 0, 1, 2, 3, 4
@@ -385,7 +388,6 @@ def _payload(
     props: dict,
     system: str,
     user: str,
-    max_tokens: int,
 ) -> dict:
     tool = {
         "name": name,
@@ -410,12 +412,15 @@ def _payload(
     }
     return {
         "model": model,
-        "max_tokens": max_tokens,
-        # Explicit, never the default: adaptive thinking eats max_tokens.
-        "thinking": {"type": "disabled"},
+        # Room for the thinking as well as the answers: it counts against this.
+        "max_tokens": JUDGE_MAX_TOKENS,
+        "thinking": {"type": "adaptive"},
+        "output_config": {"effort": JUDGE_EFFORT},
         "system": system,
         "tools": [tool],
-        "tool_choice": {"type": "tool", "name": name},
+        # auto, steered by the prompt's "Call the tool once": a reply without
+        # the call is a JudgeError and its chunk stays pending for the rerun.
+        "tool_choice": {"type": "auto"},
         "messages": [{"role": "user", "content": user}],
     }
 
@@ -463,7 +468,6 @@ def pair_request(model, pairs, texts):
         props,
         _PAIR_SYSTEM,
         f"{user}\n\nCall {PAIR_TOOL} once.",
-        2000,
     ), labels
 
 
@@ -483,7 +487,6 @@ def query_request(model, situations, texts):
         props,
         _QUERY_SYSTEM,
         user,
-        3000,
     ), labels
 
 
@@ -499,7 +502,6 @@ def relevance_request(model, query, item_ids, texts):
         props,
         _REL_SYSTEM,
         user,
-        2000,
     ), labels
 
 
