@@ -64,3 +64,28 @@ advance and scores them once on a week they have never seen.
 - All three results are reported, a failure as a failure.
 - What each outcome means for the options is the operator's call, made after the result. This
   file does not pre-decide it.
+
+## Results (appended 2026-11-25; nothing above was changed)
+
+**Test week, ending 2026-11-16** (5,548 items, 577 labelled pairs, 23 unclear; calibration
+judge $2.26, AUC 0.89, its own recommendation none):
+
+| Rule | Result | Verdict |
+|---|---|---|
+| A | 67 of 71 correct, Wilson 95% lower bound 0.864, wP 0.924, wR 0.235 | **FAIL** (needs wP ≥ 0.95) |
+| B | 87 of 104 correct, wP 0.756, wR 0.409 | **FAIL** (needs wP ≥ 0.90) |
+| Option 1 | zone 209, Haiku agrees with Opus on 173 (83%); 122 of 132 joins correct, wP 0.902, wR 0.633 | **PASS** (needs wP ≥ 0.90 and wR ≥ 0.60) |
+
+Haiku cost $0.0081 for 209 pairs.
+
+**First look, week ending 2026-11-23** (the week the rules were found on): rule A PASS (49 of
+49, wP 1.000, wR 0.138), rule B PASS (wP 0.922, wR 0.281), option 1 **FAIL** (zone 200, Haiku
+agrees on 158 (79%), wP 0.949, wR 0.489). Haiku cost $0.0060.
+
+**Reading.** The two week-1 rules did not hold on a fresh week, as the warning said they might.
+Option 1 passed the test week, just over both bars, and its precision held in both weeks (0.902
+and 0.949). Its recall did not (0.633 and 0.489). On week 1 a perfect judge from 0.65 up would
+reach recall 0.834 (the same pairs below 0.65 carry 0.166 of the weighted mass), so the
+shortfall is Haiku's: it calls same-event pairs different. The test week's retrieval numbers
+(nDCG 0.858, recall 1.000) are not comparable with week 1's: with one space, the relevance pool
+is that space's own ranking plus the lexical arm, so its recall is 1 by construction.
