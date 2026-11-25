@@ -329,6 +329,85 @@ def test_judge_labels_map_back_and_unknown_label_is_an_error():
     assert ec.parse_relevance(rel, {"D1": 7, "D2": 8}) == {7: True, 8: False}
 
 
+def _rel_answers(payload, skip=()):
+    """Answer every D label in a relevance request except those whose article
+    text is in `skip`; relevant when the text holds 'Widget'."""
+    text = payload["messages"][0]["content"]
+    rows = re.findall(r"^(D\d+): (.*)$", text, re.M)
+    return _tool_resp(
+        ec.RELEVANCE_TOOL,
+        [
+            {"article": lab, "relevant": "Widget" in body}
+            for lab, body in rows
+            if body not in skip
+        ],
+    )
+
+
+class _StubJudge:
+    model = "claude-opus-5-5"
+
+    def __init__(self, replies):
+        self.replies, self.payloads = replies, []
+
+    def ask(self, payload):
+        self.payloads.append(payload)
+        return self.replies[len(self.payloads) - 1](payload), 0.01
+
+
+def test_a_partial_relevance_reply_keeps_its_answers_and_asks_again_for_the_rest(
+    tmp_path,
+):
+    """news-brief-931 follow-up: on the host two chunks of 30 came back with one
+    label unanswered on every rerun, and the whole chunk was thrown away each
+    time. The 29 answers are kept and only the missing article is asked again,
+    in the same run."""
+    texts = {i: f"{'Widget' if i % 2 else 'Gizmo'} article {i}" for i in range(1, 31)}
+    judge = _StubJudge(
+        [lambda p: _rel_answers(p, skip={texts[7]}), lambda p: _rel_answers(p)]
+    )
+    path = tmp_path / "relevance.jsonl"
+    judged, pending = ec._judge_relevance(
+        judge, path, {0: set(texts)}, {0: "a query"}, texts
+    )
+    assert pending == 0
+    assert judged[0] == {i: bool(i % 2) for i in texts}
+    assert len(judge.payloads) == 2
+    # The second request asks for the skipped article alone.
+    assert re.findall(
+        r"^D\d+: (.*)$", judge.payloads[1]["messages"][0]["content"], re.M
+    ) == [texts[7]]
+
+
+def test_an_article_never_answered_stays_pending_and_the_rest_are_saved(tmp_path):
+    texts = {i: f"Widget article {i}" for i in range(1, 6)}
+    always_skip = lambda p: _rel_answers(p, skip={texts[3]})  # noqa: E731
+    path = tmp_path / "relevance.jsonl"
+    judged, pending = ec._judge_relevance(
+        _StubJudge([always_skip] * 5), path, {0: set(texts)}, {0: "q"}, texts
+    )
+    assert pending == 1
+    assert set(judged[0]) == {1, 2, 4, 5}
+    # A rerun reads the saved answers back and asks for article 3 only.
+    rerun = _StubJudge([lambda p: _rel_answers(p)])
+    judged, pending = ec._judge_relevance(rerun, path, {0: set(texts)}, {0: "q"}, texts)
+    assert pending == 0 and set(judged[0]) == set(texts)
+    assert len(rerun.payloads) == 1
+
+
+def test_a_reply_naming_an_unknown_label_is_still_discarded_whole(tmp_path):
+    """Partial answers are kept; a reply that invents a label is not trusted."""
+    texts = {1: "Widget a", 2: "Gizmo b"}
+    bad = lambda p: _tool_resp(  # noqa: E731
+        ec.RELEVANCE_TOOL,
+        [{"article": "D1", "relevant": True}, {"article": "D9", "relevant": True}],
+    )
+    judged, pending = ec._judge_relevance(
+        _StubJudge([bad]), tmp_path / "r.jsonl", {0: set(texts)}, {0: "q"}, texts
+    )
+    assert pending == 1 and judged[0] == {}
+
+
 def test_every_judge_request_has_a_shape_opus_5_5_accepts():
     """news-brief-931. Opus 5.5 answers a 400 to thinking `disabled` and to a
     forced tool_choice (`tool` or `any`), at every effort. Every request must

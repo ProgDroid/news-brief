@@ -68,6 +68,7 @@ NEAR_DUP, SITUATIONS, PER_OUTLET = 0.8, 20, 2
 QUERY_STYLES = ("open_question", "actor_goal", "constraint")
 RANK_K = 30
 PAIR_CHUNK, QUERY_CHUNK, REL_CHUNK = 20, 7, 30
+REL_ROUNDS = 2  # a relevance chunk, then one more ask for what it left out
 JUDGE_TEXT_MAX = 500
 RESAMPLES, SEED = 1000, 0
 GPU_RATES = {"T4": 0.000164, "L4": 0.000222, "A10": 0.000306}
@@ -315,8 +316,11 @@ def sample_pairs(pools, target: int, *, seed: int = SEED) -> list[tuple[int, int
 # ---- the judge ----
 
 
-def parse_answers(resp, *, tool: str, key: str, labels: dict) -> dict:
-    """label -> its answer entry. Every label exactly once, none other."""
+def parse_answers(
+    resp, *, tool: str, key: str, labels: dict, partial: bool = False
+) -> dict:
+    """label -> its answer entry. Every label at most once, none other; every
+    label exactly once unless `partial`, which lets a reply leave some out."""
     if not isinstance(resp, dict) or resp.get("stop_reason") != "tool_use":
         stop = resp.get("stop_reason") if isinstance(resp, dict) else None
         raise JudgeError(f"unusable response (stop_reason={stop})")
@@ -342,7 +346,7 @@ def parse_answers(resp, *, tool: str, key: str, labels: dict) -> dict:
         if lab in out:
             raise JudgeError(f"label {lab} answered twice")
         out[lab] = entry
-    if len(out) != len(labels):
+    if len(out) != len(labels) and not partial:
         raise JudgeError(f"{len(labels) - len(out)} label(s) unanswered")
     return out
 
@@ -358,10 +362,10 @@ def parse_pair_labels(resp, labels: dict) -> dict:
     return out
 
 
-def parse_relevance(resp, labels: dict) -> dict:
+def parse_relevance(resp, labels: dict, *, partial: bool = False) -> dict:
     out = {}
     for lab, e in parse_answers(
-        resp, tool=RELEVANCE_TOOL, key="article", labels=labels
+        resp, tool=RELEVANCE_TOOL, key="article", labels=labels, partial=partial
     ).items():
         if not isinstance(e.get("relevant"), bool):
             raise JudgeError(f"article {lab}: relevant is not a boolean")
@@ -901,27 +905,38 @@ def _judge_relevance(judge, path, pools, queries, texts) -> tuple[dict, int]:
     for qi in sorted(pools):
         todo = sorted(pools[qi] - judged[qi].keys())
         for c in range(0, len(todo), REL_CHUNK):
-            payload, labels = relevance_request(
-                judge.model, queries[qi], todo[c : c + REL_CHUNK], texts
-            )
-            resp, usd = judge.ask(payload)
-            try:
-                if resp is None:
-                    raise JudgeError("no reply")
-                got = parse_relevance(resp, labels)
-            except JudgeError as exc:
-                print(f"relevance Q{qi + 1}: {exc}")
+            batch = todo[c : c + REL_CHUNK]
+            # A reply may skip an article (news-brief-931: two chunks of 30
+            # skipped one on every rerun). Its answers are kept and the rest
+            # asked again on their own; whatever is still missing stays pending.
+            for _ in range(REL_ROUNDS):
+                payload, labels = relevance_request(
+                    judge.model, queries[qi], batch, texts
+                )
+                resp, usd = judge.ask(payload)
+                try:
+                    if resp is None:
+                        raise JudgeError("no reply")
+                    got = parse_relevance(resp, labels, partial=True)
+                except JudgeError as exc:
+                    print(f"relevance Q{qi + 1}: {exc}")
+                    break
+                if got:
+                    _append(
+                        path,
+                        {
+                            "query": qi,
+                            "judged": {str(k): v for k, v in got.items()},
+                            "usd": usd,
+                        },
+                    )
+                    judged[qi].update(got)
+                batch = [i for i in batch if i not in got]
+                if not batch:
+                    break
+                print(f"relevance Q{qi + 1}: {len(batch)} label(s) unanswered")
+            if batch:
                 pending += 1
-                continue
-            _append(
-                path,
-                {
-                    "query": qi,
-                    "judged": {str(k): v for k, v in got.items()},
-                    "usd": usd,
-                },
-            )
-            judged[qi].update(got)
     return judged, pending
 
 
