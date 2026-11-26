@@ -83,3 +83,62 @@ For the chosen candidate on 23 Nov: the same zone counts.
 - S is the only operator-labelled set, and choosing on it is choosing on dev data, with no test
   set behind it. The bar is the only safeguard. Whatever decider work follows on the new reference
   needs its own pre-registration and a test week.
+
+## Results (2026-11-26)
+
+Run once on the host and finished in that run. The output, verbatim apart from the first line:
+
+```
+week=2026-11-16 S=40 pass at 85%
+opus-low (baseline): agree=21/40 (audit: decider joins, Opus-low not 13/24; Opus-low same, decider not 2/9; controls 6/7)
+claude-haiku-5-5@high (baseline): agree=23/40 (audit: decider joins, Opus-low not 11/24; Opus-low same, decider not 6/9; controls 6/7)
+claude-opus-5-5@medium: agree=26/40 (audit: decider joins, Opus-low not 13/24; Opus-low same, decider not 7/9; controls 6/7) zone=209 unclear=2 agree_with_opus_low=183/209 usd=0.3872
+claude-opus-5-5@high: agree=25/40 (audit: decider joins, Opus-low not 13/24; Opus-low same, decider not 6/9; controls 6/7) zone=209 unclear=3 agree_with_opus_low=185/209 usd=0.4756
+chosen: none
+  note: no candidate reaches the bar: the fallback is the operator labelling a whole zone (its own pre-registration)
+```
+
+**Reading, as pre-registered:** medium agrees on 26 of 40 and high on 25, against a bar of 34.
+**Neither passes, so Opus is not used as the zone reference** and the fallback applies: the operator
+labels a whole zone by hand, under its own pre-registration. Nothing was run on 23 Nov. The two
+runs cost $0.86 in total, under the $1–3 per candidate estimate and far under the $15 cap.
+
+**The predictions:**
+
+- **Opus-low, 21 of 40: correct.** S has 40 pairs, split 24, 9 and 7 as in the audit, so the script
+  rebuilt S as the audit drew it.
+- **Haiku-high, 24 of 40: wrong by one (23).** The prediction's generator was wrong, not the
+  script. The audit scores the decider in two classes, `same` or not, so a decider `unclear` on a
+  pair the operator called different counted as agreeing. This script counts any label that is not
+  equal to the operator's, `unclear` included, as a miss, as the rule fixes for the candidates. The
+  audit's H=18 splits as 11 on the 24 pairs (the operator's `same`) and 7 on the 9 (the operator's
+  `different`, because Opus-low gets the other 2). This run gives 11 and 6. So one of those 9 pairs
+  carries a decider label that is neither `same` nor `different`, which is `unclear`. That is
+  inferred from the arithmetic; the decider's file on the host would confirm it. The baselines are
+  not part of the rule, and the result does not depend on it.
+
+**What qualifies it (none of this changes the reading):**
+
+- **Effort barely moves Opus.** Medium and high agree with Opus-low on 183 and 185 of the 209 zone
+  pairs, about 88%. On the 24 pairs where the decider joins and Opus-low does not, all three Opus
+  efforts score exactly 13, which is the number the operator called different. That fits Opus
+  calling all 24 different at every effort, though a mix of changes in both directions would give
+  the same count. On the 9 reverse pairs, medium gains (7 against Opus-low's 2) and high gains
+  less (6).
+- **So the disagreement looks like where the line is drawn, not noise that more thinking removes.**
+  The operator saw the prompt's definition at the audit, and still called 11 of the 24 the same
+  event where Opus, at every effort, did not. The cause is not measured here.
+- **The bar was a long way off.** Even if every zone `unclear` fell in S and were counted as an
+  agreement, medium would reach 28 (26 + 2) and high 28 (25 + 3), both short of 34.
+- **S is small and biased.** It is the 40 pairs where two models disagreed, plus the controls. A
+  candidate could do better on the zone as a whole than on S. That is why the rule scored only on
+  S, and it is also why the fallback labels a whole zone.
+
+**Consequences:**
+
+- The zone still has no usable reference on either dev week. Every zone number scored against Opus
+  labels stays suspect, as the audit concluded.
+- The candidates' labels are kept on the host (`reference-claude-opus-5-5-<effort>.jsonl` in the 16
+  Nov folder). They are not a reference, but they cost nothing more to keep.
+- Next is the fallback's pre-registration: the operator labels a whole zone. Its 40 audit answers
+  can be reused, so the 16 Nov zone needs about 170 more answers.
