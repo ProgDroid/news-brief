@@ -65,12 +65,13 @@ COPY labeller_static/ ./labeller_static/
 #   docker compose run --rm --entrypoint python newsbrief scripts/grouping_decider_dev.py --dev
 #   docker compose run --rm --entrypoint python newsbrief scripts/grouping_label_audit.py ...
 #   docker compose run --rm --entrypoint python newsbrief scripts/grouping_reference_select.py
+#   docker compose run --rm --entrypoint python newsbrief scripts/grouping_zone_labels.py ...
 #
 # They are the embedding backfill, the calibration, the fetch probe, brief_cost,
-# and the pre-registered grouping rules check, decider selection, label audit
-# and reference selection. Nothing in `scripts/` is runtime code and the
-# supervisor never invokes it; do not remove this line without moving those
-# eight elsewhere.
+# and the pre-registered grouping rules check, decider selection, label audit,
+# reference selection and zone labels. Nothing in `scripts/` is runtime code and
+# the supervisor never invokes it; do not remove this line without moving those
+# nine elsewhere.
 COPY scripts/ ./scripts/
 
 # Logs and brief archive persist via volume mount. Run as a real non-root user
