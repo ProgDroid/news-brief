@@ -61,3 +61,34 @@ only used to choose. Scored by `scripts/grouping_decider_dev.py`, which also rep
   or test number is seen.
 - Every candidate's dev numbers and the test result are reported, a failure as a failure.
 - What the outcome means for the spec is the operator's call.
+
+## Results (appended 2026-11-26; nothing above was changed)
+
+`grouping_decider_dev.py --dev` on the host. **Chosen: none.** Under rule 3 there is no test week,
+and the week ending 2026-11-09 was not labelled.
+
+| Decider | Week ending 2026-11-23 | Week ending 2026-11-16 | Est. $/month |
+|---|---|---|---|
+| Haiku low | agree 158/200, 110 of 117 joins correct, wP 0.949, wR 0.489: FAIL | agree 173/209, 122 of 132, wP 0.902, wR 0.633: PASS | 1.39 / 1.69 |
+| Haiku medium | agree 166/200, 122 of 131, wP 0.895, wR 0.626: FAIL | agree 177/209, 139 of 162, wP 0.781, wR 0.788: FAIL | 2.50 / 2.70 |
+| Haiku high | agree 183/200, 133 of 140, wP 0.945, wR 0.744: PASS | agree 171/209, 139 of 167, wP 0.739, wR 0.788: FAIL | 3.29 / 3.29 |
+| Sonnet 5.5 low | agree 166/200, 111 of 115, wP 0.934, wR 0.572: FAIL | agree 179/209, 129 of 144, wP 0.824, wR 0.696: FAIL | 27.88 / 26.64 (over cap) |
+| Sonnet 5.5 medium | agree 168/200, 113 of 116, wP 0.941, wR 0.598: FAIL | agree 183/209, 131 of 144, wP 0.853, wR 0.710: FAIL | 27.88 / 26.63 (over cap) |
+
+Cost per pair: Haiku 0.0000301, 0.0000538 and 0.0000710 on week 1 (low, medium, high); Sonnet
+0.0006009 on week 1 at both efforts.
+
+**Reading (the operator's call follows).**
+
+- No candidate passes both weeks. The two weeks pull in opposite directions. On week 1 the
+  deciders are too cautious, so recall is short. On week 2, more effort makes them join more,
+  and precision falls from 0.902 (Haiku low) to 0.739 (Haiku high).
+- Sonnet would be over the cap even if it passed, and on week 2 it is no more precise than Haiku.
+- **An inference from cost, not a measurement:** Sonnet's two efforts cost the same per pair,
+  to four significant figures on week 1. Sonnet low costs almost exactly 20 times Haiku low,
+  which is the ratio of their prices. So adaptive thinking probably did not engage at either
+  Sonnet effort, and "Sonnet medium" did not test more reasoning. Haiku's cost rises with
+  effort, so its efforts did engage.
+- The truth labels are Opus at effort `low`. On week 2, Haiku high agrees with them less than
+  Haiku low does (171 against 173 of 209) and joins 35 more pairs. Nothing here separates
+  "Haiku is wrong" from "the Opus labels are noisy" on those pairs.
